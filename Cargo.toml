@@ -17,6 +17,29 @@ members = [
     "crates/choir-view",
 ]
 
+# choir-actor is the D3 second implementation of the actor-runtime seam. It
+# pulls rivetkit, tokio and a bundled libsqlite3 that nothing else in the
+# workspace touches, and compiling it costs more than the other thirteen
+# crates put together. Excluding it from the default set means a bare
+# `cargo build`/`cargo test` skips that tree; the seam's conformance suite
+# still runs under an explicit `-p choir-actor` or `--workspace`, which is
+# what the hand-run gate uses.
+default-members = [
+    "crates/choir-bridge",
+    "crates/choir-cli",
+    "crates/choir-demo",
+    "crates/choir-hash",
+    "crates/choir-identity",
+    "crates/choir-oplog",
+    "crates/choir-sequencer",
+    "crates/choir-merge",
+    "crates/choir-node",
+    "crates/choir-queue",
+    "crates/choir-spike",
+    "crates/choir-store",
+    "crates/choir-view",
+]
+
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
