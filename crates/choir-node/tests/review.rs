@@ -64,6 +64,7 @@ fn review_fan_out_over_http() {
         id: "r-1".into(),
         target,
         reviewers: vec!["ana".into(), "bot".into()],
+        target_ref: None,
     });
     let (code, resp) = curl(&[
         "-X", "POST", "-d", &submit_body(&author, "author", &request),

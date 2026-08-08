@@ -31,9 +31,10 @@ platform) at `$CHOIR_API`.
 - `GET $CHOIR_API/api/reviews?reviewer=<you>` is your pending review
   queue; verdicts (`Approve`/`RequestChanges` + note) are signed ops via
   `POST /api/submit`, and re-posting overwrites your earlier verdict.
-- Request review with `choir review ... <id> <commit>` and name no
-  reviewers: the node draws them. You do not choose who reviews you, and
-  a review with no reviewers never counts as approved.
+- Request review with `choir review ... <id> <commit> --ref <repo:ref>`
+  and name no reviewers: the node draws them. You do not choose who
+  reviews you, a review with no reviewers never counts as approved, and
+  on a protected ref self-named reviewers are refused outright.
 - A conflicted merge is a valid committed state here, not an error:
   commit it, keep working, resolve in a follow-up commit.
 - Secrets (tokens, keys) live under `~/.choir/`; never write them into

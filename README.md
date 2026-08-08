@@ -29,7 +29,8 @@ Requirements: stable Rust (built with cargo 1.97.1, edition 2021), plus `git`, `
 
 ```bash
 cargo run -p choir-node -- <repo-root> [port] [--create owner/name.git]... \
-  [--auth-file f] [--keys-file f] [--reviewers-file f] [--bind addr] \
+  [--auth-file f] [--keys-file f] [--reviewers-file f] [--protected-refs f] \
+  [--require-assignment] [--bind addr] \
   [--tls-cert c --tls-key k]
 ```
 
@@ -55,7 +56,7 @@ Repositories created by the daemon get a `pre-receive` hook that calls back into
 choir key <key-file>
 choir workspace <api> <owner/repo> <name>
 choir submit <api> <key-file> <channel> '<op-json>'
-choir review <api> <key-file> <channel> <id> <git-oid> [reviewer]...
+choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
 choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
 choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 choir reviews <api> <reviewer>
@@ -64,7 +65,7 @@ choir view <api>
 
 Exit codes: 0 accepted, 1 rejected by the node with the error body printed, 2 usage error.
 
-`choir review` with no reviewer names is the preferred form: the node draws reviewers from an operator-curated pool and signs the assignment itself, so a requester cannot pick their own reviewers.
+`choir review` with no reviewer names is the preferred form: the node draws reviewers from an operator-curated pool and signs the assignment itself, so a requester cannot pick their own reviewers. `--require-assignment` makes that the only form node-wide; `--protected-refs` makes it the only form for reviews whose `--ref` names a protected ref, which is how "privilege-bearing" gets a definition the code can read.
 
 ### The bridge
 

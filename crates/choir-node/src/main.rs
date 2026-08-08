@@ -2,7 +2,7 @@
 //!
 //! Usage: `choir-node <repo-root> [port] [--create owner/name.git]...
 //! [--auth-file path] [--keys-file path] [--reviewers-file path]
-//! [--require-assignment] [--bind addr]
+//! [--require-assignment] [--protected-refs path] [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
@@ -13,7 +13,9 @@
 //! (one eligible reviewer name per line) lets the node assign
 //! reviewers to review requests that name none;
 //! `--require-assignment` additionally refuses requests that name
-//! their own reviewers. `--bind` with a
+//! their own reviewers, and `--protected-refs` (one
+//! `<repo>:<refname>` pattern per line, trailing `*` allowed) refuses
+//! them only for reviews landing on a matching ref. `--bind` with a
 //! non-loopback address is refused unless TLS is configured.
 
 use choir_node::{AuthTable, Node, Platform};
@@ -127,13 +129,19 @@ fn main() -> std::io::Result<()> {
                 platform = platform.with_required_assignment();
                 eprintln!("reviewer assignment required (self-named reviewers refused)");
             }
-        } else if rest.iter().any(|a| a == "--require-assignment") {
+            if let Some(refs) = flag_value("--protected-refs") {
+                platform = platform.with_protected_refs(refs.into());
+                eprintln!("protected refs enabled ({refs})");
+            }
+        } else if rest.iter().any(|a| a == "--require-assignment")
+            || flag_value("--protected-refs").is_some()
+        {
             // Without a pool nothing can ever be assigned, so every
             // review would stall unassigned. Refuse the combination
             // rather than serve a review system that cannot finish.
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "--require-assignment needs --reviewers-file",
+                "--require-assignment and --protected-refs need --reviewers-file",
             ));
         }
         node.enable_platform(platform);

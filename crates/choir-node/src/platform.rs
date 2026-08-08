@@ -90,6 +90,9 @@ struct ChoirPolicy {
     /// every review must go through the node's draw (D24 layer 5).
     /// Shared with [`Platform`] so the switch is one value, not two.
     require_assignment: Arc<std::sync::atomic::AtomicBool>,
+    /// Operator's protected-ref list: the same switch, but conditioned on
+    /// where the review proposes to land. Shared with [`Platform`].
+    protected_refs: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl ChoirPolicy {
@@ -122,6 +125,35 @@ impl ChoirPolicy {
         self.registry = registry;
         self.keys_mtime = mtime;
         true
+    }
+
+    /// Whether `name` matches the operator's protected-ref list. One
+    /// pattern per line, `#` comments allowed, exact match or a single
+    /// trailing `*` prefix glob (`repo.git:refs/heads/release/*`).
+    ///
+    /// Read per call rather than cached, so editing the list takes effect
+    /// with no restart. Cheap enough because only a `RequestReview`
+    /// reaches here — git pushes take the `SetRef` path and never touch
+    /// this file.
+    ///
+    /// Fails **closed**: an unreadable list refuses the review instead of
+    /// quietly demoting a gate to an advisory.
+    fn ref_is_protected(&self, name: &str) -> Result<bool, String> {
+        let guard = self.protected_refs.lock().expect("protected refs lock");
+        let Some(path) = guard.as_ref() else {
+            return Ok(false);
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("protected-ref list unreadable ({e}); refusing the review"))?;
+        Ok(text.lines().map(str::trim).any(|p| {
+            if p.is_empty() || p.starts_with('#') {
+                return false;
+            }
+            match p.strip_suffix('*') {
+                Some(prefix) => name.starts_with(prefix),
+                None => name == p,
+            }
+        }))
     }
 }
 
@@ -157,16 +189,33 @@ impl SubmitPolicy for ChoirPolicy {
         if matches!(op.kind, OpKind::AssignReviewers { .. }) && sig.key_id != self.node_id {
             return Err("only the node may assign reviewers".to_string());
         }
-        // Required-assignment mode closes the other half of the same
-        // loop: naming your own reviewers is refused outright, so the
-        // node's draw is the only way a review gets reviewers.
-        if self.require_assignment.load(std::sync::atomic::Ordering::Relaxed) {
-            if let OpKind::RequestReview { reviewers, .. } = &op.kind {
-                if !reviewers.is_empty() {
+        // Required-assignment closes the other half of the same loop:
+        // naming your own reviewers is refused, so the node's draw is the
+        // only way a review gets reviewers. Two ways to switch it on —
+        // node-wide, or per-ref once the review says where it wants to
+        // land. Node-wide wins because it is the stricter of the two.
+        if let OpKind::RequestReview {
+            reviewers,
+            target_ref,
+            ..
+        } = &op.kind
+        {
+            if !reviewers.is_empty() {
+                if self
+                    .require_assignment
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     return Err(
                         "this node assigns reviewers: request a review with an empty reviewer list"
                             .to_string(),
                     );
+                }
+                if let Some(name) = target_ref {
+                    if self.ref_is_protected(name)? {
+                        return Err(format!(
+                            "{name} is a protected ref: request a review with an empty reviewer list"
+                        ));
+                    }
                 }
             }
         }
@@ -206,6 +255,9 @@ pub struct Platform {
     /// Shared with the policy: when set, self-named reviewers are
     /// refused and every review goes through the node's draw.
     require_assignment: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with the policy: the same refusal, but only for reviews
+    /// that propose to land on a ref the operator marked protected.
+    protected_refs: Arc<Mutex<Option<std::path::PathBuf>>>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -261,10 +313,12 @@ impl Platform {
             .as_ref()
             .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let protected_refs = Arc::new(Mutex::new(None));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
                 require_assignment: require_assignment.clone(),
+                protected_refs: protected_refs.clone(),
                 registry,
                 view: view.clone(),
                 entries: entries.clone(),
@@ -282,6 +336,7 @@ impl Platform {
             reviewer_pool: None,
             log_path: None,
             require_assignment,
+            protected_refs,
             _sequencer: sequencer,
         })
     }
@@ -294,14 +349,39 @@ impl Platform {
     /// Requires a reviewer pool: without one no review can ever be
     /// assigned, so every request would stall unassigned.
     ///
-    /// Scope, stated honestly: this is node-wide. Gating only
-    /// *privilege-bearing* reviews needs a review→ref binding that does
-    /// not exist — a `RequestReview` names a commit, not a branch — so
-    /// there is nothing to condition on yet.
+    /// Scope: node-wide, the blunt instrument. For "only reviews landing
+    /// somewhere that matters", see [`Platform::with_protected_refs`],
+    /// which conditions on `RequestReview`'s `target_ref`.
     #[must_use]
     pub fn with_required_assignment(self) -> Self {
         self.require_assignment
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Points the platform at an operator-curated list of protected refs
+    /// (one `<repo>:<refname>` pattern per line, `#` comments allowed, a
+    /// single trailing `*` acting as a prefix glob). A `RequestReview`
+    /// whose `target_ref` matches must go through the node's draw; one
+    /// naming an unprotected ref, or naming no ref at all, may still pick
+    /// its own reviewers.
+    ///
+    /// This is the per-review half of D24 layer 5 — "privilege-bearing"
+    /// finally has a definition the code can read, rather than the
+    /// node-wide approximation of [`Platform::with_required_assignment`].
+    ///
+    /// Requires a reviewer pool, for the same reason.
+    ///
+    /// **What this is not:** nothing yet checks that a *landing* on a
+    /// protected ref was preceded by an approved review, so a requester
+    /// who simply omits `target_ref` escapes the gate. Closing that means
+    /// conditioning `SetRef` on review state, which is the next step and
+    /// is deliberately not this one — it would gate the daemon's own
+    /// pushes. Until then this is enforcement for reviews that declare
+    /// themselves, and `with_required_assignment` is the airtight option.
+    #[must_use]
+    pub fn with_protected_refs(self, path: std::path::PathBuf) -> Self {
+        *self.protected_refs.lock().expect("protected refs lock") = Some(path);
         self
     }
 
@@ -739,6 +819,7 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
         .collect();
     serde_json::json!({
         "target": r.target.as_ref().map(choir_oplog::ContentHash::to_hex),
+        "target_ref": r.target_ref,
         "reviewers": r.reviewers,
         "verdicts": verdicts,
         "complete": r.complete(),

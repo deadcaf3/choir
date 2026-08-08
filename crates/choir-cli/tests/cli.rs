@@ -109,12 +109,21 @@ fn cli_end_to_end() {
 
     // `review` with no reviewer names asks the node to draw them from
     // the operator's pool (D24 layer 5) — the requester never picks.
-    let out = choir(&["review", &api, key_file, "cli-agent", "r-assigned", &head]);
+    // `--ref` records where the change wants to land, which is what
+    // per-ref policy reads; it is not a reviewer name.
+    let out = choir(&[
+        "review", &api, key_file, "cli-agent", "r-assigned", &head,
+        "--ref", "cli/demo.git:refs/heads/main",
+    ]);
     assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
     let drawn = json(&out)["reviewers"].clone();
     assert_eq!(drawn.as_array().map(Vec::len), Some(2), "{drawn}");
     let view = json(&choir(&["view", &api]));
     assert_eq!(view["reviews"]["r-assigned"]["reviewers"], drawn, "{view}");
+    assert_eq!(
+        view["reviews"]["r-assigned"]["target_ref"], "cli/demo.git:refs/heads/main",
+        "{view}"
+    );
 
     // Raw `submit` accepts a hand-written op (second review request).
     let target = serde_json::to_string(&choir_hash::ContentHash::from_git_oid(&head).unwrap())

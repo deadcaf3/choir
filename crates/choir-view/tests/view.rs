@@ -160,6 +160,7 @@ fn review_fan_out_semantics() {
         id: "r1".into(),
         target: target.clone(),
         reviewers: vec!["ana".into(), "bot-reviewer".into()],
+        target_ref: None,
     });
     append_op(&mut log, "author", request.clone()).unwrap();
 
@@ -225,6 +226,7 @@ fn unassigned_reviews_are_never_complete_and_assign_once() {
             id: "r1".into(),
             target: ContentHash::blake3(b"change"),
             reviewers: Vec::new(),
+            target_ref: None,
         }),
     )
     .unwrap();
@@ -316,4 +318,48 @@ fn provenance_records_latest_wins() {
     // Prefix replay shows the earlier spec — history is in the log.
     let earlier = View::at(&log, 3).unwrap();
     assert_eq!(earlier.provenance["agent-1"]["task-spec"], "add auth");
+}
+
+#[test]
+fn target_ref_is_additive_and_old_payloads_hash_the_same() {
+    // Invariant 1, for an enum variant: a log written before
+    // `target_ref` existed must decode *and* re-serialize to the same
+    // bytes, or every entry hash in every existing log moves and the
+    // chain no longer verifies. `#[serde(default, skip_serializing_if)]`
+    // is what buys that, and this test is what proves it stayed.
+    let target = ContentHash::blake3(b"under review");
+    let target_json = serde_json::to_string(&target).unwrap();
+    let old = format!(
+        r#"{{"format_version":1,"kind":{{"RequestReview":{{"id":"r1","target":{target_json},"reviewers":["ana"]}}}}}}"#
+    );
+    let op = ViewOp::from_payload(old.as_bytes()).expect("old payload still decodes");
+    assert_eq!(
+        String::from_utf8(op.to_payload()).unwrap(),
+        old,
+        "re-serializing an old payload changed its bytes, so its hash moved"
+    );
+    assert!(
+        matches!(&op.kind, OpKind::RequestReview { target_ref: None, .. }),
+        "absent field must read as unbound, not as some default ref"
+    );
+
+    // And a bound review round-trips, carrying the ref into the view.
+    let bound = ViewOp::new(OpKind::RequestReview {
+        id: "r2".into(),
+        target: target.clone(),
+        reviewers: vec!["ana".into()],
+        target_ref: Some("choir/choir.git:refs/heads/main".into()),
+    });
+    let wire = bound.to_payload();
+    assert_eq!(ViewOp::from_payload(&wire).unwrap(), bound, "bound review round-trips");
+
+    let mut log = MemLog::new();
+    append_op(&mut log, "author", op).unwrap();
+    append_op(&mut log, "author", bound).unwrap();
+    let view = View::materialize(&log).unwrap();
+    assert_eq!(view.reviews["r1"].target_ref, None);
+    assert_eq!(
+        view.reviews["r2"].target_ref.as_deref(),
+        Some("choir/choir.git:refs/heads/main")
+    );
 }

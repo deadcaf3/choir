@@ -125,6 +125,22 @@ pub enum OpKind {
         target: ContentHash,
         /// Actor names the review fans out to; empty = unassigned.
         reviewers: Vec<String>,
+        /// The ref this review proposes to land on, in the view's
+        /// namespaced form `<repo>:<refname>` (e.g.
+        /// `"choir/choir.git:refs/heads/main"`). `None` = unbound: a
+        /// review of a commit that names no destination.
+        ///
+        /// Additive field, and the worked example of invariant 1 for an
+        /// *enum variant*: `default` + `skip_serializing_if` means logs
+        /// written before this field decode as `None` **and** re-serialize
+        /// byte-identically, so their entry hashes do not move.
+        ///
+        /// This is what per-ref policy conditions on. Without it there is
+        /// no way to say "reviews landing on `main` are privilege-bearing"
+        /// — a review named a commit, and a commit belongs to no branch
+        /// (D24 layer 5; D23 blast-radius gating).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_ref: Option<String>,
     },
     /// Fill in the reviewer list of an unassigned review (additive
     /// variant, wire-format unchanged). Assign-once: the review must
@@ -204,6 +220,10 @@ pub struct ReviewState {
     pub reviewers: Vec<String>,
     /// reviewer → (verdict, note); absent = not answered yet.
     pub verdicts: BTreeMap<String, (Verdict, String)>,
+    /// The ref the review proposes to land on (`<repo>:<refname>`), or
+    /// `None` for a review that named no destination. Policy reads this
+    /// to decide whether a review is privilege-bearing.
+    pub target_ref: Option<String>,
 }
 
 impl ReviewState {
@@ -373,6 +393,7 @@ impl View {
                 id,
                 target,
                 reviewers,
+                target_ref,
             } => {
                 if self.reviews.contains_key(id) {
                     return Err(ViewError::Review(format!("review {id} already exists")));
@@ -383,6 +404,7 @@ impl View {
                         target: Some(target.clone()),
                         reviewers: reviewers.clone(),
                         verdicts: BTreeMap::new(),
+                        target_ref: target_ref.clone(),
                     },
                 );
             }

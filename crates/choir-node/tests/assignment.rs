@@ -2,6 +2,8 @@
 //! reviewers gets a node-drawn pair from the operator's pool, never
 //! themselves; nobody but the node may assign; and a review that could
 //! not be assigned stays visibly unassigned rather than reading as done.
+//! Plus the per-ref form of the same rule: a review that says it wants
+//! to land on a protected ref must go through the draw.
 
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_encode;
@@ -40,6 +42,7 @@ fn request(id: &str, seed: &[u8]) -> ViewOp {
         id: id.into(),
         target: choir_oplog::ContentHash::blake3(seed),
         reviewers: Vec::new(),
+        target_ref: None,
     })
 }
 
@@ -200,6 +203,7 @@ fn required_assignment_refuses_self_named_reviewers() {
         id: "r-self".into(),
         target: choir_oplog::ContentHash::blake3(b"x"),
         reviewers: vec!["ana".into()],
+        target_ref: None,
     });
     let (code, resp) = curl(&[
         "-X", "POST", "-d", &submit_body(&author, "carol", &self_named),
@@ -221,6 +225,131 @@ fn required_assignment_refuses_self_named_reviewers() {
     ]);
     assert_eq!(code, 200, "{resp}");
     assert_eq!(resp["reviewers"].as_array().map(Vec::len), Some(2), "{resp}");
+
+    node.unblock();
+}
+
+/// A review that declares where it wants to land.
+fn request_bound(id: &str, reviewers: &[&str], target_ref: Option<&str>) -> ViewOp {
+    ViewOp::new(OpKind::RequestReview {
+        id: id.into(),
+        target: choir_oplog::ContentHash::blake3(id.as_bytes()),
+        reviewers: reviewers.iter().map(|r| (*r).to_string()).collect(),
+        target_ref: target_ref.map(str::to_string),
+    })
+}
+
+#[test]
+fn protected_refs_gate_self_named_reviewers_per_ref() {
+    let work = std::env::temp_dir().join(format!("choir-node-protected-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let pool_file = work.join("reviewers");
+    let refs_file = work.join("protected");
+    std::fs::write(&pool_file, "ana\nbot\n").unwrap();
+    std::fs::write(
+        &refs_file,
+        "# what counts as privilege-bearing here\ndemo.git:refs/heads/main\ndemo.git:refs/heads/release/*\n",
+    )
+    .unwrap();
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .unwrap()
+            .with_reviewer_pool(pool_file)
+            .with_protected_refs(refs_file.clone()),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let post = |op: &ViewOp| {
+        curl(&[
+            "-X", "POST", "-d", &submit_body(&author, "carol", op),
+            &format!("{api}/submit"),
+        ])
+    };
+
+    // Landing on a protected ref: picking your own reviewer is refused,
+    // and the error names the ref so the requester knows why this one.
+    let (code, resp) = post(&request_bound(
+        "p-main",
+        &["ana"],
+        Some("demo.git:refs/heads/main"),
+    ));
+    assert_eq!(code, 400, "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("protected ref"),
+        "{resp}"
+    );
+
+    // Trailing `*` is a prefix glob, so a whole release namespace is
+    // covered by one line.
+    let (code, resp) = post(&request_bound(
+        "p-rel",
+        &["ana"],
+        Some("demo.git:refs/heads/release/1.0"),
+    ));
+    assert_eq!(code, 400, "{resp}");
+
+    // An unprotected ref is still self-service: the gate is per-ref, not
+    // node-wide (that is what `--require-assignment` is for).
+    let (code, resp) = post(&request_bound(
+        "p-scratch",
+        &["ana"],
+        Some("demo.git:refs/heads/scratch"),
+    ));
+    assert_eq!(code, 200, "{resp}");
+
+    // Known, documented escape: a review that names no ref is unbound,
+    // so there is nothing to match. Asserted so it stays a decision
+    // rather than becoming a surprise — closing it needs SetRef itself
+    // to require an approved review.
+    let (code, resp) = post(&request_bound("p-unbound", &["ana"], None));
+    assert_eq!(code, 200, "{resp}");
+
+    // The assigned path works on a protected ref, and the view carries
+    // the binding so a reader can see what the review is for.
+    let (code, resp) = post(&request_bound("p-ok", &[], Some("demo.git:refs/heads/main")));
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["reviewers"].as_array().map(Vec::len), Some(2), "{resp}");
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(
+        view["reviews"]["p-ok"]["target_ref"], "demo.git:refs/heads/main",
+        "{view}"
+    );
+    assert_eq!(view["reviews"]["p-unbound"]["target_ref"], serde_json::Value::Null);
+
+    // Editing the list takes effect with no restart.
+    std::fs::write(&refs_file, "demo.git:refs/heads/scratch\n").unwrap();
+    let (code, resp) = post(&request_bound(
+        "p-reload",
+        &["ana"],
+        Some("demo.git:refs/heads/scratch"),
+    ));
+    assert_eq!(code, 400, "{resp}");
+
+    // Fail closed: an unreadable list refuses the review rather than
+    // quietly demoting the gate to an advisory.
+    std::fs::remove_file(&refs_file).unwrap();
+    let (code, resp) = post(&request_bound(
+        "p-gone",
+        &["ana"],
+        Some("demo.git:refs/heads/main"),
+    ));
+    assert_eq!(code, 400, "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("unreadable"),
+        "{resp}"
+    );
 
     node.unblock();
 }

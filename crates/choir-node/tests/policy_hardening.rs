@@ -66,6 +66,7 @@ fn keys_hot_reload_and_reviewer_binding() {
         id: "h-1".into(),
         target,
         reviewers: vec!["late".into()],
+        target_ref: None,
     });
 
     // Unregistered key: rejected.
