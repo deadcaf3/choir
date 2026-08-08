@@ -1108,17 +1108,53 @@ fn replay_from_disk(
 ) -> Result<Vec<serde_json::Value>, String> {
     use std::io::BufRead;
     let file = std::fs::File::open(path).map_err(|e| format!("open log: {e}"))?;
-    std::io::BufReader::new(file)
-        .lines()
-        .skip(from)
-        .take(take)
-        .map(|line| {
-            let line = line.map_err(|e| format!("read log: {e}"))?;
-            let entry: OpEntry =
-                serde_json::from_str(&line).map_err(|e| format!("decode log line: {e}"))?;
-            Ok(entry_json(&entry))
-        })
-        .collect()
+    let mut reader = std::io::BufReader::new(file);
+
+    // Skip by scanning for newlines rather than `.lines().skip(from)`,
+    // which allocates and UTF-8 validates a String for every line thrown
+    // away. Still O(bytes before `from`), but it no longer allocates
+    // per skipped entry, and a resync from a long log is exactly the case
+    // where "one allocation per line you do not want" is worst.
+    //
+    // `read_line` into a reused buffer would be the obvious fix; this
+    // uses `read_until` on the raw bytes so the skipped prefix is never
+    // UTF-8 checked either. The entries actually returned are still
+    // decoded through `serde_json`, which validates them properly.
+    let mut scratch = Vec::new();
+    for _ in 0..from {
+        scratch.clear();
+        let n = reader
+            .read_until(b'\n', &mut scratch)
+            .map_err(|e| format!("read log: {e}"))?;
+        if n == 0 {
+            // `from` is past the end of the log: an empty page, not an
+            // error. The caller already answered 409 for the case where
+            // the reader is behind the window with no log to fall back on.
+            return Ok(Vec::new());
+        }
+    }
+
+    let mut rows = Vec::with_capacity(take.min(LOG_PAGE));
+    for _ in 0..take {
+        scratch.clear();
+        let n = reader
+            .read_until(b'\n', &mut scratch)
+            .map_err(|e| format!("read log: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        let entry: OpEntry = serde_json::from_slice(trim_newline(&scratch))
+            .map_err(|e| format!("decode log line: {e}"))?;
+        rows.push(entry_json(&entry));
+    }
+    Ok(rows)
+}
+
+/// Drops a trailing `\n` and an optional preceding `\r`, so a line read
+/// with `read_until` decodes the same as one produced by `.lines()`.
+fn trim_newline(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 /// JSON shape of one review's state (shared by /api/view and

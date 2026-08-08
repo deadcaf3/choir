@@ -103,3 +103,39 @@ fn a_short_log_fills_the_window_from_zero() {
         "a short log is served from memory, not the resync path"
     );
 }
+
+/// `from` past the end of the log is an empty page, not an error.
+///
+/// Note which path this takes, because the first version of this test got
+/// it wrong: the resync path fires only when `from < window_base`, i.e.
+/// when a reader is BEHIND the window. A `from` past the end is *ahead*
+/// of it, so it is served from the window and simply skips past
+/// everything held. Reading ahead of the log is the boundary being pinned
+/// here; reading behind it is covered by tests/resync.rs.
+#[test]
+fn reading_past_the_end_of_the_log_is_an_empty_page() {
+    let dir = std::env::temp_dir().join(format!("choir-window-past-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    seed_log(&dir, 6);
+
+    let log = FileLog::open(&dir.join("ops.jsonl")).expect("reopen");
+    let platform = Platform::start(Registry::new(), Box::new(log), ActorKey::generate())
+        .expect("platform starts")
+        .with_log_window_cap(2)
+        .with_log_path(dir.join("ops.jsonl"));
+
+    let (status, out) = platform.handle_api("GET", "/api/log?from=99", b"");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(status, 200, "{out}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(
+        parsed["entries"].as_array().expect("entries").len(),
+        0,
+        "reading past the end must be empty, not an error: {out}"
+    );
+    assert_eq!(
+        parsed["source"].as_str(),
+        Some("window"),
+        "a read ahead of the window is not a resync"
+    );
+}
