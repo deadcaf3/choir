@@ -112,12 +112,32 @@ pub enum OpKind {
     /// Open review `id` on commit `target`, fanning out to `reviewers`
     /// (additive variant, added for review fan-out; wire-format
     /// unchanged). `id` must not already exist.
+    ///
+    /// An **empty** `reviewers` list opens the review *unassigned*: the
+    /// requester is not naming their own reviewers, and an
+    /// [`OpKind::AssignReviewers`] op fills the list in later. An
+    /// unassigned review is never `complete()` and never `approved()`,
+    /// so "ask nobody" cannot read as a pass (D24 layer 5).
     RequestReview {
         /// Caller-chosen review id (unique per log).
         id: String,
         /// The commit under review.
         target: ContentHash,
-        /// Actor names the review fans out to.
+        /// Actor names the review fans out to; empty = unassigned.
+        reviewers: Vec<String>,
+    },
+    /// Fill in the reviewer list of an unassigned review (additive
+    /// variant, wire-format unchanged). Assign-once: the review must
+    /// exist with an empty list, and the new list must be non-empty.
+    ///
+    /// This is the view-level half of D24 layer 5 — "the requester does
+    /// not choose who reviews them". *Who* may assign is admission
+    /// policy (L2), not view semantics: the daemon accepts this op only
+    /// from its own key, and picks from an operator-curated pool.
+    AssignReviewers {
+        /// The unassigned review being filled in.
+        id: String,
+        /// Actor names the review now fans out to (non-empty).
         reviewers: Vec<String>,
     },
     /// Record `reviewer`'s verdict on review `id` (additive variant).
@@ -187,10 +207,13 @@ pub struct ReviewState {
 }
 
 impl ReviewState {
-    /// Whether every listed reviewer has answered.
+    /// Whether every listed reviewer has answered. An unassigned review
+    /// (no reviewers yet) is never complete — vacuous truth must not
+    /// turn "asked nobody" into a finished review.
     #[must_use]
     pub fn complete(&self) -> bool {
-        self.reviewers.iter().all(|r| self.verdicts.contains_key(r))
+        !self.reviewers.is_empty()
+            && self.reviewers.iter().all(|r| self.verdicts.contains_key(r))
     }
 
     /// Whether the review is complete with no `RequestChanges`.
@@ -362,6 +385,23 @@ impl View {
                         verdicts: BTreeMap::new(),
                     },
                 );
+            }
+            OpKind::AssignReviewers { id, reviewers } => {
+                if reviewers.is_empty() {
+                    return Err(ViewError::Review(
+                        "assignment must name at least one reviewer".to_string(),
+                    ));
+                }
+                let review = self
+                    .reviews
+                    .get_mut(id)
+                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if !review.reviewers.is_empty() {
+                    return Err(ViewError::Review(format!(
+                        "review {id} is already assigned"
+                    )));
+                }
+                review.reviewers = reviewers.clone();
             }
             OpKind::PostVerdict {
                 id,

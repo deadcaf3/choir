@@ -9,7 +9,7 @@
 //! choir key <key-file>
 //! choir workspace <api> <owner/repo> <name>
 //! choir submit <api> <key-file> <channel> '<op-json>'
-//! choir review <api> <key-file> <channel> <id> <git-oid> <reviewer>...
+//! choir review <api> <key-file> <channel> <id> <git-oid> [reviewer]...
 //! choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 //! choir reviews <api> <reviewer>
@@ -26,7 +26,7 @@ const USAGE: &str = "usage:
   choir key <key-file>
   choir workspace <api> <owner/repo> <name>
   choir submit <api> <key-file> <channel> '<op-json>'
-  choir review <api> <key-file> <channel> <id> <git-oid> <reviewer>...
+  choir review <api> <key-file> <channel> <id> <git-oid> [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
   choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
   choir reviews <api> <reviewer>
@@ -123,7 +123,9 @@ fn main() {
             };
             submit(api, key_file, channel, &op);
         }
-        ["review", api, key_file, channel, id, oid, reviewers @ ..] if !reviewers.is_empty() => {
+        // No reviewer names = ask the node to assign them (D24 layer 5;
+        // needs the daemon started with --reviewers-file).
+        ["review", api, key_file, channel, id, oid, reviewers @ ..] => {
             let Some(target) = choir_hash::ContentHash::from_git_oid(oid) else {
                 eprintln!("<git-oid> must be a 40- or 64-char hex object id");
                 std::process::exit(2);

@@ -57,8 +57,12 @@ fn cli_end_to_end() {
     let mut registry = Registry::new();
     registry.register(&key_bytes).unwrap();
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    let pool = work.join("reviewers");
+    std::fs::write(&pool, "bot\nana\n").unwrap();
     node.enable_platform(
-        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .unwrap()
+            .with_reviewer_pool(pool),
     );
     node.create_repo("agents/demo.git").unwrap();
     let port = node.port();
@@ -102,6 +106,15 @@ fn cli_end_to_end() {
     let view = json(&out);
     assert_eq!(view["reviews"]["r1"]["approved"], true, "{view}");
     assert_eq!(view["reviews"]["r1"]["verdicts"]["bot"]["note"], "lgtm");
+
+    // `review` with no reviewer names asks the node to draw them from
+    // the operator's pool (D24 layer 5) — the requester never picks.
+    let out = choir(&["review", &api, key_file, "cli-agent", "r-assigned", &head]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    let drawn = json(&out)["reviewers"].clone();
+    assert_eq!(drawn.as_array().map(Vec::len), Some(2), "{drawn}");
+    let view = json(&choir(&["view", &api]));
+    assert_eq!(view["reviews"]["r-assigned"]["reviewers"], drawn, "{view}");
 
     // Raw `submit` accepts a hand-written op (second review request).
     let target = serde_json::to_string(&choir_hash::ContentHash::from_git_oid(&head).unwrap())

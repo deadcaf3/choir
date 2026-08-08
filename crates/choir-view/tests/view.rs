@@ -216,6 +216,66 @@ fn review_fan_out_semantics() {
 }
 
 #[test]
+fn unassigned_reviews_are_never_complete_and_assign_once() {
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "author",
+        ViewOp::new(OpKind::RequestReview {
+            id: "r1".into(),
+            target: ContentHash::blake3(b"change"),
+            reviewers: Vec::new(),
+        }),
+    )
+    .unwrap();
+    let assign = |id: &str, who: &[&str]| {
+        ViewOp::new(OpKind::AssignReviewers {
+            id: id.into(),
+            reviewers: who.iter().map(|s| (*s).to_string()).collect(),
+        })
+    };
+
+    // A review nobody was asked to do is not a passed review.
+    let view = View::materialize(&log).unwrap();
+    let r = view.reviews.get("r1").unwrap();
+    assert!(!r.complete() && !r.approved(), "vacuous approval");
+
+    // Empty assignment and unknown review are both rejected.
+    assert!(matches!(
+        append_op(&mut log, "node", assign("r1", &[])),
+        Err(ViewError::Review(_))
+    ));
+    assert!(matches!(
+        append_op(&mut log, "node", assign("nope", &["ana"])),
+        Err(ViewError::Review(_))
+    ));
+
+    append_op(&mut log, "node", assign("r1", &["ana"])).unwrap();
+    let view = View::materialize(&log).unwrap();
+    assert_eq!(view.reviews.get("r1").unwrap().reviewers, vec!["ana"]);
+
+    // Assign-once: reviewers cannot be swapped out mid-review, so a
+    // hostile re-draw cannot replace a reviewer who would say no.
+    assert!(matches!(
+        append_op(&mut log, "node", assign("r1", &["friend"])),
+        Err(ViewError::Review(_))
+    ));
+
+    append_op(
+        &mut log,
+        "ana",
+        ViewOp::new(OpKind::PostVerdict {
+            id: "r1".into(),
+            reviewer: "ana".into(),
+            verdict: choir_view::Verdict::Approve,
+            note: String::new(),
+        }),
+    )
+    .unwrap();
+    assert!(View::materialize(&log).unwrap().reviews.get("r1").unwrap().approved());
+}
+
+#[test]
 fn provenance_records_latest_wins() {
     let mut log = MemLog::new();
     let record = |subject: &str, kind: &str, body: &str| {

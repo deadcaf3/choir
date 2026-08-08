@@ -35,6 +35,25 @@ pub struct LogWindow {
 /// the persisted op log (not served over HTTP yet).
 const LOG_WINDOW_CAP: usize = 100_000;
 
+/// Reviewers drawn per unassigned review: two-person integrity, capped
+/// by the pool size (D24 layer 5; design choice, not a measured number).
+const ASSIGNMENT_SIZE: usize = 2;
+
+/// Nanosecond clock reading, as a nonzero xorshift seed.
+fn seed_from_clock() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0x9e37_79b9_7f4a_7c15, |d| d.as_nanos() as u64)
+        | 1
+}
+
+/// FNV-1a, so two reviews drawn in the same nanosecond still diverge.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
 impl LogWindow {
     fn push(&mut self, entry: OpEntry) {
         self.entries.push(entry);
@@ -58,6 +77,9 @@ struct ChoirPolicy {
     keys_file: Option<std::path::PathBuf>,
     keys_mtime: Option<std::time::SystemTime>,
     node_pub: Vec<u8>,
+    /// The node key's actor id (hex): the only author allowed to assign
+    /// reviewers.
+    node_id: String,
 }
 
 impl ChoirPolicy {
@@ -118,6 +140,13 @@ impl SubmitPolicy for ChoirPolicy {
                 ));
             }
         }
+        // D24 layer 5: the requester does not choose who reviews them.
+        // Only the daemon's own key may fill in a reviewer list; every
+        // other author gets a rejection, so an accepted assignment in
+        // the log always came from the node's pool draw.
+        if matches!(op.kind, OpKind::AssignReviewers { .. }) && sig.key_id != self.node_id {
+            return Err("only the node may assign reviewers".to_string());
+        }
         let mut trial = self.view.lock().expect("view lock").clone();
         trial.apply(&op).map_err(|e| format!("stale head: {e:?}"))
     }
@@ -143,6 +172,10 @@ pub struct Platform {
     /// (`git/<user>`).
     node_key: ActorKey,
     entries: Arc<Mutex<LogWindow>>,
+    /// Operator-curated file of eligible reviewer names, one per line.
+    /// Read fresh on every draw, so editing it takes effect at once.
+    /// `None` = no pool, and unassigned reviews stay unassigned.
+    reviewer_pool: Option<std::path::PathBuf>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -205,6 +238,7 @@ impl Platform {
                 keys_file,
                 keys_mtime,
                 node_pub: node_key.public_key_bytes().to_vec(),
+                node_id: node_key.actor_id().to_hex(),
             }),
         );
         Ok(Self {
@@ -212,8 +246,21 @@ impl Platform {
             view,
             node_key,
             entries,
+            reviewer_pool: None,
             _sequencer: sequencer,
         })
+    }
+
+    /// Points the platform at an operator-curated pool of eligible
+    /// reviewer names (one per line, `#` comments allowed). With a pool
+    /// set, a `RequestReview` carrying an empty reviewer list is
+    /// answered by a node-signed [`OpKind::AssignReviewers`] drawn from
+    /// the pool, excluding the requester — D24 layer 5, so a requester
+    /// cannot pick a friendly reviewer.
+    #[must_use]
+    pub fn with_reviewer_pool(mut self, path: std::path::PathBuf) -> Self {
+        self.reviewer_pool = Some(path);
+        self
     }
 
     /// Routes one git ref update (from a repo's `update` hook) through
@@ -294,6 +341,54 @@ impl Platform {
         .to_payload();
         let sig = self.node_key.sign_submission(attribution, &payload);
         self.handle.try_submit(attribution, payload, Some(sig)).map(|_| ())
+    }
+
+    /// Draws reviewers for unassigned review `id` and records them with
+    /// a node-signed op. Candidates are the pool minus `requester`;
+    /// [`ASSIGNMENT_SIZE`] are drawn, or all of them if the pool is
+    /// smaller (a one-person pool still beats self-selection).
+    ///
+    /// # Errors
+    ///
+    /// No pool configured, an unreadable or empty-after-exclusion pool,
+    /// or the sequencer's rejection reason (e.g. the review was assigned
+    /// by a concurrent request).
+    pub fn assign_reviewers(&self, id: &str, requester: &str) -> Result<Vec<String>, String> {
+        let path = self.reviewer_pool.as_ref().ok_or("no reviewer pool configured")?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("read reviewer pool: {e}"))?;
+        let mut pool: Vec<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && *l != requester)
+            .map(String::from)
+            .collect();
+        if pool.is_empty() {
+            return Err("reviewer pool has nobody but the requester".to_string());
+        }
+        // Partial Fisher-Yates with a hand-rolled xorshift (no rand
+        // dep). The draw is node-side and recorded in the log, so
+        // replay reproduces it from the op, not from this seed.
+        let mut state = seed_from_clock() ^ fnv1a(id.as_bytes());
+        let take = ASSIGNMENT_SIZE.min(pool.len());
+        for i in 0..take {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let j = i + (state as usize) % (pool.len() - i);
+            pool.swap(i, j);
+        }
+        pool.truncate(take);
+        pool.sort();
+
+        let payload = ViewOp::new(OpKind::AssignReviewers {
+            id: id.to_string(),
+            reviewers: pool.clone(),
+        })
+        .to_payload();
+        let channel = "node/assign";
+        let sig = self.node_key.sign_submission(channel, &payload);
+        self.handle.try_submit(channel, payload, Some(sig))?;
+        Ok(pool)
     }
 
     /// Handles one `/api/...` request, returning `(status, json_body)`.
@@ -451,15 +546,33 @@ impl Platform {
         else {
             return (400, r#"{"error":"bad hex"}"#.to_string());
         };
+        // An unassigned review request is answered with a node-signed
+        // assignment draw once the request itself is admitted.
+        let unassigned = match ViewOp::from_payload(&payload) {
+            Ok(op) => match op.kind {
+                OpKind::RequestReview { id, reviewers, .. } if reviewers.is_empty() => Some(id),
+                _ => None,
+            },
+            Err(_) => None,
+        };
         match self.handle.try_submit(
             &workspace,
             payload,
             Some(Witness { key_id, signature }),
         ) {
-            Ok(acc) => (
-                200,
-                serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() }).to_string(),
-            ),
+            Ok(acc) => {
+                let mut resp =
+                    serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() });
+                if let Some(id) = unassigned {
+                    match self.assign_reviewers(&id, &workspace) {
+                        Ok(reviewers) => resp["reviewers"] = serde_json::json!(reviewers),
+                        // The request stands; it is visibly unassigned,
+                        // which is a state no verdict can complete.
+                        Err(e) => resp["assignment_error"] = serde_json::json!(e),
+                    }
+                }
+                (200, resp.to_string())
+            }
             Err(reason) => (
                 400,
                 serde_json::json!({ "error": reason }).to_string(),

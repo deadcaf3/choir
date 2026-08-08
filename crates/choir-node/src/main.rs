@@ -1,14 +1,16 @@
 //! choir-node daemon entry point.
 //!
 //! Usage: `choir-node <repo-root> [port] [--create owner/name.git]...
-//! [--auth-file path] [--keys-file path] [--bind addr]
-//! [--tls-cert cert.pem --tls-key key.pem]`
+//! [--auth-file path] [--keys-file path] [--reviewers-file path]
+//! [--bind addr] [--tls-cert cert.pem --tls-key key.pem]`
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
 //! `user:token`-per-line file (0600; never in-repo) and turns on
 //! mandatory basic auth. `--keys-file` (ed25519 public keys, one
 //! 64-char hex line each) turns on the platform API; the op log
-//! persists at `<repo-root>/.choir/ops.jsonl`. `--bind` with a
+//! persists at `<repo-root>/.choir/ops.jsonl`. `--reviewers-file`
+//! (one eligible reviewer name per line) lets the node assign
+//! reviewers to review requests that name none. `--bind` with a
 //! non-loopback address is refused unless TLS is configured.
 
 use choir_node::{AuthTable, Node, Platform};
@@ -123,9 +125,13 @@ fn main() -> std::io::Result<()> {
         // Hot-reload: appending a key line to the file takes effect on
         // the next failed signature check, no restart. (Push-cert
         // allowed_signers stays startup-only for now.)
-        let platform =
+        let mut platform =
             Platform::start_reloading(registry, Box::new(log), node_key, Some(path.into()))
                 .map_err(std::io::Error::other)?;
+        if let Some(pool) = flag_value("--reviewers-file") {
+            platform = platform.with_reviewer_pool(pool.into());
+            eprintln!("reviewer assignment enabled ({pool})");
+        }
         node.enable_platform(platform);
         eprintln!("platform API enabled ({count} actor keys)");
     }

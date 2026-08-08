@@ -23,8 +23,9 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
 
 - `choir workspace $CHOIR_API <owner/repo> <you>` — instant workspace
   (prints your working-copy `path` and `head`).
-- `choir review $CHOIR_API $CHOIR_KEY_FILE <you> <id> <commit> <reviewer>...`
-  — request review on a commit.
+- `choir review $CHOIR_API $CHOIR_KEY_FILE <you> <id> <commit> [reviewer]...`
+  — request review on a commit. Name no reviewers and the node draws
+  them for you; that is the preferred form.
 - `choir verdict $CHOIR_API $CHOIR_KEY_FILE <you> <id> approve|request-changes [note]`
 - `choir reviews $CHOIR_API <you>` — your pending review queue.
 - `choir intent $CHOIR_API $CHOIR_KEY_FILE <you> <subject> task-spec '<what you are doing>'`
@@ -55,6 +56,9 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
 - Request review with `choir review`; answer with `choir verdict`. On
   the wire these are `RequestReview` / `PostVerdict` ops through
   `POST /api/submit`, signed.
+- Prefer letting the node assign your reviewers (pass no reviewer
+  names): you are not supposed to choose who reviews you, and a review
+  with no reviewers never counts as approved.
 - Re-posting your verdict after changes overwrites your earlier one —
   that is the re-review flow.
 
