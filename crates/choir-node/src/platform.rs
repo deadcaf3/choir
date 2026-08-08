@@ -767,22 +767,56 @@ impl Platform {
                 };
                 // Ops are admitted in array order; each result is
                 // independent (a rejection does not abort the batch).
-                let mut accepted = 0u64;
-                let mut rejected = 0u64;
-                let results: Vec<serde_json::Value> = ops
+                //
+                // Every op is decoded from the already-parsed request,
+                // offered to the sequencer, and only then waited on. The
+                // previous shape called the single-op path in a loop,
+                // which re-serialised each op to a string, re-parsed it,
+                // blocked for its reply, and re-parsed the reply. Blocking
+                // per op was the expensive part: it left the writer's
+                // queue empty every time it looked, so a 500-op body paid
+                // 500 durability barriers instead of ceil(500/MAX_BATCH).
+                let mut decoded = Vec::with_capacity(ops.len());
+                for op in ops {
+                    decoded.push(decode_submission(op));
+                }
+                // Malformed ops never reach the sequencer. Well-formed
+                // ones are pushed in request order, so pulling one
+                // outcome per `Ok` below keeps results aligned with the
+                // request array without any index bookkeeping.
+                let subs: Vec<Submission> = decoded
                     .iter()
-                    .map(|op| {
-                        let bytes = op.to_string().into_bytes();
-                        let (status, body) = self.submit(&bytes);
-                        if status == 200 {
-                            accepted += 1;
-                        } else {
-                            rejected += 1;
-                        }
-                        serde_json::from_str(&body)
-                            .unwrap_or_else(|_| serde_json::json!({ "error": body }))
+                    .filter_map(|d| d.as_ref().ok())
+                    .map(|sub| Submission {
+                        workspace: sub.workspace.clone(),
+                        payload: sub.payload.clone(),
+                        author_sig: sub.author_sig.clone(),
                     })
                     .collect();
+                let mut outcomes = self.handle.try_submit_many(subs).into_iter();
+
+                let mut accepted = 0u64;
+                let mut rejected = 0u64;
+                let mut results: Vec<serde_json::Value> = Vec::with_capacity(decoded.len());
+                for d in &decoded {
+                    let value = match d {
+                        Err(reason) => {
+                            rejected += 1;
+                            serde_json::json!({ "error": reason })
+                        }
+                        Ok(sub) => match outcomes.next().expect("one outcome per submitted op") {
+                            Ok(acc) => {
+                                accepted += 1;
+                                self.batch_result(acc, sub)
+                            }
+                            Err(reason) => {
+                                rejected += 1;
+                                serde_json::json!({ "error": reason })
+                            }
+                        },
+                    };
+                    results.push(value);
+                }
                 (
                     200,
                     serde_json::json!({
@@ -878,58 +912,89 @@ impl Platform {
             Ok(v) => v,
             Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
         };
-        let field = |name: &str| -> Option<String> {
-            req.get(name).and_then(|v| v.as_str()).map(String::from)
-        };
-        let (Some(workspace), Some(payload_hex), Some(key_id), Some(signature_hex)) = (
-            field("workspace"),
-            field("payload_hex"),
-            field("key_id"),
-            field("signature_hex"),
-        ) else {
-            return (
-                400,
-                r#"{"error":"need workspace, payload_hex, key_id, signature_hex"}"#.to_string(),
-            );
-        };
-        let (Some(payload), Some(signature)) =
-            (hex_decode(&payload_hex), hex_decode(&signature_hex))
-        else {
-            return (400, r#"{"error":"bad hex"}"#.to_string());
-        };
-        // An unassigned review request is answered with a node-signed
-        // assignment draw once the request itself is admitted.
-        let unassigned = match ViewOp::from_payload(&payload) {
-            Ok(op) => match op.kind {
-                OpKind::RequestReview { id, reviewers, .. } if reviewers.is_empty() => Some(id),
-                _ => None,
-            },
-            Err(_) => None,
+        let sub = match decode_submission(&req) {
+            Ok(sub) => sub,
+            Err(reason) => return (400, serde_json::json!({ "error": reason }).to_string()),
         };
         match self.handle.try_submit(
-            &workspace,
-            payload,
-            Some(Witness { key_id, signature }),
+            &sub.workspace,
+            sub.payload.clone(),
+            sub.author_sig.clone(),
         ) {
-            Ok(acc) => {
-                let mut resp =
-                    serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() });
-                if let Some(id) = unassigned {
-                    match self.assign_reviewers(&id, &workspace) {
-                        Ok(reviewers) => resp["reviewers"] = serde_json::json!(reviewers),
-                        // The request stands; it is visibly unassigned,
-                        // which is a state no verdict can complete.
-                        Err(e) => resp["assignment_error"] = serde_json::json!(e),
-                    }
-                }
-                (200, resp.to_string())
-            }
-            Err(reason) => (
-                400,
-                serde_json::json!({ "error": reason }).to_string(),
-            ),
+            Ok(acc) => (200, self.batch_result(acc, &sub).to_string()),
+            Err(reason) => (400, serde_json::json!({ "error": reason }).to_string()),
         }
     }
+
+    /// The success body for one admitted op, shared by `/api/submit` and
+    /// `/api/submit-batch` so the two cannot answer differently.
+    ///
+    /// An unassigned review request is answered with a node-signed
+    /// assignment draw once the request itself is admitted. That draw is a
+    /// *further* submission, so it deliberately happens here, after the
+    /// batch's own barrier, rather than being folded into it.
+    fn batch_result(&self, acc: choir_sequencer::Accepted, sub: &DecodedSubmission) -> serde_json::Value {
+        let mut resp = serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() });
+        if let Some(id) = &sub.unassigned_review {
+            match self.assign_reviewers(id, &sub.workspace) {
+                Ok(reviewers) => resp["reviewers"] = serde_json::json!(reviewers),
+                // The request stands; it is visibly unassigned, which is
+                // a state no verdict can complete.
+                Err(e) => resp["assignment_error"] = serde_json::json!(e),
+            }
+        }
+        resp
+    }
+}
+
+/// One decoded `/api/submit` body: the wire fields turned into the bytes
+/// the sequencer wants, plus whatever the response will need afterwards.
+struct DecodedSubmission {
+    workspace: String,
+    payload: Vec<u8>,
+    author_sig: Option<Witness>,
+    /// Review id when this op opens a review naming no reviewers, so the
+    /// node knows to draw for it once the op is admitted.
+    unassigned_review: Option<String>,
+}
+
+/// Turns one already-parsed request object into a submission.
+///
+/// Split out so `/api/submit-batch` can decode straight from the parsed
+/// request array. The previous batch path re-serialised each element back
+/// to a string and re-parsed it through the single-op entry point, which
+/// is two extra JSON round-trips per op on the endpoint that exists to
+/// avoid per-op overhead.
+fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, String> {
+    let field = |name: &str| req.get(name).and_then(|v| v.as_str());
+    let (Some(workspace), Some(payload_hex), Some(key_id), Some(signature_hex)) = (
+        field("workspace"),
+        field("payload_hex"),
+        field("key_id"),
+        field("signature_hex"),
+    ) else {
+        return Err("need workspace, payload_hex, key_id, signature_hex".to_string());
+    };
+    let (Some(payload), Some(signature)) = (hex_decode(payload_hex), hex_decode(signature_hex))
+    else {
+        return Err("bad hex".to_string());
+    };
+    let unassigned_review = match ViewOp::from_payload(&payload) {
+        Ok(op) => match op.kind {
+            OpKind::RequestReview { id, reviewers, .. } if reviewers.is_empty() => Some(id),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    Ok(DecodedSubmission {
+        workspace: workspace.to_string(),
+        payload,
+        author_sig: Some(Witness {
+            key_id: key_id.to_string(),
+            signature,
+        }),
+        unassigned_review,
+    })
 }
 
 /// JSON shape of one log entry, shared by the in-memory window and the

@@ -136,6 +136,48 @@ impl SequencerHandle {
             .expect("sequencer thread alive");
         reply_rx.recv().expect("sequencer replies before dropping")
     }
+
+    /// Offers every submission before waiting for any reply, so the whole
+    /// group is already queued when the writer next drains — and therefore
+    /// shares one durability barrier instead of one each.
+    ///
+    /// This is the difference between an N-op request costing N fsyncs and
+    /// costing `ceil(N / MAX_BATCH)`. Calling [`SequencerHandle::try_submit`]
+    /// in a loop cannot achieve it: each call blocks until its own reply,
+    /// so the queue is empty every time the writer looks and every op
+    /// becomes its own batch.
+    ///
+    /// Results are returned in submission order, one per input. Each is
+    /// independent: a rejection does not abort the rest, matching the
+    /// per-op semantics `/api/submit-batch` already promised.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sequencer thread has already shut down.
+    pub fn try_submit_many(
+        &self,
+        subs: Vec<Submission>,
+    ) -> Vec<Result<Accepted, String>> {
+        // A reply channel per op rather than one shared channel: replies
+        // are not ordered with respect to each other, because a rejection
+        // is answered immediately while an admitted op waits for the
+        // barrier. Separate channels keep the result order matching the
+        // input order by construction rather than by assumption.
+        let waiting: Vec<_> = subs
+            .into_iter()
+            .map(|sub| {
+                let (reply_tx, reply_rx) = mpsc::channel();
+                self.tx
+                    .send(Command::Submit(sub, reply_tx))
+                    .expect("sequencer thread alive");
+                reply_rx
+            })
+            .collect();
+        waiting
+            .into_iter()
+            .map(|rx| rx.recv().expect("sequencer replies before dropping"))
+            .collect()
+    }
 }
 
 /// Owns the single writer thread; the only component allowed to append to
