@@ -237,7 +237,7 @@ fn corpus_suitability_separates_a_low_rate_from_an_unmeasurable_one() {
     assert!((r.rate() - 0.0).abs() < f64::EPSILON, "and it still reads 0.0");
 
     // One revert per 200 commits clears the bar.
-    let mut reverting = quiet.clone();
+    let mut reverting = quiet;
     for i in 0..2 {
         reverting[i * 100 + 1] = Commit {
             id: format!("r{i}"),
