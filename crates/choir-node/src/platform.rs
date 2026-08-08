@@ -28,7 +28,10 @@ use choir_view::{OpKind, View, ViewOp};
 /// after old entries are dropped (full history lives in the op log).
 pub struct LogWindow {
     base: u64,
-    entries: Vec<OpEntry>,
+    /// A `VecDeque`, not a `Vec`: eviction pops from the front, which is
+    /// O(1) here and an O(n) memmove of up to `cap` entries there. At the
+    /// 100k cap that cost was paid on every push once full.
+    entries: std::collections::VecDeque<OpEntry>,
     /// Entries kept before the oldest is dropped. A field rather than a
     /// constant so a test can drive eviction without writing 100k ops.
     cap: usize,
@@ -62,11 +65,16 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 impl LogWindow {
     fn push(&mut self, entry: OpEntry) {
-        self.entries.push(entry);
-        if self.entries.len() > self.cap {
-            let drop = self.entries.len() - self.cap;
-            self.entries.drain(..drop);
-            self.base += drop as u64;
+        self.entries.push_back(entry);
+        self.trim();
+    }
+
+    /// Drops the oldest entries until the window fits its cap, advancing
+    /// `base` so `/api/log?from=` keeps absolute sequence semantics.
+    fn trim(&mut self) {
+        while self.entries.len() > self.cap {
+            self.entries.pop_front();
+            self.base += 1;
         }
     }
 }
@@ -414,14 +422,24 @@ impl Platform {
             .map_err(|e| format!("register node key: {e:?}"))?;
         let view = View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?;
         let view = Arc::new(Mutex::new(view));
-        let existing: Vec<OpEntry> = (0..log.len()).filter_map(|i| log.get(i)).collect();
+        // Fill the window from the tail only. Materialising the whole log
+        // into a Vec and pushing each entry through the window cloned
+        // every entry twice at startup and held a second full copy of the
+        // log in memory alongside the log itself -- O(total ops) for a
+        // window that keeps at most `cap`.
+        let len = log.len();
+        let start = len.saturating_sub(LOG_WINDOW_CAP as u64);
         let mut window = LogWindow {
-            base: 0,
-            entries: Vec::new(),
+            base: start,
+            entries: std::collections::VecDeque::with_capacity(
+                (len - start).min(LOG_WINDOW_CAP as u64) as usize,
+            ),
             cap: LOG_WINDOW_CAP,
         };
-        for e in existing {
-            window.push(e);
+        for i in start..len {
+            if let Some(e) = log.get(i) {
+                window.push(e);
+            }
         }
         let entries = Arc::new(Mutex::new(window));
         let keys_mtime = keys_file
@@ -580,7 +598,15 @@ impl Platform {
     /// exercise eviction and the resync path without writing 100k ops.
     #[must_use]
     pub fn with_log_window_cap(self, cap: usize) -> Self {
-        self.entries.lock().expect("entries lock").cap = cap.max(1);
+        let mut window = self.entries.lock().expect("entries lock");
+        window.cap = cap.max(1);
+        // Trim to the new cap now rather than waiting for the next push.
+        // Without this a platform started over an existing log stays
+        // over-full until something is submitted, so `/api/log` would
+        // serve entries from below `base` and a reader could not tell the
+        // window had shrunk.
+        window.trim();
+        drop(window);
         self
     }
 
