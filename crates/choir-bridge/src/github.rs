@@ -139,6 +139,43 @@ pub fn installation_token(jwt: &str) -> Result<String, String> {
         .ok_or_else(|| "token field missing".to_string())
 }
 
+/// Returns the raw installations JSON (debug aid: shows the permission
+/// set each installation has actually accepted).
+///
+/// # Errors
+///
+/// API failures with GitHub's response body included.
+pub fn installations_debug(jwt: &str) -> Result<String, String> {
+    let (status, body) = gh("GET", "https://api.github.com/app/installations", jwt, None)?;
+    if status != 200 {
+        return Err(format!("list installations: {status}: {body}"));
+    }
+    Ok(body)
+}
+
+/// Resolves the repo's default-branch HEAD sha via the API (works on
+/// private repos the installation covers).
+///
+/// # Errors
+///
+/// API failures with GitHub's response body included.
+pub fn head_sha(token: &str, repo: &str) -> Result<String, String> {
+    let (status, body) = gh(
+        "GET",
+        &format!("https://api.github.com/repos/{repo}/commits/HEAD"),
+        token,
+        None,
+    )?;
+    if status != 200 {
+        return Err(format!("resolve HEAD: {status}: {body}"));
+    }
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    v["sha"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "sha field missing".to_string())
+}
+
 /// Posts a commit status (`state`: success/failure/error/pending) on
 /// `owner/repo`@`sha` under the `choir/bridge` context.
 ///

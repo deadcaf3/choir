@@ -250,6 +250,33 @@ fn main() {
         println!("{}", hex_encode(&key.public_key_bytes()));
         return;
     }
+    // `choir-bridge app-debug <app-id> <pem-path>`: print the accepted
+    // permission set of each installation.
+    if args.first().map(String::as_str) == Some("app-debug") {
+        let (Some(app_id), Some(pem)) = (args.get(1), args.get(2)) else {
+            eprintln!("usage: choir-bridge app-debug <app-id> <pem-path>");
+            std::process::exit(2);
+        };
+        match github::app_jwt(app_id, Path::new(pem))
+            .and_then(|jwt| github::installations_debug(&jwt))
+        {
+            Ok(body) => {
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                for i in v.as_array().into_iter().flatten() {
+                    println!(
+                        "installation {}: permissions {}",
+                        i["id"],
+                        i["permissions"]
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("app-debug failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // `choir-bridge post-status <app-id> <pem-path> <owner/repo> <sha> <state> <description>`
     // Write-back v0: one commit status through the GitHub App flow.
     if args.first().map(String::as_str) == Some("post-status") {
@@ -262,9 +289,16 @@ fn main() {
         };
         let result = github::app_jwt(app_id, Path::new(pem))
             .and_then(|jwt| github::installation_token(&jwt))
-            .and_then(|token| github::post_status(&token, repo, sha, state, desc));
+            .and_then(|token| {
+                let sha = if sha == "HEAD" {
+                    github::head_sha(&token, repo)?
+                } else {
+                    sha.clone()
+                };
+                github::post_status(&token, repo, &sha, state, desc).map(|()| sha)
+            });
         match result {
-            Ok(()) => println!("status posted: {repo}@{sha} -> {state}"),
+            Ok(sha) => println!("status posted: {repo}@{sha} -> {state}"),
             Err(e) => {
                 eprintln!("post-status failed: {e}");
                 std::process::exit(1);
