@@ -84,5 +84,27 @@ opt-level = 3
 [workspace.lints.rust]
 missing_docs = "warn"
 
+# Perf lints, enabled with a measured caveat: they do NOT find the thing
+# this optimization pass is chasing.
+#
+# The expectation was that redundant_clone would flag the full-View clone
+# in ChoirPolicy::check. It does not, and cannot: the clone is immediately
+# mutated by trial.apply, so it is genuinely used and the lint has nothing
+# to complain about. Six redundant_clone hits fired across the workspace
+# and every one is in a test or the demo. An O(state) clone on a hot path
+# is a design fact, not a lint-visible one.
+#
+# Kept anyway -- they are cheap and they caught real slips in new code --
+# but nobody should read a clean clippy run as evidence of no allocation
+# problem.
+#
+# "warn" not "deny" deliberately: the gate here is run by hand, and a
+# denied lint turns an advisory into a broken build for whoever is mid-edit.
+[workspace.lints.clippy]
+perf = { level = "warn", priority = -1 }
+redundant_clone = "warn"
+needless_collect = "warn"
+large_enum_variant = "warn"
+
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

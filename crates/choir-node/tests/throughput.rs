@@ -108,7 +108,7 @@ fn mint_clients(registry: &mut Registry, count: usize, ops: usize) -> Vec<Client
                     let op = ViewOp::new(OpKind::SetWorkspaceHead {
                         workspace: workspace.clone(),
                         commit: commit.clone(),
-                        prev: prev.replace(commit).clone(),
+                        prev: prev.replace(commit),
                     });
                     submit_body(&key, &workspace, &op)
                 })
@@ -156,6 +156,12 @@ fn single_submit_throughput_and_latency() {
 
     let barrier = Arc::new(Barrier::new(CLIENTS));
     let started = Instant::now();
+    // The collect is load-bearing and clippy's needless_collect is wrong
+    // here: it forces every thread to spawn before any is joined. Consumed
+    // lazily, the iterator would spawn one client, join it, spawn the
+    // next -- serialising the run and measuring nothing about concurrency.
+    // It would also deadlock, because the barrier waits for all CLIENTS.
+    #[allow(clippy::needless_collect)]
     let threads: Vec<_> = clients
         .into_iter()
         .map(|client| {
@@ -331,7 +337,7 @@ fn per_op_cost_at_view_size(refs: usize) -> Duration {
             let op = ViewOp::new(OpKind::SetWorkspaceHead {
                 workspace: "measured".to_string(),
                 commit: commit.clone(),
-                prev: prev.replace(commit).clone(),
+                prev: prev.replace(commit),
             });
             submit_body(&key, "measured", &op)
         })

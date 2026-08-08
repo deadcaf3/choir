@@ -109,7 +109,7 @@ fn submit_path_allocation_budget() {
             let op = ViewOp::new(OpKind::SetWorkspaceHead {
                 workspace: workspace.to_string(),
                 commit: commit.clone(),
-                prev: prev.replace(commit).clone(),
+                prev: prev.replace(commit),
             });
             let payload = op.to_payload();
             let sig = key.sign_submission(workspace, &payload);
