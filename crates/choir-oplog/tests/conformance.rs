@@ -11,6 +11,7 @@ fn entry(parent: Option<choir_oplog::ContentHash>, seq: u64, ws: &str) -> OpEntr
         workspace: ws.to_string(),
         payload: format!("op-{seq}").into_bytes(),
         witnesses: Vec::new(),
+            author_sig: None,
     }
 }
 

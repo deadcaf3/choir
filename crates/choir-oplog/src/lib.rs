@@ -20,6 +20,7 @@
 //!     workspace: "agent-1".into(),
 //!     payload: b"first op".to_vec(),
 //!     witnesses: Vec::new(),
+//!     author_sig: None,
 //! };
 //! let head = log.append(genesis).unwrap();
 //! assert_eq!(log.head(), Some(head));
@@ -59,6 +60,11 @@ pub struct OpEntry {
     pub payload: Vec<u8>,
     /// Witness cosignatures; empty until Phase 2 (D16).
     pub witnesses: Vec<Witness>,
+    /// Author signature over [`OpEntry::signing_hash`] (L8). Additive
+    /// field (`serde(default)`): entries written before L8 decode with
+    /// `None`, keeping [`FORMAT_VERSION`] at 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_sig: Option<Witness>,
 }
 
 impl OpEntry {
@@ -66,6 +72,14 @@ impl OpEntry {
     pub fn content_hash(&self) -> ContentHash {
         let bytes = serde_json::to_vec(self).expect("OpEntry is always serializable");
         ContentHash::blake3(&bytes)
+    }
+
+    /// Hash of the entry with `author_sig` blanked — what the author
+    /// signs, so the signature never covers itself.
+    pub fn signing_hash(&self) -> ContentHash {
+        let mut unsigned = self.clone();
+        unsigned.author_sig = None;
+        unsigned.content_hash()
     }
 }
 

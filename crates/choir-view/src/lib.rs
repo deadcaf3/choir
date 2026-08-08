@@ -301,6 +301,7 @@ pub fn append_op(
         workspace: submitter.to_string(),
         payload: op.to_payload(),
         witnesses: Vec::new(),
+            author_sig: None,
     };
     log.append(entry).map_err(ViewError::Log)
 }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/choir-hash",
+    "crates/choir-identity",
     "crates/choir-oplog",
     "crates/choir-sequencer",
     "crates/choir-merge",

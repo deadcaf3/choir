@@ -100,6 +100,7 @@ impl Sequencer {
                             workspace: sub.workspace,
                             payload: sub.payload,
                             witnesses: Vec::new(),
+            author_sig: None,
                         };
                         let hash = entry.content_hash();
                         log.append(entry)
