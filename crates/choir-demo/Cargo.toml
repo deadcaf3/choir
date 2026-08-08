@@ -1,0 +1,18 @@
+[package]
+name = "choir-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+choir-hash = { path = "../choir-hash" }
+choir-identity = { path = "../choir-identity" }
+choir-merge = { path = "../choir-merge" }
+choir-node = { path = "../choir-node" }
+choir-oplog = { path = "../choir-oplog" }
+choir-sequencer = { path = "../choir-sequencer" }
+choir-store = { path = "../choir-store" }
+choir-view = { path = "../choir-view" }
+
+[lints]
+workspace = true
