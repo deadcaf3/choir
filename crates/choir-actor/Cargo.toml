@@ -1,0 +1,19 @@
+[package]
+name = "choir-actor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+choir-oplog = { path = "../choir-oplog" }
+rivetkit = { version = "2.3", features = ["sqlite-local"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+choir-oplog = { path = "../choir-oplog" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

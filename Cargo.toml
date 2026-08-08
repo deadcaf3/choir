@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/choir-actor",
     "crates/choir-demo",
     "crates/choir-hash",
     "crates/choir-identity",

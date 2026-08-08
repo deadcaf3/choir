@@ -1,0 +1,5 @@
+# rivetkit's local actor persistence (choir-actor, D3 second impl) probes
+# for SQLite batch atomic writes; libsqlite3-sys's bundled build doesn't
+# set the flag, so every build in this workspace adds it here.
+[env]
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_BATCH_ATOMIC_WRITE"
