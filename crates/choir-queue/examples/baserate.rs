@@ -19,7 +19,9 @@
 //! detector's false-positive rate is survivable, useless as a claim
 //! about choir.
 
-use choir_queue::corpus::{base_rate, label_merges, history, parse_history};
+use choir_queue::corpus::{
+    attribute, base_rate, history, label_merges, parse_history, revert_targets, Attribution,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -47,19 +49,47 @@ fn main() {
         commits.len()
     );
 
-    println!("\n{:>7}  {:>7}  {:>8}  {:>7}", "window", "merges", "reverted", "rate");
+    // Attribution: map each reverted commit back to the mainline commit
+    // that introduced it. Without it only reverts naming a merge count,
+    // which is a small minority in any pull-request workflow.
+    let targets = revert_targets(&commits);
+    let attribution = match attribute(std::path::Path::new(repo), &commits, &targets) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("attribution failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "{} revert targets: {} placed on the mainline, {} unresolved",
+        targets.len(),
+        attribution.resolved_count(),
+        attribution.unresolved().len()
+    );
+
+    println!(
+        "\n{:>7}  {:>7}  {:>9}  {:>7}  {:>10}  {:>7}",
+        "window", "merges", "exact-oid", "rate", "attributed", "rate"
+    );
+    let bare = Attribution::new();
     for w in &windows {
-        let r = base_rate(&commits, *w);
+        let plain = base_rate(&commits, *w, &bare);
+        let r = base_rate(&commits, *w, &attribution);
         println!(
-            "{:>7}  {:>7}  {:>8}  {:>6.3}",
-            r.window, r.merges, r.reverted, r.rate()
+            "{:>7}  {:>7}  {:>9}  {:>6.3}  {:>10}  {:>6.3}",
+            r.window,
+            r.merges,
+            plain.reverted,
+            plain.rate(),
+            r.reverted,
+            r.rate()
         );
     }
 
     // Suitability before interpretation. A corpus that does not revert
     // reads as a corpus with no bad merges, and that reading is wrong in
     // the most flattering possible direction.
-    let sample = base_rate(&commits, *windows.iter().max().unwrap_or(&200));
+    let sample = base_rate(&commits, *windows.iter().max().unwrap_or(&200), &attribution);
     println!(
         "\nrevert commits anywhere in history: {} ({:.2} per 1000 commits)",
         sample.revert_commits,
@@ -78,7 +108,7 @@ fn main() {
     // they are spread, any window choice is arbitrary and should be said
     // to be arbitrary.
     let widest = windows.iter().copied().max().unwrap_or(200);
-    let mut distances: Vec<usize> = label_merges(&commits, widest)
+    let mut distances: Vec<usize> = label_merges(&commits, widest, &attribution)
         .into_iter()
         .filter_map(|m| m.distance)
         .collect();
