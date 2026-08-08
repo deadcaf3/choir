@@ -317,8 +317,20 @@ impl SubmitPolicy for ChoirPolicy {
                 _ => {}
             }
         }
-        let mut trial = self.view.lock().expect("view lock").clone();
-        trial.apply(&op).map_err(|e| format!("stale head: {e:?}"))
+        // Admission is a read. Every precondition `View::apply` enforces
+        // is a CAS comparison or a key lookup, so this asks the shared
+        // view directly instead of deep-cloning it -- four nested
+        // BTreeMaps per submission, O(total state), which grew with the
+        // repo's lifetime rather than with the size of the op.
+        //
+        // `View::apply` calls the same `validate`, so admission and
+        // application cannot disagree; that shared path is what keeps
+        // `accepted`'s "checked in check()" honest.
+        self.view
+            .lock()
+            .expect("view lock")
+            .validate(&op)
+            .map_err(|e| format!("stale head: {e:?}"))
     }
 
     fn accepted(&mut self, entry: &OpEntry) {

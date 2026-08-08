@@ -40,9 +40,11 @@ use choir_view::{OpKind, ViewOp};
 /// `choir-sequencer/tests/concurrency.rs` both use.
 const CLIENTS: usize = 32;
 
-/// Ops per client. 32 x 100 keeps the whole run near a second while giving
-/// 3,200 samples, which is enough for a p99 to mean something.
-const OPS_PER_CLIENT: usize = 100;
+/// Ops per client. 32 x 40 gives 1,280 samples, enough for the reported
+/// percentiles to mean something, while keeping the debug-profile run --
+/// which is what `cargo test --workspace` uses -- from dominating the
+/// suite. Every op here costs a real fsync.
+const OPS_PER_CLIENT: usize = 40;
 
 /// Ops per `/api/submit-batch` body. The bridge chunks at 500 (PHASE0.md
 /// :76), so the batch measurement uses the same shape it was measured at.
@@ -144,9 +146,9 @@ fn platform_over(scratch: &Scratch, registry: Registry) -> Arc<Platform> {
 /// The headline number: signed ops/s and decision-latency percentiles
 /// through `/api/submit` at [`CLIENTS`] concurrency.
 ///
-/// Asserts only the documented Phase-0 gate (p99 < 100 ms). Throughput is
-/// reported rather than asserted, because a wall-clock floor on a shared
-/// or thermally-throttled machine is a flaky test, not a regression gate.
+/// Reports only. Nothing wall-clock is asserted here -- see the note at the
+/// end of the function for why the Phase-0 gate assertion that used to
+/// live here was measuring the wrong quantity.
 #[test]
 fn single_submit_throughput_and_latency() {
     let scratch = Scratch::new("single");
@@ -207,11 +209,21 @@ fn single_submit_throughput_and_latency() {
         percentile(&latencies, 0.99),
         latencies.last().expect("non-empty")
     );
-    assert!(
-        percentile(&latencies, 0.99) < Duration::from_millis(100),
-        "Phase-0 gate: p99 decision latency must be <100 ms, got {:?}",
-        percentile(&latencies, 0.99)
-    );
+    // Deliberately no wall-clock assertion, and the earlier one here was a
+    // mistake worth naming. It asserted the Phase-0 gate ("p99 decision
+    // latency < 100 ms") against this figure, but this is not that figure:
+    // the gate measures in-writer decision latency, while this is
+    // client-observed latency behind 32-way contention and a durability
+    // barrier. Little's law alone puts it at clients / throughput.
+    //
+    // It duly passed release-isolated (6.2 ms) and failed at 116 ms in a
+    // debug full-suite run where other test binaries were competing for
+    // the same disk -- a flaky test measuring the machine, not the code.
+    //
+    // The gate keeps its assertion where it belongs, on the metric it
+    // names, in choir-sequencer/tests/concurrency.rs. This stays a
+    // reporting harness, and the regression guards that can actually hold
+    // are the barrier-count and allocation-count tests.
 }
 
 /// The `/api/submit-batch` path, in the 500-op chunks the bridge uses —

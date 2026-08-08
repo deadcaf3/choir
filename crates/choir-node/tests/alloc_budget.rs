@@ -76,12 +76,14 @@ const WARMUP: usize = 200;
 
 /// Ceiling on allocator calls per admitted op.
 ///
-/// Measured at 170 allocs / 17,989 bytes per op on this tree, release
-/// profile, before any optimization work. Set to 180 so ordinary variation
+/// Measured at 166 allocs / 16,930 bytes per op, release profile, after
+/// S1.1 removed the per-submission View clone (was 170 / 17,989 before it,
+/// and the gap is small only because this test runs against a one-entry
+/// view -- the clone it removed was O(total state)). Set to 172 so ordinary variation
 /// inside dependencies does not fail the build, while a real regression
 /// still does. Lower it whenever a change removes an allocation — that is
 /// the entire point of the number.
-const MAX_ALLOCS_PER_OP: usize = 180;
+const MAX_ALLOCS_PER_OP: usize = 172;
 
 #[test]
 fn submit_path_allocation_budget() {
