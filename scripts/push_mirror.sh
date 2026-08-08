@@ -12,7 +12,9 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Note: rsync overwrites .git/config, so the mirror remote (whose URL embeds
 # the on-box token) is re-created on the VM on every push.
-rsync -az -e "ssh -i $KEY" --exclude target "$REPO_DIR/" "choir@$IP:~/choir-src/"
+# --filter=':- .gitignore' makes rsync skip everything git ignores
+# (CLAUDE.md, target/, ...), so local-only files never reach the VM.
+rsync -az -e "ssh -i $KEY" --filter=':- .gitignore' "$REPO_DIR/" "choir@$IP:~/choir-src/"
 ssh -i "$KEY" "choir@$IP" 'cd ~/choir-src \
   && git remote remove mirror 2>/dev/null || true \
   && git remote add mirror "http://choir:$(cat ~/.forgejo-token)@127.0.0.1:3000/choir/choir.git" \
