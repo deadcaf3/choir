@@ -8,6 +8,7 @@ license.workspace = true
 choir-merge = { path = "../choir-merge" }
 choir-oplog = { path = "../choir-oplog" }
 choir-sequencer = { path = "../choir-sequencer" }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
