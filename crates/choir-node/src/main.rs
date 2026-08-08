@@ -120,14 +120,18 @@ fn main() -> std::io::Result<()> {
             }
             key
         };
-        let log = choir_oplog::FileLog::open(&state_dir.join("ops.jsonl"))
+        let log_path = state_dir.join("ops.jsonl");
+        let log = choir_oplog::FileLog::open(&log_path)
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
         // Hot-reload: appending a key line to the file takes effect on
         // the next failed signature check, no restart. (Push-cert
         // allowed_signers stays startup-only for now.)
+        // Same file the sequencer appends to: readers that fall behind
+        // the in-memory /api/log window resync from it.
         let mut platform =
             Platform::start_reloading(registry, Box::new(log), node_key, Some(path.into()))
-                .map_err(std::io::Error::other)?;
+                .map_err(std::io::Error::other)?
+                .with_log_path(log_path);
         if let Some(pool) = flag_value("--reviewers-file") {
             platform = platform.with_reviewer_pool(pool.into());
             eprintln!("reviewer assignment enabled ({pool})");

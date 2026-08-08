@@ -29,11 +29,17 @@ use choir_view::{OpKind, View, ViewOp};
 pub struct LogWindow {
     base: u64,
     entries: Vec<OpEntry>,
+    /// Entries kept before the oldest is dropped. A field rather than a
+    /// constant so a test can drive eviction without writing 100k ops.
+    cap: usize,
 }
 
 /// Entries retained in memory for `/api/log`; older reads fall back to
 /// the persisted op log (not served over HTTP yet).
 const LOG_WINDOW_CAP: usize = 100_000;
+
+/// Entries per `/api/log` page, whichever source served them.
+const LOG_PAGE: usize = 500;
 
 /// Reviewers drawn per unassigned review: two-person integrity, capped
 /// by the pool size (D24 layer 5; design choice, not a measured number).
@@ -57,8 +63,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 impl LogWindow {
     fn push(&mut self, entry: OpEntry) {
         self.entries.push(entry);
-        if self.entries.len() > LOG_WINDOW_CAP {
-            let drop = self.entries.len() - LOG_WINDOW_CAP;
+        if self.entries.len() > self.cap {
+            let drop = self.entries.len() - self.cap;
             self.entries.drain(..drop);
             self.base += drop as u64;
         }
@@ -176,6 +182,10 @@ pub struct Platform {
     /// Read fresh on every draw, so editing it takes effect at once.
     /// `None` = no pool, and unassigned reviews stay unassigned.
     reviewer_pool: Option<std::path::PathBuf>,
+    /// The persisted op log, for readers that have fallen behind the
+    /// in-memory window. `None` (an in-memory log) means such a reader
+    /// gets a loud gap error instead of a resync.
+    log_path: Option<std::path::PathBuf>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -221,6 +231,7 @@ impl Platform {
         let mut window = LogWindow {
             base: 0,
             entries: Vec::new(),
+            cap: LOG_WINDOW_CAP,
         };
         for e in existing {
             window.push(e);
@@ -247,8 +258,31 @@ impl Platform {
             node_key,
             entries,
             reviewer_pool: None,
+            log_path: None,
             _sequencer: sequencer,
         })
+    }
+
+    /// Points the platform at the JSON-lines file its op log persists to,
+    /// so `/api/log?from=` can serve entries that have already been
+    /// evicted from the in-memory window. Without it, a reader that has
+    /// fallen further behind than the window is told so and cannot
+    /// resync.
+    ///
+    /// The file is append-only, so reading a prefix while the writer
+    /// thread appends is safe: already-written lines never change.
+    #[must_use]
+    pub fn with_log_path(mut self, path: std::path::PathBuf) -> Self {
+        self.log_path = Some(path);
+        self
+    }
+
+    /// Shrinks the in-memory `/api/log` window. Exists so tests can
+    /// exercise eviction and the resync path without writing 100k ops.
+    #[must_use]
+    pub fn with_log_window_cap(self, cap: usize) -> Self {
+        self.entries.lock().expect("entries lock").cap = cap.max(1);
+        self
     }
 
     /// Points the platform at an operator-curated pool of eligible
@@ -497,25 +531,55 @@ impl Platform {
                     .and_then(|(_, v)| v.split('&').next()?.parse().ok())
                     .unwrap_or(0);
                 let window = self.entries.lock().expect("entries lock");
-                let skip = from.saturating_sub(window.base as usize);
+                let base = window.base as usize;
+                // Behind the window: the entries the reader still needs
+                // are no longer in memory. Serving from `base` here
+                // would hand back a normal-looking page with a silent
+                // hole in it, so take the persisted log instead — and
+                // if there is none, say so loudly rather than lie.
+                if from < base {
+                    drop(window);
+                    let Some(path) = &self.log_path else {
+                        return (
+                            409,
+                            serde_json::json!({
+                                "error": "requested entries have been evicted and no persisted log is configured",
+                                "window_base": base,
+                            })
+                            .to_string(),
+                        );
+                    };
+                    return match replay_from_disk(path, from, LOG_PAGE) {
+                        Ok(rows) => (
+                            200,
+                            serde_json::json!({
+                                "entries": rows,
+                                "window_base": base,
+                                "source": "log",
+                            })
+                            .to_string(),
+                        ),
+                        Err(e) => (
+                            500,
+                            serde_json::json!({ "error": format!("resync: {e}") }).to_string(),
+                        ),
+                    };
+                }
                 let rows: Vec<serde_json::Value> = window
                     .entries
                     .iter()
-                    .skip(skip)
-                    .take(500)
-                    .map(|e| {
-                        serde_json::json!({
-                            "seq": e.seq,
-                            "workspace": e.workspace,
-                            "payload_hex": hex_encode(&e.payload),
-                            "author_key": e.author_sig.as_ref().map(|w| w.key_id.clone()),
-                        })
-                    })
+                    .skip(from - base)
+                    .take(LOG_PAGE)
+                    .map(entry_json)
                     .collect();
                 (
                     200,
-                    serde_json::json!({ "entries": rows, "window_base": window.base })
-                        .to_string(),
+                    serde_json::json!({
+                        "entries": rows,
+                        "window_base": window.base,
+                        "source": "window",
+                    })
+                    .to_string(),
                 )
             }
             _ => (404, r#"{"error":"no such endpoint"}"#.to_string()),
@@ -579,6 +643,43 @@ impl Platform {
             ),
         }
     }
+}
+
+/// JSON shape of one log entry, shared by the in-memory window and the
+/// on-disk resync path so a catching-up reader cannot tell them apart.
+fn entry_json(e: &OpEntry) -> serde_json::Value {
+    serde_json::json!({
+        "seq": e.seq,
+        "workspace": e.workspace,
+        "payload_hex": hex_encode(&e.payload),
+        "author_key": e.author_sig.as_ref().map(|w| w.key_id.clone()),
+    })
+}
+
+/// Reads up to `take` entries starting at `from` straight out of the
+/// persisted JSON-lines log, for readers behind the in-memory window.
+///
+/// Line number is sequence number, so this skips rather than parses the
+/// prefix — O(bytes before `from`) per call, which is the price of a
+/// resync and is paid only by readers that fell behind.
+fn replay_from_disk(
+    path: &std::path::Path,
+    from: usize,
+    take: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).map_err(|e| format!("open log: {e}"))?;
+    std::io::BufReader::new(file)
+        .lines()
+        .skip(from)
+        .take(take)
+        .map(|line| {
+            let line = line.map_err(|e| format!("read log: {e}"))?;
+            let entry: OpEntry =
+                serde_json::from_str(&line).map_err(|e| format!("decode log line: {e}"))?;
+            Ok(entry_json(&entry))
+        })
+        .collect()
 }
 
 /// JSON shape of one review's state (shared by /api/view and
