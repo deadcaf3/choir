@@ -16,6 +16,7 @@
 //! spindle/Firecracker executor.
 
 pub mod blast;
+pub mod corpus;
 
 use choir_merge::{MergeOutcome, Pipeline};
 use choir_oplog::MemLog;
