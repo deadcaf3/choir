@@ -140,3 +140,78 @@ fn a_memory_log_syncs_trivially() {
     log.sync().expect("MemLog sync is infallible");
     assert_eq!(log.len(), 1);
 }
+
+/// `get` must be seamless across the flushed/pending boundary.
+///
+/// Flushed entries are read back from the file at a recorded offset;
+/// entries appended since the last flush are not in the file yet and come
+/// from an in-memory buffer. A caller cannot tell which, and replay walks
+/// straight across the seam, so this covers entries on both sides of it
+/// and the seam itself.
+#[test]
+fn get_reads_across_the_flushed_and_pending_boundary() {
+    let scratch = Scratch::new("boundary");
+    let mut log = FileLog::open(&scratch.path()).expect("open");
+
+    let mut head = None;
+    for seq in 0..5 {
+        head = Some(log.append(entry(seq, head)).expect("append"));
+    }
+    log.sync().expect("sync");
+    // These stay in the pending buffer: appended, not yet flushed.
+    for seq in 5..9 {
+        head = Some(log.append(entry(seq, head)).expect("append"));
+    }
+
+    assert_eq!(log.len(), 9);
+    for seq in 0..9 {
+        let e = log.get(seq).expect("every entry readable regardless of side");
+        assert_eq!(e.seq, seq, "entry {seq} came back as {}", e.seq);
+        assert_eq!(e.payload, format!("op{seq}").into_bytes());
+    }
+    assert_eq!(log.get(9), None, "past the end is None");
+
+    // After the second flush everything comes from the file, and the
+    // answers must not change.
+    log.sync().expect("second sync");
+    for seq in 0..9 {
+        let e = log.get(seq).expect("still readable once flushed");
+        assert_eq!(e.seq, seq);
+        assert_eq!(e.payload, format!("op{seq}").into_bytes());
+    }
+}
+
+/// Entry sizes vary, so offsets cannot be assumed uniform. Payloads of
+/// wildly different lengths catch an index that strides rather than
+/// records.
+#[test]
+fn get_handles_entries_of_differing_lengths() {
+    let scratch = Scratch::new("sizes");
+    let mut log = FileLog::open(&scratch.path()).expect("open");
+
+    let sizes = [1usize, 500, 3, 20_000, 7];
+    let mut head = None;
+    for (seq, size) in sizes.iter().enumerate() {
+        let mut e = entry(seq as u64, head);
+        e.payload = vec![b'x'; *size];
+        head = Some(log.append(e).expect("append"));
+    }
+    log.sync().expect("sync");
+
+    for (seq, size) in sizes.iter().enumerate() {
+        let e = log.get(seq as u64).expect("entry present");
+        assert_eq!(e.payload.len(), *size, "entry {seq} came back the wrong size");
+        assert!(e.payload.iter().all(|b| *b == b'x'));
+    }
+
+    // And the same after a reopen, which rebuilds the index by scanning.
+    let reopened = FileLog::open(&scratch.path()).expect("reopen");
+    for (seq, size) in sizes.iter().enumerate() {
+        assert_eq!(
+            reopened.get(seq as u64).expect("entry present").payload.len(),
+            *size,
+            "entry {seq} wrong size after reopening"
+        );
+    }
+    assert_eq!(reopened.head(), head, "head survives the rebuild");
+}
