@@ -37,6 +37,16 @@ pub struct Node {
     /// Loopback secret handed to repo hooks via env so their callback to
     /// `/api/git-update` passes the auth gate without user credentials.
     internal_token: String,
+    /// Trusted-keys file to watch, so `allowed_signers` tracks it
+    /// without a restart. `None` = generated once at startup.
+    keys_watch: Option<std::sync::Arc<KeysWatch>>,
+}
+
+/// A watched trusted-keys file and the mtime last folded into
+/// `allowed_signers`.
+struct KeysWatch {
+    path: PathBuf,
+    mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
 }
 
 impl Node {
@@ -120,6 +130,7 @@ impl Node {
             platform: None,
             scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
+            keys_watch: None,
         })
     }
 
@@ -127,6 +138,50 @@ impl Node {
     /// `platform`. Call before [`Node::serve_forever`].
     pub fn enable_platform(&mut self, platform: Platform) {
         self.platform = Some(std::sync::Arc::new(platform));
+    }
+
+    /// Watches the trusted-keys file and regenerates
+    /// `<root>/.choir/allowed_signers` whenever its mtime moves, so
+    /// registering a *signing* key is "append a line" — the same
+    /// mechanism the platform registry already uses for submission
+    /// keys, which until now diverged from push-certificate
+    /// verification and left the two lists out of step.
+    pub fn watch_keys_file(&mut self, path: PathBuf) {
+        self.keys_watch = Some(std::sync::Arc::new(KeysWatch {
+            mtime: std::sync::Mutex::new(
+                std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+            ),
+            path,
+        }));
+    }
+
+    /// Rewrites `allowed_signers` if the watched keys file changed.
+    /// Runs on the accept loop, so rewrites never race each other.
+    ///
+    /// A malformed keys file leaves the existing signer list in place
+    /// (a partial list would silently stop verifying somebody's
+    /// pushes); the mtime is still recorded so the complaint is printed
+    /// once per edit rather than once per request.
+    fn refresh_allowed_signers(&self) {
+        let Some(watch) = &self.keys_watch else {
+            return;
+        };
+        let mtime = std::fs::metadata(&watch.path).and_then(|m| m.modified()).ok();
+        let mut last = watch.mtime.lock().expect("keys mtime lock");
+        if mtime.is_none() || mtime == *last {
+            return;
+        }
+        *last = mtime;
+        match parse_keys_file(&watch.path) {
+            Ok(signers) => {
+                if let Err(e) = write_allowed_signers(&self.root, &signers) {
+                    eprintln!("allowed_signers: write failed: {e}");
+                } else {
+                    eprintln!("allowed_signers: reloaded ({} keys)", signers.len());
+                }
+            }
+            Err(e) => eprintln!("allowed_signers: keys file unusable, keeping previous: {e}"),
+        }
     }
 
     /// Port the daemon is listening on.
@@ -244,6 +299,9 @@ impl Node {
     /// Serves requests until the process exits. Run on a dedicated thread.
     pub fn serve_forever(&self) {
         for request in self.server.incoming_requests() {
+            // Cheap stat on the accept loop: an appended signing key
+            // takes effect on the next request, with no restart.
+            self.refresh_allowed_signers();
             let root = self.root.clone();
             let auth = self.auth.clone();
             let platform = self.platform.clone();
@@ -375,6 +433,43 @@ pub fn ssh_ed25519_pubkey(raw: &[u8; 32]) -> String {
         blob.extend_from_slice(part);
     }
     format!("ssh-ed25519 {}", base64_encode(&blob))
+}
+
+/// Parses a trusted-keys file — one 64-char hex ed25519 public key per
+/// line, `#` comments and blank lines skipped — into
+/// `(actor_id_hex, raw_key)` pairs, the shape
+/// [`write_allowed_signers`] wants.
+///
+/// # Errors
+///
+/// Filesystem failures, and [`std::io::ErrorKind::InvalidData`] for a
+/// line that is not a valid ed25519 public key. An invalid line fails
+/// the whole parse: a partial signer list would silently drop the
+/// ability to verify somebody's pushes.
+pub fn parse_keys_file(path: &Path) -> std::io::Result<Vec<(String, [u8; 32])>> {
+    let mut registry = choir_identity::Registry::new();
+    let mut out = Vec::new();
+    for line in std::fs::read_to_string(path)?.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bytes = platform::hex_decode(line)
+            .filter(|b| b.len() == 32)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "keys file lines must be 64 hex chars",
+                )
+            })?;
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        let actor_id = registry.register(&key).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}"))
+        })?;
+        out.push((actor_id.to_hex(), key));
+    }
+    Ok(out)
 }
 
 /// Writes `<root>/.choir/allowed_signers` — the file git's ssh signature

@@ -72,29 +72,13 @@ fn main() -> std::io::Result<()> {
         let path = rest.get(i + 1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "--keys-file needs a path")
         })?;
+        let signers = choir_node::parse_keys_file(std::path::Path::new(path))?;
+        let count = signers.len();
         let mut registry = choir_identity::Registry::new();
-        let mut signers: Vec<(String, [u8; 32])> = Vec::new();
-        let mut count = 0u32;
-        for line in std::fs::read_to_string(path)?.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let bytes = choir_node::platform::hex_decode(line)
-                .filter(|b| b.len() == 32)
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "keys file lines must be 64 hex chars",
-                    )
-                })?;
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            let actor_id = registry
-                .register(&key)
+        for (_, key) in &signers {
+            registry
+                .register(key)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))?;
-            signers.push((actor_id.to_hex(), key));
-            count += 1;
         }
         let state_dir = root.join(".choir");
         std::fs::create_dir_all(&state_dir)?;
@@ -123,9 +107,10 @@ fn main() -> std::io::Result<()> {
         let log_path = state_dir.join("ops.jsonl");
         let log = choir_oplog::FileLog::open(&log_path)
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        // Hot-reload: appending a key line to the file takes effect on
-        // the next failed signature check, no restart. (Push-cert
-        // allowed_signers stays startup-only for now.)
+        // Hot-reload, both halves: appending a key line takes effect on
+        // the next failed signature check for submissions, and on the
+        // next request for push-certificate verification.
+        node.watch_keys_file(path.into());
         // Same file the sequencer appends to: readers that fall behind
         // the in-memory /api/log window resync from it.
         let mut platform =
