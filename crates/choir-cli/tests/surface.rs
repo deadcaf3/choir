@@ -73,3 +73,37 @@ fn splicing_refuses_a_file_without_markers_rather_than_appending() {
     // Idempotent: regenerating an already-generated file changes nothing.
     assert_eq!(surface::splice(&spliced, "new").expect("splice"), spliced);
 }
+
+#[test]
+fn every_rejection_code_the_node_can_emit_is_documented() {
+    // A client branching on a code that is not in ERRORS.md fails in the
+    // least debuggable way available, so the table and the enum must not
+    // be able to disagree.
+    let doc = std::fs::read_to_string(repo_root().join("ERRORS.md")).expect("ERRORS.md");
+    for code in choir_node::reject::Code::all() {
+        assert!(
+            doc.contains(&format!("`{}`", code.as_str())),
+            "ERRORS.md omits `{}`",
+            code.as_str()
+        );
+        assert!(!code.action().is_empty(), "{code:?} has no action");
+        assert!(!code.meaning().is_empty(), "{code:?} has no meaning");
+    }
+    // And every code the node emits appears in the platform source, so a
+    // documented-but-dead code shows up as a missing constructor.
+    let src = std::fs::read_to_string(
+        repo_root().join("crates/choir-node/src/platform.rs"),
+    )
+    .expect("platform.rs");
+    let reject_src = std::fs::read_to_string(
+        repo_root().join("crates/choir-node/src/reject.rs"),
+    )
+    .expect("reject.rs");
+    for code in choir_node::reject::Code::all() {
+        let name = format!("{code:?}");
+        assert!(
+            src.contains(&format!("Code::{name}")) || reject_src.contains(&format!("Code::{name}")),
+            "`{name}` is documented but never constructed"
+        );
+    }
+}

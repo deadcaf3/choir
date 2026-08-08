@@ -125,6 +125,7 @@ fn review_fan_out_over_http() {
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
+    assert_eq!(resp["code"], "review_state", "{resp}");
     assert!(resp["error"].as_str().unwrap().contains("not a reviewer"), "{resp}");
 
     node.unblock();

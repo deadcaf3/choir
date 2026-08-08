@@ -136,9 +136,12 @@ fn a_bound_key_cannot_speak_as_another_channel() {
     // name the key actually holds rather than a generic denial.
     let (code, resp) = post(&ana, "bot", &request("k-2", &["ana"]));
     assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "channel_not_owned", "{resp}");
     let err = resp["error"].as_str().unwrap();
-    assert!(err.contains("bound to \"ana\""), "{resp}");
-    assert!(err.contains("may not act as \"bot\""), "{resp}");
+    assert!(err.contains("bound to a different channel"), "{resp}");
+    // Which name, structurally, rather than parsed out of prose.
+    assert_eq!(resp["expected"], "ana", "{resp}");
+    assert_eq!(resp["actual"], "bot", "{resp}");
 
     // The refusal happened in policy, so nothing landed in the view.
     let (_, view) = curl(&[&format!("{api}/view")]);
@@ -185,7 +188,7 @@ fn a_bound_key_cannot_speak_as_another_channel() {
 
     let (code, resp) = post(&unbound, "dave", &request("k-4", &["ana"]));
     assert_eq!(code, 400, "{resp}");
-    assert!(resp["error"].as_str().unwrap().contains("bound to \"carol\""), "{resp}");
+    assert_eq!(resp["expected"], "carol", "{resp}");
     let (code, resp) = post(&unbound, "carol", &request("k-5", &["ana"]));
     assert_eq!(code, 200, "{resp}");
 
@@ -257,7 +260,7 @@ fn binding_a_name_takes_effect_without_waiting_for_a_failure() {
     // No failed signature in between — the next request is already gated.
     let (code, resp) = post("whoever", &request("w-2"));
     assert_eq!(code, 400, "binding did not take effect: {resp}");
-    assert!(resp["error"].as_str().unwrap().contains("bound to \"agent\""), "{resp}");
+    assert_eq!(resp["expected"], "agent", "{resp}");
 
     // And the bound channel works.
     let (code, resp) = post("agent", &request("w-3"));

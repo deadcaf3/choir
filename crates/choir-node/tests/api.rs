@@ -75,15 +75,34 @@ fn signed_submit_and_view_over_http() {
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
-    assert!(resp["error"].as_str().unwrap().contains("bad signature"));
+    assert_eq!(resp["code"], "unknown_key", "{resp}");
+    assert!(resp["next"].as_str().unwrap().contains("trusted-keys"), "{resp}");
 
-    // Alice replaying the same op (prev=None, but main now exists): stale.
+    // Alice replaying the *identical* op. This fails CAS internally, but
+    // the honest answer is that it already landed -- the two cases call
+    // for opposite client actions, so they must not share a response.
     let (code, resp) = curl(&[
         "-X", "POST", "-d", &submit_body(&alice, "alice", &op),
         &format!("{api}/submit"),
     ]);
-    assert_eq!(code, 400);
-    assert!(resp["error"].as_str().unwrap().contains("stale"));
+    assert_eq!(code, 200, "an identical replay is not a conflict: {resp}");
+    assert_eq!(resp["already_applied"], true, "{resp}");
+
+    // A *different* op that fails the same CAS is still a conflict, and
+    // it carries both sides so a client can rebase rather than guess.
+    let other = ViewOp::new(OpKind::SetRef {
+        name: "main".into(),
+        commit: choir_oplog::ContentHash::blake3(b"a different commit"),
+        prev: None,
+    });
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&alice, "alice", &other),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "stale_head", "{resp}");
+    assert!(resp["actual"].is_string(), "no actual state: {resp}");
+    assert!(resp["next"].as_str().unwrap().contains("resubmit"), "{resp}");
 
     // The view shows exactly the admitted state.
     let (code, view) = curl(&[&format!("{api}/view")]);
@@ -157,8 +176,12 @@ fn platform_state_survives_restart() {
         .to_string()
         .as_bytes(),
     );
-    assert_eq!(status, 400);
-    assert!(body.contains("stale"));
+    // Restart preserved the log, so this is a replay of something the
+    // reloaded node already has: it reports where it landed rather than
+    // a conflict. That the answer survives a restart is the point.
+    assert_eq!(status, 200, "{body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(resp["already_applied"], true, "{body}");
 
     std::fs::remove_dir_all(&work).ok();
 }

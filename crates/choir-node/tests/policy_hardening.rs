@@ -75,7 +75,7 @@ fn keys_hot_reload_and_reviewer_binding() {
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
-    assert!(resp["error"].as_str().unwrap().contains("bad signature"));
+    assert_eq!(resp["code"], "unknown_key", "{resp}");
 
     // Operator appends the key line; mtime must move for the reload
     // check, so nudge it past filesystem timestamp granularity.
@@ -104,7 +104,7 @@ fn keys_hot_reload_and_reviewer_binding() {
     ]);
     assert_eq!(code, 400);
     assert!(
-        resp["error"].as_str().unwrap().contains("does not match submission channel"),
+        resp["code"] == "reviewer_mismatch",
         "{resp}"
     );
 

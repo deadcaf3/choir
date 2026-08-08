@@ -261,7 +261,7 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
     ]);
     assert_eq!(code, 400, "{resp}");
     assert!(
-        resp["error"].as_str().unwrap().contains("only the node may archive"),
+        resp["code"] == "node_only" && resp["error"].as_str().unwrap().contains("archive"),
         "{resp}"
     );
 

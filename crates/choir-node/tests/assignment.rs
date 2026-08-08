@@ -97,7 +97,7 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
     ]);
     assert_eq!(code, 400, "{resp}");
     assert!(
-        resp["error"].as_str().unwrap().contains("only the node may assign"),
+        resp["code"] == "node_only" && resp["error"].as_str().unwrap().contains("assign"),
         "{resp}"
     );
 
@@ -213,7 +213,8 @@ fn required_assignment_refuses_self_named_reviewers() {
     ]);
     assert_eq!(code, 400, "{resp}");
     assert!(
-        resp["error"].as_str().unwrap().contains("empty reviewer list"),
+        resp["code"] == "assignment_required"
+            && resp["next"].as_str().unwrap().contains("empty reviewer list"),
         "{resp}"
     );
     // Rejected in the policy, so nothing landed in the view.
@@ -289,7 +290,7 @@ fn protected_refs_gate_self_named_reviewers_per_ref() {
     ));
     assert_eq!(code, 400, "{resp}");
     assert!(
-        resp["error"].as_str().unwrap().contains("protected ref"),
+        resp["code"] == "protected_ref",
         "{resp}"
     );
 
@@ -349,7 +350,8 @@ fn protected_refs_gate_self_named_reviewers_per_ref() {
     ));
     assert_eq!(code, 400, "{resp}");
     assert!(
-        resp["error"].as_str().unwrap().contains("unreadable"),
+        resp["code"] == "policy_unavailable"
+            && resp["error"].as_str().unwrap().contains("unreadable"),
         "{resp}"
     );
 

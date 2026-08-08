@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 pub mod platform;
 pub mod provision;
+pub mod reject;
 
 pub use platform::Platform;
 

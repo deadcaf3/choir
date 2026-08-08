@@ -14,12 +14,14 @@ path = "src/main.rs"
 
 [dependencies]
 choir-hash = { path = "../choir-hash" }
+# For the rejection-code table: ERRORS.md is generated alongside the rest
+# of the agent surface so one staleness test covers all of it.
+choir-node = { path = "../choir-node" }
 choir-identity = { path = "../choir-identity" }
 choir-view = { path = "../choir-view" }
 serde_json = "1"
 
 [dev-dependencies]
-choir-node = { path = "../choir-node" }
 choir-oplog = { path = "../choir-oplog" }
 
 [lints]

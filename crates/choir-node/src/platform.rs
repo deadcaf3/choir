@@ -24,6 +24,8 @@ use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, SubmitPolicy, Submission};
 use choir_view::{OpKind, View, ViewOp};
 
+use crate::reject::{Code, Rejection};
+
 /// Sliding window over recent admitted entries: `base` is the seq of
 /// the first held entry, so `/api/log?from=` keeps absolute semantics
 /// after old entries are dropped (full history lives in the op log).
@@ -36,6 +38,32 @@ pub struct LogWindow {
     /// Entries kept before the oldest is dropped. A field rather than a
     /// constant so a test can drive eviction without writing 100k ops.
     cap: usize,
+    /// `signing_hash(workspace, payload)` → the `(seq, hash)` it landed
+    /// as, for the entries currently in the window.
+    ///
+    /// Lets a resubmission be told "this already landed, here is where"
+    /// instead of the CAS failure it would otherwise see — the two are
+    /// indistinguishable today, and an agent that cannot tell them apart
+    /// either retries a completed write or abandons a successful one.
+    ///
+    /// **Bounded by the window, deliberately.** An index over the whole
+    /// log would grow with the repository's lifetime, which is the exact
+    /// growth profile `FileLog`'s offset index was just built to remove.
+    /// A window is enough because duplicate submissions come from client
+    /// retries — seconds apart, not months — so anything old enough to
+    /// have fallen out of the window is not a retry.
+    ///
+    /// A `HashMap`, and that is safe here specifically because this is
+    /// runtime state that is never serialized or hashed. Invariant 3 —
+    /// "maps in hashed structs are `BTreeMap` so serialization stays
+    /// canonical" — applies to persisted structures; an in-memory index
+    /// has no canonical form to break. Do not "fix" this to a `BTreeMap`
+    /// for consistency: `ContentHash` is `Hash` but not `Ord`.
+    /// Stores the **seq only**. The entry hash is recoverable from the
+    /// window when the rare already-applied path needs it, and computing
+    /// it here would re-serialize every entry on the write path — the
+    /// allocation budget caught exactly that.
+    by_signing: std::collections::HashMap<ContentHash, u64>,
 }
 
 /// Entries retained in memory for `/api/log`; older reads fall back to
@@ -79,15 +107,40 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 impl LogWindow {
     fn push(&mut self, entry: OpEntry) {
+        // `signing_hash` covers only (workspace, payload); `content_hash`
+        // would serialize the whole entry, and this runs per admitted op.
+        self.by_signing.insert(entry.signing_hash(), entry.seq);
         self.entries.push_back(entry);
         self.trim();
+    }
+
+    /// The `(seq, hash)` an identical submission already landed as.
+    ///
+    /// Keyed on the **signing** hash, not the entry hash: an entry's hash
+    /// covers `seq` and `parent`, which the sequencer assigns after the
+    /// author signs, so a resubmitted identical op hashes differently
+    /// every time and could never match. `signing_hash(workspace,
+    /// payload)` is position-independent by construction, which is
+    /// exactly the identity "the same submission" needs.
+    fn already_applied(&self, workspace: &str, payload: &[u8]) -> Option<(u64, ContentHash)> {
+        let seq = *self
+            .by_signing
+            .get(&choir_oplog::signing_hash(workspace, payload))?;
+        // Hash the entry only on a hit, which is a client retry rather
+        // than the common path.
+        let entry = self.entries.get(seq.checked_sub(self.base)? as usize)?;
+        Some((seq, entry.content_hash()))
     }
 
     /// Drops the oldest entries until the window fits its cap, advancing
     /// `base` so `/api/log?from=` keeps absolute sequence semantics.
     fn trim(&mut self) {
         while self.entries.len() > self.cap {
-            self.entries.pop_front();
+            if let Some(dropped) = self.entries.pop_front() {
+                // Evict from the index with the entry, or the map becomes
+                // the unbounded thing the window exists to avoid.
+                self.by_signing.remove(&dropped.signing_hash());
+            }
             self.base += 1;
         }
     }
@@ -179,9 +232,14 @@ impl ChoirPolicy {
     fn channel_is_owned(&self, key_id: &str, channel: &str) -> Result<(), String> {
         let names = self.key_names.lock().expect("key names lock");
         match names.get(key_id) {
-            Some(bound) if bound != channel => Err(format!(
-                "this key is bound to {bound:?} and may not act as {channel:?}"
-            )),
+            Some(bound) if bound != channel => Err(Rejection::new(
+                Code::ChannelNotOwned,
+                "this key is bound to a different channel",
+                "submit on the channel your key is bound to, or ask the operator to bind a \
+                 key to the channel you want",
+            )
+            .with_states(Some(bound.clone()), Some(channel.to_string()))
+            .encode()),
             _ => Ok(()),
         }
     }
@@ -205,7 +263,15 @@ impl ChoirPolicy {
             return Ok(false);
         };
         let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("protected-ref list unreadable ({e}); refusing the review"))?;
+            .map_err(|e| {
+                Rejection::new(
+                    Code::PolicyUnavailable,
+                    format!("protected-ref list unreadable: {e}"),
+                    "this is an operator problem, not a client one: the gate fails closed \
+                     rather than guessing. Retry after the operator restores the file",
+                )
+                .encode()
+            })?;
         Ok(text.lines().map(str::trim).any(|p| {
             if p.is_empty() || p.starts_with('#') {
                 return false;
@@ -249,17 +315,34 @@ impl SubmitPolicy for ChoirPolicy {
                 .registry
                 .verify_submission(&sub.workspace, &sub.payload, sig);
         }
-        verified.map_err(|e| format!("bad signature: {e:?}"))?;
-        let op = ViewOp::from_payload(&sub.payload).map_err(|e| format!("bad op: {e:?}"))?;
+        verified.map_err(|e| {
+            Rejection::new(
+                Code::UnknownKey,
+                format!("signature check failed: {e:?}"),
+                "ask the operator to add your public key to the node's trusted-keys file                  (`choir key <file> <you>` prints the line); it takes effect on the next request",
+            )
+            .encode()
+        })?;
+        let op = ViewOp::from_payload(&sub.payload).map_err(|e| {
+            Rejection::new(
+                Code::MalformedOp,
+                format!("payload did not decode as a ViewOp: {e:?}"),
+                "sign the bytes of a serialized ViewOp; `choir submit` does this correctly",
+            )
+            .encode()
+        })?;
         // A verdict's claimed reviewer must be the signature-covered
         // submission channel: the log's author attribution and the
         // view's verdict attribution can never diverge.
         if let OpKind::PostVerdict { reviewer, .. } = &op.kind {
             if *reviewer != sub.workspace {
-                return Err(format!(
-                    "verdict reviewer {reviewer:?} does not match submission channel {:?}",
-                    sub.workspace
-                ));
+                return Err(Rejection::new(
+                    Code::ReviewerMismatch,
+                    "a verdict's reviewer must be the channel it was signed on",
+                    "resubmit on your own channel: `choir verdict` signs on the reviewer name                      by construction",
+                )
+                .with_states(Some(sub.workspace.clone()), Some(reviewer.clone()))
+                .encode());
             }
         }
         // ...and the channel itself must belong to the signing key, or
@@ -276,13 +359,23 @@ impl SubmitPolicy for ChoirPolicy {
         // other author gets a rejection, so an accepted assignment in
         // the log always came from the node's pool draw.
         if matches!(op.kind, OpKind::AssignReviewers { .. }) && sig.key_id != self.node_id {
-            return Err("only the node may assign reviewers".to_string());
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may assign reviewers",
+                "request a review with an empty reviewer list and the node will draw them",
+            )
+            .encode());
         }
         // Archiving drops a review's verdicts, so an unguarded one is a
         // way to erase a RequestChanges you did not like. Node key only,
         // same reasoning as assignment: it is retention, not review.
         if matches!(op.kind, OpKind::ArchiveReview { .. }) && sig.key_id != self.node_id {
-            return Err("only the node may archive reviews".to_string());
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may archive reviews",
+                "nothing to do: archiving is retention, performed by the node",
+            )
+            .encode());
         }
         // Required-assignment closes the other half of the same loop:
         // naming your own reviewers is refused, so the node's draw is the
@@ -300,16 +393,23 @@ impl SubmitPolicy for ChoirPolicy {
                     .require_assignment
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    return Err(
-                        "this node assigns reviewers: request a review with an empty reviewer list"
-                            .to_string(),
-                    );
+                    return Err(Rejection::new(
+                        Code::AssignmentRequired,
+                        "this node assigns reviewers",
+                        "resubmit the same review with an empty reviewer list; the node draws \
+                         them and returns the names in the response",
+                    )
+                    .encode());
                 }
                 if let Some(name) = target_ref {
                     if self.ref_is_protected(name)? {
-                        return Err(format!(
-                            "{name} is a protected ref: request a review with an empty reviewer list"
-                        ));
+                        return Err(Rejection::new(
+                            Code::ProtectedRef,
+                            format!("{name} is a protected ref"),
+                            "resubmit with an empty reviewer list; on a protected ref only a \
+                             node-drawn reviewer list is accepted",
+                        )
+                        .encode());
                     }
                 }
             }
@@ -333,14 +433,27 @@ impl SubmitPolicy for ChoirPolicy {
                     // history to hijack yet, and deletion is refused
                     // below, so "delete then re-create" is not a way in.
                     if prev.is_some() && !self.approved_for(name, commit) {
-                        return Err(format!(
-                            "{name} is protected: no approved review names {} as landing there",
-                            commit.to_hex()
-                        ));
+                        return Err(Rejection::new(
+                            Code::ReviewRequired,
+                            format!("{name} is protected and this commit is not approved for it"),
+                            "open a review naming this ref and commit (`choir review ... --ref \
+                             <repo:ref>`), get it approved, then push again",
+                        )
+                        .with_states(
+                            Some(format!("an approved review of {}", commit.to_hex())),
+                            Some("none".to_string()),
+                        )
+                        .encode());
                     }
                 }
                 OpKind::DeleteRef { name, .. } if self.ref_is_protected(name)? => {
-                    return Err(format!("{name} is protected: it cannot be deleted"));
+                    return Err(Rejection::new(
+                        Code::RefUndeletable,
+                        format!("{name} is protected and cannot be deleted"),
+                        "delete a different ref, or ask the operator to remove this one from \
+                         the protected-ref list",
+                    )
+                    .encode());
                 }
                 _ => {}
             }
@@ -358,7 +471,7 @@ impl SubmitPolicy for ChoirPolicy {
             .lock()
             .expect("view lock")
             .validate(&op)
-            .map_err(|e| format!("stale head: {e:?}"))
+            .map_err(|e| crate::reject::from_view_error(&e).encode())
     }
 
     fn accepted(&mut self, entry: &OpEntry) {
@@ -455,6 +568,7 @@ impl Platform {
                 (len - start).min(LOG_WINDOW_CAP as u64) as usize,
             ),
             cap: LOG_WINDOW_CAP,
+            by_signing: std::collections::HashMap::new(),
         };
         for i in start..len {
             if let Some(e) = log.get(i) {
@@ -860,7 +974,12 @@ impl Platform {
             ("POST", "/api/submit-batch") => {
                 let req: serde_json::Value = match serde_json::from_slice(body) {
                     Ok(v) => v,
-                    Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
+                    Err(e) => return (400, Rejection::new(
+                            Code::MalformedRequest,
+                            format!("request body is not valid JSON: {e}"),
+                            "send a JSON object; GET /llms.txt lists the fields each endpoint wants",
+                        )
+                        .body()),
                 };
                 let Some(ops) = req.get("ops").and_then(|v| v.as_array()) else {
                     return (400, r#"{"error":"need ops array"}"#.to_string());
@@ -930,7 +1049,12 @@ impl Platform {
             ("POST", "/api/git-update") => {
                 let req: serde_json::Value = match serde_json::from_slice(body) {
                     Ok(v) => v,
-                    Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
+                    Err(e) => return (400, Rejection::new(
+                            Code::MalformedRequest,
+                            format!("request body is not valid JSON: {e}"),
+                            "send a JSON object; GET /llms.txt lists the fields each endpoint wants",
+                        )
+                        .body()),
                 };
                 let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let (status, signer) = (f("cert_status"), f("signer"));
@@ -943,7 +1067,7 @@ impl Platform {
                     Some((status.as_str(), signer.as_str())),
                 ) {
                     Ok(()) => (200, r#"{"ok":true}"#.to_string()),
-                    Err(reason) => (400, serde_json::json!({ "error": reason }).to_string()),
+                    Err(reason) => (400, Rejection::decode(&reason).body()),
                 }
             }
             ("GET", path) if path.starts_with("/api/log") => {
@@ -961,14 +1085,22 @@ impl Platform {
                 if from < base {
                     drop(window);
                     let Some(path) = &self.log_path else {
-                        return (
-                            409,
-                            serde_json::json!({
-                                "error": "requested entries have been evicted and no persisted log is configured",
-                                "window_base": base,
-                            })
-                            .to_string(),
-                        );
+                        // The brief's reference example: a refusal that
+                        // already refused correctly (a page with a hole is
+                        // worse than an error), now carrying the same
+                        // reason code and named action as every other.
+                        let mut body = Rejection::new(
+                            Code::LogEvicted,
+                            "requested entries have been evicted and no persisted log is configured",
+                            format!(
+                                "resync from seq {base} instead; entries before it are gone from \
+                                 this node"
+                            ),
+                        )
+                        .with_states(Some(from.to_string()), Some(format!("oldest available {base}")))
+                        .to_json();
+                        body["window_base"] = serde_json::json!(base);
+                        return (409, body.to_string());
                     };
                     return match replay_from_disk(path, from, LOG_PAGE) {
                         Ok(rows) => (
@@ -982,7 +1114,13 @@ impl Platform {
                         ),
                         Err(e) => (
                             500,
-                            serde_json::json!({ "error": format!("resync: {e}") }).to_string(),
+                            Rejection::new(
+                                Code::Unclassified,
+                                format!("resync from the persisted log failed: {e}"),
+                                "retry; this is a node-side read failure, not something the \
+                                 submission can fix",
+                            )
+                            .body(),
                         ),
                     };
                 }
@@ -1010,11 +1148,16 @@ impl Platform {
     fn submit(&self, body: &[u8]) -> (u16, String) {
         let req: serde_json::Value = match serde_json::from_slice(body) {
             Ok(v) => v,
-            Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
+            Err(e) => return (400, Rejection::new(
+                            Code::MalformedRequest,
+                            format!("request body is not valid JSON: {e}"),
+                            "send a JSON object; GET /llms.txt lists the fields each endpoint wants",
+                        )
+                        .body()),
         };
         let sub = match decode_submission(&req) {
             Ok(sub) => sub,
-            Err(reason) => return (400, serde_json::json!({ "error": reason }).to_string()),
+            Err(reason) => return (400, Rejection::decode(&reason).body()),
         };
         match self.handle.try_submit(
             &sub.workspace,
@@ -1022,7 +1165,31 @@ impl Platform {
             sub.author_sig.clone(),
         ) {
             Ok(acc) => (200, self.batch_result(acc, &sub).to_string()),
-            Err(reason) => (400, serde_json::json!({ "error": reason }).to_string()),
+            Err(reason) => {
+                // A retry of an operation that already landed fails CAS
+                // in exactly the same way as a genuine conflict. They
+                // call for opposite actions -- read back and proceed,
+                // versus re-read and rebase -- so an agent that cannot
+                // tell them apart either retries a completed write or
+                // abandons a successful one.
+                if let Some((seq, hash)) = self
+                    .entries
+                    .lock()
+                    .expect("entries lock")
+                    .already_applied(&sub.workspace, &sub.payload)
+                {
+                    return (
+                        200,
+                        serde_json::json!({
+                            "seq": seq,
+                            "hash": hash.to_hex(),
+                            "already_applied": true,
+                        })
+                        .to_string(),
+                    );
+                }
+                (400, Rejection::decode(&reason).body())
+            }
         }
     }
 

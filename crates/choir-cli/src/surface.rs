@@ -279,6 +279,10 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
     let mut out = vec![
         (root.join("agents.md"), agents_md()),
         (root.join("crates/choir-node/src/llms.txt"), llms_txt()),
+        // Owned by choir-node's reject module, generated here so one
+        // staleness test covers every generated artifact rather than two
+        // tests each covering half.
+        (root.join("ERRORS.md"), choir_node::reject::errors_md()),
         (
             root.join("README.md"),
             splice(&read("README.md")?, &api_table()).map_err(|e| format!("README.md: {e}"))?,
