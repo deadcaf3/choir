@@ -28,6 +28,9 @@ use choir_view::{OpKind, View, ViewOp};
 struct ChoirPolicy {
     registry: Registry,
     view: Arc<Mutex<View>>,
+    /// Every admitted entry, shared with `/api/log` readers. Fine at
+    /// dogfood scale; paging/compaction comes with real load.
+    entries: Arc<Mutex<Vec<OpEntry>>>,
 }
 
 impl SubmitPolicy for ChoirPolicy {
@@ -48,6 +51,7 @@ impl SubmitPolicy for ChoirPolicy {
             .expect("view lock")
             .apply(&op)
             .expect("checked in check()");
+        self.entries.lock().expect("entries lock").push(entry.clone());
     }
 }
 
@@ -56,9 +60,11 @@ pub struct Platform {
     handle: SequencerHandle,
     view: Arc<Mutex<View>>,
     /// The daemon's own key: signs ops it derives from authenticated git
-    /// pushes (the pusher is recorded as the op's workspace; per-actor
-    /// push signing arrives with `git push --signed`, later).
+    /// pushes. Attribution: a verified push certificate names the
+    /// pusher's key (`key/<principal>`); otherwise the basic-auth user
+    /// (`git/<user>`).
     node_key: ActorKey,
+    entries: Arc<Mutex<Vec<OpEntry>>>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -83,17 +89,21 @@ impl Platform {
             .map_err(|e| format!("register node key: {e:?}"))?;
         let view = View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?;
         let view = Arc::new(Mutex::new(view));
+        let existing: Vec<OpEntry> = (0..log.len()).filter_map(|i| log.get(i)).collect();
+        let entries = Arc::new(Mutex::new(existing));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
                 registry,
                 view: view.clone(),
+                entries: entries.clone(),
             }),
         );
         Ok(Self {
             handle: sequencer.handle(),
             view,
             node_key,
+            entries,
             _sequencer: sequencer,
         })
     }
@@ -114,6 +124,7 @@ impl Platform {
         old_hex: &str,
         new_hex: &str,
         user: &str,
+        cert: Option<(&str, &str)>,
     ) -> Result<(), String> {
         const ZERO: [char; 2] = ['0', '0'];
         let is_zero = |h: &str| !h.is_empty() && h.chars().all(|c| c == ZERO[0]);
@@ -133,7 +144,12 @@ impl Platform {
             }
         };
         let payload = ViewOp::new(kind).to_payload();
-        let workspace = format!("git/{user}");
+        // Verified push certificate ("G" = good signature) attributes
+        // the op to the pusher's own key; otherwise the transport user.
+        let workspace = match cert {
+            Some(("G", signer)) if !signer.is_empty() => format!("key/{signer}"),
+            _ => format!("git/{user}"),
+        };
         let sig = self.node_key.sign_submission(&workspace, &payload);
         self.handle
             .try_submit(&workspace, payload, Some(sig))
@@ -162,10 +178,39 @@ impl Platform {
                     Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
                 };
                 let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                match self.git_update(&f("repo"), &f("refname"), &f("old"), &f("new"), &f("user")) {
+                let (status, signer) = (f("cert_status"), f("signer"));
+                match self.git_update(
+                    &f("repo"),
+                    &f("refname"),
+                    &f("old"),
+                    &f("new"),
+                    &f("user"),
+                    Some((status.as_str(), signer.as_str())),
+                ) {
                     Ok(()) => (200, r#"{"ok":true}"#.to_string()),
                     Err(reason) => (400, serde_json::json!({ "error": reason }).to_string()),
                 }
+            }
+            ("GET", path) if path.starts_with("/api/log") => {
+                let from: usize = path
+                    .split_once("from=")
+                    .and_then(|(_, v)| v.split('&').next()?.parse().ok())
+                    .unwrap_or(0);
+                let entries = self.entries.lock().expect("entries lock");
+                let rows: Vec<serde_json::Value> = entries
+                    .iter()
+                    .skip(from)
+                    .take(500)
+                    .map(|e| {
+                        serde_json::json!({
+                            "seq": e.seq,
+                            "workspace": e.workspace,
+                            "payload_hex": hex_encode(&e.payload),
+                            "author_key": e.author_sig.as_ref().map(|w| w.key_id.clone()),
+                        })
+                    })
+                    .collect();
+                (200, serde_json::json!({ "entries": rows }).to_string())
             }
             _ => (404, r#"{"error":"no such endpoint"}"#.to_string()),
         }

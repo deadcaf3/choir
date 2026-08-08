@@ -50,6 +50,7 @@ fn main() -> std::io::Result<()> {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "--keys-file needs a path")
         })?;
         let mut registry = choir_identity::Registry::new();
+        let mut signers: Vec<(String, [u8; 32])> = Vec::new();
         let mut count = 0u32;
         for line in std::fs::read_to_string(path)?.lines() {
             let line = line.trim();
@@ -66,13 +67,17 @@ fn main() -> std::io::Result<()> {
                 })?;
             let mut key = [0u8; 32];
             key.copy_from_slice(&bytes);
-            registry
+            let actor_id = registry
                 .register(&key)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))?;
+            signers.push((actor_id.to_hex(), key));
             count += 1;
         }
         let state_dir = root.join(".choir");
         std::fs::create_dir_all(&state_dir)?;
+        // Same keys, OpenSSH form: what push-certificate verification
+        // (git push --signed) checks signers against.
+        choir_node::write_allowed_signers(&root, &signers)?;
         // Node key: persisted so git-derived ops keep one author across
         // restarts. 32 secret bytes, file readable by the daemon user only.
         let key_path = state_dir.join("node.key");

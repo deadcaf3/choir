@@ -120,27 +120,61 @@ impl Node {
                 .args(["config", "core.hooksPath", "hooks"])
                 .current_dir(&path)
                 .status()?
+                .success()
+            // Advertise push certificates (`git push --signed`) and
+            // verify their ssh signatures against the allowed-signers
+            // file (per-actor keys, L8).
+            && std::process::Command::new("git")
+                .args([
+                    "config",
+                    "receive.certNonceSeed",
+                    &choir_identity::ActorKey::generate().actor_id().to_hex(),
+                ])
+                .current_dir(&path)
+                .status()?
+                .success()
+            && std::process::Command::new("git")
+                .args(["config", "gpg.format", "ssh"])
+                .current_dir(&path)
+                .status()?
+                .success()
+            && std::process::Command::new("git")
+                .args(["config", "gpg.ssh.allowedSignersFile"])
+                .arg(
+                    self.root
+                        .canonicalize()
+                        .unwrap_or_else(|_| self.root.clone())
+                        .join(".choir")
+                        .join("allowed_signers"),
+                )
+                .current_dir(&path)
+                .status()?
                 .success();
         if !ok {
             return Err(std::io::Error::other("git init/config failed"));
         }
-        // The update hook routes every ref update through the platform
-        // sequencer; outside the daemon (no CHOIR_API) it is a no-op.
-        let hook = path.join("hooks").join("update");
+        // The pre-receive hook routes every ref update of a push through
+        // the platform sequencer (pre-receive, not update: only
+        // pre-/post-receive see GIT_PUSH_CERT_* for signed pushes, and
+        // one invocation covers the whole push). Outside the daemon (no
+        // CHOIR_API) it is a no-op.
+        let hook = path.join("hooks").join("pre-receive");
         std::fs::write(
             &hook,
             concat!(
                 "#!/bin/sh\n",
-                "# choir: route this ref update through the platform sequencer.\n",
-                "[ -n \"$CHOIR_API\" ] || exit 0\n",
-                "payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\"}' \\\n",
-                "  \"$CHOIR_REPO\" \"$1\" \"$2\" \"$3\" \"$CHOIR_USER\")\n",
-                "if curl -sf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
-                "    -d \"$payload\" \"$CHOIR_API\" >/dev/null; then\n",
-                "  exit 0\n",
-                "fi\n",
-                "echo \"choir: ref update rejected by sequencer\" >&2\n",
-                "exit 1\n",
+                "# choir: route this push's ref updates through the platform sequencer.\n",
+                "if [ -z \"$CHOIR_API\" ]; then cat >/dev/null; exit 0; fi\n",
+                "while read old new ref; do\n",
+                "  payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\",\"cert_status\":\"%s\",\"signer\":\"%s\"}' \\\n",
+                "    \"$CHOIR_REPO\" \"$ref\" \"$old\" \"$new\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
+                "  if ! curl -sf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
+                "      -d \"$payload\" \"$CHOIR_API\" >/dev/null; then\n",
+                "    echo \"choir: ref update rejected by sequencer: $ref\" >&2\n",
+                "    exit 1\n",
+                "  fi\n",
+                "done\n",
+                "exit 0\n",
             ),
         )?;
         #[cfg(unix)]
@@ -260,6 +294,62 @@ fn authorized(table: &AuthTable, request: &tiny_http::Request) -> Option<String>
         diff |= (a[i] ^ b[i]) as usize;
     }
     (diff == 0).then(|| user.to_string())
+}
+
+/// Encodes bytes as standard base64 with `=` padding.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Renders a raw ed25519 public key in OpenSSH `ssh-ed25519 <b64>` form
+/// (the wire blob is two length-prefixed strings: key type, key bytes).
+pub fn ssh_ed25519_pubkey(raw: &[u8; 32]) -> String {
+    let mut blob = Vec::new();
+    for part in [b"ssh-ed25519".as_slice(), raw.as_slice()] {
+        blob.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        blob.extend_from_slice(part);
+    }
+    format!("ssh-ed25519 {}", base64_encode(&blob))
+}
+
+/// Writes `<root>/.choir/allowed_signers` — the file git's ssh signature
+/// verification checks push certificates against. One line per actor:
+/// principal (the actor id) followed by the OpenSSH public key.
+///
+/// # Errors
+///
+/// Propagates filesystem failures.
+pub fn write_allowed_signers(
+    root: &Path,
+    keys: &[(String, [u8; 32])],
+) -> std::io::Result<PathBuf> {
+    let dir = root.join(".choir");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("allowed_signers");
+    let mut contents = String::new();
+    for (principal, raw) in keys {
+        contents.push_str(&format!("{principal} {}\n", ssh_ed25519_pubkey(raw)));
+    }
+    std::fs::write(&path, contents)?;
+    Ok(path)
 }
 
 /// Decodes standard base64 (with `=` padding); `None` on any bad input.
