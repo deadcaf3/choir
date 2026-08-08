@@ -392,7 +392,7 @@ fn archiving_freezes_a_review_and_keeps_its_outcome() {
             note: "reasoning that takes space".into(),
         })
     };
-    let archive = ViewOp::new(OpKind::ArchiveReview { id: "r1".into() });
+    let archive = ViewOp::new(OpKind::ArchiveReview { id: "r1".into(), lapsed: false });
 
     // Incomplete: archiving would strand it, since no further verdict
     // could ever decide the outcome.
@@ -481,11 +481,138 @@ fn archiving_preserves_a_rejection_too() {
         }),
     )
     .unwrap();
-    append_op(&mut log, "node", ViewOp::new(OpKind::ArchiveReview { id: "r2".into() })).unwrap();
+    append_op(&mut log, "node", ViewOp::new(OpKind::ArchiveReview { id: "r2".into(), lapsed: false })).unwrap();
 
     let view = View::materialize(&log).unwrap();
     assert!(
         !view.reviews["r2"].approved(),
         "an archived rejection must not read as approved"
     );
+}
+
+#[test]
+fn lapsing_settles_an_abandoned_review_without_inventing_an_outcome() {
+    // An unanswered review is exactly the kind that accumulates, and it
+    // is incomplete by definition -- so a pruner that can only archive
+    // complete reviews reclaims the ones least likely to pile up. Lapsing
+    // closes that, and the design point is that it needs no new outcome:
+    // a review nobody answered never got approval.
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "author",
+        ViewOp::new(OpKind::RequestReview {
+            id: "abandoned".into(),
+            target: ContentHash::blake3(b"nobody looked"),
+            reviewers: vec!["ana".into(), "bot".into()],
+            target_ref: Some("demo.git:refs/heads/main".into()),
+        }),
+    )
+    .unwrap();
+
+    let archive = |lapsed: bool| {
+        ViewOp::new(OpKind::ArchiveReview {
+            id: "abandoned".into(),
+            lapsed,
+        })
+    };
+
+    // Plain archiving still refuses, and now says how to settle it.
+    match append_op(&mut log, "node", archive(false)) {
+        Err(ViewError::Review(msg)) => assert!(msg.contains("lapsed"), "{msg}"),
+        other => panic!("expected a refusal naming the repair, got {other:?}"),
+    }
+
+    append_op(&mut log, "node", archive(true)).unwrap();
+    let view = View::materialize(&log).unwrap();
+    let r = &view.reviews["abandoned"];
+
+    assert!(!r.approved(), "an abandoned review must never read as approved");
+    assert!(r.complete(), "it is settled, not still waiting");
+    assert!(r.verdicts.is_empty() && r.reviewers.is_empty(), "bulk should be gone");
+    assert_eq!(r.target_ref.as_deref(), Some("demo.git:refs/heads/main"));
+    assert!(matches!(
+        r.status,
+        choir_view::ReviewStatus::Archived { approved: false }
+    ));
+
+    // And it is frozen like any other archived review.
+    let verdict = ViewOp::new(OpKind::PostVerdict {
+        id: "abandoned".into(),
+        reviewer: "ana".into(),
+        verdict: choir_view::Verdict::Approve,
+        note: String::new(),
+    });
+    assert!(matches!(
+        append_op(&mut log, "ana", verdict),
+        Err(ViewError::Review(_))
+    ));
+}
+
+#[test]
+fn a_complete_review_cannot_be_lapsed_out_of_its_outcome() {
+    // Lapsing an answered review would discard a real verdict, which is
+    // the direction that turns retention into censorship.
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "author",
+        ViewOp::new(OpKind::RequestReview {
+            id: "answered".into(),
+            target: ContentHash::blake3(b"reviewed"),
+            reviewers: vec!["ana".into()],
+            target_ref: None,
+        }),
+    )
+    .unwrap();
+    append_op(
+        &mut log,
+        "ana",
+        ViewOp::new(OpKind::PostVerdict {
+            id: "answered".into(),
+            reviewer: "ana".into(),
+            verdict: choir_view::Verdict::Approve,
+            note: "lgtm".into(),
+        }),
+    )
+    .unwrap();
+
+    match append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::ArchiveReview { id: "answered".into(), lapsed: true }),
+    ) {
+        Err(ViewError::Review(msg)) => assert!(msg.contains("cannot be lapsed"), "{msg}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    // Archived normally, the approval survives.
+    append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::ArchiveReview { id: "answered".into(), lapsed: false }),
+    )
+    .unwrap();
+    assert!(View::materialize(&log).unwrap().reviews["answered"].approved());
+}
+
+#[test]
+fn lapsed_is_additive_so_old_payloads_still_hash_the_same() {
+    // Same invariant-1 discipline as `target_ref`: a payload written
+    // before the field existed must decode AND re-serialize to identical
+    // bytes, or every entry hash in every existing log moves.
+    let old = r#"{"format_version":1,"kind":{"ArchiveReview":{"id":"r1"}}}"#;
+    let op = ViewOp::from_payload(old.as_bytes()).expect("old payload decodes");
+    assert_eq!(
+        String::from_utf8(op.to_payload()).unwrap(),
+        old,
+        "re-serializing an old payload changed its bytes"
+    );
+    assert!(
+        matches!(&op.kind, OpKind::ArchiveReview { lapsed: false, .. }),
+        "absent must mean the previous strict behaviour"
+    );
+    // And a lapse round-trips, carrying the flag.
+    let lapsing = ViewOp::new(OpKind::ArchiveReview { id: "r2".into(), lapsed: true });
+    assert_eq!(ViewOp::from_payload(&lapsing.to_payload()).unwrap(), lapsing);
 }

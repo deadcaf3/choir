@@ -177,8 +177,32 @@ pub enum OpKind {
     /// own key, because otherwise archiving would be a way to erase a
     /// `RequestChanges` you did not like.
     ArchiveReview {
-        /// The review being settled. Must exist and be complete.
+        /// The review being settled.
         id: String,
+        /// Settle an **incomplete** review as not approved, rather than
+        /// refusing because it never reached an outcome.
+        ///
+        /// An unanswered review is exactly the kind that accumulates, and
+        /// it is incomplete by definition — so a pruner that can only
+        /// archive complete reviews reclaims the ones least likely to
+        /// pile up. Lapsing is the answer, and it deliberately invents
+        /// **no new outcome**: a review nobody answered never got
+        /// approval, so `Archived { approved: false }` is the whole truth.
+        /// The landing gate is unchanged, and there is no new persisted
+        /// enum to version.
+        ///
+        /// **When** is not a view question. A pure fold of the log has no
+        /// clock, so the view cannot decide "abandoned"; the node decides
+        /// on wall time and this op records the decision, exactly as the
+        /// reviewer draw is decided node-side and recorded by
+        /// [`OpKind::AssignReviewers`]. Replay reproduces the lapse from
+        /// the op and never from re-running a timer.
+        ///
+        /// Additive: absent in a payload written before this field
+        /// existed, which decodes as `false` — the previous strict
+        /// behaviour exactly.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lapsed: bool,
     },
     /// Record `reviewer`'s verdict on review `id` (additive variant).
     /// Only listed reviewers may post; re-posting overwrites the
@@ -494,7 +518,7 @@ impl View {
                 }
                 Ok(())
             }
-            OpKind::ArchiveReview { id } => {
+            OpKind::ArchiveReview { id, lapsed } => {
                 let review = self
                     .reviews
                     .get(id)
@@ -502,12 +526,20 @@ impl View {
                 if matches!(review.status, ReviewStatus::Archived { .. }) {
                     return Err(ViewError::Review(format!("review {id} is already archived")));
                 }
-                if !review.complete() {
+                if review.complete() && *lapsed {
+                    // It reached an outcome; lapsing would discard it.
+                    return Err(ViewError::Review(format!(
+                        "review {id} is complete and cannot be lapsed"
+                    )));
+                }
+                if !review.complete() && !*lapsed {
                     // Freezing an unfinished review would strand it: the
                     // outcome is not decided and no further verdict can
-                    // decide it.
+                    // decide it. Lapsing is the deliberate way to say
+                    // "this one is abandoned", so it must be asked for.
                     return Err(ViewError::Review(format!(
-                        "review {id} is not complete and cannot be archived"
+                        "review {id} is not complete; archive it with lapsed to settle it as \
+                         unapproved"
                     )));
                 }
                 Ok(())
@@ -568,13 +600,19 @@ impl View {
                     .expect("validate proved the review exists and is live")
                     .reviewers = reviewers.clone();
             }
-            OpKind::ArchiveReview { id } => {
+            OpKind::ArchiveReview { id, lapsed } => {
                 let review = self
                     .reviews
                     .get_mut(id)
-                    .expect("validate proved the review exists, is live, and is complete");
+                    .expect("validate proved the review exists and is settleable");
                 review.status = ReviewStatus::Archived {
-                    approved: review.approved(),
+                    // A lapsed review was never answered, so it never got
+                    // approval. Reading it off `approved()` would work
+                    // today, but only because an incomplete review is
+                    // never approved -- stating the outcome directly
+                    // means a later change to `approved()` cannot quietly
+                    // turn abandoned reviews into approvals.
+                    approved: !*lapsed && review.approved(),
                 };
                 // The bulk goes; the gate's triple (target_ref, target,
                 // and the outcome now in `status`) stays.

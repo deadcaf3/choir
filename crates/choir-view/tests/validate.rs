@@ -118,7 +118,7 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
         v.apply(&ViewOp::new(OpKind::PostVerdict {
             id: "rev".into(), reviewer: "ana".into(),
             verdict: Verdict::Approve, note: String::new() })).expect("setup");
-        v.apply(&ViewOp::new(OpKind::ArchiveReview { id: "rev".into() })).expect("setup");
+        v.apply(&ViewOp::new(OpKind::ArchiveReview { id: "rev".into(), lapsed: false })).expect("setup");
         v
     };
     let complete = {
@@ -128,11 +128,11 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             verdict: Verdict::Approve, note: String::new() })).expect("setup");
         v
     };
-    push("archive a complete review", &complete, OpKind::ArchiveReview { id: "rev".into() });
-    push("archive an incomplete review", &populated, OpKind::ArchiveReview { id: "rev".into() });
-    push("archive an unassigned review", &populated, OpKind::ArchiveReview { id: "unassigned".into() });
-    push("archive an unknown review", &populated, OpKind::ArchiveReview { id: "ghost".into() });
-    push("archive an archived review", &archived, OpKind::ArchiveReview { id: "rev".into() });
+    push("archive a complete review", &complete, OpKind::ArchiveReview { id: "rev".into(), lapsed: false });
+    push("archive an incomplete review", &populated, OpKind::ArchiveReview { id: "rev".into(), lapsed: false });
+    push("archive an unassigned review", &populated, OpKind::ArchiveReview { id: "unassigned".into(), lapsed: false });
+    push("archive an unknown review", &populated, OpKind::ArchiveReview { id: "ghost".into(), lapsed: false });
+    push("archive an archived review", &archived, OpKind::ArchiveReview { id: "rev".into(), lapsed: false });
     push("verdict on an archived review", &archived, OpKind::PostVerdict {
         id: "rev".into(), reviewer: "ana".into(), verdict: Verdict::Approve, note: String::new() });
     push("assign an archived review", &archived, OpKind::AssignReviewers {

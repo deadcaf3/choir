@@ -254,7 +254,7 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
 
     // Nobody but the node may archive -- otherwise archiving is a way to
     // erase a RequestChanges you did not like.
-    let archive = ViewOp::new(OpKind::ArchiveReview { id: "land-3".into() });
+    let archive = ViewOp::new(OpKind::ArchiveReview { id: "land-3".into(), lapsed: false });
     let (code, resp) = curl(&[
         "-X", "POST", "-d", &submit_body(&author, "carol", &archive),
         &format!("{api}/submit"),
