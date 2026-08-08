@@ -15,21 +15,55 @@ use choir_oplog::{ContentHash, LogError, MemLog, OpEntry, OpLog};
 use choir_sequencer::Sequencer;
 
 /// A log that records how often it was appended to and synced, so the
-/// batching ratio is observable. Delegates storage to a real `MemLog` so
+/// batching ratio is observable. Delegates storage to a real backend so
 /// this stays a counting wrapper and not a second implementation.
-#[derive(Default)]
+///
+/// Boxed rather than fixed to `MemLog` because the batching ratio under a
+/// no-op sync says nothing about the ratio under a real one: a slow
+/// barrier lets more submitters queue behind it, so batch size is a
+/// *function* of barrier cost. Measuring one and quoting it for the other
+/// is the error this generalisation exists to prevent.
 struct CountingLog {
-    inner: MemLog,
+    inner: Box<dyn OpLog>,
     appends: Arc<AtomicUsize>,
     syncs: Arc<AtomicUsize>,
+    /// Batch sizes, in append-count per barrier, so the distribution can
+    /// be reported instead of a mean derived from throughput.
+    batches: Arc<std::sync::Mutex<Vec<usize>>>,
+    /// Appends since the last barrier.
+    pending: usize,
+    /// Wall time spent inside `sync`, the barrier cost measured directly.
+    barrier_time: Arc<std::sync::Mutex<Vec<std::time::Duration>>>,
     /// When set, `sync` fails, standing in for a full disk or a failing
     /// device without needing one.
     fail_sync: bool,
 }
 
+impl CountingLog {
+    fn new(inner: Box<dyn OpLog>) -> Self {
+        Self {
+            inner,
+            appends: Arc::new(AtomicUsize::new(0)),
+            syncs: Arc::new(AtomicUsize::new(0)),
+            batches: Arc::new(std::sync::Mutex::new(Vec::new())),
+            pending: 0,
+            barrier_time: Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_sync: false,
+        }
+    }
+
+    fn failing() -> Self {
+        Self {
+            fail_sync: true,
+            ..Self::new(Box::new(MemLog::new()))
+        }
+    }
+}
+
 impl OpLog for CountingLog {
     fn append(&mut self, entry: OpEntry) -> Result<ContentHash, LogError> {
         self.appends.fetch_add(1, Ordering::Relaxed);
+        self.pending += 1;
         self.inner.append(entry)
     }
 
@@ -50,7 +84,17 @@ impl OpLog for CountingLog {
         if self.fail_sync {
             return Err(LogError::Corrupt("device is on fire".into()));
         }
-        Ok(())
+        self.batches
+            .lock()
+            .expect("batch sizes")
+            .push(std::mem::take(&mut self.pending));
+        let started = std::time::Instant::now();
+        let result = self.inner.sync();
+        self.barrier_time
+            .lock()
+            .expect("barrier times")
+            .push(started.elapsed());
+        result
     }
 }
 
@@ -62,14 +106,9 @@ fn concurrent_submissions_share_one_durability_barrier() {
     const CLIENTS: usize = 8;
     const OPS: usize = 250;
 
-    let appends = Arc::new(AtomicUsize::new(0));
-    let syncs = Arc::new(AtomicUsize::new(0));
-    let sequencer = Sequencer::spawn(Box::new(CountingLog {
-        inner: MemLog::new(),
-        appends: appends.clone(),
-        syncs: syncs.clone(),
-        fail_sync: false,
-    }));
+    let counting = CountingLog::new(Box::new(MemLog::new()));
+    let (appends, syncs) = (counting.appends.clone(), counting.syncs.clone());
+    let sequencer = Sequencer::spawn(Box::new(counting));
 
     let threads: Vec<_> = (0..CLIENTS)
         .map(|c| {
@@ -126,12 +165,7 @@ fn a_single_submission_is_not_delayed_waiting_for_a_batch() {
 /// than handed an `Accepted` it would act on.
 #[test]
 fn a_failed_sync_is_reported_rather_than_acknowledged() {
-    let sequencer = Sequencer::spawn(Box::new(CountingLog {
-        inner: MemLog::new(),
-        appends: Arc::new(AtomicUsize::new(0)),
-        syncs: Arc::new(AtomicUsize::new(0)),
-        fail_sync: true,
-    }));
+    let sequencer = Sequencer::spawn(Box::new(CountingLog::failing()));
     let handle = sequencer.handle();
     let result = handle.try_submit("ws", b"op".to_vec(), None);
     let Err(reason) = result else {
@@ -142,6 +176,109 @@ fn a_failed_sync_is_reported_rather_than_acknowledged() {
         "the rejection must name durability as the cause, got {reason:?}"
     );
     sequencer.shutdown();
+}
+
+/// The barrier cost and the batch size, measured against a real
+/// `FileLog` rather than derived from throughput.
+///
+/// This exists because deriving them was wrong. An earlier report quoted
+/// "~3.5 ms per barrier" from a single-threaded run and "7.9 ops/barrier"
+/// from a `MemLog` run whose sync is a no-op, then applied both to a
+/// 32-client `FileLog` run. Those cannot all hold: 5,384 ops/s at 7.9
+/// ops/barrier implies a 1.47 ms barrier, not 3.5 ms. Batch size is a
+/// function of barrier cost — a slow barrier lets more submitters queue
+/// behind it — so a ratio measured under a no-op sync says nothing about
+/// the ratio under a real one.
+///
+/// Reported, not asserted: these are wall-clock figures and this machine
+/// varies several-fold with thermal state.
+///
+/// Platform note: on macOS `sync_data` is `fcntl(F_FULLFSYNC)` (verified
+/// in the toolchain source, `library/std/src/sys/fs/unix.rs`), a true
+/// drive-cache flush. Linux gets `fdatasync`, which is typically far
+/// cheaper, so none of these numbers transfer to the Linux gate.
+#[test]
+fn barrier_cost_and_batch_size_are_measured_not_derived() {
+    const CLIENTS: usize = 32;
+    const OPS: usize = 40;
+
+    let dir = std::env::temp_dir().join(format!("choir-barrier-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let log = choir_oplog::FileLog::open(&dir.join("ops.jsonl")).expect("open");
+
+    let counting = CountingLog::new(Box::new(log));
+    let (batches, barrier_time, syncs) = (
+        counting.batches.clone(),
+        counting.barrier_time.clone(),
+        counting.syncs.clone(),
+    );
+    let sequencer = Sequencer::spawn(Box::new(counting));
+
+    let started = std::time::Instant::now();
+    let threads: Vec<_> = (0..CLIENTS)
+        .map(|c| {
+            let handle = sequencer.handle();
+            std::thread::spawn(move || {
+                for i in 0..OPS {
+                    handle.submit(&format!("ws{c}"), format!("op{i}").into_bytes());
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().expect("client thread");
+    }
+    let wall = started.elapsed();
+    let log = sequencer.shutdown();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let total = CLIENTS * OPS;
+    assert_eq!(log.len(), total as u64, "no lost or duplicated ops");
+
+    let mut sizes: Vec<usize> = batches
+        .lock()
+        .expect("batch sizes")
+        .iter()
+        .copied()
+        .filter(|n| *n > 0)
+        .collect();
+    let mut times: Vec<std::time::Duration> =
+        barrier_time.lock().expect("barrier times").clone();
+    sizes.sort_unstable();
+    times.sort_unstable();
+    let pct = |v: &[std::time::Duration], q: f64| v[((v.len() - 1) as f64 * q) as usize];
+
+    println!(
+        "\n  {total} ops, {CLIENTS} clients, real FileLog, wall {wall:?} ({:.0} ops/s)",
+        total as f64 / wall.as_secs_f64()
+    );
+    println!(
+        "  barriers: {} total, {} non-empty",
+        syncs.load(Ordering::Relaxed),
+        sizes.len()
+    );
+    println!(
+        "  batch size   p50={} p90={} max={} (mean {:.1})",
+        pct_usize(&sizes, 0.5),
+        pct_usize(&sizes, 0.9),
+        sizes.last().copied().unwrap_or(0),
+        total as f64 / sizes.len().max(1) as f64
+    );
+    println!(
+        "  barrier cost p50={:?} p90={:?} p99={:?} max={:?}\n",
+        pct(&times, 0.5),
+        pct(&times, 0.9),
+        pct(&times, 0.99),
+        times.last().copied().unwrap_or_default()
+    );
+}
+
+/// Nearest-rank percentile over a sorted slice of counts.
+fn pct_usize(sorted: &[usize], q: f64) -> usize {
+    if sorted.is_empty() {
+        return 0;
+    }
+    sorted[((sorted.len() - 1) as f64 * q) as usize]
 }
 
 /// Fail closed. After a barrier fails, the writer must refuse further
@@ -156,12 +293,7 @@ fn a_failed_sync_is_reported_rather_than_acknowledged() {
 /// writer stops here.
 #[test]
 fn a_failed_barrier_stops_the_writer_accepting() {
-    let sequencer = Sequencer::spawn(Box::new(CountingLog {
-        inner: MemLog::new(),
-        appends: Arc::new(AtomicUsize::new(0)),
-        syncs: Arc::new(AtomicUsize::new(0)),
-        fail_sync: true,
-    }));
+    let sequencer = Sequencer::spawn(Box::new(CountingLog::failing()));
     let handle = sequencer.handle();
 
     let first = handle.try_submit("ws", b"op-1".to_vec(), None);
@@ -200,14 +332,10 @@ fn a_batch_of_only_rejections_does_not_sync() {
         }
     }
 
-    let syncs = Arc::new(AtomicUsize::new(0));
+    let counting = CountingLog::new(Box::new(MemLog::new()));
+    let syncs = counting.syncs.clone();
     let sequencer = Sequencer::spawn_with_policy(
-        Box::new(CountingLog {
-            inner: MemLog::new(),
-            appends: Arc::new(AtomicUsize::new(0)),
-            syncs: syncs.clone(),
-            fail_sync: false,
-        }),
+        Box::new(counting),
         Box::new(RefuseAll),
     );
     let handle = sequencer.handle();

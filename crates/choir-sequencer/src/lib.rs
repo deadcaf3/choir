@@ -166,6 +166,22 @@ impl Sequencer {
             // the refusal in the admit path below for why this is
             // one-way: the alternative is ordering ops that may not
             // survive, which is the bug this whole change exists to close.
+            //
+            // KNOWN LIMITATION, and it is a real one. This writer stays
+            // alive refusing everything, which is invisible to process
+            // supervision: launchd's `KeepAlive` only restarts a process
+            // that *exits*, so a transient fsync error becomes permanent
+            // downtime that looks like uptime. Exiting non-zero instead
+            // would make it self-clearing -- launchd restarts, FileLog
+            // replays from disk, and the diverged in-flight batch
+            // reconciles on the way back up, which is the recovery path
+            // the D20 flip already proved with `kill -9`.
+            //
+            // Not done here because "a storage hiccup takes the node
+            // down" is an operator-visible policy decision about the
+            // daemon's lifecycle, not something a sequencer library
+            // should impose on every embedder including the test suite.
+            // It is written up for whoever owns that call.
             let mut durability_failed = false;
             while let Ok(first) = rx.recv() {
                 let mut cmd = Some(first);
