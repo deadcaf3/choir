@@ -144,6 +144,88 @@ fn a_failed_sync_is_reported_rather_than_acknowledged() {
     sequencer.shutdown();
 }
 
+/// Fail closed. After a barrier fails, the writer must refuse further
+/// submissions *before* appending them, rather than keep ordering ops it
+/// cannot persist.
+///
+/// The reason is a divergence this change would otherwise introduce. A
+/// submitter told "not durable" for an op that was nonetheless appended
+/// and folded into the view leaves the two out of step — for a git push,
+/// the hook fails and git does not apply the ref, while the view already
+/// has it. That is bounded to the one failing batch only because the
+/// writer stops here.
+#[test]
+fn a_failed_barrier_stops_the_writer_accepting() {
+    let sequencer = Sequencer::spawn(Box::new(CountingLog {
+        inner: MemLog::new(),
+        appends: Arc::new(AtomicUsize::new(0)),
+        syncs: Arc::new(AtomicUsize::new(0)),
+        fail_sync: true,
+    }));
+    let handle = sequencer.handle();
+
+    let first = handle.try_submit("ws", b"op-1".to_vec(), None);
+    assert!(first.is_err(), "a failed barrier is not an acceptance");
+
+    // Everything after is refused before it can reach the log.
+    for i in 2..5 {
+        let Err(reason) = handle.try_submit("ws", format!("op-{i}").into_bytes(), None) else {
+            panic!("op-{i} was accepted after the log stopped being durable");
+        };
+        assert!(
+            reason.contains("stopped accepting"),
+            "the refusal must say the writer has stopped, got {reason:?}"
+        );
+    }
+
+    let log = sequencer.shutdown();
+    assert_eq!(
+        log.len(),
+        1,
+        "only the batch that was in flight when the barrier failed may reach the log"
+    );
+}
+
+/// A batch that admitted nothing must not touch the disk. Pure-rejection
+/// batches are common under a strict policy and an fsync per rejected op
+/// would be the cost this change exists to remove.
+#[test]
+fn a_batch_of_only_rejections_does_not_sync() {
+    use choir_sequencer::{Submission, SubmitPolicy};
+
+    struct RefuseAll;
+    impl SubmitPolicy for RefuseAll {
+        fn check(&mut self, _sub: &Submission) -> Result<(), String> {
+            Err("refused".to_string())
+        }
+    }
+
+    let syncs = Arc::new(AtomicUsize::new(0));
+    let sequencer = Sequencer::spawn_with_policy(
+        Box::new(CountingLog {
+            inner: MemLog::new(),
+            appends: Arc::new(AtomicUsize::new(0)),
+            syncs: syncs.clone(),
+            fail_sync: false,
+        }),
+        Box::new(RefuseAll),
+    );
+    let handle = sequencer.handle();
+    for i in 0..5 {
+        assert!(handle
+            .try_submit("ws", format!("op{i}").into_bytes(), None)
+            .is_err());
+    }
+    sequencer.shutdown();
+
+    // Shutdown syncs once to drain the buffer; nothing before it should.
+    assert!(
+        syncs.load(Ordering::Relaxed) <= 1,
+        "rejected ops triggered {} durability barriers; they append nothing and must cost nothing",
+        syncs.load(Ordering::Relaxed)
+    );
+}
+
 /// A rejected op touches neither the log nor the disk, so it is answered
 /// without waiting on the batch's barrier — and a rejection in the middle
 /// of a batch must not disturb the ops around it.

@@ -162,6 +162,11 @@ impl Sequencer {
             // than once per op.
             let mut acks: Vec<(mpsc::Sender<Result<Accepted, String>>, Accepted)> = Vec::new();
             let mut stopping = false;
+            // Set by a failed durability barrier and never cleared. See
+            // the refusal in the admit path below for why this is
+            // one-way: the alternative is ordering ops that may not
+            // survive, which is the bug this whole change exists to close.
+            let mut durability_failed = false;
             while let Ok(first) = rx.recv() {
                 let mut cmd = Some(first);
                 // Admit the woken command, then drain whatever else is
@@ -176,6 +181,17 @@ impl Sequencer {
                         }
                         Command::Submit(sub, reply) => {
                             let started = Instant::now();
+                            // Fail closed. Once a barrier has failed this
+                            // writer can no longer promise anything, so it
+                            // refuses *before* appending rather than
+                            // ordering ops it cannot persist.
+                            if durability_failed {
+                                let _ = reply.send(Err(
+                                    "log is not durable: writer stopped accepting".to_string(),
+                                ));
+                                cmd = rx.try_recv().ok();
+                                continue;
+                            }
                             match policy.check(&sub) {
                                 // A rejection touches neither the log nor
                                 // durability, so it is answered at once
@@ -222,12 +238,32 @@ impl Sequencer {
                 // hook submits a ref op before git applies the ref, so
                 // acknowledging early is what would let git hold a ref
                 // whose authorising op does not exist.
-                let durable = log.sync();
+                let durable = if acks.is_empty() {
+                    // Nothing was appended, so there is nothing to make
+                    // durable. Skipping the barrier keeps a batch of pure
+                    // rejections off the disk entirely.
+                    Ok(())
+                } else {
+                    log.sync()
+                };
+                if durable.is_err() {
+                    durability_failed = true;
+                }
                 for (reply, accepted) in acks.drain(..) {
                     let answer = match &durable {
                         Ok(()) => Ok(accepted),
                         // Ordered but not durable is not an acceptance.
                         // Say so, rather than acknowledge and hope.
+                        //
+                        // These ops are in the log and folded into the
+                        // view, and cannot be taken back out: the log is
+                        // append-only. So this reply leaves the daemon's
+                        // view holding ops their submitters were told
+                        // failed -- git will not have applied the ref its
+                        // pusher was refused. That divergence is bounded
+                        // to this one batch precisely because the writer
+                        // now stops accepting; unbounded is what it would
+                        // be if it carried on.
                         Err(e) => Err(format!("ordered but not durable: {e:?}")),
                     };
                     // Send failure just means the client gave up waiting.
