@@ -114,6 +114,30 @@ fn workspace_provisioning_end_to_end() {
         Some(r#"{"repo":"agents/nope","name":"x"}"#));
     assert_eq!(code, 404);
 
+    // Concurrent provisioning: 8 parallel requests on one repo — the
+    // per-repo lock must serialize template refresh, so every workspace
+    // comes out whole. Two of them race for the same name: exactly one
+    // may win.
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let name = if i < 2 { "racer".to_string() } else { format!("conc-{i}") };
+            std::thread::spawn(move || {
+                let body = format!(r#"{{"repo":"agents/demo","name":"{name}"}}"#);
+                api(port, "POST", "/api/workspace", Some(&body))
+            })
+        })
+        .collect();
+    let results: Vec<(u16, serde_json::Value)> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let ok: Vec<_> = results.iter().filter(|(code, _)| *code == 200).collect();
+    assert_eq!(ok.len(), 7, "6 unique + 1 racer must win: {results:?}");
+    assert_eq!(results.iter().filter(|(code, _)| *code == 409).count(), 1);
+    for (_, resp) in &ok {
+        let p = std::path::PathBuf::from(resp["path"].as_str().unwrap());
+        assert_eq!(std::fs::read_to_string(p.join("f.txt")).unwrap(), "v1\n",
+            "no torn copies under concurrency");
+    }
+
     // Small provisioning sample: p50 copy time over 9 more workspaces.
     let mut times: Vec<f64> = (0..9)
         .map(|i| {

@@ -62,6 +62,23 @@ fn cow_copy(src: &Path, dst: &Path) -> Result<(), String> {
     }
 }
 
+/// One mutex per repo: template refresh and CoW copy must be serialized
+/// per repo, or a concurrent request can copy a mid-checkout template
+/// (and two same-name requests can both pass the exists check).
+/// Different repos provision in parallel.
+fn repo_lock(repo: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("lock table")
+        .entry(repo.to_string())
+        .or_default()
+        .clone()
+}
+
 /// Handles `POST /api/workspace`; body `{"repo": "owner/repo",
 /// "name": "<workspace>"}`. Returns `(status, json_body)` like the rest
 /// of the platform API. `base_url` is the daemon's own address, used as
@@ -96,6 +113,8 @@ pub fn create_workspace(
         Err(_) => return (400, r#"{"error":"repository has no commits"}"#.to_string()),
     };
 
+    let lock = repo_lock(repo);
+    let _guard = lock.lock().expect("repo lock");
     let ws_dir = root.join(".choir").join("workspaces").join(repo).join(name);
     if ws_dir.exists() {
         return (409, r#"{"error":"workspace already exists"}"#.to_string());
