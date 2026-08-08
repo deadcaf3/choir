@@ -212,6 +212,22 @@ pub fn post_status(
 }
 
 /// An open pull request as the queue sees it.
+///
+/// **This struct is a security boundary, not a convenience.** The queue
+/// reads pull requests from an upstream forge (untrusted input), holds a
+/// GitHub App private key (privileged credential), and with `--land`
+/// fast-forwards a base branch (external write) — all three legs of the
+/// prompt-injection lethal trifecta in one process. The Rule-of-Two
+/// mitigation is that no untrusted *text* may reach a decision path, and
+/// this type is where that is enforced: it carries a number and an oid,
+/// both structured, and deliberately carries **no title, body, branch
+/// name, or author**.
+///
+/// Adding a text field here is not a cosmetic change. A PR title in a
+/// status description is a channel from attacker-controlled text into
+/// the bot's own output, and a PR body reaching any conditional is the
+/// vulnerability itself. `bridge_trifecta.rs` fails if this type starts
+/// carrying attacker-controlled text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pr {
     /// PR number.
@@ -275,6 +291,12 @@ pub enum Verdict {
 /// [`Verdict`]. Neutral and skipped conclusions count as success;
 /// anything else non-success (failure, cancelled, timed out) fails the
 /// train.
+///
+/// Reads **only** `status` and `conclusion`, each compared against a
+/// fixed set of literals. Check-run names, titles, summaries and output
+/// text are attacker-influenceable — a workflow is defined in the
+/// repository, so a pull request can propose one — and none of them
+/// reach this decision. See [`Pr`] for why that matters.
 #[must_use]
 pub fn parse_check_verdict(body: &str) -> Verdict {
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();

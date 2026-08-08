@@ -236,6 +236,16 @@ const POST_LAND_WATCH: std::time::Duration = std::time::Duration::from_secs(180)
 /// check verdict, and post a per-PR `choir/queue` commit status. With
 /// `land`, a green train is then fast-forwarded onto the default
 /// branch (non-force push: a lost race is a rejection, not a clobber).
+/// One speculative-train round.
+///
+/// **Decision inputs are structured only** (risk #16, Rule of Two): the
+/// train is built from PR numbers and git oids, the verdict comes from CI
+/// `status`/`conclusion` enums, and landing is gated on that verdict plus
+/// the caller's `land` argument. No pull-request title, body, branch
+/// name, author, commit message, or check-run text reaches any
+/// conditional here. `land` is passed in from a per-invocation `--land`
+/// flag and has no configuration default, so a bridge started without it
+/// cannot be talked into landing anything.
 fn queue_round(
     app_id: &str,
     pem: &Path,
