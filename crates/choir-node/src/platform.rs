@@ -23,14 +23,35 @@ use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, SubmitPolicy, Submission};
 use choir_view::{OpKind, View, ViewOp};
 
+/// Sliding window over recent admitted entries: `base` is the seq of
+/// the first held entry, so `/api/log?from=` keeps absolute semantics
+/// after old entries are dropped (full history lives in the op log).
+pub struct LogWindow {
+    base: u64,
+    entries: Vec<OpEntry>,
+}
+
+/// Entries retained in memory for `/api/log`; older reads fall back to
+/// the persisted op log (not served over HTTP yet).
+const LOG_WINDOW_CAP: usize = 100_000;
+
+impl LogWindow {
+    fn push(&mut self, entry: OpEntry) {
+        self.entries.push(entry);
+        if self.entries.len() > LOG_WINDOW_CAP {
+            let drop = self.entries.len() - LOG_WINDOW_CAP;
+            self.entries.drain(..drop);
+            self.base += drop as u64;
+        }
+    }
+}
+
 /// Verify author signature, then CAS against the shared view. Runs on
 /// the sequencer's writer thread; API readers share the view mutex.
 struct ChoirPolicy {
     registry: Registry,
     view: Arc<Mutex<View>>,
-    /// Every admitted entry, shared with `/api/log` readers. Fine at
-    /// dogfood scale; paging/compaction comes with real load.
-    entries: Arc<Mutex<Vec<OpEntry>>>,
+    entries: Arc<Mutex<LogWindow>>,
 }
 
 impl SubmitPolicy for ChoirPolicy {
@@ -64,7 +85,7 @@ pub struct Platform {
     /// pusher's key (`key/<principal>`); otherwise the basic-auth user
     /// (`git/<user>`).
     node_key: ActorKey,
-    entries: Arc<Mutex<Vec<OpEntry>>>,
+    entries: Arc<Mutex<LogWindow>>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -90,7 +111,14 @@ impl Platform {
         let view = View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?;
         let view = Arc::new(Mutex::new(view));
         let existing: Vec<OpEntry> = (0..log.len()).filter_map(|i| log.get(i)).collect();
-        let entries = Arc::new(Mutex::new(existing));
+        let mut window = LogWindow {
+            base: 0,
+            entries: Vec::new(),
+        };
+        for e in existing {
+            window.push(e);
+        }
+        let entries = Arc::new(Mutex::new(window));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
@@ -172,6 +200,42 @@ impl Platform {
                 (200, body.to_string())
             }
             ("POST", "/api/submit") => self.submit(body),
+            ("POST", "/api/submit-batch") => {
+                let req: serde_json::Value = match serde_json::from_slice(body) {
+                    Ok(v) => v,
+                    Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
+                };
+                let Some(ops) = req.get("ops").and_then(|v| v.as_array()) else {
+                    return (400, r#"{"error":"need ops array"}"#.to_string());
+                };
+                // Ops are admitted in array order; each result is
+                // independent (a rejection does not abort the batch).
+                let mut accepted = 0u64;
+                let mut rejected = 0u64;
+                let results: Vec<serde_json::Value> = ops
+                    .iter()
+                    .map(|op| {
+                        let bytes = op.to_string().into_bytes();
+                        let (status, body) = self.submit(&bytes);
+                        if status == 200 {
+                            accepted += 1;
+                        } else {
+                            rejected += 1;
+                        }
+                        serde_json::from_str(&body)
+                            .unwrap_or_else(|_| serde_json::json!({ "error": body }))
+                    })
+                    .collect();
+                (
+                    200,
+                    serde_json::json!({
+                        "accepted": accepted,
+                        "rejected": rejected,
+                        "results": results,
+                    })
+                    .to_string(),
+                )
+            }
             ("POST", "/api/git-update") => {
                 let req: serde_json::Value = match serde_json::from_slice(body) {
                     Ok(v) => v,
@@ -196,10 +260,12 @@ impl Platform {
                     .split_once("from=")
                     .and_then(|(_, v)| v.split('&').next()?.parse().ok())
                     .unwrap_or(0);
-                let entries = self.entries.lock().expect("entries lock");
-                let rows: Vec<serde_json::Value> = entries
+                let window = self.entries.lock().expect("entries lock");
+                let skip = from.saturating_sub(window.base as usize);
+                let rows: Vec<serde_json::Value> = window
+                    .entries
                     .iter()
-                    .skip(from)
+                    .skip(skip)
                     .take(500)
                     .map(|e| {
                         serde_json::json!({
@@ -210,7 +276,11 @@ impl Platform {
                         })
                     })
                     .collect();
-                (200, serde_json::json!({ "entries": rows }).to_string())
+                (
+                    200,
+                    serde_json::json!({ "entries": rows, "window_base": window.base })
+                        .to_string(),
+                )
             }
             _ => (404, r#"{"error":"no such endpoint"}"#.to_string()),
         }

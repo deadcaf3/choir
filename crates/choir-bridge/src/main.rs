@@ -30,20 +30,23 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Runs git in the mirror, returning stdout; exits loudly on failure.
-fn git(args: &[&str], dir: Option<&Path>) -> String {
+/// Runs git in the mirror, returning stdout or the failure text (a
+/// transient fetch failure must not kill the sync loop).
+fn git(args: &[&str], dir: Option<&Path>) -> Result<String, String> {
     let mut cmd = std::process::Command::new("git");
     cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
-    let out = cmd.output().expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    let out = cmd.output().map_err(|e| format!("spawn git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
 }
 
 /// Loopback API call via curl; returns (status, body).
@@ -65,17 +68,17 @@ fn api(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
 }
 
 /// Current upstream refs of the mirror: refname -> oid hex.
-fn mirror_refs(mirror: &Path) -> BTreeMap<String, String> {
-    git(
+fn mirror_refs(mirror: &Path) -> Result<BTreeMap<String, String>, String> {
+    Ok(git(
         &["for-each-ref", "--format=%(objectname) %(refname)"],
         Some(mirror),
-    )
+    )?
     .lines()
     .filter_map(|l| {
         let (oid, name) = l.split_once(' ')?;
         Some((name.to_string(), oid.to_string()))
     })
-    .collect()
+    .collect())
 }
 
 /// Choir-side view of this label's refs: refname -> ContentHash.
@@ -108,49 +111,82 @@ fn view_refs(api_base: &str, label: &str) -> BTreeMap<String, ContentHash> {
         .unwrap_or_default()
 }
 
-/// Submits one signed op; returns Err(reason) on rejection.
-fn submit(api_base: &str, key: &ActorKey, workspace: &str, op: ViewOp) -> Result<(), String> {
+/// Ops per `/api/submit-batch` request; keeps request bodies well under
+/// a megabyte.
+const BATCH: usize = 500;
+
+/// Signs one op into its submit-request JSON object.
+fn signed_op(key: &ActorKey, workspace: &str, op: ViewOp) -> serde_json::Value {
     let payload = op.to_payload();
     let sig = key.sign_submission(workspace, &payload);
-    let body = serde_json::json!({
+    serde_json::json!({
         "workspace": workspace,
         "payload_hex": hex_encode(&payload),
         "key_id": sig.key_id,
         "signature_hex": hex_encode(&sig.signature),
     })
-    .to_string();
-    let (status, resp) = api("POST", &format!("{api_base}/api/submit"), Some(&body));
-    if status == 200 {
-        Ok(())
-    } else {
-        Err(resp)
+}
+
+/// Submits ops in batches; returns the accepted count, printing each
+/// rejection. Request bodies go through a temp file — 500 signed ops
+/// exceed argv limits.
+fn submit_batch(api_base: &str, ops: &[serde_json::Value]) -> Result<usize, String> {
+    let mut accepted = 0;
+    for chunk in ops.chunks(BATCH) {
+        let body = serde_json::json!({ "ops": chunk }).to_string();
+        let tmp = std::env::temp_dir().join(format!(
+            "choir-bridge-batch-{}-{}",
+            std::process::id(),
+            accepted
+        ));
+        std::fs::write(&tmp, &body).map_err(|e| format!("write batch: {e}"))?;
+        let out = std::process::Command::new("curl")
+            .args(["-sk", "-X", "POST", "--data-binary"])
+            .arg(format!("@{}", tmp.display()))
+            .arg(format!("{api_base}/api/submit-batch"))
+            .output()
+            .map_err(|e| format!("spawn curl: {e}"))?;
+        std::fs::remove_file(&tmp).ok();
+        let resp: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("batch response: {e}"))?;
+        accepted += resp["accepted"].as_u64().unwrap_or(0) as usize;
+        if resp["rejected"].as_u64().unwrap_or(0) > 0 {
+            for r in resp["results"].as_array().into_iter().flatten() {
+                if let Some(err) = r.get("error").and_then(|e| e.as_str()) {
+                    eprintln!("bridge: op rejected: {err}");
+                }
+            }
+        }
     }
+    Ok(accepted)
 }
 
 /// One sync round: fetch upstream, diff against the choir view, submit
-/// the delta. Returns (set, deleted, unchanged).
+/// the delta in batches. Returns (set, deleted, unchanged).
 fn sync_once(
     upstream: &str,
     mirror: &Path,
     api_base: &str,
     key: &ActorKey,
     label: &str,
-) -> (usize, usize, usize) {
+) -> Result<(usize, usize, usize), String> {
     if mirror.join("HEAD").exists() {
-        git(&["remote", "update", "--prune"], Some(mirror));
+        git(&["remote", "update", "--prune"], Some(mirror))?;
     } else {
-        std::fs::create_dir_all(mirror.parent().unwrap_or(Path::new("."))).unwrap();
+        std::fs::create_dir_all(mirror.parent().unwrap_or(Path::new(".")))
+            .map_err(|e| format!("create mirror dir: {e}"))?;
         git(
             &["clone", "--mirror", upstream, mirror.to_str().expect("utf8 path")],
             None,
-        );
+        )?;
     }
 
-    let upstream_refs = mirror_refs(mirror);
+    let upstream_refs = mirror_refs(mirror)?;
     let choir_refs = view_refs(api_base, label);
     let workspace = format!("bridge/{label}");
-    let (mut set, mut deleted, mut unchanged) = (0, 0, 0);
 
+    let mut sets = Vec::new();
+    let mut unchanged = 0;
     for (name, oid) in &upstream_refs {
         let commit = match ContentHash::from_git_oid(oid) {
             Some(c) => c,
@@ -166,24 +202,21 @@ fn sync_once(
             commit,
             prev: prev.cloned(),
         });
-        match submit(api_base, key, &workspace, op) {
-            Ok(()) => set += 1,
-            Err(e) => eprintln!("bridge: set {name} rejected: {e}"),
-        }
+        sets.push(signed_op(key, &workspace, op));
     }
+    let mut deletes = Vec::new();
     for (name, prev) in &choir_refs {
         if !upstream_refs.contains_key(name) {
             let op = ViewOp::new(OpKind::DeleteRef {
                 name: format!("{label}:{name}"),
                 prev: Some(prev.clone()),
             });
-            match submit(api_base, key, &workspace, op) {
-                Ok(()) => deleted += 1,
-                Err(e) => eprintln!("bridge: delete {name} rejected: {e}"),
-            }
+            deletes.push(signed_op(key, &workspace, op));
         }
     }
-    (set, deleted, unchanged)
+    let set = submit_batch(api_base, &sets)?;
+    let deleted = submit_batch(api_base, &deletes)?;
+    Ok((set, deleted, unchanged))
 }
 
 /// Loads the 32-byte actor key at `path`, creating it (0600) if absent.
@@ -233,11 +266,14 @@ fn main() {
 
     loop {
         let started = std::time::Instant::now();
-        let (set, deleted, unchanged) = sync_once(&upstream, &mirror, &api_base, &key, &label);
-        eprintln!(
-            "bridge: {label}: {set} set, {deleted} deleted, {unchanged} unchanged in {:?}",
-            started.elapsed()
-        );
+        match sync_once(&upstream, &mirror, &api_base, &key, &label) {
+            Ok((set, deleted, unchanged)) => eprintln!(
+                "bridge: {label}: {set} set, {deleted} deleted, {unchanged} unchanged in {:?}",
+                started.elapsed()
+            ),
+            // Transient (network, rate limit): log and retry next round.
+            Err(e) => eprintln!("bridge: {label}: sync failed (will retry): {e}"),
+        }
         if once {
             break;
         }
