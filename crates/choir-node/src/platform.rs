@@ -18,10 +18,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use choir_identity::Registry;
-use choir_oplog::{OpEntry, OpLog, Witness};
+use choir_identity::{ActorKey, Registry};
+use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, SubmitPolicy, Submission};
-use choir_view::{View, ViewOp};
+use choir_view::{OpKind, View, ViewOp};
 
 /// Verify author signature, then CAS against the shared view. Runs on
 /// the sequencer's writer thread; API readers share the view mutex.
@@ -55,6 +55,10 @@ impl SubmitPolicy for ChoirPolicy {
 pub struct Platform {
     handle: SequencerHandle,
     view: Arc<Mutex<View>>,
+    /// The daemon's own key: signs ops it derives from authenticated git
+    /// pushes (the pusher is recorded as the op's workspace; per-actor
+    /// push signing arrives with `git push --signed`, later).
+    node_key: ActorKey,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -62,13 +66,21 @@ pub struct Platform {
 
 impl Platform {
     /// Replays `log` into a view and starts the admission sequencer over
-    /// it with `registry` as the trusted key set.
+    /// it with `registry` as the trusted key set plus the daemon's own
+    /// `node_key` (registered automatically, for git-derived ops).
     ///
     /// # Errors
     ///
     /// Returns a description of any replay failure (a log written
     /// through this platform always replays cleanly).
-    pub fn start(registry: Registry, log: Box<dyn OpLog>) -> Result<Self, String> {
+    pub fn start(
+        mut registry: Registry,
+        log: Box<dyn OpLog>,
+        node_key: ActorKey,
+    ) -> Result<Self, String> {
+        registry
+            .register(&node_key.public_key_bytes())
+            .map_err(|e| format!("register node key: {e:?}"))?;
         let view = View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?;
         let view = Arc::new(Mutex::new(view));
         let sequencer = Sequencer::spawn_with_policy(
@@ -81,8 +93,51 @@ impl Platform {
         Ok(Self {
             handle: sequencer.handle(),
             view,
+            node_key,
             _sequencer: sequencer,
         })
+    }
+
+    /// Routes one git ref update (from a repo's `update` hook) through
+    /// the sequencer: CAS against the view, node-signed, totally ordered
+    /// with API ops. Refs are namespaced `<repo>:<refname>`; git oids
+    /// enter the envelope with their own codec ([`ContentHash::from_git_oid`]).
+    ///
+    /// # Errors
+    ///
+    /// The policy's rejection reason (stale CAS = concurrent update git
+    /// itself would also have refused).
+    pub fn git_update(
+        &self,
+        repo: &str,
+        refname: &str,
+        old_hex: &str,
+        new_hex: &str,
+        user: &str,
+    ) -> Result<(), String> {
+        const ZERO: [char; 2] = ['0', '0'];
+        let is_zero = |h: &str| !h.is_empty() && h.chars().all(|c| c == ZERO[0]);
+        let name = format!("{repo}:{refname}");
+        let prev = if is_zero(old_hex) {
+            None
+        } else {
+            Some(ContentHash::from_git_oid(old_hex).ok_or("bad old oid")?)
+        };
+        let kind = if is_zero(new_hex) {
+            OpKind::DeleteRef { name, prev }
+        } else {
+            OpKind::SetRef {
+                name,
+                commit: ContentHash::from_git_oid(new_hex).ok_or("bad new oid")?,
+                prev,
+            }
+        };
+        let payload = ViewOp::new(kind).to_payload();
+        let workspace = format!("git/{user}");
+        let sig = self.node_key.sign_submission(&workspace, &payload);
+        self.handle
+            .try_submit(&workspace, payload, Some(sig))
+            .map(|_| ())
     }
 
     /// Handles one `/api/...` request, returning `(status, json_body)`.
@@ -101,6 +156,17 @@ impl Platform {
                 (200, body.to_string())
             }
             ("POST", "/api/submit") => self.submit(body),
+            ("POST", "/api/git-update") => {
+                let req: serde_json::Value = match serde_json::from_slice(body) {
+                    Ok(v) => v,
+                    Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
+                };
+                let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                match self.git_update(&f("repo"), &f("refname"), &f("old"), &f("new"), &f("user")) {
+                    Ok(()) => (200, r#"{"ok":true}"#.to_string()),
+                    Err(reason) => (400, serde_json::json!({ "error": reason }).to_string()),
+                }
+            }
             _ => (404, r#"{"error":"no such endpoint"}"#.to_string()),
         }
     }

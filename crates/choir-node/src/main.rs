@@ -73,9 +73,28 @@ fn main() -> std::io::Result<()> {
         }
         let state_dir = root.join(".choir");
         std::fs::create_dir_all(&state_dir)?;
+        // Node key: persisted so git-derived ops keep one author across
+        // restarts. 32 secret bytes, file readable by the daemon user only.
+        let key_path = state_dir.join("node.key");
+        let node_key = if key_path.exists() {
+            let bytes = std::fs::read(&key_path)?;
+            let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "node.key must be 32 bytes")
+            })?;
+            choir_identity::ActorKey::from_secret_bytes(&bytes)
+        } else {
+            let key = choir_identity::ActorKey::generate();
+            std::fs::write(&key_path, key.secret_bytes())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            key
+        };
         let log = choir_oplog::FileLog::open(&state_dir.join("ops.jsonl"))
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        let platform = Platform::start(registry, Box::new(log))
+        let platform = Platform::start(registry, Box::new(log), node_key)
             .map_err(std::io::Error::other)?;
         node.enable_platform(platform);
         eprintln!("platform API enabled ({count} actor keys)");

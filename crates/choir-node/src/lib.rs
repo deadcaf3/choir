@@ -32,6 +32,9 @@ pub struct Node {
     port: u16,
     auth: std::sync::Arc<Option<AuthTable>>,
     platform: Option<std::sync::Arc<Platform>>,
+    /// Loopback secret handed to repo hooks via env so their callback to
+    /// `/api/git-update` passes the auth gate without user credentials.
+    internal_token: String,
 }
 
 impl Node {
@@ -71,6 +74,7 @@ impl Node {
             port,
             auth: std::sync::Arc::new(auth),
             platform: None,
+            internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
         })
     }
 
@@ -108,12 +112,43 @@ impl Node {
                 .args(["config", "http.receivepack", "true"])
                 .current_dir(&path)
                 .status()?
+                .success()
+            // Pin hooks to this repo: a host-global core.hooksPath (set
+            // by e.g. husky) would otherwise silently bypass the
+            // sequencer hook below.
+            && std::process::Command::new("git")
+                .args(["config", "core.hooksPath", "hooks"])
+                .current_dir(&path)
+                .status()?
                 .success();
-        if ok {
-            Ok(())
-        } else {
-            Err(std::io::Error::other("git init/config failed"))
+        if !ok {
+            return Err(std::io::Error::other("git init/config failed"));
         }
+        // The update hook routes every ref update through the platform
+        // sequencer; outside the daemon (no CHOIR_API) it is a no-op.
+        let hook = path.join("hooks").join("update");
+        std::fs::write(
+            &hook,
+            concat!(
+                "#!/bin/sh\n",
+                "# choir: route this ref update through the platform sequencer.\n",
+                "[ -n \"$CHOIR_API\" ] || exit 0\n",
+                "payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\"}' \\\n",
+                "  \"$CHOIR_REPO\" \"$1\" \"$2\" \"$3\" \"$CHOIR_USER\")\n",
+                "if curl -sf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
+                "    -d \"$payload\" \"$CHOIR_API\" >/dev/null; then\n",
+                "  exit 0\n",
+                "fi\n",
+                "echo \"choir: ref update rejected by sequencer\" >&2\n",
+                "exit 1\n",
+            ),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
     }
 
     /// Rejects path traversal and normalizes the repo path under root.
@@ -133,27 +168,52 @@ impl Node {
             let root = self.root.clone();
             let auth = self.auth.clone();
             let platform = self.platform.clone();
+            let internal_token = self.internal_token.clone();
+            let port = self.port;
             std::thread::spawn(move || {
+                // Hook callbacks authenticate with the loopback secret
+                // instead of user credentials.
+                let internal_ok = request.url().starts_with("/api/git-update")
+                    && header(&request, "X-Choir-Internal").as_deref() == Some(&internal_token);
+                let mut user = "anon".to_string();
                 if let Some(table) = auth.as_ref() {
-                    if !authorized(table, &request) {
-                        let response = tiny_http::Response::from_string("unauthorized\n")
-                            .with_status_code(401)
-                            .with_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"WWW-Authenticate"[..],
-                                    &b"Basic realm=\"choir\""[..],
-                                )
-                                .expect("static header"),
-                            );
-                        let _ = request.respond(response);
-                        return;
+                    match authorized(table, &request) {
+                        Some(u) => user = u,
+                        None if internal_ok => {}
+                        None => {
+                            let response = tiny_http::Response::from_string("unauthorized\n")
+                                .with_status_code(401)
+                                .with_header(
+                                    tiny_http::Header::from_bytes(
+                                        &b"WWW-Authenticate"[..],
+                                        &b"Basic realm=\"choir\""[..],
+                                    )
+                                    .expect("static header"),
+                                );
+                            let _ = request.respond(response);
+                            return;
+                        }
                     }
                 }
                 if request.url().starts_with("/api/") {
                     let _ = handle_api(platform.as_deref(), request);
                     return;
                 }
-                let _ = handle(root, request);
+                // Platform-enabled daemons pass the sequencer callback
+                // into git's hook environment.
+                let mut extra_env = Vec::new();
+                if platform.is_some() {
+                    if let Some(repo) = repo_from_path(request.url()) {
+                        extra_env.push((
+                            "CHOIR_API".to_string(),
+                            format!("http://127.0.0.1:{port}/api/git-update"),
+                        ));
+                        extra_env.push(("CHOIR_REPO".to_string(), repo));
+                        extra_env.push(("CHOIR_USER".to_string(), user));
+                        extra_env.push(("CHOIR_INTERNAL".to_string(), internal_token));
+                    }
+                }
+                let _ = handle(root, request, &extra_env);
             });
         }
     }
@@ -164,46 +224,42 @@ impl Node {
     }
 }
 
-/// Checks a request's basic-auth credentials against the table.
-fn authorized(table: &AuthTable, request: &tiny_http::Request) -> bool {
-    let header = match request
+/// Value of the first header named `name`, if present.
+fn header(request: &tiny_http::Request, name: &str) -> Option<String> {
+    request
         .headers()
         .iter()
-        .find(|h| h.field.equiv("Authorization"))
-    {
-        Some(h) => h.value.as_str().to_string(),
-        None => return false,
-    };
-    let b64 = match header.strip_prefix("Basic ") {
-        Some(rest) => rest.trim(),
-        None => return false,
-    };
-    let decoded = match base64_decode(b64) {
-        Some(bytes) => bytes,
-        None => return false,
-    };
-    let creds = match String::from_utf8(decoded) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let (user, token) = match creds.split_once(':') {
-        Some(pair) => pair,
-        None => return false,
-    };
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str().to_string())
+}
+
+/// Extracts `owner/repo.git` from a smart-HTTP path like
+/// `/owner/repo.git/git-receive-pack`.
+fn repo_from_path(url: &str) -> Option<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    let end = path.find(".git/").map(|i| i + 4).or_else(|| {
+        path.ends_with(".git").then_some(path.len())
+    })?;
+    Some(path[1..end].to_string())
+}
+
+/// Checks a request's basic-auth credentials against the table; returns
+/// the authenticated username.
+fn authorized(table: &AuthTable, request: &tiny_http::Request) -> Option<String> {
+    let auth_header = header(request, "Authorization")?;
+    let b64 = auth_header.strip_prefix("Basic ")?.trim();
+    let creds = String::from_utf8(base64_decode(b64)?).ok()?;
+    let (user, token) = creds.split_once(':')?;
     // Compare without early exit on length/content so timing doesn't
     // leak how much of the token matched.
-    match table.get(user) {
-        Some(expected) => {
-            let a = expected.as_bytes();
-            let b = token.as_bytes();
-            let mut diff = a.len() ^ b.len();
-            for i in 0..a.len().min(b.len()) {
-                diff |= (a[i] ^ b[i]) as usize;
-            }
-            diff == 0
-        }
-        None => false,
+    let expected = table.get(user)?;
+    let a = expected.as_bytes();
+    let b = token.as_bytes();
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().min(b.len()) {
+        diff |= (a[i] ^ b[i]) as usize;
     }
+    (diff == 0).then(|| user.to_string())
 }
 
 /// Decodes standard base64 (with `=` padding); `None` on any bad input.
@@ -256,8 +312,13 @@ fn handle_api(
     request.respond(response)
 }
 
-/// Bridges one HTTP request to `git http-backend` CGI.
-fn handle(root: PathBuf, mut request: tiny_http::Request) -> std::io::Result<()> {
+/// Bridges one HTTP request to `git http-backend` CGI. `extra_env` is
+/// added to the CGI child (and thus inherited by git hooks).
+fn handle(
+    root: PathBuf,
+    mut request: tiny_http::Request,
+    extra_env: &[(String, String)],
+) -> std::io::Result<()> {
     let url = request.url().to_string();
     let (path, query) = match url.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
@@ -277,6 +338,7 @@ fn handle(root: PathBuf, mut request: tiny_http::Request) -> std::io::Result<()>
 
     let mut child = std::process::Command::new("git")
         .arg("http-backend")
+        .envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("GIT_PROJECT_ROOT", &root)
         .env("GIT_HTTP_EXPORT_ALL", "1")
         .env("PATH_INFO", &path)

@@ -45,7 +45,7 @@ fn signed_submit_and_view_over_http() {
     registry.register(&alice.public_key_bytes()).unwrap();
 
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
-    node.enable_platform(Platform::start(registry, Box::new(MemLog::new())).unwrap());
+    node.enable_platform(Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap());
     let port = node.port();
     let node = std::sync::Arc::new(node);
     {
@@ -114,7 +114,7 @@ fn platform_state_survives_restart() {
         let mut registry = Registry::new();
         registry.register(&alice.public_key_bytes()).unwrap();
         let log = choir_oplog::FileLog::open(&log_path).unwrap();
-        let platform = Platform::start(registry, Box::new(log)).unwrap();
+        let platform = Platform::start(registry, Box::new(log), ActorKey::generate()).unwrap();
         let payload = op.to_payload();
         let sig = alice.sign_submission("alice", &payload);
         let (status, _) = platform.handle_api(
@@ -137,7 +137,7 @@ fn platform_state_survives_restart() {
     let mut registry = Registry::new();
     registry.register(&alice.public_key_bytes()).unwrap();
     let log = choir_oplog::FileLog::open(&log_path).unwrap();
-    let platform = Platform::start(registry, Box::new(log)).unwrap();
+    let platform = Platform::start(registry, Box::new(log), ActorKey::generate()).unwrap();
     let (status, body) = platform.handle_api("GET", "/api/view", b"");
     assert_eq!(status, 200);
     let view: serde_json::Value = serde_json::from_str(&body).unwrap();

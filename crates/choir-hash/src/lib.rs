@@ -36,6 +36,26 @@ impl ContentHash {
         }
     }
 
+    /// Wraps a git object id (hex) in the envelope: codec `0x11` for
+    /// SHA-1 (40 hex chars) or `0x12` for SHA-256 (64), per the
+    /// multicodec table. `None` for anything else. This is how git ref
+    /// updates enter the op log without pretending to be BLAKE3.
+    pub fn from_git_oid(hex: &str) -> Option<Self> {
+        let codec = match hex.len() {
+            40 => 0x11,
+            64 => 0x12,
+            _ => return None,
+        };
+        let digest: Option<Vec<u8>> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+            .collect();
+        Some(Self {
+            codec,
+            digest: digest?,
+        })
+    }
+
     /// Lowercase hex of the digest, prefixed with the codec byte
     /// (e.g. `1e-ab12…`); used for filesystem sharding and display.
     pub fn to_hex(&self) -> String {

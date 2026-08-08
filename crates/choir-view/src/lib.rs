@@ -109,6 +109,14 @@ pub enum OpKind {
         /// Workspace being removed.
         workspace: String,
     },
+    /// Remove named ref `name` under the same CAS rule (additive
+    /// variant, added for git branch deletion; wire-format unchanged).
+    DeleteRef {
+        /// Ref being removed.
+        name: String,
+        /// Expected current target (CAS).
+        prev: Option<ContentHash>,
+    },
 }
 
 /// Failure modes of view folding and commit storage.
@@ -246,6 +254,17 @@ impl View {
             }
             OpKind::DeleteWorkspace { workspace } => {
                 self.workspaces.remove(workspace);
+            }
+            OpKind::DeleteRef { name, prev } => {
+                let actual = self.refs.get(name);
+                if actual != prev.as_ref() {
+                    return Err(ViewError::StaleHead {
+                        target: name.clone(),
+                        expected: prev.clone(),
+                        actual: actual.cloned(),
+                    });
+                }
+                self.refs.remove(name);
             }
         }
         Ok(())
