@@ -18,5 +18,7 @@ rsync -az -e "ssh -i $KEY" --filter=':- .gitignore' "$REPO_DIR/" "choir@$IP:~/ch
 ssh -i "$KEY" "choir@$IP" 'cd ~/choir-src \
   && git remote remove mirror 2>/dev/null || true \
   && git remote add mirror "http://choir:$(cat ~/.forgejo-token)@127.0.0.1:3000/choir/choir.git" \
-  && git push -q mirror main && git log --oneline -1'
+  && git push -q mirror main \
+  && git push -q --tags mirror \
+  && git log --oneline -1'
 echo "mirror updated"
