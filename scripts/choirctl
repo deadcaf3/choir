@@ -61,6 +61,14 @@ mirror)
   sh "$HERE/push_mirror.sh"
   ;;
 
+sync)
+  # The post-flip order, in one command: canonical first, follower
+  # second. `set -e` stops here if the canonical push fails, so the
+  # mirror can never get ahead of the node (D21 single-canonical).
+  sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
+  sh "$HERE/push_mirror.sh"
+  ;;
+
 logs)
   tail -n "${2:-30}" "$STATE/node.log"
   ;;
@@ -80,8 +88,9 @@ sh scripts/choirctl <command>
   stop             unload it for now (it returns at next login)
   uninstall        unload it and remove the agent (data kept)
 
-  push [repo]      push this repo to the node (--all and --tags)
-  mirror           push to the private Forgejo follower
+  sync [repo]      push to the node, then the follower (the usual one)
+  push [repo]      push this repo to the node only (--all and --tags)
+  mirror           push to the private Forgejo follower only
   url [repo]       clone/push URL including credentials
 
 Port is $PORT (override with CHOIR_PORT). Runbook: scripts/flip/RUNBOOK.md

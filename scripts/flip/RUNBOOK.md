@@ -61,10 +61,12 @@ git rev-parse HEAD     # must equal the oid under refs/heads/main
 
    The oid in the view carries codec byte `11` (git oid) — a bare
    BLAKE3 digest there means something bypassed the git path.
-4. Repoint the follower. `scripts/push_mirror.sh` keeps working
-   unchanged (it rsyncs the working repo and pushes box-locally); after
-   the flip its input is the choir node's content, not the other way
-   round. Do not add a push from Forgejo back to the node.
+4. Repoint the follower: from here on use `sh scripts/choirctl sync`,
+   which pushes to the node first and the Forgejo mirror second, and
+   stops before the mirror if the canonical push failed — so the
+   follower can never get ahead of the node. `push` and `mirror` remain
+   available separately. Do not add a push from Forgejo back to the
+   node (D21 single-canonical: one direction, never dual-write).
 
 ## Rollback
 
