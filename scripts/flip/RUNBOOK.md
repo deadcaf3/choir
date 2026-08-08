@@ -72,8 +72,13 @@ The flip is reversible and cheap: the Forgejo mirror still holds every
 ref, and the bundle cron holds a daily copy.
 
 ```sh
-launchctl bootout gui/$(id -u)/com.choir.node     # stop the daemon
+sh scripts/choirctl stop         # unload it for this boot only
+sh scripts/choirctl uninstall    # unload it and remove the LaunchAgent
 ```
+
+`stop` alone is not permanent: the plist stays in `~/Library/LaunchAgents`,
+so launchd starts the daemon again at the next login. `uninstall` removes
+it. Neither touches `~/.choir`.
 
 Nothing is lost by stopping: `~/.choir/repos` and the op log at
 `~/.choir/repos/.choir/ops.jsonl` persist, and the daemon replays the

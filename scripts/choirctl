@@ -34,8 +34,21 @@ status)
   ;;
 
 stop)
+  # Unloads for this boot only: the plist stays in LaunchAgents, so
+  # launchd starts it again at next login. Use uninstall to end it.
   launchctl bootout "gui/$(id -u)/$LABEL"
-  echo "stopped $LABEL (data kept in $STATE; 'install' brings it back)"
+  echo "stopped $LABEL — but it returns at next login"
+  echo "to end it for good: sh scripts/choirctl uninstall"
+  ;;
+
+uninstall)
+  # Stop it and remove the plist, so it does not come back. Data is
+  # deliberately kept: $STATE holds the keys, the repos, and the op log.
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
+  echo "uninstalled $LABEL (agent unloaded, plist removed)"
+  echo "kept: $STATE — keys, repos and the op log"
+  echo "to erase that too, by hand: rm -rf $STATE"
   ;;
 
 push)
@@ -64,7 +77,8 @@ sh scripts/choirctl <command>
   install [repo]   build + mint secrets + load the supervised daemon
   status           is it running, is auth on, what does the view say
   logs [n]         last n lines of the daemon log
-  stop             unload the daemon (data kept)
+  stop             unload it for now (it returns at next login)
+  uninstall        unload it and remove the agent (data kept)
 
   push [repo]      push this repo to the node (--all and --tags)
   mirror           push to the private Forgejo follower
