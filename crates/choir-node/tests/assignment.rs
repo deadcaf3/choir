@@ -145,8 +145,10 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
+    // Exclusion is by operator now, and an unprefixed name is its own
+    // operator, so a pool of only the requester still assigns nobody.
     assert!(
-        resp["assignment_error"].as_str().unwrap().contains("nobody but the requester"),
+        resp["assignment_error"].as_str().unwrap().contains("nobody outside"),
         "{resp}"
     );
 
@@ -350,6 +352,99 @@ fn protected_refs_gate_self_named_reviewers_per_ref() {
         resp["error"].as_str().unwrap().contains("unreadable"),
         "{resp}"
     );
+
+    node.unblock();
+}
+
+#[test]
+fn the_draw_excludes_the_requesters_whole_operator_not_just_their_name() {
+    // The multi-operator case, which is the normal one. Excluding only
+    // the requester's own name lets an operator running several agents
+    // satisfy two-person integrity by themselves, and manufacture more
+    // agreement by registering more agents — the Sybil move D24 says must
+    // be blocked at the operator level.
+    let work = std::env::temp_dir().join(format!("choir-node-operator-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let pool_file = work.join("reviewers");
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .unwrap()
+            .with_reviewer_pool(pool_file.clone()),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let post = |channel: &str, op: &ViewOp| {
+        curl(&[
+            "-X", "POST", "-d", &submit_body(&author, channel, op),
+            &format!("{api}/submit"),
+        ])
+    };
+
+    // alice runs three agents; bob and carol run one each.
+    std::fs::write(
+        &pool_file,
+        "# operator/agent\nalice/one\nalice/two\nalice/three\nbob/one\ncarol/one\n",
+    )
+    .unwrap();
+
+    // Twenty draws from alice: never a sibling, and never two from the
+    // same operator. One run could pass by luck; twenty could not.
+    for i in 0..20 {
+        let id = format!("op-{i}");
+        let (code, resp) = post("alice/two", &request(&id, id.as_bytes()));
+        assert_eq!(code, 200, "{resp}");
+        let drawn: Vec<String> =
+            serde_json::from_value(resp["reviewers"].clone()).expect("reviewers");
+        assert_eq!(drawn.len(), 2, "{resp}");
+        for r in &drawn {
+            assert!(
+                !r.starts_with("alice/"),
+                "drew the requester's own operator: {drawn:?}"
+            );
+        }
+        let operators: std::collections::BTreeSet<&str> =
+            drawn.iter().map(|r| r.split('/').next().unwrap()).collect();
+        assert_eq!(operators.len(), 2, "two seats, one operator: {drawn:?}");
+    }
+
+    // Only one other operator available: draw one rather than two from
+    // the same operator. Under-assigned and visible beats independent-
+    // looking and false.
+    std::fs::write(&pool_file, "alice/one\nalice/two\nbob/one\nbob/two\n").unwrap();
+    let (code, resp) = post("alice/one", &request("op-thin", b"thin"));
+    assert_eq!(code, 200, "{resp}");
+    let drawn: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).expect("reviewers");
+    assert_eq!(drawn, ["bob/one"], "should not double up on bob: {resp}");
+
+    // A pool that is entirely the requester's operator assigns nobody,
+    // and says why.
+    std::fs::write(&pool_file, "alice/one\nalice/two\n").unwrap();
+    let (code, resp) = post("alice/one", &request("op-none", b"none"));
+    assert_eq!(code, 200, "{resp}");
+    assert!(
+        resp["assignment_error"].as_str().unwrap().contains("alice"),
+        "{resp}"
+    );
+
+    // Unprefixed names keep behaving as before: each is its own operator,
+    // so a flat pool is unchanged by namespacing existing.
+    std::fs::write(&pool_file, "ana\nbot\ncarol\n").unwrap();
+    let (code, resp) = post("carol", &request("op-flat", b"flat"));
+    assert_eq!(code, 200, "{resp}");
+    let drawn: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).expect("reviewers");
+    assert_eq!(drawn, ["ana", "bot"], "{resp}");
 
     node.unblock();
 }

@@ -16,6 +16,7 @@
 //! covers the exact bytes the author serialized; re-encoding through a
 //! JSON tree could legally reorder/respace them and break verification.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use choir_identity::{ActorKey, Registry};
@@ -51,6 +52,19 @@ fn seed_from_clock() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0x9e37_79b9_7f4a_7c15, |d| d.as_nanos() as u64)
         | 1
+}
+
+/// The operator a reviewer name belongs to: the part before the first
+/// `/` in `operator/agent`, or the whole name when it carries no prefix.
+///
+/// An unprefixed name is its own operator, which keeps a flat pool
+/// behaving exactly as it did before namespacing existed. The prefix is
+/// asserted by the node operator in the trusted-keys file, never by the
+/// agent — an agent cannot claim a different one, because the channel
+/// binding refuses any channel that is not the name bound to its key.
+/// Without that binding the prefix would be self-declared and worthless.
+fn operator_of(name: &str) -> &str {
+    name.split_once('/').map_or(name, |(op, _)| op)
 }
 
 /// FNV-1a, so two reviews drawn in the same nanosecond still diverge.
@@ -665,40 +679,69 @@ impl Platform {
     }
 
     /// Draws reviewers for unassigned review `id` and records them with
-    /// a node-signed op. Candidates are the pool minus `requester`;
-    /// [`ASSIGNMENT_SIZE`] are drawn, or all of them if the pool is
-    /// smaller (a one-person pool still beats self-selection).
+    /// a node-signed op.
+    ///
+    /// Candidates are the pool minus everyone sharing the requester's
+    /// **operator**, and the draw takes at most one reviewer per operator
+    /// so [`ASSIGNMENT_SIZE`] reviewers means that many *independent*
+    /// ones.
+    ///
+    /// Excluding only the requester's own name was the original rule and
+    /// it does not survive the multi-operator case, which is the normal
+    /// one: an operator running three agents in the pool satisfies
+    /// two-person integrity by themselves, and can manufacture more
+    /// agreement by registering more agents. That is the Sybil move D24
+    /// says must be blocked at the operator level, so the exclusion has
+    /// to be at that level too.
+    ///
+    /// A pool that cannot supply [`ASSIGNMENT_SIZE`] distinct operators
+    /// draws fewer rather than doubling up — a visibly under-assigned
+    /// review beats one that looks independent and is not.
     ///
     /// # Errors
     ///
-    /// No pool configured, an unreadable or empty-after-exclusion pool,
-    /// or the sequencer's rejection reason (e.g. the review was assigned
-    /// by a concurrent request).
+    /// No pool configured, an unreadable pool, no candidate from another
+    /// operator, or the sequencer's rejection reason (e.g. the review was
+    /// assigned by a concurrent request).
     pub fn assign_reviewers(&self, id: &str, requester: &str) -> Result<Vec<String>, String> {
         let path = self.reviewer_pool.as_ref().ok_or("no reviewer pool configured")?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("read reviewer pool: {e}"))?;
+        let mine = operator_of(requester);
         let mut pool: Vec<String> = text
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#') && *l != requester)
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && operator_of(l) != mine)
             .map(String::from)
             .collect();
         if pool.is_empty() {
-            return Err("reviewer pool has nobody but the requester".to_string());
+            return Err(format!(
+                "reviewer pool has nobody outside {mine:?}, the requester's operator"
+            ));
         }
         // Partial Fisher-Yates with a hand-rolled xorshift (no rand
         // dep). The draw is node-side and recorded in the log, so
         // replay reproduces it from the op, not from this seed.
         let mut state = seed_from_clock() ^ fnv1a(id.as_bytes());
-        let take = ASSIGNMENT_SIZE.min(pool.len());
-        for i in 0..take {
+        let mut drawn: Vec<String> = Vec::new();
+        // Owned, not borrowed: the shuffle mutates `pool` under it.
+        let mut seen_operators: BTreeSet<String> = BTreeSet::new();
+        seen_operators.insert(mine.to_string());
+        for i in 0..pool.len() {
+            if drawn.len() == ASSIGNMENT_SIZE {
+                break;
+            }
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             let j = i + (state as usize) % (pool.len() - i);
             pool.swap(i, j);
+            // One seat per operator: a second agent from an operator
+            // already drawn would add a name, not a second opinion.
+            if seen_operators.insert(operator_of(&pool[i]).to_string()) {
+                drawn.push(pool[i].clone());
+            }
         }
-        pool.truncate(take);
+        let mut pool = drawn;
         pool.sort();
 
         let payload = ViewOp::new(OpKind::AssignReviewers {
