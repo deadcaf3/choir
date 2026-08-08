@@ -9,6 +9,7 @@ members = [
     "crates/choir-queue",
     "crates/choir-spike",
     "crates/choir-store",
+    "crates/choir-view",
 ]
 
 [workspace.package]

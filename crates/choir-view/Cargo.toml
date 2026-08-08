@@ -1,0 +1,15 @@
+[package]
+name = "choir-view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+choir-hash = { path = "../choir-hash" }
+choir-oplog = { path = "../choir-oplog" }
+choir-store = { path = "../choir-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
