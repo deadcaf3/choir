@@ -425,8 +425,12 @@ fn the_draw_excludes_the_requesters_whole_operator_not_just_their_name() {
     std::fs::write(&pool_file, "alice/one\nalice/two\nbob/one\nbob/two\n").unwrap();
     let (code, resp) = post("alice/one", &request("op-thin", b"thin"));
     assert_eq!(code, 200, "{resp}");
+    // One seat, and it is bob's — but *which* of bob's agents is a draw,
+    // not a property. Asserting the sample rather than the property is
+    // how a test passes on one seed and fails on the next.
     let drawn: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).expect("reviewers");
-    assert_eq!(drawn, ["bob/one"], "should not double up on bob: {resp}");
+    assert_eq!(drawn.len(), 1, "should not double up on bob: {resp}");
+    assert!(drawn[0].starts_with("bob/"), "{resp}");
 
     // A pool that is entirely the requester's operator assigns nobody,
     // and says why.

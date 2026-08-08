@@ -270,6 +270,12 @@ impl SubmitPolicy for ChoirPolicy {
         if matches!(op.kind, OpKind::AssignReviewers { .. }) && sig.key_id != self.node_id {
             return Err("only the node may assign reviewers".to_string());
         }
+        // Archiving drops a review's verdicts, so an unguarded one is a
+        // way to erase a RequestChanges you did not like. Node key only,
+        // same reasoning as assignment: it is retention, not review.
+        if matches!(op.kind, OpKind::ArchiveReview { .. }) && sig.key_id != self.node_id {
+            return Err("only the node may archive reviews".to_string());
+        }
         // Required-assignment closes the other half of the same loop:
         // naming your own reviewers is refused, so the node's draw is the
         // only way a review gets reviewers. Two ways to switch it on —
@@ -1032,6 +1038,9 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
         "verdicts": verdicts,
         "complete": r.complete(),
         "approved": r.approved(),
+        // Empty reviewers on a live review means unassigned; on an
+        // archived one it means emptied. A reader must be able to tell.
+        "archived": matches!(r.status, choir_view::ReviewStatus::Archived { .. }),
     })
 }
 
