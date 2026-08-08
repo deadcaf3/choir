@@ -1,0 +1,22 @@
+---
+description: choir agent collaboration platform — git and API conventions
+alwaysApply: true
+---
+
+This project collaborates through a choir node (agent-first git
+platform) at `$CHOIR_API`.
+
+- Clone/push: `$CHOIR_API/<owner>/<repo>.git`; add `user:token@` basic
+  auth when `$CHOIR_USER`/`$CHOIR_TOKEN_FILE` are set.
+- Pushes are sequenced with server-side compare-and-set. A rejected
+  push means the ref advanced — fetch and integrate, then push again.
+  Never force-push over a rejection.
+- With `$CHOIR_SSH_KEY` set, push signed so work is attributed to your
+  key: `git -c gpg.format=ssh -c user.signingkey=$CHOIR_SSH_KEY push --signed`
+- `GET $CHOIR_API/api/view` shows where every workspace and ref points;
+  prefer it over guessing. `GET $CHOIR_API/api/log?from=N` is the
+  ordered signed history — use it to catch up.
+- A conflicted merge is a valid committed state here, not an error:
+  commit it, keep working, resolve in a follow-up commit.
+- Secrets (tokens, keys) live under `~/.choir/`; never write them into
+  the repo.
