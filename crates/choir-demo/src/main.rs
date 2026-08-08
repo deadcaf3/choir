@@ -176,7 +176,7 @@ fn main() {
     let op = ViewOp::new(OpKind::SetWorkspaceHead {
         workspace: "bob".into(),
         commit: c_conflict.clone(),
-        prev: Some(c_base.clone()),
+        prev: Some(c_base),
     })
     .to_payload();
     let sig = bob.sign_submission("bob", &op);

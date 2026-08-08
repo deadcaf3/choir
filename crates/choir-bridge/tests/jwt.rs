@@ -6,7 +6,7 @@ use choir_bridge::github::app_jwt;
 
 fn b64url_decode(s: &str) -> Vec<u8> {
     let table: std::collections::HashMap<u8, u32> =
-        (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9').chain([b'-', b'_'])
+        (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9').chain(*b"-_")
             .enumerate()
             .map(|(i, c)| (c, i as u32))
             .collect();

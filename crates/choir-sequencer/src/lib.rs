@@ -20,7 +20,9 @@
 //! ```
 
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness, FORMAT_VERSION};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -92,9 +94,29 @@ enum Command {
 #[derive(Clone)]
 pub struct SequencerHandle {
     tx: mpsc::Sender<Command>,
+    poisoned: Arc<AtomicBool>,
 }
 
 impl SequencerHandle {
+    /// Whether a durability barrier has failed, after which this writer
+    /// refuses every submission.
+    ///
+    /// Exposed rather than acted on. The sequencer's job is to say that it
+    /// can no longer promise durability; deciding what a *node* does about
+    /// that — keep serving reads, exit so supervision restarts it, page
+    /// someone — is a lifecycle policy, and a library linked by every
+    /// embedder including the test suite is the wrong place to make it.
+    ///
+    /// The daemon polls this and exits, so launchd's `KeepAlive` restarts
+    /// into the same replay path a `kill -9` already exercises. Without an
+    /// observer, fail-closed is invisible to supervision: the process
+    /// stays up refusing everything, and a transient fsync error becomes
+    /// permanent downtime that looks like uptime.
+    #[must_use]
+    pub fn durability_failed(&self) -> bool {
+        self.poisoned.load(Ordering::Relaxed)
+    }
+
     /// Blocks until the sequencer has durably ordered the op. Unsigned
     /// convenience wrapper over [`SequencerHandle::try_submit`]; only
     /// valid under a policy that admits unsigned ops.
@@ -163,6 +185,12 @@ impl SequencerHandle {
         // is answered immediately while an admitted op waits for the
         // barrier. Separate channels keep the result order matching the
         // input order by construction rather than by assumption.
+        // The collect is the whole mechanism, not an accident: it forces
+        // every submission to be SENT before the first reply is awaited.
+        // Consumed lazily this would send one, block on its reply, send
+        // the next -- exactly the per-op blocking that made the batch
+        // endpoint pay one fsync per op.
+        #[allow(clippy::needless_collect)]
         let waiting: Vec<_> = subs
             .into_iter()
             .map(|sub| {
@@ -184,6 +212,9 @@ impl SequencerHandle {
 /// the repo's [`OpLog`].
 pub struct Sequencer {
     tx: mpsc::Sender<Command>,
+    /// Set by the writer when a durability barrier fails; read by the
+    /// daemon through [`SequencerHandle::durability_failed`].
+    poisoned: Arc<AtomicBool>,
     thread: Option<JoinHandle<Box<dyn OpLog>>>,
 }
 
@@ -197,6 +228,8 @@ impl Sequencer {
     /// through `policy` before it is ordered.
     pub fn spawn_with_policy(mut log: Box<dyn OpLog>, mut policy: Box<dyn SubmitPolicy>) -> Self {
         let (tx, rx) = mpsc::channel::<Command>();
+        let poisoned = Arc::new(AtomicBool::new(false));
+        let writer_flag = poisoned.clone();
         let thread = std::thread::spawn(move || {
             // Ordered, then made durable, then acknowledged. Everything
             // admitted in one pass through the loop shares a single
@@ -306,6 +339,9 @@ impl Sequencer {
                 };
                 if durable.is_err() {
                     durability_failed = true;
+                    // Publish before replying, so an observer that wakes
+                    // on a client's error already sees the cause.
+                    writer_flag.store(true, Ordering::Relaxed);
                 }
                 for (reply, accepted) in acks.drain(..) {
                     let answer = match &durable {
@@ -337,6 +373,7 @@ impl Sequencer {
         });
         Self {
             tx,
+            poisoned,
             thread: Some(thread),
         }
     }
@@ -345,6 +382,7 @@ impl Sequencer {
     pub fn handle(&self) -> SequencerHandle {
         SequencerHandle {
             tx: self.tx.clone(),
+            poisoned: self.poisoned.clone(),
         }
     }
 

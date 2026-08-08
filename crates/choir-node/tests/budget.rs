@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use choir_hash::ContentHash;
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::{hex_decode, hex_encode};
-use choir_oplog::{OpEntry, OpLog, Witness, FORMAT_VERSION};
+use choir_oplog::{OpEntry, Witness, FORMAT_VERSION};
 use choir_view::{OpKind, View, ViewOp};
 
 /// Iterations per stage. Each stage is sub-microsecond to low-microsecond,
@@ -151,7 +151,8 @@ fn submit_path_budget() {
             "View::apply",
             bench(|| {
                 let mut v = View::default();
-                std::hint::black_box(v.apply(std::hint::black_box(&op)).expect("applies"));
+                v.apply(std::hint::black_box(&op)).expect("applies");
+                std::hint::black_box(&v);
             }),
         ),
         (

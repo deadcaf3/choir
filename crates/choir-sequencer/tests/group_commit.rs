@@ -310,12 +310,32 @@ fn a_failed_barrier_stops_the_writer_accepting() {
         );
     }
 
+    // The state is observable, which is what lets the daemon exit rather
+    // than stay up refusing everything where supervision cannot see it.
+    assert!(
+        handle.durability_failed(),
+        "a failed barrier must be visible to an observer, not only to submitters"
+    );
+
     let log = sequencer.shutdown();
     assert_eq!(
         log.len(),
         1,
         "only the batch that was in flight when the barrier failed may reach the log"
     );
+}
+
+/// The flag stays clear on a healthy writer, so an observer that exits on
+/// it cannot take a node down for no reason.
+#[test]
+fn a_healthy_writer_never_reports_a_durability_failure() {
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let handle = sequencer.handle();
+    for i in 0..50 {
+        handle.submit("ws", format!("op{i}").into_bytes());
+    }
+    assert!(!handle.durability_failed());
+    sequencer.shutdown();
 }
 
 /// A batch that admitted nothing must not touch the disk. Pure-rejection

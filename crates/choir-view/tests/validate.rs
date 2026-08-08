@@ -168,7 +168,7 @@ fn validate_agrees_with_apply_on_every_op_shape() {
 #[test]
 fn validate_never_mutates() {
     for (name, view, op) in cases() {
-        let mut probe = view.clone();
+        let probe = view.clone();
         let _ = probe.validate(&op);
         assert_eq!(probe, view, "{name}: validate mutated the view");
     }

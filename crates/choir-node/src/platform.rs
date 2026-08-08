@@ -799,6 +799,19 @@ impl Platform {
         Ok(pool)
     }
 
+    /// Whether the sequencer has failed a durability barrier and stopped
+    /// accepting.
+    ///
+    /// The daemon's accept loop polls this so a node that can no longer
+    /// persist exits rather than staying up refusing everything. Process
+    /// supervision only restarts a process that *exits*, so without this
+    /// a transient fsync error is permanent downtime that looks like
+    /// uptime.
+    #[must_use]
+    pub fn durability_failed(&self) -> bool {
+        self.handle.durability_failed()
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {
@@ -1185,7 +1198,7 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
 
 /// Decodes lowercase/uppercase hex; `None` on any bad input.
 pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
