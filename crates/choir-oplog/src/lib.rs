@@ -74,13 +74,24 @@ impl OpEntry {
         ContentHash::blake3(&bytes)
     }
 
-    /// Hash of the entry with `author_sig` blanked — what the author
-    /// signs, so the signature never covers itself.
+    /// What the author signs: a hash over `(workspace, payload)` only.
+    ///
+    /// The author asserts *what* they submitted, not *where* it landed —
+    /// `seq`/`parent` are assigned by the sequencer after signing (and
+    /// are covered by witnesses from Phase 2). Replaying a signed op at
+    /// a different position is rejected by the CAS `prev` carried inside
+    /// the payload, not by the signature.
     pub fn signing_hash(&self) -> ContentHash {
-        let mut unsigned = self.clone();
-        unsigned.author_sig = None;
-        unsigned.content_hash()
+        signing_hash(&self.workspace, &self.payload)
     }
+}
+
+/// Hash over an author's submission content — see
+/// [`OpEntry::signing_hash`]. Standalone so clients can sign before the
+/// sequencer has built the entry.
+pub fn signing_hash(workspace: &str, payload: &[u8]) -> ContentHash {
+    let canonical = serde_json::to_vec(&(workspace, payload)).expect("tuple always serializes");
+    ContentHash::blake3(&canonical)
 }
 
 /// Failure modes of an [`OpLog`] backend.

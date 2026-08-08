@@ -33,9 +33,15 @@ fn sign_verify_roundtrip_and_tamper_detection() {
         registry.verify_entry(&tampered),
         Err(IdentityError::BadSignature)
     );
+    let mut rews = e.clone();
+    rews.workspace = "someone-else".into();
+    assert_eq!(registry.verify_entry(&rews), Err(IdentityError::BadSignature));
+
+    // seq/parent are deliberately NOT covered: the sequencer assigns
+    // them after signing (witnesses cover placement from Phase 2).
     let mut reseq = e.clone();
     reseq.seq = 7;
-    assert_eq!(registry.verify_entry(&reseq), Err(IdentityError::BadSignature));
+    assert!(registry.verify_entry(&reseq).is_ok());
 }
 
 #[test]

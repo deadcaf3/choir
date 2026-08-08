@@ -9,3 +9,7 @@ choir-oplog = { path = "../choir-oplog" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+choir-identity = { path = "../choir-identity" }
+choir-view = { path = "../choir-view" }

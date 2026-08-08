@@ -88,16 +88,22 @@ impl ActorKey {
         ContentHash::blake3(&self.public_key_bytes())
     }
 
+    /// Signs a submission's content — `(workspace, payload)` — before
+    /// the sequencer assigns it a position. See
+    /// [`choir_oplog::signing_hash`] for what is and isn't covered.
+    pub fn sign_submission(&self, workspace: &str, payload: &[u8]) -> Witness {
+        let hash = choir_oplog::signing_hash(workspace, payload);
+        let sig = self.signing.sign(hash.to_hex().as_bytes());
+        Witness {
+            key_id: self.actor_id().to_hex(),
+            signature: sig.to_bytes().to_vec(),
+        }
+    }
+
     /// Signs `entry` in place: sets `author_sig` over the entry's
     /// [`OpEntry::signing_hash`]. Any existing signature is replaced.
     pub fn sign_entry(&self, entry: &mut OpEntry) {
-        entry.author_sig = None;
-        let hash = entry.signing_hash();
-        let sig = self.signing.sign(hash.to_hex().as_bytes());
-        entry.author_sig = Some(Witness {
-            key_id: self.actor_id().to_hex(),
-            signature: sig.to_bytes().to_vec(),
-        });
+        entry.author_sig = Some(self.sign_submission(&entry.workspace, &entry.payload));
     }
 }
 
@@ -137,13 +143,29 @@ impl Registry {
     /// the entry (tampered entry or wrong key).
     pub fn verify_entry(&self, entry: &OpEntry) -> Result<ContentHash, IdentityError> {
         let sig = entry.author_sig.as_ref().ok_or(IdentityError::Unsigned)?;
+        self.verify_submission(&entry.workspace, &entry.payload, sig)
+    }
+
+    /// Verifies a signature over submission content — the sequencer-side
+    /// check before a position is assigned. Returns the author's id.
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Registry::verify_entry`], minus
+    /// [`IdentityError::Unsigned`].
+    pub fn verify_submission(
+        &self,
+        workspace: &str,
+        payload: &[u8],
+        sig: &Witness,
+    ) -> Result<ContentHash, IdentityError> {
         let key = self
             .keys
             .get(&sig.key_id)
             .ok_or_else(|| IdentityError::UnknownKey(sig.key_id.clone()))?;
         let signature = Signature::from_slice(&sig.signature)
             .map_err(|_| IdentityError::BadSignature)?;
-        let hash = entry.signing_hash();
+        let hash = choir_oplog::signing_hash(workspace, payload);
         key.verify(hash.to_hex().as_bytes(), &signature)
             .map_err(|_| IdentityError::BadSignature)?;
         Ok(ContentHash::blake3(&key.to_bytes()))
