@@ -145,6 +145,24 @@ pub enum OpKind {
         /// Expected current target (CAS).
         prev: Option<ContentHash>,
     },
+    /// Attach an intent/provenance record — task spec, plan, rationale
+    /// — to `subject` (D22 substrate; additive variant, wire-format
+    /// unchanged). The latest record per `(subject, kind)` wins in the
+    /// view; the full history stays in the log.
+    ///
+    /// `subject` is deliberately not bound to the submitting channel —
+    /// a shared living spec is written by many agents. Trusting *who*
+    /// wrote a record means reading the log entry's author.
+    RecordProvenance {
+        /// What the record is about: a workspace name, or any agreed
+        /// channel (e.g. a repo's shared spec).
+        subject: String,
+        /// Record type, e.g. `"task-spec"` or `"plan"`.
+        kind: String,
+        /// The record text (stored as-is; an empty body is a valid,
+        /// visible "withdrawn" state, not a deletion).
+        body: String,
+    },
 }
 
 /// A reviewer's answer to a review request.
@@ -204,6 +222,8 @@ pub enum ViewError {
     /// Review-op precondition failure (duplicate id, unknown review,
     /// or a reviewer not on the review's list).
     Review(String),
+    /// Provenance-record precondition failure (empty subject or kind).
+    Provenance(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -284,6 +304,8 @@ pub struct View {
     pub refs: BTreeMap<String, ContentHash>,
     /// Review id → review state (fan-out and verdicts).
     pub reviews: BTreeMap<String, ReviewState>,
+    /// Subject → record kind → latest body (D22 provenance records).
+    pub provenance: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl View {
@@ -359,6 +381,17 @@ impl View {
                 review
                     .verdicts
                     .insert(reviewer.clone(), (*verdict, note.clone()));
+            }
+            OpKind::RecordProvenance { subject, kind, body } => {
+                if subject.is_empty() || kind.is_empty() {
+                    return Err(ViewError::Provenance(
+                        "provenance subject and kind must be non-empty".to_string(),
+                    ));
+                }
+                self.provenance
+                    .entry(subject.clone())
+                    .or_default()
+                    .insert(kind.clone(), body.clone());
             }
             OpKind::DeleteRef { name, prev } => {
                 let actual = self.refs.get(name);

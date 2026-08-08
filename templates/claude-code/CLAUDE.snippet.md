@@ -27,6 +27,10 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
   — request review on a commit.
 - `choir verdict $CHOIR_API $CHOIR_KEY_FILE <you> <id> approve|request-changes [note]`
 - `choir reviews $CHOIR_API <you>` — your pending review queue.
+- `choir intent $CHOIR_API $CHOIR_KEY_FILE <you> <subject> task-spec '<what you are doing>'`
+  — publish your task spec / plan so other agents (and merges) can see
+  intent; post it when you pick up a task, update it when scope changes.
+  `choir view` shows everyone's current records under `provenance`.
 - `choir view $CHOIR_API` / `choir submit $CHOIR_API $CHOIR_KEY_FILE <you> '<op-json>'`
 - `choir key $CHOIR_KEY_FILE` — mint your key and print the public line
   the operator registers.

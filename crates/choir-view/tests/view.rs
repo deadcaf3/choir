@@ -214,3 +214,46 @@ fn review_fan_out_semantics() {
     assert_eq!(r.target.as_ref(), Some(&target));
     assert_eq!(r.verdicts.len(), 2);
 }
+
+#[test]
+fn provenance_records_latest_wins() {
+    let mut log = MemLog::new();
+    let record = |subject: &str, kind: &str, body: &str| {
+        ViewOp::new(OpKind::RecordProvenance {
+            subject: subject.into(),
+            kind: kind.into(),
+            body: body.into(),
+        })
+    };
+
+    // Empty subject or kind is rejected; the log stays clean.
+    assert!(matches!(
+        append_op(&mut log, "agent-1", record("", "task-spec", "x")),
+        Err(ViewError::Provenance(_))
+    ));
+    assert!(matches!(
+        append_op(&mut log, "agent-1", record("agent-1", "", "x")),
+        Err(ViewError::Provenance(_))
+    ));
+    assert_eq!(choir_oplog::OpLog::len(&log), 0);
+
+    // Records accumulate per (subject, kind); latest body wins.
+    append_op(&mut log, "agent-1", record("agent-1", "task-spec", "add auth")).unwrap();
+    append_op(&mut log, "agent-1", record("agent-1", "plan", "1. schema 2. api")).unwrap();
+    append_op(&mut log, "agent-2", record("repo/shared", "task-spec", "living spec v1")).unwrap();
+    append_op(&mut log, "agent-1", record("agent-1", "task-spec", "add auth + rate limit")).unwrap();
+
+    let view = View::materialize(&log).unwrap();
+    assert_eq!(view.provenance["agent-1"]["task-spec"], "add auth + rate limit");
+    assert_eq!(view.provenance["agent-1"]["plan"], "1. schema 2. api");
+    assert_eq!(view.provenance["repo/shared"]["task-spec"], "living spec v1");
+
+    // An empty body is a visible withdrawn state, not a deletion.
+    append_op(&mut log, "agent-2", record("repo/shared", "task-spec", "")).unwrap();
+    let view = View::materialize(&log).unwrap();
+    assert_eq!(view.provenance["repo/shared"]["task-spec"], "");
+
+    // Prefix replay shows the earlier spec — history is in the log.
+    let earlier = View::at(&log, 3).unwrap();
+    assert_eq!(earlier.provenance["agent-1"]["task-spec"], "add auth");
+}

@@ -112,6 +112,17 @@ fn cli_end_to_end() {
     let out = choir(&["submit", &api, key_file, "cli-agent", &op]);
     assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
 
+    // Intent record (D22): latest per (subject, kind) wins in the view.
+    let out = choir(&["intent", &api, key_file, "cli-agent", "cli-agent", "task-spec", "add auth"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    let out = choir(&["intent", &api, key_file, "cli-agent", "cli-agent", "task-spec", "add auth v2"]);
+    assert!(out.status.success());
+    let view = json(&choir(&["view", &api]));
+    assert_eq!(view["provenance"]["cli-agent"]["task-spec"], "add auth v2", "{view}");
+    // Empty subject is a view-semantics rejection → exit 1.
+    let out = choir(&["intent", &api, key_file, "cli-agent", "", "task-spec", "x"]);
+    assert_eq!(out.status.code(), Some(1));
+
     // A non-listed reviewer's verdict is rejected by view semantics → exit 1.
     let out = choir(&["verdict", &api, key_file, "stranger", "r1", "approve"]);
     assert_eq!(out.status.code(), Some(1));

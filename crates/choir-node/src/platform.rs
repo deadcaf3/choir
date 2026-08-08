@@ -313,7 +313,12 @@ impl Platform {
                     .iter()
                     .map(|(id, r)| (id.clone(), review_json(r)))
                     .collect();
-                let body = serde_json::json!({ "workspaces": ws, "refs": refs, "reviews": reviews });
+                let body = serde_json::json!({
+                    "workspaces": ws,
+                    "refs": refs,
+                    "reviews": reviews,
+                    "provenance": view.provenance,
+                });
                 (200, body.to_string())
             }
             // Pending queue for one reviewer: reviews that fanned out to

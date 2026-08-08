@@ -11,6 +11,7 @@
 //! choir submit <api> <key-file> <channel> '<op-json>'
 //! choir review <api> <key-file> <channel> <id> <git-oid> <reviewer>...
 //! choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+//! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 //! choir reviews <api> <reviewer>
 //! choir view <api>
 //! ```
@@ -27,6 +28,7 @@ const USAGE: &str = "usage:
   choir submit <api> <key-file> <channel> '<op-json>'
   choir review <api> <key-file> <channel> <id> <git-oid> <reviewer>...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+  choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
   choir reviews <api> <reviewer>
   choir view <api>";
 
@@ -148,6 +150,16 @@ fn main() {
             // The channel is the reviewer name: admission policy rejects
             // any verdict whose reviewer differs from the signed channel.
             submit(api, key_file, reviewer, &op);
+        }
+        ["intent", api, key_file, channel, subject, kind, body] => {
+            // D22 provenance record: task spec / plan / rationale for
+            // `subject`; latest per (subject, kind) wins in the view.
+            let op = ViewOp::new(OpKind::RecordProvenance {
+                subject: (*subject).into(),
+                kind: (*kind).into(),
+                body: (*body).into(),
+            });
+            submit(api, key_file, channel, &op);
         }
         ["reviews", api, reviewer] => {
             let (status, resp) =
