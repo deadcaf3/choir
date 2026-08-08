@@ -109,6 +109,12 @@ dependencies = [
 name = "choir-node"
 version = "0.0.1"
 dependencies = [
+ "choir-hash",
+ "choir-identity",
+ "choir-oplog",
+ "choir-sequencer",
+ "choir-view",
+ "serde_json",
  "tiny_http",
 ]
 

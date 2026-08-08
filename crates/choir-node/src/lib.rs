@@ -5,11 +5,17 @@
 //! over git plumbing, and platform behavior (sequencer, queue, identity)
 //! layers on top. ForgeMark benchmarks this surface directly.
 //!
-//! **No authentication yet**: L8 identity is a later phase; run only on
-//! localhost or behind an SSH tunnel until then.
+//! Authentication is per-actor basic auth ([`AuthTable`], `--auth-file`);
+//! the platform API ([`platform`]) additionally verifies ed25519 op
+//! signatures. The bind stays loopback-only: beyond localhost you still
+//! need TLS or an SSH tunnel so tokens aren't sent in the clear.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+pub mod platform;
+
+pub use platform::Platform;
 
 /// Per-actor credentials: username → token, checked as HTTP basic auth
 /// (the standard git-over-HTTP shape; every forge client speaks it).
@@ -25,6 +31,7 @@ pub struct Node {
     server: std::sync::Arc<tiny_http::Server>,
     port: u16,
     auth: std::sync::Arc<Option<AuthTable>>,
+    platform: Option<std::sync::Arc<Platform>>,
 }
 
 impl Node {
@@ -63,7 +70,14 @@ impl Node {
             server: std::sync::Arc::new(server),
             port,
             auth: std::sync::Arc::new(auth),
+            platform: None,
         })
+    }
+
+    /// Enables the platform API (`/api/submit`, `/api/view`) backed by
+    /// `platform`. Call before [`Node::serve_forever`].
+    pub fn enable_platform(&mut self, platform: Platform) {
+        self.platform = Some(std::sync::Arc::new(platform));
     }
 
     /// Port the daemon is listening on.
@@ -118,6 +132,7 @@ impl Node {
         for request in self.server.incoming_requests() {
             let root = self.root.clone();
             let auth = self.auth.clone();
+            let platform = self.platform.clone();
             std::thread::spawn(move || {
                 if let Some(table) = auth.as_ref() {
                     if !authorized(table, &request) {
@@ -133,6 +148,10 @@ impl Node {
                         let _ = request.respond(response);
                         return;
                     }
+                }
+                if request.url().starts_with("/api/") {
+                    let _ = handle_api(platform.as_deref(), request);
+                    return;
                 }
                 let _ = handle(root, request);
             });
@@ -211,6 +230,30 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// Routes one `/api/...` request to the platform (503 when disabled).
+fn handle_api(
+    platform: Option<&Platform>,
+    mut request: tiny_http::Request,
+) -> std::io::Result<()> {
+    let (status, body) = match platform {
+        Some(p) => {
+            let mut req_body = Vec::new();
+            request.as_reader().read_to_end(&mut req_body)?;
+            let method = request.method().as_str().to_string();
+            let path = request.url().to_string();
+            p.handle_api(&method, &path, &req_body)
+        }
+        None => (503, r#"{"error":"platform API not enabled"}"#.to_string()),
+    };
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        );
+    request.respond(response)
 }
 
 /// Bridges one HTTP request to `git http-backend` CGI.
