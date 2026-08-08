@@ -68,6 +68,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "choir-spike"
+version = "0.0.1"
+dependencies = [
+ "choir-merge",
+ "choir-oplog",
+ "choir-sequencer",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

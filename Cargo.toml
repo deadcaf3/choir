@@ -4,6 +4,7 @@ members = [
     "crates/choir-oplog",
     "crates/choir-sequencer",
     "crates/choir-merge",
+    "crates/choir-spike",
 ]
 
 [workspace.package]
