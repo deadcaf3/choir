@@ -19,6 +19,8 @@
 //! - `label`: ref namespace prefix, e.g. `github/git/git`.
 //! - `--once`: single sync instead of a 60 s loop.
 
+use choir_bridge::github;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -246,6 +248,28 @@ fn main() {
         let key_file = args.get(1).expect("--pubkey needs a key file path");
         let key = load_or_create_key(key_file);
         println!("{}", hex_encode(&key.public_key_bytes()));
+        return;
+    }
+    // `choir-bridge post-status <app-id> <pem-path> <owner/repo> <sha> <state> <description>`
+    // Write-back v0: one commit status through the GitHub App flow.
+    if args.first().map(String::as_str) == Some("post-status") {
+        let [app_id, pem, repo, sha, state, desc] = match &args[1..] {
+            [a, b, c, d, e, f] => [a, b, c, d, e, f],
+            _ => {
+                eprintln!("usage: choir-bridge post-status <app-id> <pem-path> <owner/repo> <sha> <state> <description>");
+                std::process::exit(2);
+            }
+        };
+        let result = github::app_jwt(app_id, Path::new(pem))
+            .and_then(|jwt| github::installation_token(&jwt))
+            .and_then(|token| github::post_status(&token, repo, sha, state, desc));
+        match result {
+            Ok(()) => println!("status posted: {repo}@{sha} -> {state}"),
+            Err(e) => {
+                eprintln!("post-status failed: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     let [upstream, mirror, api_base, key_file, label] = match args.as_slice() {
