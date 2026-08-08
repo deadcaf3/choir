@@ -75,9 +75,14 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
     let mut registry = Registry::new();
     registry.register(&author.public_key_bytes()).unwrap();
 
+    // The node's own key, kept so the test can sign the ops only the node
+    // is allowed to author (assignment, archiving).
+    let node_secret = ActorKey::generate().secret_bytes();
+    let node_key = ActorKey::from_secret_bytes(&node_secret);
+
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
     node.enable_platform(
-        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+        Platform::start(registry, Box::new(MemLog::new()), node_key)
             .unwrap()
             .with_reviewer_pool(pool_file)
             .with_protected_refs(refs_file)
@@ -222,11 +227,70 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         "main must still be where the one real approval left it"
     );
 
+    // An ARCHIVED approval still authorizes a landing. This is the whole
+    // point of keeping (target_ref, target, approved) when a review's
+    // verdicts are pruned: retention must not quietly become an expiry
+    // policy on approvals.
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d",
+        &submit_body(&author, "carol", &review("land-3", &c3, "agents/demo.git:refs/heads/main")),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+    let drawn3: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).expect("reviewers");
+    for who in &drawn3 {
+        let verdict = ViewOp::new(OpKind::PostVerdict {
+            id: "land-3".into(),
+            reviewer: who.clone(),
+            verdict: Verdict::Approve,
+            note: "ok".into(),
+        });
+        let (code, resp) = curl(&[
+            "-X", "POST", "-d", &submit_body(&author, who, &verdict),
+            &format!("{api}/submit"),
+        ]);
+        assert_eq!(code, 200, "{resp}");
+    }
+
+    // Nobody but the node may archive -- otherwise archiving is a way to
+    // erase a RequestChanges you did not like.
+    let archive = ViewOp::new(OpKind::ArchiveReview { id: "land-3".into() });
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&author, "carol", &archive),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("only the node may archive"),
+        "{resp}"
+    );
+
+    let node_key = ActorKey::from_secret_bytes(&node_secret);
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&node_key, "node/archive", &archive),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(view["reviews"]["land-3"]["archived"], true, "{view}");
+    assert_eq!(view["reviews"]["land-3"]["approved"], true, "{view}");
+    assert_eq!(view["reviews"]["land-3"]["verdicts"], serde_json::json!({}), "{view}");
+
+    // ...and the push it authorized still lands, with the verdicts gone.
+    let out = git(&clone, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        out.status.success(),
+        "archived approval failed to authorize: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
+
     // A protected ref cannot be deleted, reviewed or not.
     assert!(
         !git(&clone, &["push", "-q", "origin", ":main"]).status.success(),
         "a protected ref must not be deletable"
     );
+    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
     assert!(refs()["agents/demo.git:refs/heads/main"].is_string());
 
     node.unblock();

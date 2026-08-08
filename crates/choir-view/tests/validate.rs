@@ -110,6 +110,34 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
     push("verdict on unknown review", &populated, OpKind::PostVerdict {
         id: "ghost".into(), reviewer: "ana".into(), verdict: Verdict::Approve, note: String::new() });
 
+    // Archiving, and the states around it. These preconditions moved into
+    // `validate` when the archiving work merged, so they need the same
+    // agreement guarantee as everything else.
+    let archived = {
+        let mut v = populated.clone();
+        v.apply(&ViewOp::new(OpKind::PostVerdict {
+            id: "rev".into(), reviewer: "ana".into(),
+            verdict: Verdict::Approve, note: String::new() })).expect("setup");
+        v.apply(&ViewOp::new(OpKind::ArchiveReview { id: "rev".into() })).expect("setup");
+        v
+    };
+    let complete = {
+        let mut v = populated.clone();
+        v.apply(&ViewOp::new(OpKind::PostVerdict {
+            id: "rev".into(), reviewer: "ana".into(),
+            verdict: Verdict::Approve, note: String::new() })).expect("setup");
+        v
+    };
+    push("archive a complete review", &complete, OpKind::ArchiveReview { id: "rev".into() });
+    push("archive an incomplete review", &populated, OpKind::ArchiveReview { id: "rev".into() });
+    push("archive an unassigned review", &populated, OpKind::ArchiveReview { id: "unassigned".into() });
+    push("archive an unknown review", &populated, OpKind::ArchiveReview { id: "ghost".into() });
+    push("archive an archived review", &archived, OpKind::ArchiveReview { id: "rev".into() });
+    push("verdict on an archived review", &archived, OpKind::PostVerdict {
+        id: "rev".into(), reviewer: "ana".into(), verdict: Verdict::Approve, note: String::new() });
+    push("assign an archived review", &archived, OpKind::AssignReviewers {
+        id: "rev".into(), reviewers: vec!["bo".into()] });
+
     // Provenance.
     push("provenance ok", &populated, OpKind::RecordProvenance {
         subject: "ws".into(), kind: "plan".into(), body: "b".into() });

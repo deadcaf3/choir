@@ -156,6 +156,30 @@ pub enum OpKind {
         /// Actor names the review now fans out to (non-empty).
         reviewers: Vec<String>,
     },
+    /// Settle review `id` and drop its bulk (additive variant,
+    /// wire-format unchanged).
+    ///
+    /// A review's verdicts, notes and reviewer list are the part that
+    /// grows without bound; the landing gate reads only
+    /// `(target_ref, target, approved)`. Archiving keeps that triple and
+    /// discards the rest, so retention stops being an authorization
+    /// decision — an approval never silently expires.
+    ///
+    /// **Archiving is freezing, not deleting.** `PostVerdict` overwrites
+    /// a reviewer's earlier verdict, so approval is *not* monotonic and a
+    /// review can go approved then not. Once the verdicts are gone that
+    /// transition can no longer be computed, so an archived review
+    /// accepts no further verdicts — and says so, rather than reporting
+    /// itself absent.
+    ///
+    /// *Who* may archive is admission policy (L2), like
+    /// [`OpKind::AssignReviewers`]: the daemon accepts it only from its
+    /// own key, because otherwise archiving would be a way to erase a
+    /// `RequestChanges` you did not like.
+    ArchiveReview {
+        /// The review being settled. Must exist and be complete.
+        id: String,
+    },
     /// Record `reviewer`'s verdict on review `id` (additive variant).
     /// Only listed reviewers may post; re-posting overwrites the
     /// reviewer's own earlier verdict (re-review after changes).
@@ -210,6 +234,23 @@ pub enum Verdict {
     RequestChanges,
 }
 
+/// Whether a review is still accepting verdicts, or has been settled and
+/// had its bulk dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewStatus {
+    /// Accepting verdicts; `reviewers` and `verdicts` are authoritative.
+    #[default]
+    Live,
+    /// Settled: `reviewers` and `verdicts` have been dropped, and the
+    /// outcome they produced is recorded here instead. Distinguishable
+    /// from a review that never existed, which is the point — a reviewer
+    /// told "no such review" would go hunting for a typo.
+    Archived {
+        /// The verdict the review had reached when it was archived.
+        approved: bool,
+    },
+}
+
 /// Materialized state of one review: what is under review, who was
 /// asked, who has answered what.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -224,6 +265,10 @@ pub struct ReviewState {
     /// `None` for a review that named no destination. Policy reads this
     /// to decide whether a review is privilege-bearing.
     pub target_ref: Option<String>,
+    /// Live, or settled with its outcome retained. Defaults to
+    /// [`ReviewStatus::Live`], so replaying a log written before
+    /// archiving existed yields exactly the previous behaviour.
+    pub status: ReviewStatus,
 }
 
 impl ReviewState {
@@ -232,6 +277,13 @@ impl ReviewState {
     /// turn "asked nobody" into a finished review.
     #[must_use]
     pub fn complete(&self) -> bool {
+        if matches!(self.status, ReviewStatus::Archived { .. }) {
+            // Archiving requires completeness, and the reviewer list it
+            // was computed from is gone. Recomputing here would read the
+            // emptied list and answer "not complete", silently unfinishing
+            // every settled review.
+            return true;
+        }
         !self.reviewers.is_empty()
             && self.reviewers.iter().all(|r| self.verdicts.contains_key(r))
     }
@@ -239,6 +291,9 @@ impl ReviewState {
     /// Whether the review is complete with no `RequestChanges`.
     #[must_use]
     pub fn approved(&self) -> bool {
+        if let ReviewStatus::Archived { approved } = self.status {
+            return approved;
+        }
         self.complete()
             && self.verdicts.values().all(|(v, _)| *v == Verdict::Approve)
     }
@@ -412,6 +467,11 @@ impl View {
                     .reviews
                     .get(id)
                     .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if matches!(review.status, ReviewStatus::Archived { .. }) {
+                    // Its reviewer list is empty because it was emptied,
+                    // not because it is unassigned.
+                    return Err(ViewError::Review(format!("review {id} is archived")));
+                }
                 if !review.reviewers.is_empty() {
                     return Err(ViewError::Review(format!("review {id} is already assigned")));
                 }
@@ -422,9 +482,32 @@ impl View {
                     .reviews
                     .get(id)
                     .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if matches!(review.status, ReviewStatus::Archived { .. }) {
+                    return Err(ViewError::Review(format!(
+                        "review {id} is archived and accepts no further verdicts"
+                    )));
+                }
                 if !review.reviewers.iter().any(|r| r == reviewer) {
                     return Err(ViewError::Review(format!(
                         "{reviewer} is not a reviewer of {id}"
+                    )));
+                }
+                Ok(())
+            }
+            OpKind::ArchiveReview { id } => {
+                let review = self
+                    .reviews
+                    .get(id)
+                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if matches!(review.status, ReviewStatus::Archived { .. }) {
+                    return Err(ViewError::Review(format!("review {id} is already archived")));
+                }
+                if !review.complete() {
+                    // Freezing an unfinished review would strand it: the
+                    // outcome is not decided and no further verdict can
+                    // decide it.
+                    return Err(ViewError::Review(format!(
+                        "review {id} is not complete and cannot be archived"
                     )));
                 }
                 Ok(())
@@ -475,14 +558,28 @@ impl View {
                         reviewers: reviewers.clone(),
                         verdicts: BTreeMap::new(),
                         target_ref: target_ref.clone(),
+                        status: ReviewStatus::Live,
                     },
                 );
             }
             OpKind::AssignReviewers { id, reviewers } => {
                 self.reviews
                     .get_mut(id)
-                    .expect("validate proved the review exists")
+                    .expect("validate proved the review exists and is live")
                     .reviewers = reviewers.clone();
+            }
+            OpKind::ArchiveReview { id } => {
+                let review = self
+                    .reviews
+                    .get_mut(id)
+                    .expect("validate proved the review exists, is live, and is complete");
+                review.status = ReviewStatus::Archived {
+                    approved: review.approved(),
+                };
+                // The bulk goes; the gate's triple (target_ref, target,
+                // and the outcome now in `status`) stays.
+                review.reviewers = Vec::new();
+                review.verdicts = BTreeMap::new();
             }
             OpKind::PostVerdict {
                 id,
@@ -492,7 +589,7 @@ impl View {
             } => {
                 self.reviews
                     .get_mut(id)
-                    .expect("validate proved the review exists and lists this reviewer")
+                    .expect("validate proved the review exists, is live, and lists this reviewer")
                     .verdicts
                     .insert(reviewer.clone(), (*verdict, note.clone()));
             }

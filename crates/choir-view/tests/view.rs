@@ -363,3 +363,129 @@ fn target_ref_is_additive_and_old_payloads_hash_the_same() {
         Some("choir/choir.git:refs/heads/main")
     );
 }
+
+#[test]
+fn archiving_freezes_a_review_and_keeps_its_outcome() {
+    // Retention must not become an authorization decision: the landing
+    // gate reads (target_ref, target, approved), so archiving keeps that
+    // triple and drops the bulk. The trap is that approval is NOT
+    // monotonic -- PostVerdict overwrites -- so once verdicts are gone
+    // the outcome can no longer be recomputed and must be stored.
+    let mut log = MemLog::new();
+    let target = ContentHash::blake3(b"change");
+    append_op(
+        &mut log,
+        "author",
+        ViewOp::new(OpKind::RequestReview {
+            id: "r1".into(),
+            target: target.clone(),
+            reviewers: vec!["ana".into(), "bot".into()],
+            target_ref: Some("demo.git:refs/heads/main".into()),
+        }),
+    )
+    .unwrap();
+    let verdict = |who: &str, v: choir_view::Verdict| {
+        ViewOp::new(OpKind::PostVerdict {
+            id: "r1".into(),
+            reviewer: who.into(),
+            verdict: v,
+            note: "reasoning that takes space".into(),
+        })
+    };
+    let archive = ViewOp::new(OpKind::ArchiveReview { id: "r1".into() });
+
+    // Incomplete: archiving would strand it, since no further verdict
+    // could ever decide the outcome.
+    append_op(&mut log, "ana", verdict("ana", choir_view::Verdict::Approve)).unwrap();
+    assert!(matches!(
+        append_op(&mut log, "node", archive.clone()),
+        Err(ViewError::Review(_))
+    ));
+
+    append_op(&mut log, "bot", verdict("bot", choir_view::Verdict::Approve)).unwrap();
+    let view = View::materialize(&log).unwrap();
+    assert!(view.reviews["r1"].approved());
+
+    append_op(&mut log, "node", archive.clone()).unwrap();
+    let view = View::materialize(&log).unwrap();
+    let r = &view.reviews["r1"];
+
+    // Outcome survives; bulk does not.
+    assert!(r.approved(), "archived approval must not evaporate");
+    assert!(r.complete(), "archived reviews are settled, not unfinished");
+    assert!(r.verdicts.is_empty(), "verdicts should have been dropped");
+    assert!(r.reviewers.is_empty(), "reviewer list should have been dropped");
+    // The gate's other two fields are untouched.
+    assert_eq!(r.target.as_ref(), Some(&target));
+    assert_eq!(r.target_ref.as_deref(), Some("demo.git:refs/heads/main"));
+    assert!(matches!(
+        r.status,
+        choir_view::ReviewStatus::Archived { approved: true }
+    ));
+
+    // Frozen: no further verdicts, and the refusal says archived rather
+    // than absent, or a reviewer goes hunting for a typo.
+    let err = append_op(&mut log, "ana", verdict("ana", choir_view::Verdict::RequestChanges));
+    match err {
+        Err(ViewError::Review(msg)) => assert!(msg.contains("archived"), "{msg}"),
+        other => panic!("expected an archived refusal, got {other:?}"),
+    }
+    // Double archive, and assignment onto an emptied list, both refused.
+    assert!(matches!(
+        append_op(&mut log, "node", archive),
+        Err(ViewError::Review(_))
+    ));
+    assert!(matches!(
+        append_op(
+            &mut log,
+            "node",
+            ViewOp::new(OpKind::AssignReviewers {
+                id: "r1".into(),
+                reviewers: vec!["carol".into()],
+            })
+        ),
+        Err(ViewError::Review(_))
+    ));
+
+    // A rejected verdict must not have disturbed the frozen outcome.
+    let view = View::materialize(&log).unwrap();
+    assert!(view.reviews["r1"].approved());
+}
+
+#[test]
+fn archiving_preserves_a_rejection_too() {
+    // The dangerous direction: if archiving lost the outcome and fell
+    // back to recomputing from an emptied verdict map, a RequestChanges
+    // review would silently read as approved -- vacuously, since "all of
+    // no verdicts are approvals".
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "author",
+        ViewOp::new(OpKind::RequestReview {
+            id: "r2".into(),
+            target: ContentHash::blake3(b"bad"),
+            reviewers: vec!["ana".into()],
+            target_ref: None,
+        }),
+    )
+    .unwrap();
+    append_op(
+        &mut log,
+        "ana",
+        ViewOp::new(OpKind::PostVerdict {
+            id: "r2".into(),
+            reviewer: "ana".into(),
+            verdict: choir_view::Verdict::RequestChanges,
+            note: "no".into(),
+        }),
+    )
+    .unwrap();
+    append_op(&mut log, "node", ViewOp::new(OpKind::ArchiveReview { id: "r2".into() })).unwrap();
+
+    let view = View::materialize(&log).unwrap();
+    assert!(
+        !view.reviews["r2"].approved(),
+        "an archived rejection must not read as approved"
+    );
+}
