@@ -17,6 +17,29 @@ members = [
     "crates/choir-view",
 ]
 
+# choir-actor is the D3 second implementation of the actor-runtime seam. It
+# pulls rivetkit, tokio and a bundled libsqlite3 that nothing else in the
+# workspace touches, and compiling it costs more than the other thirteen
+# crates put together. Excluding it from the default set means a bare
+# `cargo build`/`cargo test` skips that tree; the seam's conformance suite
+# still runs under an explicit `-p choir-actor` or `--workspace`, which is
+# what the hand-run gate uses.
+default-members = [
+    "crates/choir-bridge",
+    "crates/choir-cli",
+    "crates/choir-demo",
+    "crates/choir-hash",
+    "crates/choir-identity",
+    "crates/choir-oplog",
+    "crates/choir-sequencer",
+    "crates/choir-merge",
+    "crates/choir-node",
+    "crates/choir-queue",
+    "crates/choir-spike",
+    "crates/choir-store",
+    "crates/choir-view",
+]
+
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
@@ -27,8 +50,61 @@ blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The workspace shipped on cargo defaults until now, which for release
+# means lto = false and codegen-units = 16 — the compiler declining to
+# optimise across crate boundaries in a workspace that is almost entirely
+# crate boundaries.
+#
+# Deliberately absent: panic = "abort". `Node::serve_forever` spawns a
+# thread per request and relies on a panicking handler killing only that
+# thread; under abort, one bad request takes down the daemon. Revisit only
+# once handlers are proven panic-free.
+[profile.release]
+opt-level = 3
+# "fat", not the usual "thin" default advice. Measured on this workspace,
+# fat won every metric including the one it is supposed to lose: clean
+# build 169.7 s vs 206.6 s, binary 1.98 MB vs 2.28 MB. Small workspace,
+# codegen-units = 1 already, so thin's incrementality buys nothing here and
+# its own bookkeeping costs. Re-measure if the workspace grows a lot.
+lto = "fat"
+codegen-units = 1
+strip = true
+# Keeps a symbolicatable profile without carrying full debuginfo. `strip`
+# removes the symbol table from the binary; this leaves enough for a
+# sampling profiler to name frames.
+debug = "line-tables-only"
+
+# Dependencies are optimised even in dev builds: they are compiled once and
+# then cached, while the workspace crates are rebuilt constantly. This
+# keeps `cargo test` from running the whole suite through an unoptimised
+# blake3 and ed25519.
+[profile.dev.package."*"]
+opt-level = 3
+
 [workspace.lints.rust]
 missing_docs = "warn"
+
+# Perf lints, enabled with a measured caveat: they do NOT find the thing
+# this optimization pass is chasing.
+#
+# The expectation was that redundant_clone would flag the full-View clone
+# in ChoirPolicy::check. It does not, and cannot: the clone is immediately
+# mutated by trial.apply, so it is genuinely used and the lint has nothing
+# to complain about. Six redundant_clone hits fired across the workspace
+# and every one is in a test or the demo. An O(state) clone on a hot path
+# is a design fact, not a lint-visible one.
+#
+# Kept anyway -- they are cheap and they caught real slips in new code --
+# but nobody should read a clean clippy run as evidence of no allocation
+# problem.
+#
+# "warn" not "deny" deliberately: the gate here is run by hand, and a
+# denied lint turns an advisory into a broken build for whoever is mid-edit.
+[workspace.lints.clippy]
+perf = { level = "warn", priority = -1 }
+redundant_clone = "warn"
+needless_collect = "warn"
+large_enum_variant = "warn"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

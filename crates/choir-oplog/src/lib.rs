@@ -132,6 +132,30 @@ pub trait OpLog: Send {
 
     /// Entry at sequence number `seq`, or `None` if out of range.
     fn get(&self, seq: u64) -> Option<OpEntry>;
+
+    /// Makes every prior [`OpLog::append`] durable — survives power loss,
+    /// not merely process death.
+    ///
+    /// Until this returns `Ok`, an appended entry may exist only in the
+    /// OS page cache. That matters here beyond losing a tail: the
+    /// `pre-receive` hook submits a ref op *before* git applies the ref,
+    /// so an unsynced log can leave git holding a ref whose authorising
+    /// op does not exist. Two sources of truth then disagree, and the
+    /// next push fails its CAS against a view that never saw the update.
+    ///
+    /// The sequencer calls this once per batch rather than once per
+    /// append, and only acknowledges submitters afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Backend-specific [`LogError`] on storage failure. A failure here
+    /// must be treated as "the batch is not durable", never as success.
+    ///
+    /// Default: a no-op, correct for backends that never outlive the
+    /// process (see [`MemLog`]).
+    fn sync(&mut self) -> Result<(), LogError> {
+        Ok(())
+    }
 }
 
 /// Primary in-memory implementation (also the dev/test runtime).
@@ -170,13 +194,47 @@ impl OpLog for MemLog {
     fn get(&self, seq: u64) -> Option<OpEntry> {
         self.entries.get(seq as usize).cloned()
     }
+
+    /// Nothing to do: a `MemLog` never outlives its process, so there is
+    /// no weaker state for `sync` to strengthen. The default would serve;
+    /// it is spelled out because "in-memory logs cannot be made durable"
+    /// is the reason, not an oversight.
+    fn sync(&mut self) -> Result<(), LogError> {
+        Ok(())
+    }
 }
 
 /// Second implementation (seam rule: feature-poor is fine, broken is not):
 /// JSON-lines file, append-only, rebuilt head on open.
 pub struct FileLog {
-    file: std::fs::File,
-    entries: Vec<OpEntry>,
+    /// Buffered so a batch of appends costs one write syscall instead of
+    /// one each. Correctness rests on [`OpLog::sync`]: nothing here is
+    /// durable, or even visible to another reader of the file, until the
+    /// buffer is flushed.
+    file: std::io::BufWriter<std::fs::File>,
+    /// Separate read handle, so [`OpLog::get`] can take `&self` without
+    /// disturbing the writer.
+    reader: std::sync::Mutex<std::fs::File>,
+    /// Byte offset where each entry starts, one `u64` per entry.
+    ///
+    /// This replaces holding every [`OpEntry`] in memory. That cost some
+    /// hundreds of bytes per op and never shrank, so a log grew in RAM
+    /// with the repo's *lifetime* rather than with load — at the Phase-1
+    /// target of 5 ops/s, ~432k entries a day, forever. Eight bytes per op
+    /// instead, and `get` pays a seek and a parse for what is no longer
+    /// resident.
+    ///
+    /// Rebuilt on open and never persisted, so it adds no on-disk format
+    /// and needs no `format_version` or checkpoint record. `open` already
+    /// scanned the whole file to rebuild `head`; this rides along.
+    offsets: Vec<u64>,
+    /// Total bytes handed to the writer, including what is still sitting
+    /// in the `BufWriter`.
+    write_pos: u64,
+    /// Entries appended since the last successful flush. They are not yet
+    /// readable from the file, so [`OpLog::get`] serves them from here.
+    /// Bounded by the sequencer's batch size, which syncs once per batch.
+    pending: std::collections::VecDeque<OpEntry>,
     head: Option<ContentHash>,
 }
 
@@ -196,16 +254,49 @@ impl FileLog {
             .append(true)
             .open(path)
             .map_err(LogError::Io)?;
-        let mut entries = Vec::new();
+        // Replay rebuilds `head` and the offset index together. Reading by
+        // bytes rather than `.lines()` is what makes the offsets available
+        // at all: a line iterator does not say where it was.
+        let mut offsets = Vec::new();
         let mut head = None;
-        for line in BufReader::new(&file).lines() {
-            let line = line.map_err(LogError::Io)?;
+        let mut write_pos = 0u64;
+        let mut reader = BufReader::new(&file);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line).map_err(LogError::Io)?;
+            if n == 0 {
+                break;
+            }
+            let body = line.strip_suffix(b"\n").unwrap_or(&line);
             let entry: OpEntry =
-                serde_json::from_str(&line).map_err(|e| LogError::Corrupt(e.to_string()))?;
+                serde_json::from_slice(body).map_err(|e| LogError::Corrupt(e.to_string()))?;
             head = Some(entry.content_hash());
-            entries.push(entry);
+            offsets.push(write_pos);
+            write_pos += n as u64;
         }
-        Ok(Self { file, entries, head })
+        drop(reader);
+        let read_handle = std::fs::File::open(path).map_err(LogError::Io)?;
+        Ok(Self {
+            file: std::io::BufWriter::new(file),
+            reader: std::sync::Mutex::new(read_handle),
+            offsets,
+            write_pos,
+            pending: std::collections::VecDeque::new(),
+            head,
+        })
+    }
+}
+
+impl Drop for FileLog {
+    /// Last-resort flush. The sequencer syncs per batch, so in normal
+    /// operation this finds an empty buffer; it exists so a log dropped on
+    /// an error path does not silently discard buffered entries. Errors
+    /// are unreportable here, hence the `ok()` — durability is the
+    /// sequencer's job via [`OpLog::sync`], not this.
+    fn drop(&mut self) {
+        use std::io::Write;
+        self.file.flush().ok();
     }
 }
 
@@ -219,7 +310,10 @@ impl OpLog for FileLog {
         line.push(b'\n');
         self.file.write_all(&line).map_err(LogError::Io)?;
         let hash = entry.content_hash();
-        self.entries.push(entry);
+        self.offsets.push(self.write_pos);
+        self.write_pos += line.len() as u64;
+        // Held only until the next flush makes it readable from the file.
+        self.pending.push_back(entry);
         self.head = Some(hash.clone());
         Ok(hash)
     }
@@ -229,10 +323,62 @@ impl OpLog for FileLog {
     }
 
     fn len(&self) -> u64 {
-        self.entries.len() as u64
+        self.offsets.len() as u64
     }
 
+    /// Reads one entry back: from the pending buffer if it has not been
+    /// flushed yet, otherwise from the file at its recorded offset.
+    ///
+    /// Returns `None` for an out-of-range `seq` and also for a stored line
+    /// that fails to decode or read. The trait signature has no way to say
+    /// "present but unreadable", and inventing one is a wider change than
+    /// this belongs in — but a corrupt log is a real condition, and `open`
+    /// does report it as [`LogError::Corrupt`], so damage is caught when
+    /// the log is next opened rather than never.
     fn get(&self, seq: u64) -> Option<OpEntry> {
-        self.entries.get(seq as usize).cloned()
+        let len = self.offsets.len() as u64;
+        if seq >= len {
+            return None;
+        }
+        // Entries appended since the last flush are not in the file yet.
+        let pending_start = len - self.pending.len() as u64;
+        if seq >= pending_start {
+            return self.pending.get((seq - pending_start) as usize).cloned();
+        }
+
+        let start = self.offsets[seq as usize];
+        // The next entry's offset bounds this one; for the last entry the
+        // bound is everything written so far.
+        let end = self
+            .offsets
+            .get(seq as usize + 1)
+            .copied()
+            .unwrap_or(self.write_pos);
+        let mut buf = vec![0u8; (end - start) as usize];
+
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = self.reader.lock().ok()?;
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut buf).ok()?;
+        let body = buf.strip_suffix(b"\n").unwrap_or(&buf);
+        serde_json::from_slice(body).ok()
+    }
+
+    /// Flush the buffer to the OS, then ask the OS to put it on the
+    /// platter. Both halves are required and neither substitutes for the
+    /// other: `flush` alone leaves the bytes in the page cache, and
+    /// `sync_data` alone would sync a buffer that was never written.
+    ///
+    /// `sync_data` rather than `sync_all`: the file's length and contents
+    /// must survive, its mtime need not, and skipping the metadata write
+    /// is the cheaper half of an fsync.
+    fn sync(&mut self) -> Result<(), LogError> {
+        use std::io::Write;
+        self.file.flush().map_err(LogError::Io)?;
+        // Only now are these readable from the file, so only now may the
+        // in-memory copies go. If `flush` failed they are still the only
+        // copy and must be kept.
+        self.pending.clear();
+        self.file.get_ref().sync_data().map_err(LogError::Io)
     }
 }

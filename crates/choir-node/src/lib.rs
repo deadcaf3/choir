@@ -311,6 +311,23 @@ impl Node {
             // channel name becomes enforced, with no restart and no wait
             // for some later event.
             self.refresh_allowed_signers();
+            // A writer that has failed a durability barrier refuses every
+            // submission from then on. Staying up in that state is worse
+            // than being down: process supervision only restarts a process
+            // that *exits*, so the node would sit there looking healthy
+            // to launchd while rejecting everything, and a transient fsync
+            // error would become permanent downtime that reads as uptime.
+            // Exiting hands it back to supervision, which restarts into
+            // the same replay path the D20 flip proved with `kill -9`.
+            if self.platform.as_ref().is_some_and(|p| p.durability_failed()) {
+                eprintln!(
+                    "choir: the op log is no longer durable, so this node has stopped \
+                     accepting writes; exiting so supervision restarts it. Check the \
+                     filesystem backing the log."
+                );
+                // EX_TEMPFAIL: the condition may well clear on restart.
+                std::process::exit(75);
+            }
             let root = self.root.clone();
             let auth = self.auth.clone();
             let platform = self.platform.clone();

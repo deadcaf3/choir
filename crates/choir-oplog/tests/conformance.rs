@@ -26,7 +26,7 @@ fn conformance(log: &mut dyn OpLog) {
 
     // Chained append.
     let h1 = log.append(entry(Some(h0.clone()), 1, "b")).expect("chained append");
-    assert_eq!(log.head(), Some(h1.clone()));
+    assert_eq!(log.head(), Some(h1));
 
     // Stale-parent append must be rejected (single-writer invariant).
     assert!(log.append(entry(Some(h0), 2, "c")).is_err());

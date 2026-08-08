@@ -27,7 +27,7 @@ fn raw_from_ssh_pub(line: &str) -> [u8; 32] {
     let b64 = line.split_whitespace().nth(1).expect("key field");
     let mut bytes = Vec::new();
     let table: std::collections::HashMap<u8, u32> =
-        (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9').chain([b'+', b'/'])
+        (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9').chain(*b"+/")
             .enumerate()
             .map(|(i, c)| (c, i as u32))
             .collect();

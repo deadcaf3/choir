@@ -35,6 +35,12 @@ fn api(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, serde_j
 }
 
 #[test]
+// The thread-spawn collect below is load-bearing and clippy's
+// needless_collect is wrong about it: it forces every request to be in
+// flight before any is joined. Consumed lazily the requests would go out
+// one at a time and the race this test exists to provoke -- six unique
+// names plus one duplicate racer -- would never happen.
+#[allow(clippy::needless_collect)]
 fn workspace_provisioning_end_to_end() {
     let work = std::env::temp_dir().join(format!("choir-node-ws-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();

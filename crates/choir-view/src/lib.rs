@@ -407,62 +407,55 @@ pub struct View {
 }
 
 impl View {
-    /// Applies one op, enforcing its CAS precondition. A rejected op
-    /// leaves the view unchanged.
+    /// Whether `op` would apply cleanly, without changing anything.
+    ///
+    /// Every precondition in this model is a read — a CAS comparison, a
+    /// key lookup, or a non-empty check — so admission can be decided
+    /// against a shared `&View` rather than against a private copy of it.
+    /// That is what lets the single-writer admission path stop cloning the
+    /// whole view per submission.
+    ///
+    /// [`View::apply`] calls this first and mutates only on `Ok`, so the
+    /// two can never disagree about what is admissible. Keeping them as
+    /// one code path is the point: a separate fast-path predicate that
+    /// drifts from the real one is how "checked in check()" turns into a
+    /// panic on the writer thread.
     ///
     /// # Errors
     ///
-    /// Returns [`ViewError::StaleHead`] when `prev` does not match.
-    pub fn apply(&mut self, op: &ViewOp) -> Result<(), ViewError> {
+    /// The same failures [`View::apply`] would return for `op`.
+    pub fn validate(&self, op: &ViewOp) -> Result<(), ViewError> {
+        /// CAS comparison shared by the three head-moving ops.
+        fn cas(
+            actual: Option<&ContentHash>,
+            expected: &Option<ContentHash>,
+            target: &str,
+        ) -> Result<(), ViewError> {
+            if actual != expected.as_ref() {
+                return Err(ViewError::StaleHead {
+                    target: target.to_string(),
+                    expected: expected.clone(),
+                    actual: actual.cloned(),
+                });
+            }
+            Ok(())
+        }
+
         match &op.kind {
             OpKind::SetWorkspaceHead {
-                workspace,
-                commit,
-                prev,
-            } => {
-                let actual = self.workspaces.get(workspace);
-                if actual != prev.as_ref() {
-                    return Err(ViewError::StaleHead {
-                        target: workspace.clone(),
-                        expected: prev.clone(),
-                        actual: actual.cloned(),
-                    });
-                }
-                self.workspaces.insert(workspace.clone(), commit.clone());
+                workspace, prev, ..
+            } => cas(self.workspaces.get(workspace), prev, workspace),
+            OpKind::SetRef { name, prev, .. } | OpKind::DeleteRef { name, prev } => {
+                cas(self.refs.get(name), prev, name)
             }
-            OpKind::SetRef { name, commit, prev } => {
-                let actual = self.refs.get(name);
-                if actual != prev.as_ref() {
-                    return Err(ViewError::StaleHead {
-                        target: name.clone(),
-                        expected: prev.clone(),
-                        actual: actual.cloned(),
-                    });
-                }
-                self.refs.insert(name.clone(), commit.clone());
-            }
-            OpKind::DeleteWorkspace { workspace } => {
-                self.workspaces.remove(workspace);
-            }
-            OpKind::RequestReview {
-                id,
-                target,
-                reviewers,
-                target_ref,
-            } => {
+            // Removing an absent workspace is not an error: the op is a
+            // statement about the end state, not about the transition.
+            OpKind::DeleteWorkspace { .. } => Ok(()),
+            OpKind::RequestReview { id, .. } => {
                 if self.reviews.contains_key(id) {
                     return Err(ViewError::Review(format!("review {id} already exists")));
                 }
-                self.reviews.insert(
-                    id.clone(),
-                    ReviewState {
-                        target: Some(target.clone()),
-                        reviewers: reviewers.clone(),
-                        verdicts: BTreeMap::new(),
-                        target_ref: target_ref.clone(),
-                        status: ReviewStatus::Live,
-                    },
-                );
+                Ok(())
             }
             OpKind::AssignReviewers { id, reviewers } => {
                 if reviewers.is_empty() {
@@ -472,7 +465,7 @@ impl View {
                 }
                 let review = self
                     .reviews
-                    .get_mut(id)
+                    .get(id)
                     .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
                 if matches!(review.status, ReviewStatus::Archived { .. }) {
                     // Its reviewer list is empty because it was emptied,
@@ -480,16 +473,31 @@ impl View {
                     return Err(ViewError::Review(format!("review {id} is archived")));
                 }
                 if !review.reviewers.is_empty() {
+                    return Err(ViewError::Review(format!("review {id} is already assigned")));
+                }
+                Ok(())
+            }
+            OpKind::PostVerdict { id, reviewer, .. } => {
+                let review = self
+                    .reviews
+                    .get(id)
+                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if matches!(review.status, ReviewStatus::Archived { .. }) {
                     return Err(ViewError::Review(format!(
-                        "review {id} is already assigned"
+                        "review {id} is archived and accepts no further verdicts"
                     )));
                 }
-                review.reviewers = reviewers.clone();
+                if !review.reviewers.iter().any(|r| r == reviewer) {
+                    return Err(ViewError::Review(format!(
+                        "{reviewer} is not a reviewer of {id}"
+                    )));
+                }
+                Ok(())
             }
             OpKind::ArchiveReview { id } => {
                 let review = self
                     .reviews
-                    .get_mut(id)
+                    .get(id)
                     .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
                 if matches!(review.status, ReviewStatus::Archived { .. }) {
                     return Err(ViewError::Review(format!("review {id} is already archived")));
@@ -502,6 +510,69 @@ impl View {
                         "review {id} is not complete and cannot be archived"
                     )));
                 }
+                Ok(())
+            }
+            OpKind::RecordProvenance { subject, kind, .. } => {
+                if subject.is_empty() || kind.is_empty() {
+                    return Err(ViewError::Provenance(
+                        "provenance subject and kind must be non-empty".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Applies one op, enforcing its CAS precondition. A rejected op
+    /// leaves the view unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewError::StaleHead`] when `prev` does not match.
+    pub fn apply(&mut self, op: &ViewOp) -> Result<(), ViewError> {
+        // Preconditions live in `validate` and nowhere else, so admission
+        // and application cannot drift apart.
+        self.validate(op)?;
+        match &op.kind {
+            OpKind::SetWorkspaceHead {
+                workspace, commit, ..
+            } => {
+                self.workspaces.insert(workspace.clone(), commit.clone());
+            }
+            OpKind::SetRef { name, commit, .. } => {
+                self.refs.insert(name.clone(), commit.clone());
+            }
+            OpKind::DeleteWorkspace { workspace } => {
+                self.workspaces.remove(workspace);
+            }
+            OpKind::RequestReview {
+                id,
+                target,
+                reviewers,
+                target_ref,
+            } => {
+                self.reviews.insert(
+                    id.clone(),
+                    ReviewState {
+                        target: Some(target.clone()),
+                        reviewers: reviewers.clone(),
+                        verdicts: BTreeMap::new(),
+                        target_ref: target_ref.clone(),
+                        status: ReviewStatus::Live,
+                    },
+                );
+            }
+            OpKind::AssignReviewers { id, reviewers } => {
+                self.reviews
+                    .get_mut(id)
+                    .expect("validate proved the review exists and is live")
+                    .reviewers = reviewers.clone();
+            }
+            OpKind::ArchiveReview { id } => {
+                let review = self
+                    .reviews
+                    .get_mut(id)
+                    .expect("validate proved the review exists, is live, and is complete");
                 review.status = ReviewStatus::Archived {
                     approved: review.approved(),
                 };
@@ -516,44 +587,19 @@ impl View {
                 verdict,
                 note,
             } => {
-                let review = self
-                    .reviews
+                self.reviews
                     .get_mut(id)
-                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
-                if matches!(review.status, ReviewStatus::Archived { .. }) {
-                    return Err(ViewError::Review(format!(
-                        "review {id} is archived and accepts no further verdicts"
-                    )));
-                }
-                if !review.reviewers.iter().any(|r| r == reviewer) {
-                    return Err(ViewError::Review(format!(
-                        "{reviewer} is not a reviewer of {id}"
-                    )));
-                }
-                review
+                    .expect("validate proved the review exists, is live, and lists this reviewer")
                     .verdicts
                     .insert(reviewer.clone(), (*verdict, note.clone()));
             }
             OpKind::RecordProvenance { subject, kind, body } => {
-                if subject.is_empty() || kind.is_empty() {
-                    return Err(ViewError::Provenance(
-                        "provenance subject and kind must be non-empty".to_string(),
-                    ));
-                }
                 self.provenance
                     .entry(subject.clone())
                     .or_default()
                     .insert(kind.clone(), body.clone());
             }
-            OpKind::DeleteRef { name, prev } => {
-                let actual = self.refs.get(name);
-                if actual != prev.as_ref() {
-                    return Err(ViewError::StaleHead {
-                        target: name.clone(),
-                        expected: prev.clone(),
-                        actual: actual.cloned(),
-                    });
-                }
+            OpKind::DeleteRef { name, .. } => {
                 self.refs.remove(name);
             }
         }

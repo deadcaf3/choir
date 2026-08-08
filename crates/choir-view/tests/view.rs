@@ -346,7 +346,7 @@ fn target_ref_is_additive_and_old_payloads_hash_the_same() {
     // And a bound review round-trips, carrying the ref into the view.
     let bound = ViewOp::new(OpKind::RequestReview {
         id: "r2".into(),
-        target: target.clone(),
+        target,
         reviewers: vec!["ana".into()],
         target_ref: Some("choir/choir.git:refs/heads/main".into()),
     });

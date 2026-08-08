@@ -29,7 +29,10 @@ use choir_view::{OpKind, View, ViewOp};
 /// after old entries are dropped (full history lives in the op log).
 pub struct LogWindow {
     base: u64,
-    entries: Vec<OpEntry>,
+    /// A `VecDeque`, not a `Vec`: eviction pops from the front, which is
+    /// O(1) here and an O(n) memmove of up to `cap` entries there. At the
+    /// 100k cap that cost was paid on every push once full.
+    entries: std::collections::VecDeque<OpEntry>,
     /// Entries kept before the oldest is dropped. A field rather than a
     /// constant so a test can drive eviction without writing 100k ops.
     cap: usize,
@@ -76,11 +79,16 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 impl LogWindow {
     fn push(&mut self, entry: OpEntry) {
-        self.entries.push(entry);
-        if self.entries.len() > self.cap {
-            let drop = self.entries.len() - self.cap;
-            self.entries.drain(..drop);
-            self.base += drop as u64;
+        self.entries.push_back(entry);
+        self.trim();
+    }
+
+    /// Drops the oldest entries until the window fits its cap, advancing
+    /// `base` so `/api/log?from=` keeps absolute sequence semantics.
+    fn trim(&mut self) {
+        while self.entries.len() > self.cap {
+            self.entries.pop_front();
+            self.base += 1;
         }
     }
 }
@@ -337,8 +345,20 @@ impl SubmitPolicy for ChoirPolicy {
                 _ => {}
             }
         }
-        let mut trial = self.view.lock().expect("view lock").clone();
-        trial.apply(&op).map_err(|e| format!("stale head: {e:?}"))
+        // Admission is a read. Every precondition `View::apply` enforces
+        // is a CAS comparison or a key lookup, so this asks the shared
+        // view directly instead of deep-cloning it -- four nested
+        // BTreeMaps per submission, O(total state), which grew with the
+        // repo's lifetime rather than with the size of the op.
+        //
+        // `View::apply` calls the same `validate`, so admission and
+        // application cannot disagree; that shared path is what keeps
+        // `accepted`'s "checked in check()" honest.
+        self.view
+            .lock()
+            .expect("view lock")
+            .validate(&op)
+            .map_err(|e| format!("stale head: {e:?}"))
     }
 
     fn accepted(&mut self, entry: &OpEntry) {
@@ -422,14 +442,24 @@ impl Platform {
             .map_err(|e| format!("register node key: {e:?}"))?;
         let view = View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?;
         let view = Arc::new(Mutex::new(view));
-        let existing: Vec<OpEntry> = (0..log.len()).filter_map(|i| log.get(i)).collect();
+        // Fill the window from the tail only. Materialising the whole log
+        // into a Vec and pushing each entry through the window cloned
+        // every entry twice at startup and held a second full copy of the
+        // log in memory alongside the log itself -- O(total ops) for a
+        // window that keeps at most `cap`.
+        let len = log.len();
+        let start = len.saturating_sub(LOG_WINDOW_CAP as u64);
         let mut window = LogWindow {
-            base: 0,
-            entries: Vec::new(),
+            base: start,
+            entries: std::collections::VecDeque::with_capacity(
+                (len - start).min(LOG_WINDOW_CAP as u64) as usize,
+            ),
             cap: LOG_WINDOW_CAP,
         };
-        for e in existing {
-            window.push(e);
+        for i in start..len {
+            if let Some(e) = log.get(i) {
+                window.push(e);
+            }
         }
         let entries = Arc::new(Mutex::new(window));
         let keys_mtime = keys_file
@@ -588,7 +618,15 @@ impl Platform {
     /// exercise eviction and the resync path without writing 100k ops.
     #[must_use]
     pub fn with_log_window_cap(self, cap: usize) -> Self {
-        self.entries.lock().expect("entries lock").cap = cap.max(1);
+        let mut window = self.entries.lock().expect("entries lock");
+        window.cap = cap.max(1);
+        // Trim to the new cap now rather than waiting for the next push.
+        // Without this a platform started over an existing log stays
+        // over-full until something is submitted, so `/api/log` would
+        // serve entries from below `base` and a reader could not tell the
+        // window had shrunk.
+        window.trim();
+        drop(window);
         self
     }
 
@@ -761,6 +799,19 @@ impl Platform {
         Ok(pool)
     }
 
+    /// Whether the sequencer has failed a durability barrier and stopped
+    /// accepting.
+    ///
+    /// The daemon's accept loop polls this so a node that can no longer
+    /// persist exits rather than staying up refusing everything. Process
+    /// supervision only restarts a process that *exits*, so without this
+    /// a transient fsync error is permanent downtime that looks like
+    /// uptime.
+    #[must_use]
+    pub fn durability_failed(&self) -> bool {
+        self.handle.durability_failed()
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {
@@ -816,22 +867,56 @@ impl Platform {
                 };
                 // Ops are admitted in array order; each result is
                 // independent (a rejection does not abort the batch).
-                let mut accepted = 0u64;
-                let mut rejected = 0u64;
-                let results: Vec<serde_json::Value> = ops
+                //
+                // Every op is decoded from the already-parsed request,
+                // offered to the sequencer, and only then waited on. The
+                // previous shape called the single-op path in a loop,
+                // which re-serialised each op to a string, re-parsed it,
+                // blocked for its reply, and re-parsed the reply. Blocking
+                // per op was the expensive part: it left the writer's
+                // queue empty every time it looked, so a 500-op body paid
+                // 500 durability barriers instead of ceil(500/MAX_BATCH).
+                let mut decoded = Vec::with_capacity(ops.len());
+                for op in ops {
+                    decoded.push(decode_submission(op));
+                }
+                // Malformed ops never reach the sequencer. Well-formed
+                // ones are pushed in request order, so pulling one
+                // outcome per `Ok` below keeps results aligned with the
+                // request array without any index bookkeeping.
+                let subs: Vec<Submission> = decoded
                     .iter()
-                    .map(|op| {
-                        let bytes = op.to_string().into_bytes();
-                        let (status, body) = self.submit(&bytes);
-                        if status == 200 {
-                            accepted += 1;
-                        } else {
-                            rejected += 1;
-                        }
-                        serde_json::from_str(&body)
-                            .unwrap_or_else(|_| serde_json::json!({ "error": body }))
+                    .filter_map(|d| d.as_ref().ok())
+                    .map(|sub| Submission {
+                        workspace: sub.workspace.clone(),
+                        payload: sub.payload.clone(),
+                        author_sig: sub.author_sig.clone(),
                     })
                     .collect();
+                let mut outcomes = self.handle.try_submit_many(subs).into_iter();
+
+                let mut accepted = 0u64;
+                let mut rejected = 0u64;
+                let mut results: Vec<serde_json::Value> = Vec::with_capacity(decoded.len());
+                for d in &decoded {
+                    let value = match d {
+                        Err(reason) => {
+                            rejected += 1;
+                            serde_json::json!({ "error": reason })
+                        }
+                        Ok(sub) => match outcomes.next().expect("one outcome per submitted op") {
+                            Ok(acc) => {
+                                accepted += 1;
+                                self.batch_result(acc, sub)
+                            }
+                            Err(reason) => {
+                                rejected += 1;
+                                serde_json::json!({ "error": reason })
+                            }
+                        },
+                    };
+                    results.push(value);
+                }
                 (
                     200,
                     serde_json::json!({
@@ -927,58 +1012,89 @@ impl Platform {
             Ok(v) => v,
             Err(e) => return (400, format!(r#"{{"error":"bad json: {e}"}}"#)),
         };
-        let field = |name: &str| -> Option<String> {
-            req.get(name).and_then(|v| v.as_str()).map(String::from)
-        };
-        let (Some(workspace), Some(payload_hex), Some(key_id), Some(signature_hex)) = (
-            field("workspace"),
-            field("payload_hex"),
-            field("key_id"),
-            field("signature_hex"),
-        ) else {
-            return (
-                400,
-                r#"{"error":"need workspace, payload_hex, key_id, signature_hex"}"#.to_string(),
-            );
-        };
-        let (Some(payload), Some(signature)) =
-            (hex_decode(&payload_hex), hex_decode(&signature_hex))
-        else {
-            return (400, r#"{"error":"bad hex"}"#.to_string());
-        };
-        // An unassigned review request is answered with a node-signed
-        // assignment draw once the request itself is admitted.
-        let unassigned = match ViewOp::from_payload(&payload) {
-            Ok(op) => match op.kind {
-                OpKind::RequestReview { id, reviewers, .. } if reviewers.is_empty() => Some(id),
-                _ => None,
-            },
-            Err(_) => None,
+        let sub = match decode_submission(&req) {
+            Ok(sub) => sub,
+            Err(reason) => return (400, serde_json::json!({ "error": reason }).to_string()),
         };
         match self.handle.try_submit(
-            &workspace,
-            payload,
-            Some(Witness { key_id, signature }),
+            &sub.workspace,
+            sub.payload.clone(),
+            sub.author_sig.clone(),
         ) {
-            Ok(acc) => {
-                let mut resp =
-                    serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() });
-                if let Some(id) = unassigned {
-                    match self.assign_reviewers(&id, &workspace) {
-                        Ok(reviewers) => resp["reviewers"] = serde_json::json!(reviewers),
-                        // The request stands; it is visibly unassigned,
-                        // which is a state no verdict can complete.
-                        Err(e) => resp["assignment_error"] = serde_json::json!(e),
-                    }
-                }
-                (200, resp.to_string())
-            }
-            Err(reason) => (
-                400,
-                serde_json::json!({ "error": reason }).to_string(),
-            ),
+            Ok(acc) => (200, self.batch_result(acc, &sub).to_string()),
+            Err(reason) => (400, serde_json::json!({ "error": reason }).to_string()),
         }
     }
+
+    /// The success body for one admitted op, shared by `/api/submit` and
+    /// `/api/submit-batch` so the two cannot answer differently.
+    ///
+    /// An unassigned review request is answered with a node-signed
+    /// assignment draw once the request itself is admitted. That draw is a
+    /// *further* submission, so it deliberately happens here, after the
+    /// batch's own barrier, rather than being folded into it.
+    fn batch_result(&self, acc: choir_sequencer::Accepted, sub: &DecodedSubmission) -> serde_json::Value {
+        let mut resp = serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() });
+        if let Some(id) = &sub.unassigned_review {
+            match self.assign_reviewers(id, &sub.workspace) {
+                Ok(reviewers) => resp["reviewers"] = serde_json::json!(reviewers),
+                // The request stands; it is visibly unassigned, which is
+                // a state no verdict can complete.
+                Err(e) => resp["assignment_error"] = serde_json::json!(e),
+            }
+        }
+        resp
+    }
+}
+
+/// One decoded `/api/submit` body: the wire fields turned into the bytes
+/// the sequencer wants, plus whatever the response will need afterwards.
+struct DecodedSubmission {
+    workspace: String,
+    payload: Vec<u8>,
+    author_sig: Option<Witness>,
+    /// Review id when this op opens a review naming no reviewers, so the
+    /// node knows to draw for it once the op is admitted.
+    unassigned_review: Option<String>,
+}
+
+/// Turns one already-parsed request object into a submission.
+///
+/// Split out so `/api/submit-batch` can decode straight from the parsed
+/// request array. The previous batch path re-serialised each element back
+/// to a string and re-parsed it through the single-op entry point, which
+/// is two extra JSON round-trips per op on the endpoint that exists to
+/// avoid per-op overhead.
+fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, String> {
+    let field = |name: &str| req.get(name).and_then(|v| v.as_str());
+    let (Some(workspace), Some(payload_hex), Some(key_id), Some(signature_hex)) = (
+        field("workspace"),
+        field("payload_hex"),
+        field("key_id"),
+        field("signature_hex"),
+    ) else {
+        return Err("need workspace, payload_hex, key_id, signature_hex".to_string());
+    };
+    let (Some(payload), Some(signature)) = (hex_decode(payload_hex), hex_decode(signature_hex))
+    else {
+        return Err("bad hex".to_string());
+    };
+    let unassigned_review = match ViewOp::from_payload(&payload) {
+        Ok(op) => match op.kind {
+            OpKind::RequestReview { id, reviewers, .. } if reviewers.is_empty() => Some(id),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    Ok(DecodedSubmission {
+        workspace: workspace.to_string(),
+        payload,
+        author_sig: Some(Witness {
+            key_id: key_id.to_string(),
+            signature,
+        }),
+        unassigned_review,
+    })
 }
 
 /// JSON shape of one log entry, shared by the in-memory window and the
@@ -1005,17 +1121,53 @@ fn replay_from_disk(
 ) -> Result<Vec<serde_json::Value>, String> {
     use std::io::BufRead;
     let file = std::fs::File::open(path).map_err(|e| format!("open log: {e}"))?;
-    std::io::BufReader::new(file)
-        .lines()
-        .skip(from)
-        .take(take)
-        .map(|line| {
-            let line = line.map_err(|e| format!("read log: {e}"))?;
-            let entry: OpEntry =
-                serde_json::from_str(&line).map_err(|e| format!("decode log line: {e}"))?;
-            Ok(entry_json(&entry))
-        })
-        .collect()
+    let mut reader = std::io::BufReader::new(file);
+
+    // Skip by scanning for newlines rather than `.lines().skip(from)`,
+    // which allocates and UTF-8 validates a String for every line thrown
+    // away. Still O(bytes before `from`), but it no longer allocates
+    // per skipped entry, and a resync from a long log is exactly the case
+    // where "one allocation per line you do not want" is worst.
+    //
+    // `read_line` into a reused buffer would be the obvious fix; this
+    // uses `read_until` on the raw bytes so the skipped prefix is never
+    // UTF-8 checked either. The entries actually returned are still
+    // decoded through `serde_json`, which validates them properly.
+    let mut scratch = Vec::new();
+    for _ in 0..from {
+        scratch.clear();
+        let n = reader
+            .read_until(b'\n', &mut scratch)
+            .map_err(|e| format!("read log: {e}"))?;
+        if n == 0 {
+            // `from` is past the end of the log: an empty page, not an
+            // error. The caller already answered 409 for the case where
+            // the reader is behind the window with no log to fall back on.
+            return Ok(Vec::new());
+        }
+    }
+
+    let mut rows = Vec::with_capacity(take.min(LOG_PAGE));
+    for _ in 0..take {
+        scratch.clear();
+        let n = reader
+            .read_until(b'\n', &mut scratch)
+            .map_err(|e| format!("read log: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        let entry: OpEntry = serde_json::from_slice(trim_newline(&scratch))
+            .map_err(|e| format!("decode log line: {e}"))?;
+        rows.push(entry_json(&entry));
+    }
+    Ok(rows)
+}
+
+/// Drops a trailing `\n` and an optional preceding `\r`, so a line read
+/// with `read_until` decodes the same as one produced by `.lines()`.
+fn trim_newline(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 /// JSON shape of one review's state (shared by /api/view and
@@ -1046,7 +1198,7 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
 
 /// Decodes lowercase/uppercase hex; `None` on any bad input.
 pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
