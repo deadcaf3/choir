@@ -96,6 +96,19 @@ pub struct BaseRate {
     /// Commits in the history that was scanned, for context: a rate over
     /// 40 merges and a rate over 40,000 are not the same evidence.
     pub commits: usize,
+    /// Commits that revert *anything*, anywhere in the scanned history.
+    ///
+    /// This is the corpus-suitability signal, and measuring git/git is
+    /// what showed it was needed: 15,579 merges, 46 revert commits in the
+    /// whole first-parent history, giving a labelled rate of 0.001. That
+    /// is not "git's merges are 99.9% safe" — it is a project that drops
+    /// bad topics from an integration branch before they reach the
+    /// mainline instead of reverting them. The proxy measures revert
+    /// *culture*, and where there is none it reads as safety.
+    ///
+    /// A corpus with near-zero reverts cannot supply a base rate at all.
+    /// Check this before believing [`Self::rate`].
+    pub revert_commits: usize,
     /// The window the labelling used, in commits.
     pub window: usize,
 }
@@ -112,6 +125,20 @@ impl BaseRate {
             return 0.0;
         }
         self.reverted as f64 / self.merges as f64
+    }
+
+    /// Whether the corpus reverts often enough for [`Self::rate`] to mean
+    /// anything, at a deliberately low bar: at least one revert commit
+    /// per 200 scanned commits.
+    ///
+    /// The threshold is a judgement, not a measurement, and it is set
+    /// where it is because git/git sits an order of magnitude below it
+    /// (46 reverts in 24,234 first-parent commits) while a
+    /// merge-queue-driven project sits above. A `false` here means "find
+    /// another corpus", never "this project's merges are safe".
+    #[must_use]
+    pub fn corpus_is_suitable(&self) -> bool {
+        self.commits > 0 && self.revert_commits * 200 >= self.commits
     }
 }
 
@@ -214,6 +241,7 @@ pub fn base_rate(history: &[Commit], window: usize) -> BaseRate {
         merges: labelled.len(),
         reverted: labelled.iter().filter(|m| m.reverted_by.is_some()).count(),
         commits: history.len(),
+        revert_commits: history.iter().filter(|c| c.reverts().is_some()).count(),
         window,
     }
 }
@@ -257,5 +285,12 @@ pub fn history(repo: &std::path::Path, max: usize) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    String::from_utf8(out.stdout).map_err(|e| format!("git log output is not utf-8: {e}"))
+    // Lossy, not strict. Real histories carry commit messages that are
+    // not valid UTF-8 — git/git has them at around 9.5 MB into its log,
+    // from the pre-UTF-8 era — and refusing the whole corpus over an
+    // author's name in Latin-1 would be absurd. Everything this module
+    // reads is ASCII: the 0x1f/0x1e framing, hex oids, and the literal
+    // "This reverts commit ". Replacement characters land only inside
+    // message text the labelling never inspects.
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

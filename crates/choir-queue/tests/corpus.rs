@@ -210,3 +210,41 @@ fn a_history_with_no_merges_reports_zero_merges_not_a_clean_rate() {
     assert_eq!(rate.commits, 1);
     assert!((rate.rate() - 0.0).abs() < f64::EPSILON);
 }
+
+#[test]
+fn corpus_suitability_separates_a_low_rate_from_an_unmeasurable_one() {
+    // Measuring git/git is what forced this: 15,579 merges, 46 revert
+    // commits in the whole first-parent history, labelled rate 0.001.
+    // Read as safety that is a spectacular claim; read as workflow it is
+    // just a project that drops bad topics from an integration branch
+    // instead of reverting them. The two have to be distinguishable.
+    let quiet: Vec<Commit> = (0..400)
+        .map(|i| Commit {
+            id: format!("c{i}"),
+            parents: if i % 3 == 0 {
+                vec!["a".into(), "b".into()]
+            } else {
+                vec!["a".into()]
+            },
+            body: "work".into(),
+        })
+        .collect();
+    let r = base_rate(&quiet, 50);
+    assert_eq!(r.revert_commits, 0);
+    assert!(!r.corpus_is_suitable(), "a revert-free corpus cannot supply a rate");
+    assert!((r.rate() - 0.0).abs() < f64::EPSILON, "and it still reads 0.0");
+
+    // One revert per 200 commits clears the bar.
+    let mut reverting = quiet.clone();
+    for i in 0..2 {
+        reverting[i * 100 + 1] = Commit {
+            id: format!("r{i}"),
+            parents: vec!["a".into()],
+            body: "This reverts commit 1234567890abcdef.".into(),
+        };
+    }
+    assert!(base_rate(&reverting, 50).corpus_is_suitable());
+
+    // An empty history is unsuitable rather than dividing by zero.
+    assert!(!base_rate(&[], 50).corpus_is_suitable());
+}
