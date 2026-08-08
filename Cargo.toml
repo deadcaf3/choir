@@ -5,6 +5,7 @@ members = [
     "crates/choir-oplog",
     "crates/choir-sequencer",
     "crates/choir-merge",
+    "crates/choir-queue",
     "crates/choir-spike",
     "crates/choir-store",
 ]

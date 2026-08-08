@@ -69,6 +69,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "choir-queue"
+version = "0.0.1"
+dependencies = [
+ "choir-merge",
+ "choir-oplog",
+ "choir-sequencer",
+]
+
+[[package]]
 name = "choir-sequencer"
 version = "0.0.1"
 dependencies = [
