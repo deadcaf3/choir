@@ -221,6 +221,92 @@ fn sync_once(
     Ok((set, deleted, unchanged))
 }
 
+/// How long to wait for CI on the train commit before giving up.
+const CI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Poll interval while waiting on CI.
+const CI_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// One queue-as-bot round (D21 queue stage, verdict-only): fetch the
+/// open PRs, build the speculative train locally, publish it as the
+/// `choir/train` branch so the forge's CI runs on it, wait for the
+/// check verdict, and post a per-PR `choir/queue` commit status.
+fn queue_round(app_id: &str, pem: &Path, repo: &str, workdir: &Path) -> Result<(), String> {
+    let token = github::app_jwt(app_id, pem).and_then(|jwt| github::installation_token(&jwt))?;
+    let base_branch = github::default_branch(&token, repo)?;
+    let prs = github::list_open_prs(&token, repo)?;
+    if prs.is_empty() {
+        println!("queue: no open PRs on {repo}; nothing to do");
+        return Ok(());
+    }
+    // The installation token lives in this URL for the duration of the
+    // round; it is passed per-invocation and never written to git
+    // config or disk.
+    let url = format!("https://x-access-token:{token}@github.com/{repo}.git");
+
+    if !workdir.join(".git").exists() {
+        std::fs::create_dir_all(workdir).map_err(|e| format!("create workdir: {e}"))?;
+        git(&["init", "-q"], Some(workdir))?;
+    }
+    let mut fetch: Vec<String> = vec!["fetch".into(), "-q".into(), url.clone()];
+    fetch.push(format!("+refs/heads/{base_branch}:refs/choirq/base"));
+    for pr in &prs {
+        fetch.push(format!("+refs/pull/{}/head:refs/choirq/pr/{}", pr.number, pr.number));
+    }
+    let fetch_refs: Vec<&str> = fetch.iter().map(String::as_str).collect();
+    git(&fetch_refs, Some(workdir))?;
+    let base = git(&["rev-parse", "refs/choirq/base"], Some(workdir))?.trim().to_string();
+
+    let heads: Vec<(u64, String)> =
+        prs.iter().map(|p| (p.number, format!("refs/choirq/pr/{}", p.number))).collect();
+    let train = choir_bridge::queue::build_train(workdir, &base, &heads)?;
+    if train.tip == base {
+        println!("queue: no PR merged cleanly; train == base, skipping CI");
+    } else {
+        git(
+            &["push", "-q", &url, &format!("+{}:refs/heads/choir/train", train.tip)],
+            Some(workdir),
+        )?;
+        println!("queue: train {} pushed ({} PRs considered)", train.tip, prs.len());
+    }
+
+    let verdict = if train.tip == base {
+        // Nothing new to test; base is presumed already checked.
+        github::Verdict::Success
+    } else {
+        let deadline = std::time::Instant::now() + CI_TIMEOUT;
+        loop {
+            let v = github::check_verdict(&token, repo, &train.tip)?;
+            match v {
+                github::Verdict::Success | github::Verdict::Failure => break v,
+                github::Verdict::Pending | github::Verdict::NoRuns => {
+                    if std::time::Instant::now() >= deadline {
+                        break v;
+                    }
+                    std::thread::sleep(CI_POLL);
+                }
+            }
+        }
+    };
+
+    for entry in &train.entries {
+        // Statuses land on the PR head sha, which the fetched ref points at.
+        let sha = git(&["rev-parse", &entry.head], Some(workdir))?.trim().to_string();
+        let (state, desc) = if !entry.merged {
+            ("failure", entry.note.as_str())
+        } else {
+            match verdict {
+                github::Verdict::Success => ("success", "speculative train green"),
+                github::Verdict::Failure => ("failure", "train CI failed"),
+                github::Verdict::Pending => ("error", "train CI timed out"),
+                github::Verdict::NoRuns => ("error", "no CI signal on train"),
+            }
+        };
+        github::post_status(&token, repo, &sha, "choir/queue", state, desc)?;
+        println!("queue: PR #{}: {state} ({desc})", entry.id);
+    }
+    Ok(())
+}
+
 /// Loads the 32-byte actor key at `path`, creating it (0600) if absent.
 fn load_or_create_key(path: &str) -> ActorKey {
     if Path::new(path).exists() {
@@ -295,7 +381,7 @@ fn main() {
                 } else {
                     sha.clone()
                 };
-                github::post_status(&token, repo, &sha, state, desc).map(|()| sha)
+                github::post_status(&token, repo, &sha, "choir/bridge", state, desc).map(|()| sha)
             });
         match result {
             Ok(sha) => println!("status posted: {repo}@{sha} -> {state}"),
@@ -303,6 +389,22 @@ fn main() {
                 eprintln!("post-status failed: {e}");
                 std::process::exit(1);
             }
+        }
+        return;
+    }
+    // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir>`
+    // Queue-as-bot v0: one speculative-train round, verdict-only.
+    if args.first().map(String::as_str) == Some("queue") {
+        let [app_id, pem, repo, workdir] = match &args[1..] {
+            [a, b, c, d] => [a, b, c, d],
+            _ => {
+                eprintln!("usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir>");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = queue_round(app_id, Path::new(pem), repo, Path::new(workdir)) {
+            eprintln!("queue round failed: {e}");
+            std::process::exit(1);
         }
         return;
     }
