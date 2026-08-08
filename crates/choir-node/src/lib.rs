@@ -32,6 +32,7 @@ pub struct Node {
     port: u16,
     auth: std::sync::Arc<Option<AuthTable>>,
     platform: Option<std::sync::Arc<Platform>>,
+    scheme: &'static str,
     /// Loopback secret handed to repo hooks via env so their callback to
     /// `/api/git-update` passes the auth gate without user credentials.
     internal_token: String,
@@ -61,9 +62,51 @@ impl Node {
         port: u16,
         auth: Option<AuthTable>,
     ) -> std::io::Result<Self> {
+        Self::bind_full(root, "127.0.0.1", port, auth, None)
+    }
+
+    /// Full-control bind: address, port, auth, and optional TLS
+    /// (PEM certificate chain + PEM private key).
+    ///
+    /// A non-loopback `addr` is refused without TLS — plaintext basic
+    /// auth must never cross a real network (standing privacy rule:
+    /// nothing leaves loopback without an explicit, protected choice).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket cannot be bound, `root` cannot
+    /// be created, the TLS material is invalid, or a non-loopback bind
+    /// is requested without TLS.
+    pub fn bind_full(
+        root: &Path,
+        addr: &str,
+        port: u16,
+        auth: Option<AuthTable>,
+        tls: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> std::io::Result<Self> {
+        let loopback = addr
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+        if !loopback && tls.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing non-loopback bind without TLS",
+            ));
+        }
         std::fs::create_dir_all(root)?;
-        let server = tiny_http::Server::http(("127.0.0.1", port))
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        let server = match tls {
+            Some((certificate, private_key)) => tiny_http::Server::https(
+                (addr, port),
+                tiny_http::SslConfig {
+                    certificate,
+                    private_key,
+                },
+            ),
+            None => tiny_http::Server::http((addr, port)),
+        }
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
         let port = match server.server_addr().to_ip() {
             Some(addr) => addr.port(),
             None => 0,
@@ -74,6 +117,7 @@ impl Node {
             port,
             auth: std::sync::Arc::new(auth),
             platform: None,
+            scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
         })
     }
@@ -168,7 +212,7 @@ impl Node {
                 "while read old new ref; do\n",
                 "  payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\",\"cert_status\":\"%s\",\"signer\":\"%s\"}' \\\n",
                 "    \"$CHOIR_REPO\" \"$ref\" \"$old\" \"$new\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
-                "  if ! curl -sf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
+                "  if ! curl -skf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
                 "      -d \"$payload\" \"$CHOIR_API\" >/dev/null; then\n",
                 "    echo \"choir: ref update rejected by sequencer: $ref\" >&2\n",
                 "    exit 1\n",
@@ -204,6 +248,7 @@ impl Node {
             let platform = self.platform.clone();
             let internal_token = self.internal_token.clone();
             let port = self.port;
+            let scheme = self.scheme;
             std::thread::spawn(move || {
                 // Hook callbacks authenticate with the loopback secret
                 // instead of user credentials.
@@ -240,7 +285,7 @@ impl Node {
                     if let Some(repo) = repo_from_path(request.url()) {
                         extra_env.push((
                             "CHOIR_API".to_string(),
-                            format!("http://127.0.0.1:{port}/api/git-update"),
+                            format!("{scheme}://127.0.0.1:{port}/api/git-update"),
                         ));
                         extra_env.push(("CHOIR_REPO".to_string(), repo));
                         extra_env.push(("CHOIR_USER".to_string(), user));

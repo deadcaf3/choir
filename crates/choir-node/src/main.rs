@@ -1,12 +1,15 @@
 //! choir-node daemon entry point.
 //!
 //! Usage: `choir-node <repo-root> [port] [--create owner/name.git]...
-//! [--auth-file path] [--keys-file path]`
+//! [--auth-file path] [--keys-file path] [--bind addr]
+//! [--tls-cert cert.pem --tls-key key.pem]`
 //!
-//! Binds 127.0.0.1 only. `--auth-file` points at a `user:token`-per-line
-//! file (0600; never in-repo) and turns on mandatory basic auth.
-//! `--keys-file` (ed25519 public keys, one 64-char hex line each) turns
-//! on the platform API; the op log persists at `<repo-root>/.choir/ops.jsonl`.
+//! Binds 127.0.0.1 by default. `--auth-file` points at a
+//! `user:token`-per-line file (0600; never in-repo) and turns on
+//! mandatory basic auth. `--keys-file` (ed25519 public keys, one
+//! 64-char hex line each) turns on the platform API; the op log
+//! persists at `<repo-root>/.choir/ops.jsonl`. `--bind` with a
+//! non-loopback address is refused unless TLS is configured.
 
 use choir_node::{AuthTable, Node, Platform};
 
@@ -44,7 +47,25 @@ fn main() -> std::io::Result<()> {
         None => None,
     };
 
-    let mut node = Node::bind_with_auth(&root, port, auth)?;
+    let flag_value = |name: &str| -> Option<&String> {
+        rest.iter()
+            .position(|a| a == name)
+            .and_then(|i| rest.get(i + 1))
+    };
+    let bind = flag_value("--bind").cloned().unwrap_or_else(|| "127.0.0.1".into());
+    let tls = match (flag_value("--tls-cert"), flag_value("--tls-key")) {
+        (Some(cert), Some(key)) => Some((std::fs::read(cert)?, std::fs::read(key)?)),
+        (None, None) => None,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--tls-cert and --tls-key must be given together",
+            ))
+        }
+    };
+    let tls_on = tls.is_some();
+
+    let mut node = Node::bind_full(&root, &bind, port, auth, tls)?;
     if let Some(i) = rest.iter().position(|a| a == "--keys-file") {
         let path = rest.get(i + 1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "--keys-file needs a path")
@@ -118,8 +139,10 @@ fn main() -> std::io::Result<()> {
         }
     }
     eprintln!(
-        "choir-node serving {} on http://127.0.0.1:{}",
+        "choir-node serving {} on {}://{}:{}",
         root.display(),
+        if tls_on { "https" } else { "http" },
+        bind,
         node.port()
     );
     node.serve_forever();
