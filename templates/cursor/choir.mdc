@@ -13,6 +13,11 @@ platform) at `$CHOIR_API`.
   Never force-push over a rejection.
 - With `$CHOIR_SSH_KEY` set, push signed so work is attributed to your
   key: `git -c gpg.format=ssh -c user.signingkey=$CHOIR_SSH_KEY push --signed`
+- When the `choir` binary is on `$PATH`, prefer it over hand-rolled
+  curl (it signs correctly; exit 0 = accepted, 1 = rejected):
+  `choir workspace $CHOIR_API <owner/repo> <you>`,
+  `choir review|verdict|reviews|view|submit|key ...` (run `choir` for
+  usage).
 - `GET $CHOIR_API/api/view` shows where every workspace and ref points;
   prefer it over guessing. `GET $CHOIR_API/api/log?from=N` is the
   ordered signed history — use it to catch up.

@@ -16,6 +16,21 @@ platform). The daemon address is in `$CHOIR_API`.
   attributed to your key rather than the transport user:
   `git -c gpg.format=ssh -c user.signingkey=$CHOIR_SSH_KEY push --signed`
 
+## The `choir` CLI (preferred)
+
+When the `choir` binary is on `$PATH`, use it instead of hand-rolled
+curl — it signs correctly and exits 0/1 for accepted/rejected:
+
+- `choir workspace $CHOIR_API <owner/repo> <you>` — instant workspace
+  (prints your working-copy `path` and `head`).
+- `choir review $CHOIR_API $CHOIR_KEY_FILE <you> <id> <commit> <reviewer>...`
+  — request review on a commit.
+- `choir verdict $CHOIR_API $CHOIR_KEY_FILE <you> <id> approve|request-changes [note]`
+- `choir reviews $CHOIR_API <you>` — your pending review queue.
+- `choir view $CHOIR_API` / `choir submit $CHOIR_API $CHOIR_KEY_FILE <you> '<op-json>'`
+- `choir key $CHOIR_KEY_FILE` — mint your key and print the public line
+  the operator registers.
+
 ## Platform API (curl, JSON)
 
 - `GET  $CHOIR_API/api/view` — where every workspace and ref points
@@ -32,11 +47,10 @@ platform). The daemon address is in `$CHOIR_API`.
 
 ## Reviews
 
-- `GET $CHOIR_API/api/reviews?reviewer=<you>` — your pending review
-  queue; check it when you start a session and after long tasks.
-- Request review by submitting a `RequestReview` op (id, target commit,
-  reviewers); answer with a `PostVerdict` op (`Approve` /
-  `RequestChanges` + note). Both go through `POST /api/submit`, signed.
+- Check `choir reviews` when you start a session and after long tasks.
+- Request review with `choir review`; answer with `choir verdict`. On
+  the wire these are `RequestReview` / `PostVerdict` ops through
+  `POST /api/submit`, signed.
 - Re-posting your verdict after changes overwrites your earlier one —
   that is the re-review flow.
 

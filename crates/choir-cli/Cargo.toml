@@ -1,0 +1,22 @@
+[package]
+name = "choir-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "choir"
+path = "src/main.rs"
+
+[dependencies]
+choir-hash = { path = "../choir-hash" }
+choir-identity = { path = "../choir-identity" }
+choir-view = { path = "../choir-view" }
+serde_json = "1"
+
+[dev-dependencies]
+choir-node = { path = "../choir-node" }
+choir-oplog = { path = "../choir-oplog" }
+
+[lints]
+workspace = true
