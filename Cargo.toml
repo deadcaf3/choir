@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/choir-hash",
     "crates/choir-oplog",
     "crates/choir-sequencer",
     "crates/choir-merge",
     "crates/choir-spike",
+    "crates/choir-store",
 ]
 
 [workspace.package]

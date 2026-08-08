@@ -1,13 +1,12 @@
 [package]
-name = "choir-oplog"
+name = "choir-hash"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-choir-hash = { path = "../choir-hash" }
+blake3 = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

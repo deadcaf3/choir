@@ -1,11 +1,12 @@
 [package]
-name = "choir-oplog"
+name = "choir-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 choir-hash = { path = "../choir-hash" }
+fastcdc = "3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -28,32 +28,11 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use choir_hash::ContentHash;
+
 /// Current wire-format version. Bump on any incompatible change; additive
 /// changes keep the version (plan.md §E evolution policy).
 pub const FORMAT_VERSION: u16 = 1;
-
-/// Self-describing content address (multihash-style envelope, D6).
-///
-/// The codec byte names the hash function, so a future hash migration adds a
-/// codec instead of rewriting stored identifiers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ContentHash {
-    /// Hash-function identifier; `0x1e` = BLAKE3-256, following the
-    /// multicodec table.
-    pub codec: u8,
-    /// Raw digest bytes for `codec`.
-    pub digest: Vec<u8>,
-}
-
-impl ContentHash {
-    /// Hashes `data` with BLAKE3-256 and wraps it in the envelope.
-    pub fn blake3(data: &[u8]) -> Self {
-        Self {
-            codec: 0x1e,
-            digest: blake3::hash(data).as_bytes().to_vec(),
-        }
-    }
-}
 
 /// A witness cosignature. Unused until Phase 2 (D16); present in the format
 /// from the first persisted byte so adding witnessing never rewrites history.

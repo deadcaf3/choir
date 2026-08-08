@@ -45,6 +45,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "choir-hash"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "serde",
+]
+
+[[package]]
 name = "choir-merge"
 version = "0.0.1"
 dependencies = [
@@ -55,7 +63,7 @@ dependencies = [
 name = "choir-oplog"
 version = "0.0.1"
 dependencies = [
- "blake3",
+ "choir-hash",
  "serde",
  "serde_json",
 ]
@@ -74,6 +82,16 @@ dependencies = [
  "choir-merge",
  "choir-oplog",
  "choir-sequencer",
+]
+
+[[package]]
+name = "choir-store"
+version = "0.0.1"
+dependencies = [
+ "choir-hash",
+ "fastcdc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -99,6 +117,12 @@ checksum = "b545b8c50194bdd008283985ab0b31dba153cfd5b3066a92770634fbc0d7d291"
 dependencies = [
  "nu-ansi-term",
 ]
+
+[[package]]
+name = "fastcdc"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf51ceb43e96afbfe4dd5c6f6082af5dfd60e220820b8123792d61963f2ce6bc"
 
 [[package]]
 name = "find-msvc-tools"
