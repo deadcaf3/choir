@@ -120,8 +120,12 @@ fn main() -> std::io::Result<()> {
         };
         let log = choir_oplog::FileLog::open(&state_dir.join("ops.jsonl"))
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        let platform = Platform::start(registry, Box::new(log), node_key)
-            .map_err(std::io::Error::other)?;
+        // Hot-reload: appending a key line to the file takes effect on
+        // the next failed signature check, no restart. (Push-cert
+        // allowed_signers stays startup-only for now.)
+        let platform =
+            Platform::start_reloading(registry, Box::new(log), node_key, Some(path.into()))
+                .map_err(std::io::Error::other)?;
         node.enable_platform(platform);
         eprintln!("platform API enabled ({count} actor keys)");
     }

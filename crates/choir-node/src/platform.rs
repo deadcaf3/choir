@@ -52,15 +52,72 @@ struct ChoirPolicy {
     registry: Registry,
     view: Arc<Mutex<View>>,
     entries: Arc<Mutex<LogWindow>>,
+    /// When set, the trusted-keys file is re-read after a failed
+    /// signature check if its mtime moved — registering a key becomes
+    /// "append a line", no daemon restart.
+    keys_file: Option<std::path::PathBuf>,
+    keys_mtime: Option<std::time::SystemTime>,
+    node_pub: Vec<u8>,
+}
+
+impl ChoirPolicy {
+    /// Rebuilds the registry from the keys file iff its mtime changed
+    /// since the last (re)load. Returns whether a reload happened.
+    fn reload_keys(&mut self) -> bool {
+        let Some(path) = &self.keys_file else {
+            return false;
+        };
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if mtime.is_none() || mtime == self.keys_mtime {
+            return false;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let mut registry = Registry::new();
+        if let Ok(node_pub) = <[u8; 32]>::try_from(self.node_pub.as_slice()) {
+            registry.register(&node_pub).ok();
+        }
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(key) = hex_decode(line).and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+                registry.register(&key).ok();
+            }
+        }
+        self.registry = registry;
+        self.keys_mtime = mtime;
+        true
+    }
 }
 
 impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
-        self.registry
-            .verify_submission(&sub.workspace, &sub.payload, sig)
-            .map_err(|e| format!("bad signature: {e:?}"))?;
+        let mut verified = self
+            .registry
+            .verify_submission(&sub.workspace, &sub.payload, sig);
+        // Unknown/failed key: maybe the operator just registered it.
+        if verified.is_err() && self.reload_keys() {
+            verified = self
+                .registry
+                .verify_submission(&sub.workspace, &sub.payload, sig);
+        }
+        verified.map_err(|e| format!("bad signature: {e:?}"))?;
         let op = ViewOp::from_payload(&sub.payload).map_err(|e| format!("bad op: {e:?}"))?;
+        // A verdict's claimed reviewer must be the signature-covered
+        // submission channel: the log's author attribution and the
+        // view's verdict attribution can never diverge.
+        if let OpKind::PostVerdict { reviewer, .. } = &op.kind {
+            if *reviewer != sub.workspace {
+                return Err(format!(
+                    "verdict reviewer {reviewer:?} does not match submission channel {:?}",
+                    sub.workspace
+                ));
+            }
+        }
         let mut trial = self.view.lock().expect("view lock").clone();
         trial.apply(&op).map_err(|e| format!("stale head: {e:?}"))
     }
@@ -101,9 +158,26 @@ impl Platform {
     /// Returns a description of any replay failure (a log written
     /// through this platform always replays cleanly).
     pub fn start(
+        registry: Registry,
+        log: Box<dyn OpLog>,
+        node_key: ActorKey,
+    ) -> Result<Self, String> {
+        Self::start_reloading(registry, log, node_key, None)
+    }
+
+    /// [`Platform::start`] with a trusted-keys file that is hot-reloaded
+    /// (on mtime change) whenever a signature check fails: registering a
+    /// key is appending a line, no restart. The file's contents replace
+    /// the whole registry on reload, so key *removal* also takes effect.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Platform::start`].
+    pub fn start_reloading(
         mut registry: Registry,
         log: Box<dyn OpLog>,
         node_key: ActorKey,
+        keys_file: Option<std::path::PathBuf>,
     ) -> Result<Self, String> {
         registry
             .register(&node_key.public_key_bytes())
@@ -119,12 +193,18 @@ impl Platform {
             window.push(e);
         }
         let entries = Arc::new(Mutex::new(window));
+        let keys_mtime = keys_file
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
                 registry,
                 view: view.clone(),
                 entries: entries.clone(),
+                keys_file,
+                keys_mtime,
+                node_pub: node_key.public_key_bytes().to_vec(),
             }),
         );
         Ok(Self {
