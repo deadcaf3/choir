@@ -109,6 +109,34 @@ pub enum OpKind {
         /// Workspace being removed.
         workspace: String,
     },
+    /// Open review `id` on commit `target`, fanning out to `reviewers`
+    /// (additive variant, added for review fan-out; wire-format
+    /// unchanged). `id` must not already exist.
+    RequestReview {
+        /// Caller-chosen review id (unique per log).
+        id: String,
+        /// The commit under review.
+        target: ContentHash,
+        /// Actor names the review fans out to.
+        reviewers: Vec<String>,
+    },
+    /// Record `reviewer`'s verdict on review `id` (additive variant).
+    /// Only listed reviewers may post; re-posting overwrites the
+    /// reviewer's own earlier verdict (re-review after changes).
+    ///
+    /// `reviewer` is payload data and therefore covered by the author
+    /// signature; binding it to the submitting key is admission policy
+    /// (L2), not view semantics.
+    PostVerdict {
+        /// The review being answered.
+        id: String,
+        /// The responding reviewer (must be in the review's list).
+        reviewer: String,
+        /// The verdict.
+        verdict: Verdict,
+        /// Free-text rationale (may be empty).
+        note: String,
+    },
     /// Remove named ref `name` under the same CAS rule (additive
     /// variant, added for git branch deletion; wire-format unchanged).
     DeleteRef {
@@ -117,6 +145,42 @@ pub enum OpKind {
         /// Expected current target (CAS).
         prev: Option<ContentHash>,
     },
+}
+
+/// A reviewer's answer to a review request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verdict {
+    /// The change may land.
+    Approve,
+    /// The change needs work before landing.
+    RequestChanges,
+}
+
+/// Materialized state of one review: what is under review, who was
+/// asked, who has answered what.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReviewState {
+    /// The commit under review.
+    pub target: Option<ContentHash>,
+    /// Actors the review fanned out to.
+    pub reviewers: Vec<String>,
+    /// reviewer → (verdict, note); absent = not answered yet.
+    pub verdicts: BTreeMap<String, (Verdict, String)>,
+}
+
+impl ReviewState {
+    /// Whether every listed reviewer has answered.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.reviewers.iter().all(|r| self.verdicts.contains_key(r))
+    }
+
+    /// Whether the review is complete with no `RequestChanges`.
+    #[must_use]
+    pub fn approved(&self) -> bool {
+        self.complete()
+            && self.verdicts.values().all(|(v, _)| *v == Verdict::Approve)
+    }
 }
 
 /// Failure modes of view folding and commit storage.
@@ -137,6 +201,9 @@ pub enum ViewError {
     Log(LogError),
     /// Underlying chunk-store failure.
     Store(StoreError),
+    /// Review-op precondition failure (duplicate id, unknown review,
+    /// or a reviewer not on the review's list).
+    Review(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -215,6 +282,8 @@ pub struct View {
     pub workspaces: BTreeMap<String, ContentHash>,
     /// Ref name → target commit id.
     pub refs: BTreeMap<String, ContentHash>,
+    /// Review id → review state (fan-out and verdicts).
+    pub reviews: BTreeMap<String, ReviewState>,
 }
 
 impl View {
@@ -254,6 +323,42 @@ impl View {
             }
             OpKind::DeleteWorkspace { workspace } => {
                 self.workspaces.remove(workspace);
+            }
+            OpKind::RequestReview {
+                id,
+                target,
+                reviewers,
+            } => {
+                if self.reviews.contains_key(id) {
+                    return Err(ViewError::Review(format!("review {id} already exists")));
+                }
+                self.reviews.insert(
+                    id.clone(),
+                    ReviewState {
+                        target: Some(target.clone()),
+                        reviewers: reviewers.clone(),
+                        verdicts: BTreeMap::new(),
+                    },
+                );
+            }
+            OpKind::PostVerdict {
+                id,
+                reviewer,
+                verdict,
+                note,
+            } => {
+                let review = self
+                    .reviews
+                    .get_mut(id)
+                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if !review.reviewers.iter().any(|r| r == reviewer) {
+                    return Err(ViewError::Review(format!(
+                        "{reviewer} is not a reviewer of {id}"
+                    )));
+                }
+                review
+                    .verdicts
+                    .insert(reviewer.clone(), (*verdict, note.clone()));
             }
             OpKind::DeleteRef { name, prev } => {
                 let actual = self.refs.get(name);

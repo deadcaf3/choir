@@ -30,6 +30,16 @@ platform). The daemon address is in `$CHOIR_API`.
   registers the workspace in the view. Push with a full refname
   (`HEAD:refs/heads/<branch>`) — workspaces start on a detached HEAD.
 
+## Reviews
+
+- `GET $CHOIR_API/api/reviews?reviewer=<you>` — your pending review
+  queue; check it when you start a session and after long tasks.
+- Request review by submitting a `RequestReview` op (id, target commit,
+  reviewers); answer with a `PostVerdict` op (`Approve` /
+  `RequestChanges` + note). Both go through `POST /api/submit`, signed.
+- Re-posting your verdict after changes overwrites your earlier one —
+  that is the re-review flow.
+
 ## Conventions
 
 - One workspace per agent, named after you; set your workspace head

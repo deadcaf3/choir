@@ -228,8 +228,32 @@ impl Platform {
                     .collect();
                 let refs: std::collections::BTreeMap<_, _> =
                     view.refs.iter().map(|(k, v)| (k.clone(), v.to_hex())).collect();
-                let body = serde_json::json!({ "workspaces": ws, "refs": refs });
+                let reviews: std::collections::BTreeMap<_, _> = view
+                    .reviews
+                    .iter()
+                    .map(|(id, r)| (id.clone(), review_json(r)))
+                    .collect();
+                let body = serde_json::json!({ "workspaces": ws, "refs": refs, "reviews": reviews });
                 (200, body.to_string())
+            }
+            // Pending queue for one reviewer: reviews that fanned out to
+            // them and are still unanswered by them.
+            ("GET", path) if path.starts_with("/api/reviews") => {
+                let reviewer = path
+                    .split_once("reviewer=")
+                    .map(|(_, v)| v.split('&').next().unwrap_or(v))
+                    .unwrap_or("");
+                let view = self.view.lock().expect("view lock");
+                let pending: std::collections::BTreeMap<_, _> = view
+                    .reviews
+                    .iter()
+                    .filter(|(_, r)| {
+                        r.reviewers.iter().any(|x| x == reviewer)
+                            && !r.verdicts.contains_key(reviewer)
+                    })
+                    .map(|(id, r)| (id.clone(), review_json(r)))
+                    .collect();
+                (200, serde_json::json!({ "pending": pending }).to_string())
             }
             ("POST", "/api/submit") => self.submit(body),
             ("POST", "/api/submit-batch") => {
@@ -357,6 +381,28 @@ impl Platform {
             ),
         }
     }
+}
+
+/// JSON shape of one review's state (shared by /api/view and
+/// /api/reviews).
+fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
+    let verdicts: std::collections::BTreeMap<_, _> = r
+        .verdicts
+        .iter()
+        .map(|(who, (v, note))| {
+            (
+                who.clone(),
+                serde_json::json!({ "verdict": format!("{v:?}"), "note": note }),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "target": r.target.as_ref().map(choir_oplog::ContentHash::to_hex),
+        "reviewers": r.reviewers,
+        "verdicts": verdicts,
+        "complete": r.complete(),
+        "approved": r.approved(),
+    })
 }
 
 /// Decodes lowercase/uppercase hex; `None` on any bad input.

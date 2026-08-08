@@ -151,3 +151,66 @@ fn commit_roundtrips_through_store() {
     assert_eq!(loaded.message, "c1");
     assert_eq!(loaded.put(&mut store).unwrap(), c1, "re-store is stable");
 }
+
+#[test]
+fn review_fan_out_semantics() {
+    let mut log = MemLog::new();
+    let target = ContentHash::blake3(b"change under review");
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r1".into(),
+        target: target.clone(),
+        reviewers: vec!["ana".into(), "bot-reviewer".into()],
+    });
+    append_op(&mut log, "author", request.clone()).unwrap();
+
+    // Duplicate id is rejected; unknown review and non-reviewer too.
+    assert!(matches!(
+        append_op(&mut log, "author", request),
+        Err(ViewError::Review(_))
+    ));
+    let verdict = |id: &str, who: &str, v: choir_view::Verdict, note: &str| {
+        ViewOp::new(OpKind::PostVerdict {
+            id: id.into(),
+            reviewer: who.into(),
+            verdict: v,
+            note: note.into(),
+        })
+    };
+    assert!(matches!(
+        append_op(&mut log, "ana", verdict("nope", "ana", choir_view::Verdict::Approve, "")),
+        Err(ViewError::Review(_))
+    ));
+    assert!(matches!(
+        append_op(&mut log, "mallory", verdict("r1", "mallory", choir_view::Verdict::Approve, "")),
+        Err(ViewError::Review(_))
+    ));
+
+    // First verdict: incomplete. RequestChanges: complete but not approved.
+    append_op(&mut log, "ana", verdict("r1", "ana", choir_view::Verdict::Approve, "lgtm")).unwrap();
+    let view = View::materialize(&log).unwrap();
+    let r = view.reviews.get("r1").unwrap();
+    assert!(!r.complete() && !r.approved());
+
+    append_op(
+        &mut log,
+        "bot-reviewer",
+        verdict("r1", "bot-reviewer", choir_view::Verdict::RequestChanges, "missing test"),
+    )
+    .unwrap();
+    let view = View::materialize(&log).unwrap();
+    let r = view.reviews.get("r1").unwrap();
+    assert!(r.complete() && !r.approved());
+
+    // Re-review overwrites the reviewer's own verdict: now approved.
+    append_op(
+        &mut log,
+        "bot-reviewer",
+        verdict("r1", "bot-reviewer", choir_view::Verdict::Approve, "test added"),
+    )
+    .unwrap();
+    let view = View::materialize(&log).unwrap();
+    let r = view.reviews.get("r1").unwrap();
+    assert!(r.approved());
+    assert_eq!(r.target.as_ref(), Some(&target));
+    assert_eq!(r.verdicts.len(), 2);
+}
