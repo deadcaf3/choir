@@ -162,3 +162,38 @@ fn platform_state_survives_restart() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+#[test]
+fn llms_txt_is_served_and_describes_the_surface() {
+    // The cheapest possible discovery mechanism for an agent that has
+    // never seen choir: one GET, plain text, no auth dance beyond the
+    // node's own. Generated from the CLI surface table, so it cannot
+    // describe endpoints the node does not have.
+    let work = std::env::temp_dir().join(format!("choir-llms-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let node = Node::bind(&work.join("repos"), 0).unwrap();
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-w", "\n%{http_code}", &format!("http://127.0.0.1:{port}/llms.txt")])
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text.rsplit_once('\n').expect("status line");
+    assert_eq!(code.trim(), "200", "{body}");
+    assert!(body.starts_with("# choir"), "{body}");
+    // It must name the primary path, since teaching the wrong default is
+    // the whole failure mode this file exists to prevent.
+    assert!(body.contains("/api/submit-batch"), "{body}");
+    assert!(body.contains("git push is the compatibility path"), "{body}");
+    assert!(body.contains("choir review"), "{body}");
+
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}

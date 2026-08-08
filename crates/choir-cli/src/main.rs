@@ -22,18 +22,10 @@
 use choir_identity::ActorKey;
 use choir_view::{OpKind, Verdict, ViewOp};
 
-const USAGE: &str = "usage:
-  choir key <key-file> [name]
-  choir workspace <api> <owner/repo> <name>
-  choir submit <api> <key-file> <channel> '<op-json>'
-  choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
-  choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
-  choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
-  choir reviews <api> <reviewer>
-  choir view <api>";
-
 fn usage() -> ! {
-    eprintln!("{USAGE}");
+    // Rendered from the surface table, so help can never disagree with
+    // the README, the templates, or agents.md.
+    eprint!("{}", choir_cli::surface::usage());
     std::process::exit(2);
 }
 

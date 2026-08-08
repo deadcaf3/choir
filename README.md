@@ -40,15 +40,19 @@ Repositories created by the daemon get a `pre-receive` hook that calls back into
 
 ### API surface
 
+<!-- generated: choir surface, do not edit -->
+
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
-| `POST /api/submit-batch` | Same, in array order, roughly 1,130 signed ops/s measured |
+| `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
 | `GET /api/view` | The materialized view: workspace heads, refs, reviews, provenance |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it |
 | `POST /api/workspace` | Provision a copy-on-write workspace and register it in the view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
+| `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
+<!-- /generated -->
 
 ### The `choir` CLI
 

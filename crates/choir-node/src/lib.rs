@@ -342,6 +342,20 @@ impl Node {
                         }
                     }
                 }
+                // The surface as plain text, for an agent that has never
+                // seen choir. Behind auth like everything else; it
+                // describes the node rather than exposing its contents.
+                if request.url() == "/llms.txt" {
+                    let response = tiny_http::Response::from_string(LLMS_TXT).with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"text/plain; charset=utf-8"[..],
+                        )
+                        .expect("static header"),
+                    );
+                    let _ = request.respond(response);
+                    return;
+                }
                 if request.url().starts_with("/api/") {
                     let base_url = format!("{scheme}://127.0.0.1:{port}");
                     let _ = handle_api(platform.as_deref(), &root, &base_url, &user, request);
@@ -566,6 +580,13 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+
+/// The agent-facing surface as plain text, generated from
+/// `crates/choir-cli/src/surface.rs` and checked for staleness by
+/// `choir-cli/tests/surface.rs`. Included rather than depended on: the
+/// node has no business linking the CLI, and a generated file with a
+/// staleness test is the cheaper coupling.
+const LLMS_TXT: &str = include_str!("llms.txt");
 
 /// Routes one `/api/...` request to the platform (503 when disabled).
 fn handle_api(

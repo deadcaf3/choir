@@ -1,0 +1,298 @@
+//! The agent-facing surface, as data, and the generators that render it.
+//!
+//! `choir --help`, the README's API and CLI tables, the three
+//! `templates/` snippets, the root `agents.md` and the node's `llms.txt`
+//! all describe one surface. Hand-maintained, they drift — and they had
+//! already started to: the README's API table carried a throughput
+//! figure that three later measurements had superseded.
+//!
+//! So the surface is described once, here, and everything else is
+//! rendered from it. [`crate::surface`] is the source; a staleness test
+//! re-renders and compares, so a committed artifact cannot silently fall
+//! behind the table.
+//!
+//! # What is generated and what is not
+//!
+//! Only the *signatures* — command names, arguments, endpoints,
+//! purposes. The conventions around them stay hand-written, because
+//! `templates/` is a product deliverable whose value is judgement
+//! ("name no reviewers; the node draws them") rather than syntax, and
+//! generating prose would flatten exactly the part worth shipping. In
+//! the templates the generated region is bounded by
+//! [`GEN_START`]/[`GEN_END`] markers and the prose lives outside them.
+//!
+//! No dependency is added for any of this: rendering markdown from a
+//! const table is a few `format!` calls.
+
+/// Opening marker of a generated region in an otherwise authored file.
+pub const GEN_START: &str = "<!-- generated: choir surface, do not edit -->";
+/// Closing marker of a generated region.
+pub const GEN_END: &str = "<!-- /generated -->";
+
+/// One `choir` subcommand.
+pub struct Command {
+    /// Subcommand name.
+    pub name: &'static str,
+    /// Argument spec as shown in help, e.g. `<api> <key-file>`.
+    pub args: &'static str,
+    /// One line, imperative, no trailing period.
+    pub summary: &'static str,
+    /// Whether an agent is expected to reach for this routinely.
+    pub agent_facing: bool,
+}
+
+/// One HTTP endpoint on the node.
+pub struct Endpoint {
+    /// HTTP method.
+    pub method: &'static str,
+    /// Path, including any query parameter that is part of the contract.
+    pub path: &'static str,
+    /// What it is for, one line.
+    pub purpose: &'static str,
+}
+
+/// Every `choir` subcommand, in help order.
+pub const COMMANDS: &[Command] = &[
+    Command {
+        name: "key",
+        args: "<key-file> [name]",
+        summary: "mint a key and print the line the operator registers; \
+                  pass your channel name to print the bound form",
+        agent_facing: true,
+    },
+    Command {
+        name: "workspace",
+        args: "<api> <owner/repo> <name>",
+        summary: "provision a copy-on-write workspace; prints its path and head",
+        agent_facing: true,
+    },
+    Command {
+        name: "submit",
+        args: "<api> <key-file> <channel> '<op-json>'",
+        summary: "sign and submit one raw operation",
+        agent_facing: false,
+    },
+    Command {
+        name: "review",
+        args: "<api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...",
+        summary: "request review on a commit; name no reviewers and the node draws them",
+        agent_facing: true,
+    },
+    Command {
+        name: "verdict",
+        args: "<api> <key-file> <reviewer> <id> approve|request-changes [note]",
+        summary: "answer a review you were assigned",
+        agent_facing: true,
+    },
+    Command {
+        name: "intent",
+        args: "<api> <key-file> <channel> <subject> <kind> '<body>'",
+        summary: "publish a task spec or plan so other agents can see intent",
+        agent_facing: true,
+    },
+    Command {
+        name: "reviews",
+        args: "<api> <reviewer>",
+        summary: "your pending review queue",
+        agent_facing: true,
+    },
+    Command {
+        name: "view",
+        args: "<api>",
+        summary: "the materialized view: workspace heads, refs, reviews, provenance",
+        agent_facing: true,
+    },
+];
+
+/// Every endpoint the node serves, in the order the README lists them.
+pub const ENDPOINTS: &[Endpoint] = &[
+    Endpoint {
+        method: "POST",
+        path: "/api/submit",
+        purpose: "Submit one signed operation (hex payload, hex signature)",
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/submit-batch",
+        purpose: "Same, in array order; the primary path for agent workloads \
+                  (throughput figures live in PHASE0.md, not here, so they cannot go stale)",
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/view",
+        purpose: "The materialized view: workspace heads, refs, reviews, provenance",
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/log?from=N",
+        purpose: "Ordered log entries, the catch-up and sync primitive. Absolute `from`: \
+                  entries evicted from the in-memory window are served from the persisted log \
+                  (`source` says which), and a node that cannot reach that far back answers 409 \
+                  rather than a page with a hole in it",
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/workspace",
+        purpose: "Provision a copy-on-write workspace and register it in the view",
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/reviews?reviewer=X",
+        purpose: "One actor's pending review queue",
+    },
+    Endpoint {
+        method: "GET",
+        path: "/llms.txt",
+        purpose: "This surface, as text, for an agent that has never seen choir",
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/git-update",
+        purpose: "Internal: the pre-receive hook callback",
+    },
+];
+
+/// The `choir` usage block, as `--help` and a bare invocation print it.
+#[must_use]
+pub fn usage() -> String {
+    let mut out = String::from("usage:\n");
+    for c in COMMANDS {
+        out.push_str(&format!("  choir {} {}\n", c.name, c.args));
+    }
+    out.push_str(
+        "\nExit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), \
+         2 usage error.\n",
+    );
+    out
+}
+
+/// The README's endpoint table.
+#[must_use]
+pub fn api_table() -> String {
+    let mut out = String::from("| Endpoint | Purpose |\n|---|---|\n");
+    for e in ENDPOINTS {
+        out.push_str(&format!("| `{} {}` | {} |\n", e.method, e.path, e.purpose));
+    }
+    out
+}
+
+/// The command list the agent templates carry, as a markdown bullet list.
+#[must_use]
+pub fn command_bullets() -> String {
+    let mut out = String::new();
+    for c in COMMANDS.iter().filter(|c| c.agent_facing) {
+        out.push_str(&format!("- `choir {} {}` — {}\n", c.name, c.args, c.summary));
+    }
+    out
+}
+
+/// `agents.md`: the first thing a coding agent should read.
+#[must_use]
+pub fn agents_md() -> String {
+    format!(
+        "# choir, for agents\n\n\
+         Generated from `crates/choir-cli/src/surface.rs`. Do not edit; edit the table.\n\n\
+         choir is an agent-first code collaboration platform. Many agents work on one \
+         repository at once, a single-writer sequencer puts every change in one total order, \
+         and merge conflicts are first-class values rather than errors.\n\n\
+         ## Use the signed-op API, not `git push`\n\n\
+         `git push` works and is the compatibility path. The signed-operation API is the \
+         primary agent path: it is faster, it carries your identity, and it is the only way \
+         to say what you are doing. For anything more than one change at a time, use \
+         `POST /api/submit-batch` rather than a loop over `POST /api/submit` — a batch is one \
+         durability barrier, a loop is one per operation.\n\n\
+         ## Commands\n\n{}\n\
+         ## Endpoints\n\n{}\n\
+         ## Conventions that are not obvious\n\n\
+         - A conflict is a committed value, not a failure. Commit it, keep working, resolve in \
+         a follow-up.\n\
+         - You do not choose who reviews you. Request review naming no reviewers and the node \
+         draws them; a review with no reviewers never counts as approved.\n\
+         - Channel names are conventionally `operator/agent`. The node will not draw a reviewer \
+         sharing your operator prefix, so agents run by the same person cannot review each other.\n\
+         - Publish your task spec with `choir intent` when you pick up work, and update it when \
+         scope changes. Other agents and the merge machinery can both see it.\n\
+         - Secrets live under `~/.choir/`. Never write one into the repository.\n",
+        command_bullets(),
+        api_table()
+    )
+}
+
+/// `llms.txt`, served by the node: the same surface, compact, no markdown
+/// tables — a plain list survives a small context window better.
+#[must_use]
+pub fn llms_txt() -> String {
+    let mut out = String::from(
+        "# choir\n\n\
+         Agent-first code collaboration. One total order from a single-writer sequencer; \
+         conflicts are values, not errors.\n\n\
+         Use POST /api/submit-batch for more than one change: a batch is one durability \
+         barrier, a loop is one per operation. git push is the compatibility path.\n\n\
+         ## Endpoints\n",
+    );
+    for e in ENDPOINTS {
+        out.push_str(&format!("{} {} - {}\n", e.method, e.path, e.purpose));
+    }
+    out.push_str("\n## CLI\n");
+    for c in COMMANDS {
+        out.push_str(&format!("choir {} {} - {}\n", c.name, c.args, c.summary));
+    }
+    out
+}
+
+/// Replaces the region between [`GEN_START`] and [`GEN_END`] in `doc`.
+///
+/// # Errors
+///
+/// Returns a description when the markers are missing or out of order,
+/// rather than appending and quietly producing two generated regions.
+pub fn splice(doc: &str, generated: &str) -> Result<String, String> {
+    let start = doc.find(GEN_START).ok_or("missing generated-start marker")?;
+    let end = doc.find(GEN_END).ok_or("missing generated-end marker")?;
+    if end < start {
+        return Err("generated markers are out of order".to_string());
+    }
+    Ok(format!(
+        "{}{}\n\n{}\n{}",
+        &doc[..start],
+        GEN_START,
+        generated.trim_end(),
+        &doc[end..]
+    ))
+}
+
+/// Every artifact rendered from this table, as `(path, full contents)`,
+/// relative to the repository `root`.
+///
+/// Returned rather than written so the generator and the staleness test
+/// share one definition of what exists — a test that enumerated the
+/// artifacts separately would pass while missing a new one.
+///
+/// # Errors
+///
+/// A file that should carry generated markers and does not, or cannot be
+/// read.
+pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, String)>, String> {
+    let read = |rel: &str| -> Result<String, String> {
+        std::fs::read_to_string(root.join(rel)).map_err(|e| format!("{rel}: {e}"))
+    };
+    let mut out = vec![
+        (root.join("agents.md"), agents_md()),
+        (root.join("crates/choir-node/src/llms.txt"), llms_txt()),
+        (
+            root.join("README.md"),
+            splice(&read("README.md")?, &api_table()).map_err(|e| format!("README.md: {e}"))?,
+        ),
+    ];
+    for rel in [
+        "templates/claude-code/CLAUDE.snippet.md",
+        "templates/codex/AGENTS.snippet.md",
+        "templates/cursor/choir.mdc",
+    ] {
+        out.push((
+            root.join(rel),
+            splice(&read(rel)?, &command_bullets()).map_err(|e| format!("{rel}: {e}"))?,
+        ));
+    }
+    Ok(out)
+}

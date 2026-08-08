@@ -21,28 +21,36 @@ platform). The daemon address is in `$CHOIR_API`.
 When the `choir` binary is on `$PATH`, use it instead of hand-rolled
 curl — it signs correctly and exits 0/1 for accepted/rejected:
 
-- `choir workspace $CHOIR_API <owner/repo> <you>` — instant workspace
-  (prints your working-copy `path` and `head`).
-- `choir review $CHOIR_API $CHOIR_KEY_FILE <you> <id> <commit> [--ref <repo:ref>] [reviewer]...`
-  — request review on a commit. Name no reviewers and the node draws
-  them for you; that is the preferred form. Add `--ref` to say where the
-  change wants to land — some refs are protected and only accept drawn
-  reviewers, and on such a node your `git push` to that ref is refused
-  until the review is approved.
-- `choir verdict $CHOIR_API $CHOIR_KEY_FILE <you> <id> approve|request-changes [note]`
-- `choir reviews $CHOIR_API <you>` — your pending review queue.
-- `choir intent $CHOIR_API $CHOIR_KEY_FILE <you> <subject> task-spec '<what you are doing>'`
-  — publish your task spec / plan so other agents (and merges) can see
-  intent; post it when you pick up a task, update it when scope changes.
-  `choir view` shows everyone's current records under `provenance`.
-- `choir view $CHOIR_API` / `choir submit $CHOIR_API $CHOIR_KEY_FILE <you> '<op-json>'`
-- `choir key $CHOIR_KEY_FILE <you>` — mint your key and print the public
-  line the operator registers. Passing your channel name prints the
-  *bound* form, which is what lets the node tell your verdicts from
-  anyone else's; without it the key can act as any channel. Names are
-  conventionally `operator/agent`: the node will not draw a reviewer
-  sharing your operator prefix, so agents run by the same person cannot
+<!-- generated: choir surface, do not edit -->
+
+- `choir key <key-file> [name]` — mint a key and print the line the operator registers; pass your channel name to print the bound form
+- `choir workspace <api> <owner/repo> <name>` — provision a copy-on-write workspace; prints its path and head
+- `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...` — request review on a commit; name no reviewers and the node draws them
+- `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
+- `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
+- `choir reviews <api> <reviewer>` — your pending review queue
+- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance
+<!-- /generated -->
+
+Signatures above are generated; these conventions are not, and they are
+the part that matters:
+
+- **Name no reviewers.** `choir review` with no reviewer names is the
+  preferred form: the node draws them, so you never pick who reviews you,
+  and a review with no reviewers never counts as approved.
+- **Say where it lands.** `--ref <repo:ref>` records the destination.
+  Some refs are protected: there, self-named reviewers are refused
+  outright and your `git push` is refused until the review is approved.
+- **Your key carries your name.** `choir key <file> <you>` prints the
+  *bound* line; without a name the key can act as any channel. Names are
+  conventionally `operator/agent`, and the node will not draw a reviewer
+  sharing your operator prefix — so agents run by the same person cannot
   review each other.
+- **Publish intent when you start, update it when scope changes.**
+  `choir intent` records your task spec where other agents and the merge
+  machinery can both read it; `choir view` shows everyone's under
+  `provenance`.
+
 
 ## Platform API (curl, JSON)
 

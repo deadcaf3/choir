@@ -1,0 +1,75 @@
+//! Every generated description of the agent surface must match the table
+//! it came from. Three hand-maintained descriptions of one surface drift;
+//! this is the thing that notices.
+
+use choir_cli::surface;
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+#[test]
+fn every_generated_artifact_is_current() {
+    let root = repo_root();
+    let artifacts = surface::artifacts(&root).expect("render artifacts");
+    assert!(artifacts.len() >= 6, "expected every artifact, got {}", artifacts.len());
+    let mut stale = Vec::new();
+    for (path, expected) in artifacts {
+        let actual = std::fs::read_to_string(&path).unwrap_or_default();
+        if actual != expected {
+            stale.push(path.display().to_string());
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "stale generated artifacts: {stale:?}\n\
+         run: cargo run -p choir-cli --example gen-surface"
+    );
+}
+
+#[test]
+fn the_binarys_help_is_the_tables_help() {
+    // A CLI whose help disagrees with the README is the drift this exists
+    // to stop, so check the shipped binary rather than the function.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_choir"))
+        .output()
+        .expect("choir runs");
+    let printed = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(printed, surface::usage(), "binary help drifted from the table");
+    assert_eq!(out.status.code(), Some(2), "bare invocation is a usage error");
+}
+
+#[test]
+fn every_command_appears_in_the_agent_facing_docs() {
+    // A command that exists but is documented nowhere is invisible to an
+    // agent; one documented but missing is a broken instruction.
+    let agents = surface::agents_md();
+    let llms = surface::llms_txt();
+    for c in surface::COMMANDS {
+        assert!(llms.contains(c.name), "llms.txt omits `{}`", c.name);
+        if c.agent_facing {
+            assert!(agents.contains(c.name), "agents.md omits `{}`", c.name);
+        }
+    }
+    for e in surface::ENDPOINTS {
+        assert!(agents.contains(e.path), "agents.md omits `{}`", e.path);
+        assert!(llms.contains(e.path), "llms.txt omits `{}`", e.path);
+    }
+}
+
+#[test]
+fn splicing_refuses_a_file_without_markers_rather_than_appending() {
+    // Appending would produce two generated regions and a file that
+    // regenerates differently every run.
+    assert!(surface::splice("no markers here", "x").is_err());
+    assert!(surface::splice(&format!("{} only start", surface::GEN_START), "x").is_err());
+    let reversed = format!("{} then {}", surface::GEN_END, surface::GEN_START);
+    assert!(surface::splice(&reversed, "x").is_err());
+
+    let doc = format!("before\n{}\nold\n{}\nafter", surface::GEN_START, surface::GEN_END);
+    let spliced = surface::splice(&doc, "new").expect("splice");
+    assert!(spliced.contains("before") && spliced.contains("after"));
+    assert!(spliced.contains("new") && !spliced.contains("old"));
+    // Idempotent: regenerating an already-generated file changes nothing.
+    assert_eq!(surface::splice(&spliced, "new").expect("splice"), spliced);
+}
