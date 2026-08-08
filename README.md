@@ -30,7 +30,7 @@ Requirements: stable Rust (built with cargo 1.97.1, edition 2021), plus `git`, `
 ```bash
 cargo run -p choir-node -- <repo-root> [port] [--create owner/name.git]... \
   [--auth-file f] [--keys-file f] [--reviewers-file f] [--protected-refs f] \
-  [--require-assignment] [--bind addr] \
+  [--require-assignment] [--require-review] [--bind addr] \
   [--tls-cert c --tls-key k]
 ```
 
@@ -66,6 +66,8 @@ choir view <api>
 Exit codes: 0 accepted, 1 rejected by the node with the error body printed, 2 usage error.
 
 `choir review` with no reviewer names is the preferred form: the node draws reviewers from an operator-curated pool and signs the assignment itself, so a requester cannot pick their own reviewers. `--require-assignment` makes that the only form node-wide; `--protected-refs` makes it the only form for reviews whose `--ref` names a protected ref, which is how "privilege-bearing" gets a definition the code can read.
+
+Adding `--require-review` turns that from a convention into a gate: a protected ref only moves to a commit some approved review already named as its destination, and cannot be deleted at all. There is no exemption for the daemon's own key, because every `git push` reaches the sequencer as a node-signed `SetRef` — so switching it on means this node's own repository can only be advanced through a review. Creating a protected ref is still allowed; nothing exists yet to hijack, and since deletion is refused, delete-then-recreate is not a way back in.
 
 ### The bridge
 

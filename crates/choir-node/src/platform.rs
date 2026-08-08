@@ -93,6 +93,9 @@ struct ChoirPolicy {
     /// Operator's protected-ref list: the same switch, but conditioned on
     /// where the review proposes to land. Shared with [`Platform`].
     protected_refs: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// When set, a protected ref only moves to a commit some approved
+    /// review already named — the landing half of the gate.
+    require_review: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChoirPolicy {
@@ -132,11 +135,13 @@ impl ChoirPolicy {
     /// trailing `*` prefix glob (`repo.git:refs/heads/release/*`).
     ///
     /// Read per call rather than cached, so editing the list takes effect
-    /// with no restart. Cheap enough because only a `RequestReview`
-    /// reaches here — git pushes take the `SetRef` path and never touch
-    /// this file.
+    /// with no restart. A `RequestReview` always reaches here; a
+    /// `SetRef`/`DeleteRef` only under `--require-review`, which is the
+    /// mode that also puts a file read on the git-push path. If push
+    /// throughput ever notices, an mtime-stat cache is the fix — measure
+    /// before adding one.
     ///
-    /// Fails **closed**: an unreadable list refuses the review instead of
+    /// Fails **closed**: an unreadable list refuses the op instead of
     /// quietly demoting a gate to an advisory.
     fn ref_is_protected(&self, name: &str) -> Result<bool, String> {
         let guard = self.protected_refs.lock().expect("protected refs lock");
@@ -154,6 +159,25 @@ impl ChoirPolicy {
                 None => name == p,
             }
         }))
+    }
+
+    /// Whether some approved review named exactly this `(ref, commit)`
+    /// pair as where it wanted to land.
+    ///
+    /// Both halves matter. Matching only the commit would let an approval
+    /// for a scratch branch land the same commit on `main`; matching only
+    /// the ref would let any approved review authorize any later commit.
+    fn approved_for(&self, name: &str, commit: &ContentHash) -> bool {
+        self.view
+            .lock()
+            .expect("view lock")
+            .reviews
+            .values()
+            .any(|r| {
+                r.target_ref.as_deref() == Some(name)
+                    && r.target.as_ref() == Some(commit)
+                    && r.approved()
+            })
     }
 }
 
@@ -219,6 +243,37 @@ impl SubmitPolicy for ChoirPolicy {
                 }
             }
         }
+        // The landing half of the gate: a protected ref only moves to a
+        // commit that some approved review already named as its
+        // destination. This is what turns `--protected-refs` from an
+        // advisory into enforcement — without it a requester escapes by
+        // simply omitting `target_ref`.
+        //
+        // No exemption for the node's own key. Every git push arrives
+        // here as a node-signed `SetRef`, so exempting the node would
+        // exempt every push, which is the whole population being gated.
+        if self
+            .require_review
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            match &op.kind {
+                OpKind::SetRef { name, commit, prev } if self.ref_is_protected(name)? => {
+                    // Creating a protected ref is allowed: there is no
+                    // history to hijack yet, and deletion is refused
+                    // below, so "delete then re-create" is not a way in.
+                    if prev.is_some() && !self.approved_for(name, commit) {
+                        return Err(format!(
+                            "{name} is protected: no approved review names {} as landing there",
+                            commit.to_hex()
+                        ));
+                    }
+                }
+                OpKind::DeleteRef { name, .. } if self.ref_is_protected(name)? => {
+                    return Err(format!("{name} is protected: it cannot be deleted"));
+                }
+                _ => {}
+            }
+        }
         let mut trial = self.view.lock().expect("view lock").clone();
         trial.apply(&op).map_err(|e| format!("stale head: {e:?}"))
     }
@@ -258,6 +313,9 @@ pub struct Platform {
     /// Shared with the policy: the same refusal, but only for reviews
     /// that propose to land on a ref the operator marked protected.
     protected_refs: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// Shared with the policy: when set, a protected ref only moves to a
+    /// commit an approved review already named.
+    require_review: Arc<std::sync::atomic::AtomicBool>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -314,11 +372,13 @@ impl Platform {
             .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
+        let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
                 require_assignment: require_assignment.clone(),
                 protected_refs: protected_refs.clone(),
+                require_review: require_review.clone(),
                 registry,
                 view: view.clone(),
                 entries: entries.clone(),
@@ -337,6 +397,7 @@ impl Platform {
             log_path: None,
             require_assignment,
             protected_refs,
+            require_review,
             _sequencer: sequencer,
         })
     }
@@ -372,16 +433,42 @@ impl Platform {
     ///
     /// Requires a reviewer pool, for the same reason.
     ///
-    /// **What this is not:** nothing yet checks that a *landing* on a
-    /// protected ref was preceded by an approved review, so a requester
-    /// who simply omits `target_ref` escapes the gate. Closing that means
-    /// conditioning `SetRef` on review state, which is the next step and
-    /// is deliberately not this one — it would gate the daemon's own
-    /// pushes. Until then this is enforcement for reviews that declare
-    /// themselves, and `with_required_assignment` is the airtight option.
+    /// On its own this only binds *reviews*: a requester who omits
+    /// `target_ref` still escapes it. [`Platform::with_required_review`]
+    /// is the other half, and closes that.
     #[must_use]
     pub fn with_protected_refs(self, path: std::path::PathBuf) -> Self {
         *self.protected_refs.lock().expect("protected refs lock") = Some(path);
+        self
+    }
+
+    /// A protected ref only moves to a commit that some **approved**
+    /// review already named as its destination, and can never be deleted.
+    /// This is the landing half of the gate: with it, omitting
+    /// `target_ref` stops being an escape and becomes a refusal, because
+    /// the push itself is what gets checked.
+    ///
+    /// Requires [`Platform::with_protected_refs`] — with no list nothing
+    /// is protected and the flag would do nothing.
+    ///
+    /// **No exemption for the node's own key.** Every git push reaches the
+    /// sequencer as a node-signed `SetRef`, so exempting the node would
+    /// exempt every push. The consequence is deliberate and operational:
+    /// switching this on means this daemon's *own* repository can only be
+    /// advanced through a review, `choirctl sync` included.
+    ///
+    /// Creating a protected ref is allowed (`prev == None`): there is no
+    /// history to hijack yet, and since deletion is refused, "delete then
+    /// re-create" is not a way back in.
+    ///
+    /// Not covered, and not silently implied: force-pushes and
+    /// non-fast-forward updates are only constrained by the CAS `prev`
+    /// git itself supplies. An approved review of commit X authorizes
+    /// landing X, whether or not X is a descendant of the current tip.
+    #[must_use]
+    pub fn with_required_review(self) -> Self {
+        self.require_review
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self
     }
 

@@ -2,7 +2,8 @@
 //!
 //! Usage: `choir-node <repo-root> [port] [--create owner/name.git]...
 //! [--auth-file path] [--keys-file path] [--reviewers-file path]
-//! [--require-assignment] [--protected-refs path] [--bind addr]
+//! [--require-assignment] [--protected-refs path] [--require-review]
+//! [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
@@ -15,7 +16,10 @@
 //! `--require-assignment` additionally refuses requests that name
 //! their own reviewers, and `--protected-refs` (one
 //! `<repo>:<refname>` pattern per line, trailing `*` allowed) refuses
-//! them only for reviews landing on a matching ref. `--bind` with a
+//! them only for reviews landing on a matching ref.
+//! `--require-review` additionally refuses to move a protected ref to
+//! any commit no approved review named, and refuses to delete one at
+//! all — including for this daemon's own pushes. `--bind` with a
 //! non-loopback address is refused unless TLS is configured.
 
 use choir_node::{AuthTable, Node, Platform};
@@ -132,6 +136,21 @@ fn main() -> std::io::Result<()> {
             if let Some(refs) = flag_value("--protected-refs") {
                 platform = platform.with_protected_refs(refs.into());
                 eprintln!("protected refs enabled ({refs})");
+                if rest.iter().any(|a| a == "--require-review") {
+                    platform = platform.with_required_review();
+                    eprintln!(
+                        "protected refs require an approved review to land \
+                         (this daemon's own pushes included)"
+                    );
+                }
+            } else if rest.iter().any(|a| a == "--require-review") {
+                // Nothing is protected, so the flag would silently do
+                // nothing — and a gate that silently does nothing is
+                // worse than no gate.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--require-review needs --protected-refs",
+                ));
             }
         } else if rest.iter().any(|a| a == "--require-assignment")
             || flag_value("--protected-refs").is_some()

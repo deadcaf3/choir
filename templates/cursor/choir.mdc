@@ -34,7 +34,8 @@ platform) at `$CHOIR_API`.
 - Request review with `choir review ... <id> <commit> --ref <repo:ref>`
   and name no reviewers: the node draws them. You do not choose who
   reviews you, a review with no reviewers never counts as approved, and
-  on a protected ref self-named reviewers are refused outright.
+  on a protected ref self-named reviewers are refused outright and your
+  `git push` there is refused until the review is approved.
 - A conflicted merge is a valid committed state here, not an error:
   commit it, keep working, resolve in a follow-up commit.
 - Secrets (tokens, keys) live under `~/.choir/`; never write them into

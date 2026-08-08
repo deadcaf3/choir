@@ -27,7 +27,8 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
   — request review on a commit. Name no reviewers and the node draws
   them for you; that is the preferred form. Add `--ref` to say where the
   change wants to land — some refs are protected and only accept drawn
-  reviewers.
+  reviewers, and on such a node your `git push` to that ref is refused
+  until the review is approved.
 - `choir verdict $CHOIR_API $CHOIR_KEY_FILE <you> <id> approve|request-changes [note]`
 - `choir reviews $CHOIR_API <you>` — your pending review queue.
 - `choir intent $CHOIR_API $CHOIR_KEY_FILE <you> <subject> task-spec '<what you are doing>'`
