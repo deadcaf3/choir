@@ -50,6 +50,37 @@ blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The workspace shipped on cargo defaults until now, which for release
+# means lto = false and codegen-units = 16 — the compiler declining to
+# optimise across crate boundaries in a workspace that is almost entirely
+# crate boundaries.
+#
+# Deliberately absent: panic = "abort". `Node::serve_forever` spawns a
+# thread per request and relies on a panicking handler killing only that
+# thread; under abort, one bad request takes down the daemon. Revisit only
+# once handlers are proven panic-free.
+[profile.release]
+opt-level = 3
+# "fat", not the usual "thin" default advice. Measured on this workspace,
+# fat won every metric including the one it is supposed to lose: clean
+# build 169.7 s vs 206.6 s, binary 1.98 MB vs 2.28 MB. Small workspace,
+# codegen-units = 1 already, so thin's incrementality buys nothing here and
+# its own bookkeeping costs. Re-measure if the workspace grows a lot.
+lto = "fat"
+codegen-units = 1
+strip = true
+# Keeps a symbolicatable profile without carrying full debuginfo. `strip`
+# removes the symbol table from the binary; this leaves enough for a
+# sampling profiler to name frames.
+debug = "line-tables-only"
+
+# Dependencies are optimised even in dev builds: they are compiled once and
+# then cached, while the workspace crates are rebuilt constantly. This
+# keeps `cargo test` from running the whole suite through an unoptimised
+# blake3 and ed25519.
+[profile.dev.package."*"]
+opt-level = 3
+
 [workspace.lints.rust]
 missing_docs = "warn"
 
