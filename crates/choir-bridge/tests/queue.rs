@@ -134,6 +134,38 @@ fn landing_fast_forwards_and_rejects_stale_trains() {
 }
 
 #[test]
+fn revert_restores_base_tree_and_respects_the_race_guard() {
+    let dir = tempdir("revert");
+    fixture(&dir);
+    let remote = tempdir("revert-remote");
+    git(&dir, &["clone", "-q", "--bare", dir.to_str().unwrap(), remote.to_str().unwrap()]);
+    let url = remote.to_str().unwrap().to_string();
+
+    let base = rev(&dir, "main");
+    let train =
+        build_train(&dir, &base, &[(1, rev(&dir, "pr-1")), (2, rev(&dir, "pr-2"))]).unwrap();
+    choir_bridge::queue::land(&dir, &url, &train.tip, "main").unwrap();
+
+    let new_tip =
+        choir_bridge::queue::revert_train(&dir, &url, &base, &train.tip, "main").unwrap();
+    assert_eq!(rev(&remote, "main"), new_tip);
+    // The reverted tree is exactly base's tree; history keeps the train.
+    assert_eq!(rev(&dir, &format!("{new_tip}^{{tree}}")), rev(&dir, &format!("{base}^{{tree}}")));
+    git(&dir, &["merge-base", "--is-ancestor", &train.tip, &new_tip]);
+
+    // Race guard: if the branch moved past the tip, revert must not clobber.
+    let moved = build_train(&dir, &new_tip, &[(3, rev(&dir, "pr-conflict"))]).unwrap();
+    choir_bridge::queue::land(&dir, &url, &moved.tip, "main").unwrap();
+    let err =
+        choir_bridge::queue::revert_train(&dir, &url, &base, &train.tip, "main").unwrap_err();
+    assert!(err.contains("rejected") || err.contains("fast-forward"), "{err}");
+    assert_eq!(rev(&remote, "main"), moved.tip, "remote main must be untouched");
+
+    // No merges between base and base: refuse rather than push a no-op.
+    assert!(choir_bridge::queue::revert_train(&dir, &url, &base, &base, "main").is_err());
+}
+
+#[test]
 fn pr_parse_orders_by_number() {
     let body = r#"[
         {"number": 7, "head": {"sha": "bbb"}},

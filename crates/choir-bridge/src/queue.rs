@@ -109,3 +109,37 @@ pub fn build_train(repo: &Path, base: &str, prs: &[(u64, String)]) -> Result<Tra
 pub fn land(repo: &Path, url: &str, tip: &str, branch: &str) -> Result<(), String> {
     git(repo, &["push", "-q", url, &format!("{tip}:refs/heads/{branch}")]).map(|_| ())
 }
+
+/// Reverts a landed train (D23 auto-revert arm): reverts each of the
+/// train's merge commits (`base..tip`, first-parent, newest first) on
+/// top of `tip`, then pushes the result to `branch` WITHOUT force — if
+/// the branch moved past `tip` since landing, the push is rejected and
+/// a human decides. Returns the new branch tip. The reverted tree is
+/// byte-identical to `base`'s tree; history keeps the full record.
+///
+/// # Errors
+///
+/// Git failures, including a revert that itself conflicts (possible
+/// when later commits touched the same lines) and the non-fast-forward
+/// rejection — both leave the remote branch untouched.
+pub fn revert_train(repo: &Path, url: &str, base: &str, tip: &str, branch: &str) -> Result<String, String> {
+    let merges = git(
+        repo,
+        &["rev-list", "--first-parent", "--merges", &format!("{base}..{tip}")],
+    )?;
+    let merges: Vec<&str> = merges.split_whitespace().collect();
+    if merges.is_empty() {
+        return Err("no train merges between base and tip".to_string());
+    }
+    git(repo, &["checkout", "-q", "--detach", tip])?;
+    for merge in &merges {
+        // -m 1 = revert to the first parent (the train spine).
+        if let Err(e) = git(repo, &["revert", "-m", "1", "--no-edit", merge]) {
+            git(repo, &["revert", "--abort"]).ok();
+            return Err(format!("revert of {merge} conflicts, leaving branch alone: {e}"));
+        }
+    }
+    let new_tip = git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
+    git(repo, &["push", "-q", url, &format!("{new_tip}:refs/heads/{branch}")])?;
+    Ok(new_tip)
+}

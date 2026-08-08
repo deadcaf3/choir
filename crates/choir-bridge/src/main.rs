@@ -225,6 +225,10 @@ fn sync_once(
 const CI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Poll interval while waiting on CI.
 const CI_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long to watch the landed tip for post-land CI (D23: train green
+/// is necessary, never sufficient — the default-branch push can trigger
+/// branch-conditional workflows the train branch never ran).
+const POST_LAND_WATCH: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// One queue-as-bot round (D21 queue stage, verdict-only): fetch the
 /// open PRs, build the speculative train locally, publish it as the
@@ -315,6 +319,42 @@ fn queue_round(
     if land && train.tip != base && verdict == github::Verdict::Success {
         choir_bridge::queue::land(workdir, &url, &train.tip, &base_branch)?;
         println!("queue: landed train {} -> {base_branch}", train.tip);
+        // Immediately after the push the aggregated verdict is still the
+        // pre-land green, so an early Success is only trusted once a new
+        // run has been seen Pending; otherwise watch the full window.
+        let deadline = std::time::Instant::now() + POST_LAND_WATCH;
+        let mut saw_pending = false;
+        loop {
+            let v = github::check_verdict(&token, repo, &train.tip)?;
+            match v {
+                github::Verdict::Failure => {
+                    let new_tip = choir_bridge::queue::revert_train(
+                        workdir, &url, &base, &train.tip, &base_branch,
+                    )?;
+                    println!(
+                        "queue: post-land CI red; reverted train, {base_branch} -> {new_tip}"
+                    );
+                    for entry in train.entries.iter().filter(|e| e.merged) {
+                        let sha =
+                            git(&["rev-parse", &entry.head], Some(workdir))?.trim().to_string();
+                        github::post_status(
+                            &token, repo, &sha, "choir/queue", "failure",
+                            "landed train reverted: post-land CI red",
+                        )?;
+                        println!("queue: PR #{}: reverted", entry.id);
+                    }
+                    break;
+                }
+                github::Verdict::Success if saw_pending => break,
+                github::Verdict::Pending | github::Verdict::NoRuns | github::Verdict::Success => {
+                    saw_pending |= v == github::Verdict::Pending;
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(CI_POLL);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -404,24 +444,52 @@ fn main() {
         }
         return;
     }
-    // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land]`
-    // Queue-as-bot: one speculative-train round. Verdict-only by
-    // default; --land fast-forwards the default branch on a green train.
+    // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]`
+    // Queue-as-bot: speculative-train rounds. Verdict-only by default;
+    // --land fast-forwards the default branch on a green train (and
+    // auto-reverts if post-land CI goes red); --watch repeats rounds
+    // forever, sleeping <secs> between them.
     if args.first().map(String::as_str) == Some("queue") {
-        let land = args.iter().any(|a| a == "--land");
-        let rest: Vec<&String> = args[1..].iter().filter(|a| *a != "--land").collect();
+        let mut land = false;
+        let mut watch: Option<u64> = None;
+        let mut rest: Vec<&String> = Vec::new();
+        let mut it = args[1..].iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--land" => land = true,
+                "--watch" => {
+                    watch = Some(it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                        eprintln!("--watch needs an interval in seconds");
+                        std::process::exit(2);
+                    }));
+                }
+                _ => rest.push(a),
+            }
+        }
         let [app_id, pem, repo, workdir] = match rest.as_slice() {
             [a, b, c, d] => [*a, *b, *c, *d],
             _ => {
                 eprintln!(
-                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land]"
+                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]"
                 );
                 std::process::exit(2);
             }
         };
-        if let Err(e) = queue_round(app_id, Path::new(pem), repo, Path::new(workdir), land) {
-            eprintln!("queue round failed: {e}");
-            std::process::exit(1);
+        loop {
+            match queue_round(app_id, Path::new(pem), repo, Path::new(workdir), land) {
+                Ok(()) => {}
+                // In watch mode a failed round (network, rate limit) is
+                // logged and retried; one-shot mode exits nonzero.
+                Err(e) if watch.is_some() => eprintln!("queue round failed (will retry): {e}"),
+                Err(e) => {
+                    eprintln!("queue round failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            match watch {
+                Some(secs) => std::thread::sleep(std::time::Duration::from_secs(secs)),
+                None => break,
+            }
         }
         return;
     }
