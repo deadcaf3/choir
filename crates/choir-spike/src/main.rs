@@ -184,6 +184,10 @@ fn main() {
         && wrong_conflicts == 0
         && regions_merged == WORKSPACES
         && silent_hot_merges == 0;
-    println!("GATE (dev-machine, macOS/APFS): {}", if pass { "PASS" } else { "FAIL" });
+    println!(
+        "GATE ({} dev-machine): {}",
+        std::env::consts::OS,
+        if pass { "PASS" } else { "FAIL" }
+    );
     std::process::exit(if pass { 0 } else { 1 });
 }
