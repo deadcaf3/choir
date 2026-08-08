@@ -36,8 +36,10 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
   intent; post it when you pick up a task, update it when scope changes.
   `choir view` shows everyone's current records under `provenance`.
 - `choir view $CHOIR_API` / `choir submit $CHOIR_API $CHOIR_KEY_FILE <you> '<op-json>'`
-- `choir key $CHOIR_KEY_FILE` — mint your key and print the public line
-  the operator registers.
+- `choir key $CHOIR_KEY_FILE <you>` — mint your key and print the public
+  line the operator registers. Passing your channel name prints the
+  *bound* form, which is what lets the node tell your verdicts from
+  anyone else's; without it the key can act as any channel.
 
 ## Platform API (curl, JSON)
 

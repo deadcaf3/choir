@@ -96,6 +96,15 @@ struct ChoirPolicy {
     /// When set, a protected ref only moves to a commit some approved
     /// review already named — the landing half of the gate.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// `key_id` (actor id hex) → the channel name that key is bound to,
+    /// for keys whose trusted-keys line carries a name. Keys absent from
+    /// this map are unconstrained, which is what every key was before the
+    /// name column existed.
+    ///
+    /// Shared with [`Platform`], because a *tightening* must not wait for
+    /// an unrelated event: the accept loop refreshes it on mtime change,
+    /// while the failed-signature path below refreshes it too.
+    key_names: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
 }
 
 impl ChoirPolicy {
@@ -109,25 +118,50 @@ impl ChoirPolicy {
         if mtime.is_none() || mtime == self.keys_mtime {
             return false;
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
+        // Same parser startup uses, so the two cannot drift — and a
+        // malformed file keeps the previous registry *and* the previous
+        // name bindings rather than half-applying either.
+        let Ok(signers) = crate::parse_keys_file(path) else {
+            self.keys_mtime = mtime;
             return false;
         };
         let mut registry = Registry::new();
         if let Ok(node_pub) = <[u8; 32]>::try_from(self.node_pub.as_slice()) {
             registry.register(&node_pub).ok();
         }
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some(key) = hex_decode(line).and_then(|b| <[u8; 32]>::try_from(b).ok()) {
-                registry.register(&key).ok();
+        let mut key_names = std::collections::BTreeMap::new();
+        for signer in &signers {
+            registry.register(&signer.key).ok();
+            if let Some(name) = &signer.name {
+                key_names.insert(signer.actor_id.clone(), name.clone());
             }
         }
         self.registry = registry;
+        *self.key_names.lock().expect("key names lock") = key_names;
         self.keys_mtime = mtime;
         true
+    }
+
+    /// Enforces the name a key is bound to, for ops whose submission
+    /// channel is an identity claim rather than a workspace name.
+    ///
+    /// Scope is deliberately narrow. `sub.workspace` does double duty: it
+    /// is the reviewer/requester identity for review ops, but it is also
+    /// a workspace name and the daemon's push-attribution channel
+    /// (`git/<user>`, `key/<principal>`). Binding every channel would
+    /// break workspace provisioning and every git-derived op.
+    ///
+    /// A key with no bound name is unconstrained — exactly its behaviour
+    /// before the name column existed — so this cannot break a running
+    /// node, and the operator opts in one line at a time.
+    fn channel_is_owned(&self, key_id: &str, channel: &str) -> Result<(), String> {
+        let names = self.key_names.lock().expect("key names lock");
+        match names.get(key_id) {
+            Some(bound) if bound != channel => Err(format!(
+                "this key is bound to {bound:?} and may not act as {channel:?}"
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Whether `name` matches the operator's protected-ref list. One
@@ -205,6 +239,15 @@ impl SubmitPolicy for ChoirPolicy {
                     sub.workspace
                 ));
             }
+        }
+        // ...and the channel itself must belong to the signing key, or
+        // the check above only proves a claim is self-consistent, not
+        // that it is true. Review ops only: see `channel_is_owned`.
+        if matches!(
+            op.kind,
+            OpKind::PostVerdict { .. } | OpKind::RequestReview { .. }
+        ) {
+            self.channel_is_owned(&sig.key_id, &sub.workspace)?;
         }
         // D24 layer 5: the requester does not choose who reviews them.
         // Only the daemon's own key may fill in a reviewer list; every
@@ -316,6 +359,8 @@ pub struct Platform {
     /// Shared with the policy: when set, a protected ref only moves to a
     /// commit an approved review already named.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with the policy: `key_id` → bound channel name.
+    key_names: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -370,6 +415,21 @@ impl Platform {
         let keys_mtime = keys_file
             .as_ref()
             .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        // Name bindings are read from the same file at startup; a
+        // malformed file here is not fatal because `start_reloading`
+        // already accepted the caller's registry.
+        let key_names = Arc::new(Mutex::new(
+            keys_file
+                .as_ref()
+                .and_then(|p| crate::parse_keys_file(p).ok())
+                .map(|signers| {
+                    signers
+                        .into_iter()
+                        .filter_map(|s| s.name.map(|n| (s.actor_id, n)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ));
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -386,6 +446,7 @@ impl Platform {
                 keys_mtime,
                 node_pub: node_key.public_key_bytes().to_vec(),
                 node_id: node_key.actor_id().to_hex(),
+                key_names: key_names.clone(),
             }),
         );
         Ok(Self {
@@ -398,6 +459,7 @@ impl Platform {
             require_assignment,
             protected_refs,
             require_review,
+            key_names,
             _sequencer: sequencer,
         })
     }
@@ -484,6 +546,22 @@ impl Platform {
     pub fn with_log_path(mut self, path: std::path::PathBuf) -> Self {
         self.log_path = Some(path);
         self
+    }
+
+    /// Replaces the `key_id` → bound-name map from a freshly parsed
+    /// trusted-keys file.
+    ///
+    /// Called from the daemon's accept loop when the file's mtime moves,
+    /// so binding a name to an already-trusted key takes effect on the
+    /// next request rather than waiting for some later signature failure.
+    /// That matters because a binding is a *tightening*: a gate that
+    /// applies at an unpredictable future moment is not a gate.
+    pub fn set_key_names(&self, signers: &[crate::TrustedKey]) {
+        let map = signers
+            .iter()
+            .filter_map(|s| s.name.clone().map(|n| (s.actor_id.clone(), n)))
+            .collect();
+        *self.key_names.lock().expect("key names lock") = map;
     }
 
     /// Shrinks the in-memory `/api/log` window. Exists so tests can

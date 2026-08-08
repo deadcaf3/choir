@@ -53,7 +53,7 @@ Repositories created by the daemon get a `pre-receive` hook that calls back into
 ### The `choir` CLI
 
 ```text
-choir key <key-file>
+choir key <key-file> [name]
 choir workspace <api> <owner/repo> <name>
 choir submit <api> <key-file> <channel> '<op-json>'
 choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
@@ -66,6 +66,8 @@ choir view <api>
 Exit codes: 0 accepted, 1 rejected by the node with the error body printed, 2 usage error.
 
 `choir review` with no reviewer names is the preferred form: the node draws reviewers from an operator-curated pool and signs the assignment itself, so a requester cannot pick their own reviewers. `--require-assignment` makes that the only form node-wide; `--protected-refs` makes it the only form for reviews whose `--ref` names a protected ref, which is how "privilege-bearing" gets a definition the code can read.
+
+A trusted-keys line may bind a key to a channel name — `<name> <hex>` instead of a bare `<hex>` — and a bound key's `RequestReview` or `PostVerdict` is refused on any other channel. Without it, "the verdict's reviewer matches the signed submission channel" only proves a claim is self-consistent, not that it is true: any trusted key could post as any name. Binding is opt-in per key and additive, so an existing keys file keeps working unchanged, and an edit takes effect on the next request.
 
 Adding `--require-review` turns that from a convention into a gate: a protected ref only moves to a commit some approved review already named as its destination, and cannot be deleted at all. There is no exemption for the daemon's own key, because every `git push` reaches the sequencer as a node-signed `SetRef` — so switching it on means this node's own repository can only be advanced through a review. Creating a protected ref is still allowed; nothing exists yet to hijack, and since deletion is refused, delete-then-recreate is not a way back in.
 

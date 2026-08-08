@@ -6,7 +6,7 @@
 //! positional argument (no crate reads environment variables).
 //!
 //! ```text
-//! choir key <key-file>
+//! choir key <key-file> [name]
 //! choir workspace <api> <owner/repo> <name>
 //! choir submit <api> <key-file> <channel> '<op-json>'
 //! choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
@@ -23,7 +23,7 @@ use choir_identity::ActorKey;
 use choir_view::{OpKind, Verdict, ViewOp};
 
 const USAGE: &str = "usage:
-  choir key <key-file>
+  choir key <key-file> [name]
   choir workspace <api> <owner/repo> <name>
   choir submit <api> <key-file> <channel> '<op-json>'
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
@@ -102,9 +102,16 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
-        ["key", key_file] => {
+        // With a name, prints the line that *binds* this key to one
+        // review channel; without, the unconstrained form. Either way the
+        // operator appends the output to the node's trusted-keys file.
+        ["key", key_file, rest @ ..] if rest.len() <= 1 => {
             let key = load_key(key_file);
-            println!("{}", hex_encode(&key.public_key_bytes()));
+            let hex = hex_encode(&key.public_key_bytes());
+            match rest.first() {
+                Some(name) => println!("{name} {hex}"),
+                None => println!("{hex}"),
+            }
         }
         ["workspace", api, repo, name] => {
             let body = serde_json::json!({ "repo": repo, "name": name }).to_string();

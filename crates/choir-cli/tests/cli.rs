@@ -53,6 +53,13 @@ fn cli_end_to_end() {
     // Same file again: same key, not a regenerate.
     let again = choir(&["key", key_file]);
     assert_eq!(String::from_utf8_lossy(&again.stdout).trim(), pub_hex);
+    // With a name, the same key prints the *bound* line — what the
+    // operator appends to bind this key to one review channel.
+    let named = choir(&["key", key_file, "cli-agent"]);
+    assert_eq!(
+        String::from_utf8_lossy(&named.stdout).trim(),
+        format!("cli-agent {pub_hex}")
+    );
 
     let mut registry = Registry::new();
     registry.register(&key_bytes).unwrap();

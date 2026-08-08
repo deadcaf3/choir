@@ -179,6 +179,12 @@ impl Node {
                 } else {
                     eprintln!("allowed_signers: reloaded ({} keys)", signers.len());
                 }
+                // Same file, same edit: pick up name bindings here too, so
+                // binding a name to an already-trusted key does not wait
+                // for the policy's failed-signature reload trigger.
+                if let Some(platform) = &self.platform {
+                    platform.set_key_names(&signers);
+                }
             }
             Err(e) => eprintln!("allowed_signers: keys file unusable, keeping previous: {e}"),
         }
@@ -299,8 +305,11 @@ impl Node {
     /// Serves requests until the process exits. Run on a dedicated thread.
     pub fn serve_forever(&self) {
         for request in self.server.incoming_requests() {
-            // Cheap stat on the accept loop: an appended signing key
-            // takes effect on the next request, with no restart.
+            // Cheap stat between accepting a request and handling it, so
+            // an edited keys file takes effect on *this* request: an
+            // appended signing key becomes usable, and a newly bound
+            // channel name becomes enforced, with no restart and no wait
+            // for some later event.
             self.refresh_allowed_signers();
             let root = self.root.clone();
             let auth = self.auth.clone();
@@ -435,39 +444,77 @@ pub fn ssh_ed25519_pubkey(raw: &[u8; 32]) -> String {
     format!("ssh-ed25519 {}", base64_encode(&blob))
 }
 
-/// Parses a trusted-keys file — one 64-char hex ed25519 public key per
-/// line, `#` comments and blank lines skipped — into
-/// `(actor_id_hex, raw_key)` pairs, the shape
-/// [`write_allowed_signers`] wants.
+/// One line of the trusted-keys file: a public key the node accepts, and
+/// optionally the channel name its holder is allowed to speak as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedKey {
+    /// Operator-assigned channel name this key may act as, when the line
+    /// carries one. `None` = key trusted, name unconstrained (the
+    /// pre-existing behaviour, and what a bare hex line still means).
+    pub name: Option<String>,
+    /// Actor id (hex): the git push principal, and the `key_id` a
+    /// signature carries. **Always derived from the key**, never from the
+    /// name — so adding a name column cannot shift push attribution.
+    pub actor_id: String,
+    /// The raw ed25519 public key.
+    pub key: [u8; 32],
+}
+
+/// Parses a trusted-keys file. One key per line, `#` comments and blank
+/// lines skipped, in either form:
+///
+/// ```text
+/// <64-char hex>            # trusted, speaks as any channel
+/// <name> <64-char hex>     # trusted, bound to that channel name
+/// ```
+///
+/// The name column is additive: files written before it existed parse
+/// unchanged, and a key with no name keeps exactly its old permissions.
+/// Binding is opt-in per key, so adding one line cannot lock anybody
+/// else out.
 ///
 /// # Errors
 ///
 /// Filesystem failures, and [`std::io::ErrorKind::InvalidData`] for a
-/// line that is not a valid ed25519 public key. An invalid line fails
-/// the whole parse: a partial signer list would silently drop the
-/// ability to verify somebody's pushes.
-pub fn parse_keys_file(path: &Path) -> std::io::Result<Vec<(String, [u8; 32])>> {
+/// line that is not a valid ed25519 public key, or that binds one name
+/// to two keys. An invalid line fails the whole parse: a partial signer
+/// list would silently drop the ability to verify somebody's pushes.
+pub fn parse_keys_file(path: &Path) -> std::io::Result<Vec<TrustedKey>> {
+    let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     let mut registry = choir_identity::Registry::new();
-    let mut out = Vec::new();
+    let mut out: Vec<TrustedKey> = Vec::new();
     for line in std::fs::read_to_string(path)?.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let bytes = platform::hex_decode(line)
+        let (name, hex) = match line.rsplit_once(char::is_whitespace) {
+            Some((name, hex)) => (Some(name.trim().to_string()), hex),
+            None => (None, line),
+        };
+        let bytes = platform::hex_decode(hex)
             .filter(|b| b.len() == 32)
             .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "keys file lines must be 64 hex chars",
-                )
+                invalid("keys file lines are `<hex>` or `<name> <hex>`, 64 hex chars".to_string())
             })?;
+        // One name, one key. Two keys sharing a name would make the
+        // binding meaningless in exactly the direction it exists to
+        // prevent: either holder could speak as that channel.
+        if let Some(name) = &name {
+            if out.iter().any(|k| k.name.as_ref() == Some(name)) {
+                return Err(invalid(format!("keys file binds {name:?} to more than one key")));
+            }
+        }
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
-        let actor_id = registry.register(&key).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}"))
-        })?;
-        out.push((actor_id.to_hex(), key));
+        let actor_id = registry
+            .register(&key)
+            .map_err(|e| invalid(format!("{e:?}")))?;
+        out.push(TrustedKey {
+            name,
+            actor_id: actor_id.to_hex(),
+            key,
+        });
     }
     Ok(out)
 }
@@ -479,16 +526,16 @@ pub fn parse_keys_file(path: &Path) -> std::io::Result<Vec<(String, [u8; 32])>> 
 /// # Errors
 ///
 /// Propagates filesystem failures.
-pub fn write_allowed_signers(
-    root: &Path,
-    keys: &[(String, [u8; 32])],
-) -> std::io::Result<PathBuf> {
+pub fn write_allowed_signers(root: &Path, keys: &[TrustedKey]) -> std::io::Result<PathBuf> {
     let dir = root.join(".choir");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("allowed_signers");
     let mut contents = String::new();
-    for (principal, raw) in keys {
-        contents.push_str(&format!("{principal} {}\n", ssh_ed25519_pubkey(raw)));
+    for k in keys {
+        // Principal stays the actor id even when the line carries a name:
+        // push attribution (`key/<principal>`) is a property of the key,
+        // and rewriting it would silently reattribute pushes.
+        contents.push_str(&format!("{} {}\n", k.actor_id, ssh_ed25519_pubkey(&k.key)));
     }
     std::fs::write(&path, contents)?;
     Ok(path)

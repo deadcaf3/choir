@@ -8,8 +8,10 @@
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
 //! `user:token`-per-line file (0600; never in-repo) and turns on
-//! mandatory basic auth. `--keys-file` (ed25519 public keys, one
-//! 64-char hex line each) turns on the platform API; the op log
+//! mandatory basic auth. `--keys-file` turns on the platform API; each
+//! line is `<64-char hex>` or `<name> <64-char hex>`, where the optional
+//! name binds that key to one review channel (a key with no name is
+//! unconstrained, as every key was before the column existed). The op log
 //! persists at `<repo-root>/.choir/ops.jsonl`. `--reviewers-file`
 //! (one eligible reviewer name per line) lets the node assign
 //! reviewers to review requests that name none;
@@ -84,9 +86,9 @@ fn main() -> std::io::Result<()> {
         let signers = choir_node::parse_keys_file(std::path::Path::new(path))?;
         let count = signers.len();
         let mut registry = choir_identity::Registry::new();
-        for (_, key) in &signers {
+        for signer in &signers {
             registry
-                .register(key)
+                .register(&signer.key)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))?;
         }
         let state_dir = root.join(".choir");
@@ -116,9 +118,10 @@ fn main() -> std::io::Result<()> {
         let log_path = state_dir.join("ops.jsonl");
         let log = choir_oplog::FileLog::open(&log_path)
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        // Hot-reload, both halves: appending a key line takes effect on
-        // the next failed signature check for submissions, and on the
-        // next request for push-certificate verification.
+        // Hot-reload, all three halves: appending a key line takes effect
+        // on the next failed signature check for submissions, and on the
+        // next request for push-certificate verification and for channel
+        // name bindings (a tightening, so it must not wait for a failure).
         node.watch_keys_file(path.into());
         // Same file the sequencer appends to: readers that fall behind
         // the in-memory /api/log window resync from it.

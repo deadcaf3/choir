@@ -66,7 +66,11 @@ fn signed_push_attributes_the_pushers_key() {
     let mut registry = Registry::new();
     let principal = registry.register(&raw).unwrap().to_hex();
     std::fs::create_dir_all(&repos).unwrap();
-    write_allowed_signers(&repos, &[(principal.clone(), raw)]).unwrap();
+    write_allowed_signers(
+        &repos,
+        &[choir_node::TrustedKey { name: None, actor_id: principal.clone(), key: raw }],
+    )
+    .unwrap();
 
     let mut node = Node::bind(&repos, 0).unwrap();
     node.enable_platform(
