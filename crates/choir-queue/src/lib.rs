@@ -17,6 +17,7 @@
 
 pub mod blast;
 pub mod corpus;
+pub mod envelope;
 
 use choir_merge::{MergeOutcome, Pipeline};
 use choir_oplog::MemLog;
