@@ -11,21 +11,46 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// Per-actor credentials: username → token, checked as HTTP basic auth
+/// (the standard git-over-HTTP shape; every forge client speaks it).
+///
+/// L8 note: usernames are actor ids and tokens are per-actor secrets
+/// minted by the operator; key-signature-based challenge auth can
+/// replace the token *check* later without changing the wire shape.
+pub type AuthTable = std::collections::HashMap<String, String>;
+
 /// A running node daemon serving repos under a root directory.
 pub struct Node {
     root: PathBuf,
     server: std::sync::Arc<tiny_http::Server>,
     port: u16,
+    auth: std::sync::Arc<Option<AuthTable>>,
 }
 
 impl Node {
-    /// Binds to `127.0.0.1:port` (0 = ephemeral) over `root`.
+    /// Binds to `127.0.0.1:port` (0 = ephemeral) over `root`, with no
+    /// authentication — localhost/dev only.
     ///
     /// # Errors
     ///
     /// Returns an error when the socket cannot be bound or `root` cannot be
     /// created.
     pub fn bind(root: &Path, port: u16) -> std::io::Result<Self> {
+        Self::bind_with_auth(root, port, None)
+    }
+
+    /// Binds like [`Node::bind`]; when `auth` is `Some`, every request
+    /// must carry valid basic-auth credentials from the table or it is
+    /// answered with 401 before touching git.
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Node::bind`].
+    pub fn bind_with_auth(
+        root: &Path,
+        port: u16,
+        auth: Option<AuthTable>,
+    ) -> std::io::Result<Self> {
         std::fs::create_dir_all(root)?;
         let server = tiny_http::Server::http(("127.0.0.1", port))
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -37,6 +62,7 @@ impl Node {
             root: root.to_path_buf(),
             server: std::sync::Arc::new(server),
             port,
+            auth: std::sync::Arc::new(auth),
         })
     }
 
@@ -91,7 +117,23 @@ impl Node {
     pub fn serve_forever(&self) {
         for request in self.server.incoming_requests() {
             let root = self.root.clone();
+            let auth = self.auth.clone();
             std::thread::spawn(move || {
+                if let Some(table) = auth.as_ref() {
+                    if !authorized(table, &request) {
+                        let response = tiny_http::Response::from_string("unauthorized\n")
+                            .with_status_code(401)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"WWW-Authenticate"[..],
+                                    &b"Basic realm=\"choir\""[..],
+                                )
+                                .expect("static header"),
+                            );
+                        let _ = request.respond(response);
+                        return;
+                    }
+                }
                 let _ = handle(root, request);
             });
         }
@@ -101,6 +143,74 @@ impl Node {
     pub fn unblock(&self) {
         self.server.unblock();
     }
+}
+
+/// Checks a request's basic-auth credentials against the table.
+fn authorized(table: &AuthTable, request: &tiny_http::Request) -> bool {
+    let header = match request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+    {
+        Some(h) => h.value.as_str().to_string(),
+        None => return false,
+    };
+    let b64 = match header.strip_prefix("Basic ") {
+        Some(rest) => rest.trim(),
+        None => return false,
+    };
+    let decoded = match base64_decode(b64) {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+    let creds = match String::from_utf8(decoded) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let (user, token) = match creds.split_once(':') {
+        Some(pair) => pair,
+        None => return false,
+    };
+    // Compare without early exit on length/content so timing doesn't
+    // leak how much of the token matched.
+    match table.get(user) {
+        Some(expected) => {
+            let a = expected.as_bytes();
+            let b = token.as_bytes();
+            let mut diff = a.len() ^ b.len();
+            for i in 0..a.len().min(b.len()) {
+                diff |= (a[i] ^ b[i]) as usize;
+            }
+            diff == 0
+        }
+        None => false,
+    }
+}
+
+/// Decodes standard base64 (with `=` padding); `None` on any bad input.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut rev = [255u8; 256];
+    for (i, &c) in ALPHABET.iter().enumerate() {
+        rev[c as usize] = i as u8;
+    }
+    let input = input.trim_end_matches('=');
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for c in input.bytes() {
+        let v = rev[c as usize];
+        if v == 255 {
+            return None;
+        }
+        buf = (buf << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Bridges one HTTP request to `git http-backend` CGI.
