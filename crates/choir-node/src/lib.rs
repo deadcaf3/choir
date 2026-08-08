@@ -14,6 +14,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub mod platform;
+pub mod provision;
 
 pub use platform::Platform;
 
@@ -275,7 +276,8 @@ impl Node {
                     }
                 }
                 if request.url().starts_with("/api/") {
-                    let _ = handle_api(platform.as_deref(), request);
+                    let base_url = format!("{scheme}://127.0.0.1:{port}");
+                    let _ = handle_api(platform.as_deref(), &root, &base_url, &user, request);
                     return;
                 }
                 // Platform-enabled daemons pass the sequencer callback
@@ -426,6 +428,9 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 /// Routes one `/api/...` request to the platform (503 when disabled).
 fn handle_api(
     platform: Option<&Platform>,
+    root: &Path,
+    base_url: &str,
+    user: &str,
     mut request: tiny_http::Request,
 ) -> std::io::Result<()> {
     let (status, body) = match platform {
@@ -434,7 +439,11 @@ fn handle_api(
             request.as_reader().read_to_end(&mut req_body)?;
             let method = request.method().as_str().to_string();
             let path = request.url().to_string();
-            p.handle_api(&method, &path, &req_body)
+            if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
+                provision::create_workspace(root, p, base_url, &format!("git/{user}"), &req_body)
+            } else {
+                p.handle_api(&method, &path, &req_body)
+            }
         }
         None => (503, r#"{"error":"platform API not enabled"}"#.to_string()),
     };

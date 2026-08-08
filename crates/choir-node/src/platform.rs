@@ -184,6 +184,38 @@ impl Platform {
             .map(|_| ())
     }
 
+    /// Points `workspace` at git oid `head_hex` with a node-signed op,
+    /// using the view's current head as the CAS `prev` (a lost race is
+    /// a sequencer rejection, not a clobber). `attribution` is the
+    /// submission channel (e.g. `git/<user>`), as for git-derived ops.
+    ///
+    /// # Errors
+    ///
+    /// Bad oid, or the policy's rejection reason.
+    pub fn set_workspace_head(
+        &self,
+        workspace: &str,
+        head_hex: &str,
+        attribution: &str,
+    ) -> Result<(), String> {
+        let commit = ContentHash::from_git_oid(head_hex).ok_or("bad head oid")?;
+        let prev = self
+            .view
+            .lock()
+            .expect("view lock")
+            .workspaces
+            .get(workspace)
+            .cloned();
+        let payload = ViewOp::new(OpKind::SetWorkspaceHead {
+            workspace: workspace.to_string(),
+            commit,
+            prev,
+        })
+        .to_payload();
+        let sig = self.node_key.sign_submission(attribution, &payload);
+        self.handle.try_submit(attribution, payload, Some(sig)).map(|_| ())
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {

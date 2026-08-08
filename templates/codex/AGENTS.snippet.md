@@ -25,6 +25,10 @@ platform). The daemon address is in `$CHOIR_API`.
 - `POST $CHOIR_API/api/submit` — submit a signed op (workspace head or
   ref move with CAS). Requires `$CHOIR_KEY_FILE`; ask the operator to
   register your key if submissions are rejected `unknown key`.
+- `POST $CHOIR_API/api/workspace` with `{"repo":"owner/repo","name":"<you>"}`
+  — instant CoW workspace: returns your working-copy `path` and `head`,
+  registers the workspace in the view. Push with a full refname
+  (`HEAD:refs/heads/<branch>`) — workspaces start on a detached HEAD.
 
 ## Conventions
 
