@@ -2,7 +2,8 @@
 //!
 //! Usage: `choir-node <repo-root> [port] [--create owner/name.git]...
 //! [--auth-file path] [--keys-file path] [--reviewers-file path]
-//! [--bind addr] [--tls-cert cert.pem --tls-key key.pem]`
+//! [--require-assignment] [--bind addr]
+//! [--tls-cert cert.pem --tls-key key.pem]`
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
 //! `user:token`-per-line file (0600; never in-repo) and turns on
@@ -10,7 +11,9 @@
 //! 64-char hex line each) turns on the platform API; the op log
 //! persists at `<repo-root>/.choir/ops.jsonl`. `--reviewers-file`
 //! (one eligible reviewer name per line) lets the node assign
-//! reviewers to review requests that name none. `--bind` with a
+//! reviewers to review requests that name none;
+//! `--require-assignment` additionally refuses requests that name
+//! their own reviewers. `--bind` with a
 //! non-loopback address is refused unless TLS is configured.
 
 use choir_node::{AuthTable, Node, Platform};
@@ -120,6 +123,18 @@ fn main() -> std::io::Result<()> {
         if let Some(pool) = flag_value("--reviewers-file") {
             platform = platform.with_reviewer_pool(pool.into());
             eprintln!("reviewer assignment enabled ({pool})");
+            if rest.iter().any(|a| a == "--require-assignment") {
+                platform = platform.with_required_assignment();
+                eprintln!("reviewer assignment required (self-named reviewers refused)");
+            }
+        } else if rest.iter().any(|a| a == "--require-assignment") {
+            // Without a pool nothing can ever be assigned, so every
+            // review would stall unassigned. Refuse the combination
+            // rather than serve a review system that cannot finish.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--require-assignment needs --reviewers-file",
+            ));
         }
         node.enable_platform(platform);
         eprintln!("platform API enabled ({count} actor keys)");

@@ -86,6 +86,10 @@ struct ChoirPolicy {
     /// The node key's actor id (hex): the only author allowed to assign
     /// reviewers.
     node_id: String,
+    /// When set, a `RequestReview` may not name its own reviewers —
+    /// every review must go through the node's draw (D24 layer 5).
+    /// Shared with [`Platform`] so the switch is one value, not two.
+    require_assignment: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChoirPolicy {
@@ -153,6 +157,19 @@ impl SubmitPolicy for ChoirPolicy {
         if matches!(op.kind, OpKind::AssignReviewers { .. }) && sig.key_id != self.node_id {
             return Err("only the node may assign reviewers".to_string());
         }
+        // Required-assignment mode closes the other half of the same
+        // loop: naming your own reviewers is refused outright, so the
+        // node's draw is the only way a review gets reviewers.
+        if self.require_assignment.load(std::sync::atomic::Ordering::Relaxed) {
+            if let OpKind::RequestReview { reviewers, .. } = &op.kind {
+                if !reviewers.is_empty() {
+                    return Err(
+                        "this node assigns reviewers: request a review with an empty reviewer list"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         let mut trial = self.view.lock().expect("view lock").clone();
         trial.apply(&op).map_err(|e| format!("stale head: {e:?}"))
     }
@@ -186,6 +203,9 @@ pub struct Platform {
     /// in-memory window. `None` (an in-memory log) means such a reader
     /// gets a loud gap error instead of a resync.
     log_path: Option<std::path::PathBuf>,
+    /// Shared with the policy: when set, self-named reviewers are
+    /// refused and every review goes through the node's draw.
+    require_assignment: Arc<std::sync::atomic::AtomicBool>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -240,9 +260,11 @@ impl Platform {
         let keys_mtime = keys_file
             .as_ref()
             .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
+                require_assignment: require_assignment.clone(),
                 registry,
                 view: view.clone(),
                 entries: entries.clone(),
@@ -259,8 +281,28 @@ impl Platform {
             entries,
             reviewer_pool: None,
             log_path: None,
+            require_assignment,
             _sequencer: sequencer,
         })
+    }
+
+    /// Refuses any `RequestReview` that names its own reviewers, so the
+    /// node's draw is the only path to a reviewer list (D24 layer 5,
+    /// "the requester does not choose who reviews them" — enforced
+    /// rather than merely offered).
+    ///
+    /// Requires a reviewer pool: without one no review can ever be
+    /// assigned, so every request would stall unassigned.
+    ///
+    /// Scope, stated honestly: this is node-wide. Gating only
+    /// *privilege-bearing* reviews needs a review→ref binding that does
+    /// not exist — a `RequestReview` names a commit, not a branch — so
+    /// there is nothing to condition on yet.
+    #[must_use]
+    pub fn with_required_assignment(self) -> Self {
+        self.require_assignment
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self
     }
 
     /// Points the platform at the JSON-lines file its op log persists to,

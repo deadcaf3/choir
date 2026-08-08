@@ -166,3 +166,61 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
 
     node.unblock();
 }
+
+#[test]
+fn required_assignment_refuses_self_named_reviewers() {
+    let work = std::env::temp_dir().join(format!("choir-node-required-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let pool_file = work.join("reviewers");
+    std::fs::write(&pool_file, "ana\nbot\n").unwrap();
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .unwrap()
+            .with_reviewer_pool(pool_file)
+            .with_required_assignment(),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+
+    // Picking your own reviewer is refused outright, not quietly
+    // overridden — the requester learns why.
+    let self_named = ViewOp::new(OpKind::RequestReview {
+        id: "r-self".into(),
+        target: choir_oplog::ContentHash::blake3(b"x"),
+        reviewers: vec!["ana".into()],
+    });
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&author, "carol", &self_named),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("empty reviewer list"),
+        "{resp}"
+    );
+    // Rejected in the policy, so nothing landed in the view.
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert!(view["reviews"].get("r-self").is_none(), "{view}");
+
+    // The assigned path still works.
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&author, "carol", &request("r-ok", b"y")),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["reviewers"].as_array().map(Vec::len), Some(2), "{resp}");
+
+    node.unblock();
+}
