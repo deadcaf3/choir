@@ -1,0 +1,246 @@
+//! Bridge v0 (plan.md D21, read-replica stage): mirror an upstream git
+//! repo and record every upstream ref movement as a signed, CAS-checked
+//! op through the choir platform API.
+//!
+//! Single-canonical invariant: the upstream forge is canonical; choir is
+//! a follower of the sequencer. This binary never writes back to the
+//! upstream — the write-back stage arrives with the GitHub App
+//! credentials story (risk register #15).
+//!
+//! Usage:
+//!   choir-bridge <upstream-url> <mirror-path> <api-base> <bridge-key-file> <label> [--once]
+//!
+//! - `mirror-path`: where the `git clone --mirror` lives (created on
+//!   first run, `remote update --prune`d afterwards).
+//! - `api-base`: e.g. `http://127.0.0.1:8417` — a choir-node with the
+//!   platform API enabled and the bridge's public key registered.
+//! - `bridge-key-file`: 32 secret bytes for the bridge's actor key
+//!   (created 0600 on first run if absent).
+//! - `label`: ref namespace prefix, e.g. `github/git/git`.
+//! - `--once`: single sync instead of a 60 s loop.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use choir_hash::ContentHash;
+use choir_identity::ActorKey;
+use choir_view::{OpKind, ViewOp};
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Runs git in the mirror, returning stdout; exits loudly on failure.
+fn git(args: &[&str], dir: Option<&Path>) -> String {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    let out = cmd.output().expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Loopback API call via curl; returns (status, body).
+fn api(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
+    let mut args = vec!["-sk", "-w", "\n%{http_code}", "-X", method];
+    if let Some(b) = body {
+        args.extend(["-d", b]);
+    }
+    args.push(url);
+    let out = std::process::Command::new("curl")
+        .args(&args)
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    match text.rsplit_once('\n') {
+        Some((b, code)) => (code.trim().parse().unwrap_or(0), b.to_string()),
+        None => (0, text),
+    }
+}
+
+/// Current upstream refs of the mirror: refname -> oid hex.
+fn mirror_refs(mirror: &Path) -> BTreeMap<String, String> {
+    git(
+        &["for-each-ref", "--format=%(objectname) %(refname)"],
+        Some(mirror),
+    )
+    .lines()
+    .filter_map(|l| {
+        let (oid, name) = l.split_once(' ')?;
+        Some((name.to_string(), oid.to_string()))
+    })
+    .collect()
+}
+
+/// Choir-side view of this label's refs: refname -> ContentHash.
+fn view_refs(api_base: &str, label: &str) -> BTreeMap<String, ContentHash> {
+    let (status, body) = api("GET", &format!("{api_base}/api/view"), None);
+    assert_eq!(status, 200, "view: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("view json");
+    let prefix = format!("{label}:");
+    v["refs"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, hex)| {
+                    let name = k.strip_prefix(&prefix)?;
+                    let hex = hex.as_str()?;
+                    let (codec, digest) = hex.split_once('-')?;
+                    Some((
+                        name.to_string(),
+                        ContentHash {
+                            codec: u8::from_str_radix(codec, 16).ok()?,
+                            digest: (0..digest.len())
+                                .step_by(2)
+                                .map(|i| u8::from_str_radix(&digest[i..i + 2], 16).ok())
+                                .collect::<Option<Vec<u8>>>()?,
+                        },
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Submits one signed op; returns Err(reason) on rejection.
+fn submit(api_base: &str, key: &ActorKey, workspace: &str, op: ViewOp) -> Result<(), String> {
+    let payload = op.to_payload();
+    let sig = key.sign_submission(workspace, &payload);
+    let body = serde_json::json!({
+        "workspace": workspace,
+        "payload_hex": hex_encode(&payload),
+        "key_id": sig.key_id,
+        "signature_hex": hex_encode(&sig.signature),
+    })
+    .to_string();
+    let (status, resp) = api("POST", &format!("{api_base}/api/submit"), Some(&body));
+    if status == 200 {
+        Ok(())
+    } else {
+        Err(resp)
+    }
+}
+
+/// One sync round: fetch upstream, diff against the choir view, submit
+/// the delta. Returns (set, deleted, unchanged).
+fn sync_once(
+    upstream: &str,
+    mirror: &Path,
+    api_base: &str,
+    key: &ActorKey,
+    label: &str,
+) -> (usize, usize, usize) {
+    if mirror.join("HEAD").exists() {
+        git(&["remote", "update", "--prune"], Some(mirror));
+    } else {
+        std::fs::create_dir_all(mirror.parent().unwrap_or(Path::new("."))).unwrap();
+        git(
+            &["clone", "--mirror", upstream, mirror.to_str().expect("utf8 path")],
+            None,
+        );
+    }
+
+    let upstream_refs = mirror_refs(mirror);
+    let choir_refs = view_refs(api_base, label);
+    let workspace = format!("bridge/{label}");
+    let (mut set, mut deleted, mut unchanged) = (0, 0, 0);
+
+    for (name, oid) in &upstream_refs {
+        let commit = match ContentHash::from_git_oid(oid) {
+            Some(c) => c,
+            None => continue, // non-oid ref (should not happen)
+        };
+        let prev = choir_refs.get(name);
+        if prev == Some(&commit) {
+            unchanged += 1;
+            continue;
+        }
+        let op = ViewOp::new(OpKind::SetRef {
+            name: format!("{label}:{name}"),
+            commit,
+            prev: prev.cloned(),
+        });
+        match submit(api_base, key, &workspace, op) {
+            Ok(()) => set += 1,
+            Err(e) => eprintln!("bridge: set {name} rejected: {e}"),
+        }
+    }
+    for (name, prev) in &choir_refs {
+        if !upstream_refs.contains_key(name) {
+            let op = ViewOp::new(OpKind::DeleteRef {
+                name: format!("{label}:{name}"),
+                prev: Some(prev.clone()),
+            });
+            match submit(api_base, key, &workspace, op) {
+                Ok(()) => deleted += 1,
+                Err(e) => eprintln!("bridge: delete {name} rejected: {e}"),
+            }
+        }
+    }
+    (set, deleted, unchanged)
+}
+
+/// Loads the 32-byte actor key at `path`, creating it (0600) if absent.
+fn load_or_create_key(path: &str) -> ActorKey {
+    if Path::new(path).exists() {
+        let bytes = std::fs::read(path).expect("read key file");
+        let bytes: [u8; 32] = bytes.as_slice().try_into().expect("key file must be 32 bytes");
+        ActorKey::from_secret_bytes(&bytes)
+    } else {
+        let key = ActorKey::generate();
+        std::fs::write(path, key.secret_bytes()).expect("write key file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod key file");
+        }
+        key
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `choir-bridge --pubkey <key-file>`: ensure the key exists and print
+    // its public key hex (for the daemon's --keys-file), then exit.
+    if args.first().map(String::as_str) == Some("--pubkey") {
+        let key_file = args.get(1).expect("--pubkey needs a key file path");
+        let key = load_or_create_key(key_file);
+        println!("{}", hex_encode(&key.public_key_bytes()));
+        return;
+    }
+    let [upstream, mirror, api_base, key_file, label] = match args.as_slice() {
+        [a, b, c, d, e, rest @ ..] if rest.iter().all(|r| r == "--once") => {
+            [a.clone(), b.clone(), c.clone(), d.clone(), e.clone()]
+        }
+        _ => {
+            eprintln!(
+                "usage: choir-bridge <upstream-url> <mirror-path> <api-base> <bridge-key-file> <label> [--once]"
+            );
+            std::process::exit(2);
+        }
+    };
+    let once = args.iter().any(|a| a == "--once");
+    let mirror = std::path::PathBuf::from(mirror);
+
+    let key = load_or_create_key(&key_file);
+
+    loop {
+        let started = std::time::Instant::now();
+        let (set, deleted, unchanged) = sync_once(&upstream, &mirror, &api_base, &key, &label);
+        eprintln!(
+            "bridge: {label}: {set} set, {deleted} deleted, {unchanged} unchanged in {:?}",
+            started.elapsed()
+        );
+        if once {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}

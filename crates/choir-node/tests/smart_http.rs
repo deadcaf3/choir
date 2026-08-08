@@ -6,7 +6,7 @@ use choir_node::Node;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
         .args(args)
         .current_dir(dir)
         .env("GIT_AUTHOR_NAME", "t")

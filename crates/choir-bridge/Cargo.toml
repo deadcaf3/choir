@@ -1,0 +1,18 @@
+[package]
+name = "choir-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+choir-hash = { path = "../choir-hash" }
+choir-identity = { path = "../choir-identity" }
+choir-view = { path = "../choir-view" }
+serde_json = "1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+choir-node = { path = "../choir-node" }
+choir-oplog = { path = "../choir-oplog" }

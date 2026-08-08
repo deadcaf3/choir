@@ -6,7 +6,7 @@ use choir_node::{AuthTable, Node};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
