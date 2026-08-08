@@ -229,8 +229,16 @@ const CI_POLL: std::time::Duration = std::time::Duration::from_secs(15);
 /// One queue-as-bot round (D21 queue stage, verdict-only): fetch the
 /// open PRs, build the speculative train locally, publish it as the
 /// `choir/train` branch so the forge's CI runs on it, wait for the
-/// check verdict, and post a per-PR `choir/queue` commit status.
-fn queue_round(app_id: &str, pem: &Path, repo: &str, workdir: &Path) -> Result<(), String> {
+/// check verdict, and post a per-PR `choir/queue` commit status. With
+/// `land`, a green train is then fast-forwarded onto the default
+/// branch (non-force push: a lost race is a rejection, not a clobber).
+fn queue_round(
+    app_id: &str,
+    pem: &Path,
+    repo: &str,
+    workdir: &Path,
+    land: bool,
+) -> Result<(), String> {
     let token = github::app_jwt(app_id, pem).and_then(|jwt| github::installation_token(&jwt))?;
     let base_branch = github::default_branch(&token, repo)?;
     let prs = github::list_open_prs(&token, repo)?;
@@ -303,6 +311,10 @@ fn queue_round(app_id: &str, pem: &Path, repo: &str, workdir: &Path) -> Result<(
         };
         github::post_status(&token, repo, &sha, "choir/queue", state, desc)?;
         println!("queue: PR #{}: {state} ({desc})", entry.id);
+    }
+    if land && train.tip != base && verdict == github::Verdict::Success {
+        choir_bridge::queue::land(workdir, &url, &train.tip, &base_branch)?;
+        println!("queue: landed train {} -> {base_branch}", train.tip);
     }
     Ok(())
 }
@@ -392,17 +404,22 @@ fn main() {
         }
         return;
     }
-    // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir>`
-    // Queue-as-bot v0: one speculative-train round, verdict-only.
+    // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land]`
+    // Queue-as-bot: one speculative-train round. Verdict-only by
+    // default; --land fast-forwards the default branch on a green train.
     if args.first().map(String::as_str) == Some("queue") {
-        let [app_id, pem, repo, workdir] = match &args[1..] {
-            [a, b, c, d] => [a, b, c, d],
+        let land = args.iter().any(|a| a == "--land");
+        let rest: Vec<&String> = args[1..].iter().filter(|a| *a != "--land").collect();
+        let [app_id, pem, repo, workdir] = match rest.as_slice() {
+            [a, b, c, d] => [*a, *b, *c, *d],
             _ => {
-                eprintln!("usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir>");
+                eprintln!(
+                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land]"
+                );
                 std::process::exit(2);
             }
         };
-        if let Err(e) = queue_round(app_id, Path::new(pem), repo, Path::new(workdir)) {
+        if let Err(e) = queue_round(app_id, Path::new(pem), repo, Path::new(workdir), land) {
             eprintln!("queue round failed: {e}");
             std::process::exit(1);
         }

@@ -112,6 +112,28 @@ fn empty_pr_list_leaves_train_at_base() {
 }
 
 #[test]
+fn landing_fast_forwards_and_rejects_stale_trains() {
+    let dir = tempdir("land");
+    fixture(&dir);
+    let remote = tempdir("land-remote");
+    git(&dir, &["clone", "-q", "--bare", dir.to_str().unwrap(), remote.to_str().unwrap()]);
+    let url = remote.to_str().unwrap().to_string();
+
+    let base = rev(&dir, "main");
+    let train =
+        build_train(&dir, &base, &[(1, rev(&dir, "pr-1")), (2, rev(&dir, "pr-2"))]).unwrap();
+    choir_bridge::queue::land(&dir, &url, &train.tip, "main").unwrap();
+    assert_eq!(rev(&remote, "main"), train.tip);
+
+    // A train built from the now-stale base must be rejected, not clobber.
+    let stale = build_train(&dir, &base, &[(3, rev(&dir, "pr-conflict"))]).unwrap();
+    assert_ne!(stale.tip, train.tip);
+    let err = choir_bridge::queue::land(&dir, &url, &stale.tip, "main").unwrap_err();
+    assert!(err.contains("rejected") || err.contains("fast-forward"), "{err}");
+    assert_eq!(rev(&remote, "main"), train.tip, "remote main must be untouched");
+}
+
+#[test]
 fn pr_parse_orders_by_number() {
     let body = r#"[
         {"number": 7, "head": {"sha": "bbb"}},

@@ -97,3 +97,15 @@ pub fn build_train(repo: &Path, base: &str, prs: &[(u64, String)]) -> Result<Tra
     let tip = git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
     Ok(Train { tip, entries })
 }
+
+/// Lands a green train: pushes `tip` to `branch` on the remote at
+/// `url` WITHOUT force, so git's fast-forward rule is the race guard —
+/// if the branch moved since the train was built, the push is rejected
+/// and the caller should rebuild on the next round.
+///
+/// # Errors
+///
+/// Push failures, including the non-fast-forward rejection.
+pub fn land(repo: &Path, url: &str, tip: &str, branch: &str) -> Result<(), String> {
+    git(repo, &["push", "-q", url, &format!("{tip}:refs/heads/{branch}")]).map(|_| ())
+}
