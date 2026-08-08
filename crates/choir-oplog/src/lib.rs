@@ -132,6 +132,30 @@ pub trait OpLog: Send {
 
     /// Entry at sequence number `seq`, or `None` if out of range.
     fn get(&self, seq: u64) -> Option<OpEntry>;
+
+    /// Makes every prior [`OpLog::append`] durable — survives power loss,
+    /// not merely process death.
+    ///
+    /// Until this returns `Ok`, an appended entry may exist only in the
+    /// OS page cache. That matters here beyond losing a tail: the
+    /// `pre-receive` hook submits a ref op *before* git applies the ref,
+    /// so an unsynced log can leave git holding a ref whose authorising
+    /// op does not exist. Two sources of truth then disagree, and the
+    /// next push fails its CAS against a view that never saw the update.
+    ///
+    /// The sequencer calls this once per batch rather than once per
+    /// append, and only acknowledges submitters afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Backend-specific [`LogError`] on storage failure. A failure here
+    /// must be treated as "the batch is not durable", never as success.
+    ///
+    /// Default: a no-op, correct for backends that never outlive the
+    /// process (see [`MemLog`]).
+    fn sync(&mut self) -> Result<(), LogError> {
+        Ok(())
+    }
 }
 
 /// Primary in-memory implementation (also the dev/test runtime).
@@ -170,12 +194,24 @@ impl OpLog for MemLog {
     fn get(&self, seq: u64) -> Option<OpEntry> {
         self.entries.get(seq as usize).cloned()
     }
+
+    /// Nothing to do: a `MemLog` never outlives its process, so there is
+    /// no weaker state for `sync` to strengthen. The default would serve;
+    /// it is spelled out because "in-memory logs cannot be made durable"
+    /// is the reason, not an oversight.
+    fn sync(&mut self) -> Result<(), LogError> {
+        Ok(())
+    }
 }
 
 /// Second implementation (seam rule: feature-poor is fine, broken is not):
 /// JSON-lines file, append-only, rebuilt head on open.
 pub struct FileLog {
-    file: std::fs::File,
+    /// Buffered so a batch of appends costs one write syscall instead of
+    /// one each. Correctness rests on [`OpLog::sync`]: nothing here is
+    /// durable, or even visible to another reader of the file, until the
+    /// buffer is flushed.
+    file: std::io::BufWriter<std::fs::File>,
     entries: Vec<OpEntry>,
     head: Option<ContentHash>,
 }
@@ -205,7 +241,23 @@ impl FileLog {
             head = Some(entry.content_hash());
             entries.push(entry);
         }
-        Ok(Self { file, entries, head })
+        Ok(Self {
+            file: std::io::BufWriter::new(file),
+            entries,
+            head,
+        })
+    }
+}
+
+impl Drop for FileLog {
+    /// Last-resort flush. The sequencer syncs per batch, so in normal
+    /// operation this finds an empty buffer; it exists so a log dropped on
+    /// an error path does not silently discard buffered entries. Errors
+    /// are unreportable here, hence the `ok()` — durability is the
+    /// sequencer's job via [`OpLog::sync`], not this.
+    fn drop(&mut self) {
+        use std::io::Write;
+        self.file.flush().ok();
     }
 }
 
@@ -234,5 +286,19 @@ impl OpLog for FileLog {
 
     fn get(&self, seq: u64) -> Option<OpEntry> {
         self.entries.get(seq as usize).cloned()
+    }
+
+    /// Flush the buffer to the OS, then ask the OS to put it on the
+    /// platter. Both halves are required and neither substitutes for the
+    /// other: `flush` alone leaves the bytes in the page cache, and
+    /// `sync_data` alone would sync a buffer that was never written.
+    ///
+    /// `sync_data` rather than `sync_all`: the file's length and contents
+    /// must survive, its mtime need not, and skipping the metadata write
+    /// is the cheaper half of an fsync.
+    fn sync(&mut self) -> Result<(), LogError> {
+        use std::io::Write;
+        self.file.flush().map_err(LogError::Io)?;
+        self.file.get_ref().sync_data().map_err(LogError::Io)
     }
 }

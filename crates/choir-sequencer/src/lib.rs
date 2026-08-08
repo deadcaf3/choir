@@ -74,6 +74,15 @@ pub struct Accepted {
     pub decision_latency: Duration,
 }
 
+/// Most ops admitted before the writer stops draining and syncs.
+///
+/// Bounds the latency a submitter can inherit from the ops queued ahead
+/// of it: without a cap, a sustained burst would keep the drain loop fed
+/// and the batch would never close. 256 is a starting point chosen to sit
+/// far under the 100 ms decision-latency gate at the measured per-op cost,
+/// not a tuned value.
+const MAX_BATCH: usize = 256;
+
 enum Command {
     Submit(Submission, mpsc::Sender<Result<Accepted, String>>),
     Shutdown,
@@ -147,38 +156,89 @@ impl Sequencer {
     pub fn spawn_with_policy(mut log: Box<dyn OpLog>, mut policy: Box<dyn SubmitPolicy>) -> Self {
         let (tx, rx) = mpsc::channel::<Command>();
         let thread = std::thread::spawn(move || {
-            while let Ok(cmd) = rx.recv() {
-                match cmd {
-                    Command::Submit(sub, reply) => {
-                        let started = Instant::now();
-                        if let Err(reason) = policy.check(&sub) {
-                            let _ = reply.send(Err(reason));
-                            continue;
+            // Ordered, then made durable, then acknowledged. Everything
+            // admitted in one pass through the loop shares a single
+            // `sync`, so the fsync cost is paid once per batch rather
+            // than once per op.
+            let mut acks: Vec<(mpsc::Sender<Result<Accepted, String>>, Accepted)> = Vec::new();
+            let mut stopping = false;
+            while let Ok(first) = rx.recv() {
+                let mut cmd = Some(first);
+                // Admit the woken command, then drain whatever else is
+                // already queued behind it. Nothing is waited for: an idle
+                // sequencer still batches exactly one op, so a lone
+                // submitter pays no added latency.
+                while let Some(current) = cmd.take() {
+                    match current {
+                        Command::Shutdown => {
+                            stopping = true;
+                            break;
                         }
-                        let seq = log.len();
-                        let entry = OpEntry {
-                            format_version: FORMAT_VERSION,
-                            parent: log.head(),
-                            seq,
-                            workspace: sub.workspace,
-                            payload: sub.payload,
-                            witnesses: Vec::new(),
-                            author_sig: sub.author_sig,
-                        };
-                        let hash = entry.content_hash();
-                        policy.accepted(&entry);
-                        log.append(entry)
-                            .expect("single writer never sees a stale head");
-                        // Reply failure just means the client gave up waiting.
-                        let _ = reply.send(Ok(Accepted {
-                            seq,
-                            hash,
-                            decision_latency: started.elapsed(),
-                        }));
+                        Command::Submit(sub, reply) => {
+                            let started = Instant::now();
+                            match policy.check(&sub) {
+                                // A rejection touches neither the log nor
+                                // durability, so it is answered at once
+                                // rather than made to wait for the batch.
+                                Err(reason) => {
+                                    let _ = reply.send(Err(reason));
+                                }
+                                Ok(()) => {
+                                    let seq = log.len();
+                                    let entry = OpEntry {
+                                        format_version: FORMAT_VERSION,
+                                        parent: log.head(),
+                                        seq,
+                                        workspace: sub.workspace,
+                                        payload: sub.payload,
+                                        witnesses: Vec::new(),
+                                        author_sig: sub.author_sig,
+                                    };
+                                    let hash = entry.content_hash();
+                                    policy.accepted(&entry);
+                                    log.append(entry)
+                                        .expect("single writer never sees a stale head");
+                                    acks.push((
+                                        reply,
+                                        Accepted {
+                                            seq,
+                                            hash,
+                                            decision_latency: started.elapsed(),
+                                        },
+                                    ));
+                                }
+                            }
+                        }
                     }
-                    Command::Shutdown => break,
+                    if acks.len() >= MAX_BATCH {
+                        break;
+                    }
+                    cmd = rx.try_recv().ok();
+                }
+
+                // The durability barrier. Submitters are told `Accepted`
+                // only after this returns, so an acknowledged op has
+                // reached the platter -- not merely the page cache. The
+                // hook submits a ref op before git applies the ref, so
+                // acknowledging early is what would let git hold a ref
+                // whose authorising op does not exist.
+                let durable = log.sync();
+                for (reply, accepted) in acks.drain(..) {
+                    let answer = match &durable {
+                        Ok(()) => Ok(accepted),
+                        // Ordered but not durable is not an acceptance.
+                        // Say so, rather than acknowledge and hope.
+                        Err(e) => Err(format!("ordered but not durable: {e:?}")),
+                    };
+                    // Send failure just means the client gave up waiting.
+                    let _ = reply.send(answer);
+                }
+                if stopping {
+                    break;
                 }
             }
+            // A clean shutdown must not strand the buffer.
+            log.sync().ok();
             log
         });
         Self {
