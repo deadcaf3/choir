@@ -6,21 +6,47 @@
 //!   can change under the same envelope (D6)
 //! - `witnesses` exists from day 1, empty until Phase 2, so the append-only →
 //!   witnessed swap (D16) is additive, not a migration
+//!
+//! # Examples
+//!
+//! ```
+//! use choir_oplog::{MemLog, OpEntry, OpLog, FORMAT_VERSION};
+//!
+//! let mut log = MemLog::new();
+//! let genesis = OpEntry {
+//!     format_version: FORMAT_VERSION,
+//!     parent: None,
+//!     seq: 0,
+//!     workspace: "agent-1".into(),
+//!     payload: b"first op".to_vec(),
+//!     witnesses: Vec::new(),
+//! };
+//! let head = log.append(genesis).unwrap();
+//! assert_eq!(log.head(), Some(head));
+//! assert_eq!(log.len(), 1);
+//! ```
 
 use serde::{Deserialize, Serialize};
 
-/// Bump on any incompatible change; additive changes keep the version.
+/// Current wire-format version. Bump on any incompatible change; additive
+/// changes keep the version (plan.md §E evolution policy).
 pub const FORMAT_VERSION: u16 = 1;
 
 /// Self-describing content address (multihash-style envelope, D6).
+///
+/// The codec byte names the hash function, so a future hash migration adds a
+/// codec instead of rewriting stored identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentHash {
-    /// 0x1e = BLAKE3-256, following the multicodec table.
+    /// Hash-function identifier; `0x1e` = BLAKE3-256, following the
+    /// multicodec table.
     pub codec: u8,
+    /// Raw digest bytes for `codec`.
     pub digest: Vec<u8>,
 }
 
 impl ContentHash {
+    /// Hashes `data` with BLAKE3-256 and wraps it in the envelope.
     pub fn blake3(data: &[u8]) -> Self {
         Self {
             codec: 0x1e,
@@ -33,48 +59,74 @@ impl ContentHash {
 /// from the first persisted byte so adding witnessing never rewrites history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Witness {
+    /// Identifier of the witness key that produced [`Witness::signature`].
     pub key_id: String,
+    /// Signature over the entry's content hash.
     pub signature: Vec<u8>,
 }
 
 /// One operation in the log. Payload semantics live above this layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpEntry {
+    /// Wire-format version this entry was written with; see [`FORMAT_VERSION`].
     pub format_version: u16,
-    /// Hash of the previous entry; None only for the genesis entry.
+    /// Hash of the previous entry; `None` only for the genesis entry.
     pub parent: Option<ContentHash>,
     /// Sequence number assigned by the single-writer sequencer.
     pub seq: u64,
     /// Workspace (agent) that submitted the op.
     pub workspace: String,
+    /// Opaque operation body; interpreted by the layers above L1.
     pub payload: Vec<u8>,
+    /// Witness cosignatures; empty until Phase 2 (D16).
     pub witnesses: Vec<Witness>,
 }
 
 impl OpEntry {
+    /// Content address of this entry (its canonical serialization, hashed).
     pub fn content_hash(&self) -> ContentHash {
         let bytes = serde_json::to_vec(self).expect("OpEntry is always serializable");
         ContentHash::blake3(&bytes)
     }
 }
 
+/// Failure modes of an [`OpLog`] backend.
 #[derive(Debug)]
 pub enum LogError {
     /// Parent hash of the appended entry does not match the current head.
     HeadMismatch,
+    /// Underlying storage I/O failure.
     Io(std::io::Error),
+    /// Stored data could not be decoded as valid entries.
     Corrupt(String),
 }
 
 /// The log-backend seam (D16). Conformance suite: `tests/conformance.rs`,
 /// run against every implementation.
+///
+/// Implementations must reject appends whose `parent` is not the current
+/// head, and a rejected append must not mutate the log.
 pub trait OpLog: Send {
+    /// Appends `entry` and returns its content hash (the new head).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::HeadMismatch`] when `entry.parent` is not the
+    /// current head, or a backend-specific [`LogError`] on storage failure.
     fn append(&mut self, entry: OpEntry) -> Result<ContentHash, LogError>;
+
+    /// Content hash of the newest entry, or `None` for an empty log.
     fn head(&self) -> Option<ContentHash>;
+
+    /// Number of entries in the log.
     fn len(&self) -> u64;
+
+    /// Whether the log has no entries.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Entry at sequence number `seq`, or `None` if out of range.
     fn get(&self, seq: u64) -> Option<OpEntry>;
 }
 
@@ -86,6 +138,7 @@ pub struct MemLog {
 }
 
 impl MemLog {
+    /// Creates an empty in-memory log.
     pub fn new() -> Self {
         Self::default()
     }
@@ -124,6 +177,13 @@ pub struct FileLog {
 }
 
 impl FileLog {
+    /// Opens (creating if absent) the log file at `path` and replays it to
+    /// rebuild the in-memory index and head.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::Io`] on filesystem failure and
+    /// [`LogError::Corrupt`] when an existing line fails to decode.
     pub fn open(path: &std::path::Path) -> Result<Self, LogError> {
         use std::io::{BufRead, BufReader};
         let file = std::fs::OpenOptions::new()

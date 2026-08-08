@@ -4,18 +4,43 @@
 //! Resolved or Conflict. LLM resolution and Mergiraf are just strategy slots,
 //! so widening or dropping them is configuration, not surgery. Mergiraf is
 //! GPLv3 (audited 2026-08-08): subprocess only, never linked (D4).
+//!
+//! # Examples
+//!
+//! ```
+//! use choir_merge::{MergeOutcome, Pipeline};
+//!
+//! let pipeline = Pipeline::default_v1();
+//! // Only the right side changed, so the merge resolves trivially.
+//! let result = pipeline.merge("a\n", "a\n", "a\nb\n");
+//! assert_eq!(result.strategy, "trivial");
+//! match result.outcome {
+//!     MergeOutcome::Resolved(text) => assert_eq!(text, "a\nb\n"),
+//!     _ => unreachable!(),
+//! }
+//! ```
 
+/// Result of one strategy's attempt at a 3-way merge.
 pub enum MergeOutcome {
+    /// Strategy produced a clean merge.
     Resolved(String),
     /// Strategy ran but could not resolve; carry the conflict downstream
     /// (jj-style first-class conflict is the pipeline's terminal fallback).
-    Conflict { annotated: String },
+    Conflict {
+        /// Merge text with conflict markers preserved.
+        annotated: String,
+    },
     /// Strategy not applicable in this environment (e.g. binary missing).
     Unavailable(String),
 }
 
+/// The strategy seam: one slot in the [`Pipeline`].
 pub trait MergeStrategy: Send + Sync {
+    /// Stable identifier, recorded in [`PipelineResult::strategy`] for
+    /// provenance and review escalation.
     fn name(&self) -> &'static str;
+
+    /// Attempts a 3-way merge of `left` and `right` against `base`.
     fn merge(&self, base: &str, left: &str, right: &str) -> MergeOutcome;
 }
 
@@ -25,13 +50,16 @@ pub struct Pipeline {
     strategies: Vec<Box<dyn MergeStrategy>>,
 }
 
+/// A [`Pipeline`] verdict plus which strategy produced it.
 pub struct PipelineResult {
+    /// The merge outcome; never [`MergeOutcome::Unavailable`].
     pub outcome: MergeOutcome,
     /// Which strategy produced the outcome (provenance for review escalation).
     pub strategy: &'static str,
 }
 
 impl Pipeline {
+    /// Builds a pipeline from an ordered list of strategies, cheapest first.
     pub fn new(strategies: Vec<Box<dyn MergeStrategy>>) -> Self {
         Self { strategies }
     }
@@ -42,6 +70,13 @@ impl Pipeline {
         Self::new(vec![Box::new(TrivialMerge), Box::new(LineMerge)])
     }
 
+    /// Runs the strategies in order and returns the first clean resolution,
+    /// or the last conflict if nothing resolves.
+    ///
+    /// # Panics
+    ///
+    /// Panics if every strategy reports [`MergeOutcome::Unavailable`]; a
+    /// pipeline must always contain at least one applicable strategy.
     pub fn merge(&self, base: &str, left: &str, right: &str) -> PipelineResult {
         let mut last_conflict: Option<PipelineResult> = None;
         for s in &self.strategies {
@@ -115,7 +150,7 @@ pub struct MergirafMerge {
 }
 
 impl MergirafMerge {
-    /// Returns None when mergiraf is not installed; the pipeline then simply
+    /// Returns `None` when mergiraf is not installed; the pipeline then simply
     /// skips this slot (D4 fallback: line merge + first-class conflicts).
     pub fn detect(extension: &str) -> Option<Self> {
         let out = std::process::Command::new("which")
