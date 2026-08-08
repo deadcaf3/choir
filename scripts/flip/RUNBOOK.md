@@ -1,5 +1,10 @@
 # D20 flip runbook
 
+Nothing below needs memorizing: `sh scripts/choirctl` with no arguments
+lists every command. The long forms are kept here so the procedure is
+auditable, but `choirctl install`, `choirctl status`, `choirctl push`
+and `choirctl mirror` are the four you actually run.
+
 The flip makes the choir node canonical and Forgejo a follower (D21
 single-canonical invariant — one direction, never dual-write). The
 git-bundle cron on the mirror VM continues unchanged as insurance.

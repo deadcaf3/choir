@@ -1,0 +1,76 @@
+#!/bin/zsh
+# One entry point for the dogfood node, so nothing has to be memorized.
+# Run it with no arguments to see what it can do.
+#
+# Everything here delegates to the scripts next to it; this file adds no
+# behaviour of its own beyond the status/logs conveniences.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+STATE=$HOME/.choir
+LABEL=com.choir.node
+PORT=${CHOIR_PORT:-8417}
+
+auth_user() { head -1 "$STATE/auth" | cut -d: -f1; }
+auth_pass() { head -1 "$STATE/auth" | cut -d: -f2-; }
+
+case "${1:-}" in
+
+install)
+  # Build, mint secrets, load the supervised LaunchAgent. Idempotent.
+  sh "$HERE/flip/install_node.sh" "$PORT" "${2:-choir/choir.git}"
+  ;;
+
+status)
+  if launchctl print "gui/$(id -u)/$LABEL" > /dev/null 2>&1; then
+    echo "agent:  loaded ($LABEL)"
+  else
+    echo "agent:  not loaded — run: sh scripts/choirctl install"
+    exit 1
+  fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/view" || true)
+  echo "auth:   $code on an unauthenticated /api/view (401 = auth is on)"
+  echo "view:   $(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")"
+  ;;
+
+stop)
+  launchctl bootout "gui/$(id -u)/$LABEL"
+  echo "stopped $LABEL (data kept in $STATE; 'install' brings it back)"
+  ;;
+
+push)
+  # Local repo -> the choir node, as the canonical remote (--all + --tags).
+  sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
+  ;;
+
+mirror)
+  # Repo -> the private Forgejo follower on the mirror VM.
+  sh "$HERE/push_mirror.sh"
+  ;;
+
+logs)
+  tail -n "${2:-30}" "$STATE/node.log"
+  ;;
+
+url)
+  # Clone/push URL with credentials, for pasting into git or curl.
+  echo "http://$(auth_user):$(auth_pass)@127.0.0.1:$PORT/${2:-choir/choir.git}"
+  ;;
+
+*)
+  cat <<USAGE
+sh scripts/choirctl <command>
+
+  install [repo]   build + mint secrets + load the supervised daemon
+  status           is it running, is auth on, what does the view say
+  logs [n]         last n lines of the daemon log
+  stop             unload the daemon (data kept)
+
+  push [repo]      push this repo to the node (--all and --tags)
+  mirror           push to the private Forgejo follower
+  url [repo]       clone/push URL including credentials
+
+Port is $PORT (override with CHOIR_PORT). Runbook: scripts/flip/RUNBOOK.md
+USAGE
+  ;;
+esac
