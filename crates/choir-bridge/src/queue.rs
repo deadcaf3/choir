@@ -128,6 +128,27 @@ pub enum DifferentialVerdict {
     InconclusiveParentFailure,
 }
 
+fn compatible_confidence_policy(value: &serde_json::Value) -> bool {
+    value["format_version"].as_u64() == Some(1)
+        && value["method"].as_str() == Some("one_sided_exact_binomial_zero_spurious")
+        && value["confidence"]["numerator"].as_u64() == Some(95)
+        && value["confidence"]["denominator"].as_u64() == Some(100)
+        && value["target"]["numerator"].as_u64() == Some(1)
+        && value["target"]["denominator"].as_u64() == Some(1000)
+        && value["target"]["comparison"].as_str() == Some("strictly_less_than")
+        && value["minimum_evaluated_merges"].as_u64() == Some(2_995)
+        && value["requires_zero_spurious_failures"].as_bool() == Some(true)
+        && value["assumptions"].as_array().is_some_and(|assumptions| {
+            assumptions
+                == &[
+                    serde_json::Value::String("independent_runs".to_string()),
+                    serde_json::Value::String(
+                        "representative_queue_command_and_merge_population".to_string(),
+                    ),
+                ]
+        })
+}
+
 fn cleanup_worktrees(repo: &Path, root: &Path, paths: &[std::path::PathBuf]) -> Result<(), String> {
     let mut first_error = None;
     for path in paths.iter().rev() {
@@ -207,11 +228,15 @@ pub fn run_differential(
     command_file: &Path,
     state_dir: &Path,
 ) -> Result<DifferentialOutcome, String> {
-    let first = format!("{merge}^1");
-    let second = format!("{merge}^2");
+    let commit = format!("{merge}^{{commit}}");
+    let merged_revision = git(repo, &["rev-parse", "--verify", &commit])?
+        .trim()
+        .to_string();
+    let first = format!("{merged_revision}^1");
+    let second = format!("{merged_revision}^2");
     let parent_a = git(repo, &["rev-parse", &first])?.trim().to_string();
     let parent_b = git(repo, &["rev-parse", &second])?.trim().to_string();
-    with_isolated_revisions(repo, &parent_a, &parent_b, merge, |a, b, merged| {
+    with_isolated_revisions(repo, &parent_a, &parent_b, &merged_revision, |a, b, merged| {
         let output = std::process::Command::new(runner)
             .arg("run")
             .arg(command_file)
@@ -220,7 +245,7 @@ pub fn run_differential(
             .arg(a)
             .arg(&parent_b)
             .arg(b)
-            .arg(merge)
+            .arg(&merged_revision)
             .arg(merged)
             .output()
             .map_err(|error| format!("spawn differential runner: {error}"))?;
@@ -230,10 +255,13 @@ pub fn run_differential(
         let value: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|_| "differential runner returned malformed JSON".to_string())?;
         if value["format_version"].as_u64() != Some(1)
-            || value["merge"].as_str() != Some(merge)
+            || value["merge"].as_str() != Some(merged_revision.as_str())
             || value["calibration"]["landing_gate_enabled"].as_bool() != Some(false)
-            || !value["calibration"]["confidence_claim"].is_null()
-            || !value["calibration"]["confidence_policy"].is_null()
+            || !matches!(
+                &value["calibration"]["confidence_claim"],
+                serde_json::Value::Null | serde_json::Value::Bool(_)
+            )
+            || !compatible_confidence_policy(&value["calibration"]["confidence_policy"])
         {
             return Err("differential runner returned an incompatible receipt".to_string());
         }

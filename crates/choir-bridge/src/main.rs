@@ -564,6 +564,53 @@ fn main() {
         }
         return;
     }
+    // `choir-bridge calibrate <repo> <runner> <command> <state> <rounds> <merge>...`
+    // Replays already-existing real merge commits through the same advisory
+    // three-worktree adapter used by queue mode. It never contacts a forge or
+    // consumes a landing decision.
+    if args.first().map(String::as_str) == Some("calibrate") {
+        let [repo, runner, command_file, state_dir, rounds, merges @ ..] = &args[1..] else {
+            eprintln!(
+                "usage: choir-bridge calibrate <repo> <runner> <command-file> <state-dir> <rounds> <merge>..."
+            );
+            std::process::exit(2);
+        };
+        if merges.is_empty() {
+            eprintln!(
+                "usage: choir-bridge calibrate <repo> <runner> <command-file> <state-dir> <rounds> <merge>..."
+            );
+            std::process::exit(2);
+        }
+        let rounds = rounds.parse::<u64>().unwrap_or_else(|_| {
+            eprintln!("calibration rounds must be a positive integer");
+            std::process::exit(2);
+        });
+        if rounds == 0 {
+            eprintln!("calibration rounds must be a positive integer");
+            std::process::exit(2);
+        }
+        for round in 1..=rounds {
+            for merge in merges {
+                match choir_bridge::queue::run_differential(
+                    Path::new(repo),
+                    merge,
+                    Path::new(runner),
+                    Path::new(command_file),
+                    Path::new(state_dir),
+                ) {
+                    Ok(outcome) => println!(
+                        "calibration: round {round}: {merge}: {:?} (observation {}, pending {})",
+                        outcome.verdict, outcome.observation_id, outcome.pending_interactions
+                    ),
+                    Err(error) => {
+                        eprintln!("calibration failed for {merge}: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        return;
+    }
     // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]`
     // Queue-as-bot: speculative-train rounds. Verdict-only by default;
     // --land fast-forwards the default branch on a green train (and

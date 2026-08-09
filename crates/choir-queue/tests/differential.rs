@@ -1,7 +1,10 @@
 //! Executable D23 three-revision classification and exact-rate calibration.
 
+use std::path::Path;
+
 use choir_queue::differential::{
-    run_merged_vs_parents, Calibration, DifferentialReport, Observation, Verdict,
+    confidence_policy, run_merged_vs_parents, Calibration, DifferentialReport, Observation,
+    Verdict, CONFIDENCE_MIN_EVALUATED_MERGES,
 };
 use choir_queue::differential_ledger::{
     adjudicate, load_command, record_observation, refresh, Revisions,
@@ -111,7 +114,7 @@ fn calibration_uses_exact_strict_point_one_percent_boundary() {
     assert_eq!(receipt["target"]["met"], true);
     assert_eq!(receipt["target"]["comparison"], "strictly_less_than");
     assert_eq!(receipt["confidence_claim"], serde_json::Value::Null);
-    assert_eq!(receipt["confidence_policy"], serde_json::Value::Null);
+    assert_eq!(receipt["confidence_policy"], confidence_policy());
     assert_eq!(receipt["landing_gate_enabled"], false);
 
     let mut confirmed = Calibration::default();
@@ -119,6 +122,56 @@ fn calibration_uses_exact_strict_point_one_percent_boundary() {
     let receipt = confirmed.receipt();
     assert_eq!(receipt["confirmed_interactions"], 1);
     assert_eq!(receipt["spurious_failures"], 0);
+}
+
+#[test]
+fn confidence_requires_2995_adjudicated_zero_spurious_observations() {
+    let clean = report(Verdict::Clean);
+    let flagged = report(Verdict::InteractionFailure);
+    let mut calibration = Calibration::default();
+
+    for _ in 0..CONFIDENCE_MIN_EVALUATED_MERGES - 1 {
+        calibration.record(&clean, None).unwrap();
+    }
+    assert_eq!(calibration.receipt()["confidence_claim"], serde_json::Value::Null);
+
+    calibration.record(&clean, None).unwrap();
+    assert_eq!(calibration.receipt()["confidence_claim"], true);
+    assert_eq!(
+        calibration.receipt()["confidence_policy"]["minimum_evaluated_merges"],
+        2_995
+    );
+
+    let mut with_spurious = Calibration::default();
+    for _ in 0..CONFIDENCE_MIN_EVALUATED_MERGES - 1 {
+        with_spurious.record(&clean, None).unwrap();
+    }
+    with_spurious.record(&flagged, Some(false)).unwrap();
+    assert_eq!(with_spurious.receipt()["confidence_claim"], false);
+
+    let mut pending = Calibration::default();
+    for _ in 0..CONFIDENCE_MIN_EVALUATED_MERGES - 1 {
+        pending.record(&clean, None).unwrap();
+    }
+    pending.record_pending(&flagged).unwrap();
+    assert_eq!(pending.receipt()["confidence_claim"], serde_json::Value::Null);
+}
+
+#[test]
+fn shipped_calibration_command_is_the_complete_workspace_test_gate() {
+    let command_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/differential-command.json");
+    let command = load_command(&command_file).unwrap();
+    assert_eq!(command.program, "cargo");
+    assert_eq!(
+        command.args,
+        [
+            "test",
+            "--workspace",
+            "--target-dir",
+            "../../target/d23-calibration",
+        ]
+    );
 }
 
 #[test]
@@ -142,6 +195,20 @@ fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
         parent_b: "b".repeat(40),
         merged: "c".repeat(40),
     };
+    let abbreviated = Revisions {
+        merged: "c".repeat(7),
+        ..revisions.clone()
+    };
+    let invalid_state = work.join("invalid-state");
+    let error = record_observation(
+        &invalid_state,
+        &command.snapshot_hash,
+        &abbreviated,
+        &report(Verdict::Clean),
+    )
+    .unwrap_err();
+    assert!(error.contains("canonical Git object ids"), "{error}");
+    assert!(!invalid_state.exists());
 
     let clean = record_observation(
         &state,
@@ -167,6 +234,7 @@ fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
     .unwrap();
     assert_eq!(pending.observation_id, 2);
     assert_eq!(pending.calibration["pending_interactions"], 1);
+    assert_eq!(pending.calibration["unique_merge_commits"], 1);
     assert_eq!(
         pending.calibration["target"]["met"],
         serde_json::Value::Null,

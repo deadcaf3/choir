@@ -2,6 +2,8 @@
 
 use std::process::Command;
 
+use choir_queue::differential::confidence_policy;
+
 #[test]
 fn runner_executes_three_trees_and_persists_an_advisory_receipt() {
     let work =
@@ -76,7 +78,7 @@ fn runner_executes_three_trees_and_persists_an_advisory_receipt() {
     assert_eq!(receipt["spurious_failures"], 1);
     assert_eq!(receipt["target"]["met"], false);
     assert_eq!(receipt["confidence_claim"], serde_json::Value::Null);
-    assert_eq!(receipt["confidence_policy"], serde_json::Value::Null);
+    assert_eq!(receipt["confidence_policy"], confidence_policy());
     assert_eq!(receipt["landing_gate_enabled"], false);
     std::fs::remove_dir_all(work).ok();
 }

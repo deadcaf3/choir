@@ -230,7 +230,7 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 
 Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).
 
-Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), and exercise one commit-status write (`post-status`). Queue mode can optionally run the advisory three-worktree D23 detector documented in `internal/design.md`; it never changes the landing condition. Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
+Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), exercise one commit-status write (`post-status`), and replay existing merge commits for offline D23 calibration (`calibrate`). Queue mode can optionally run the advisory three-worktree D23 detector documented in `internal/design.md`; it never changes the landing condition. Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
 
 ### Agent templates
 

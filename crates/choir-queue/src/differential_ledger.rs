@@ -33,11 +33,11 @@ pub struct CommandSpec {
 /// Commit identities recorded with one three-worktree observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revisions {
-    /// First-parent commit.
+    /// First-parent commit as a canonical full Git object id.
     pub parent_a: String,
-    /// Second-parent commit.
+    /// Second-parent commit as a canonical full Git object id.
     pub parent_b: String,
-    /// Speculative merge commit.
+    /// Speculative merge commit as a canonical full Git object id.
     pub merged: String,
 }
 
@@ -154,6 +154,28 @@ fn state_paths(state: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     )
 }
 
+fn is_canonical_git_oid(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64)
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_revisions(revisions: &Revisions) -> Result<(), String> {
+    if [
+        revisions.parent_a.as_str(),
+        revisions.parent_b.as_str(),
+        revisions.merged.as_str(),
+    ]
+    .into_iter()
+    .all(is_canonical_git_oid)
+    {
+        Ok(())
+    } else {
+        Err("observation revisions must use canonical Git object ids".to_string())
+    }
+}
+
 fn write_new(path: &Path, body: &[u8]) -> Result<(), String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -214,6 +236,7 @@ struct Folded {
 fn fold(state: &Path, command_hash: &str) -> Result<Folded, String> {
     let (_, observations_path, adjudications_path, _) = state_paths(state);
     let mut reports = BTreeMap::new();
+    let mut unique_merge_commits = BTreeSet::new();
     let rows = read_rows(&observations_path)?;
     for (index, row) in rows.iter().enumerate() {
         if row["format_version"].as_u64() != Some(FORMAT_VERSION) {
@@ -226,12 +249,20 @@ fn fold(state: &Path, command_hash: &str) -> Result<Folded, String> {
         for field in ["parent_a", "parent_b", "merged"] {
             if row["revisions"][field]
                 .as_str()
-                .filter(|revision| !revision.is_empty())
+                .filter(|revision| is_canonical_git_oid(revision))
                 .is_none()
             {
-                return Err("observation row needs three revision ids".to_string());
+                return Err(
+                    "observation row needs three canonical Git object ids".to_string(),
+                );
             }
         }
+        unique_merge_commits.insert(
+            row["revisions"]["merged"]
+                .as_str()
+                .expect("validated above")
+                .to_string(),
+        );
         reports.insert(expected, DifferentialReport::from_json(&row["report"])?);
     }
 
@@ -277,6 +308,10 @@ fn fold(state: &Path, command_hash: &str) -> Result<Folded, String> {
     );
     receipt_object.insert("observations".to_string(), serde_json::json!(reports.len()));
     receipt_object.insert(
+        "unique_merge_commits".to_string(),
+        serde_json::json!(unique_merge_commits.len()),
+    );
+    receipt_object.insert(
         "has_conclusive_observation".to_string(),
         serde_json::json!(receipt_object["evaluated_merges"].as_u64().unwrap_or(0) != 0),
     );
@@ -317,14 +352,16 @@ fn write_receipt(state: &Path, receipt: &serde_json::Value) -> Result<(), String
 ///
 /// # Errors
 ///
-/// State cannot be created, belongs to another command, contains an invalid
-/// row, or cannot be durably updated.
+/// A revision is not a canonical full Git object id, state cannot be created,
+/// belongs to another command, contains an invalid row, or cannot be durably
+/// updated.
 pub fn record_observation(
     state: &Path,
     command_hash: &str,
     revisions: &Revisions,
     report: &DifferentialReport,
 ) -> Result<RecordedObservation, String> {
+    validate_revisions(revisions)?;
     prepare_state(state, command_hash)?;
     let before = fold(state, command_hash)?;
     let (_, observations, _, _) = state_paths(state);

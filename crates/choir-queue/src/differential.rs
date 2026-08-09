@@ -188,12 +188,48 @@ pub fn run_merged_vs_parents(
     })
 }
 
+/// Minimum conclusive sample for the fixed 95% zero-spurious confidence rule.
+///
+/// At the target boundary, `(999 / 1000)^2994` remains above 5%, while
+/// `(999 / 1000)^2995` is below 5%. The rule is deliberately conservative:
+/// any observed spurious failure refuses the confidence claim rather than
+/// selecting a more favorable test after seeing the data.
+pub const CONFIDENCE_MIN_EVALUATED_MERGES: u64 = 2_995;
+
+/// Frozen statistical rule attached to every calibration receipt.
+///
+/// This rule only covers sampling error. Its independence and
+/// representativeness assumptions are named rather than inferred from counts.
+#[must_use]
+pub fn confidence_policy() -> serde_json::Value {
+    serde_json::json!({
+        "format_version": 1,
+        "method": "one_sided_exact_binomial_zero_spurious",
+        "confidence": {
+            "numerator": 95,
+            "denominator": 100,
+        },
+        "target": {
+            "numerator": 1,
+            "denominator": 1000,
+            "comparison": "strictly_less_than",
+        },
+        "minimum_evaluated_merges": CONFIDENCE_MIN_EVALUATED_MERGES,
+        "requires_zero_spurious_failures": true,
+        "assumptions": [
+            "independent_runs",
+            "representative_queue_command_and_merge_population",
+        ],
+    })
+}
+
 /// Count-based false-positive calibration for differential failures.
 ///
 /// Every interaction failure must be adjudicated before the target has a
 /// verdict. The operational D23 target is exact rational arithmetic: spurious
 /// failures / evaluated merges must be strictly below 1/1000. This reports the
-/// observed rate; it makes no statistical confidence claim.
+/// observed rate. The frozen confidence rule is a sufficient zero-spurious
+/// test and remains indeterminate until its minimum sample is reached.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Calibration {
     evaluated_merges: u64,
@@ -271,6 +307,12 @@ impl Calibration {
             .then(|| u128::from(self.spurious_failures) * 1000 < u128::from(self.evaluated_merges))
     }
 
+    fn confidence_claim(&self) -> Option<bool> {
+        (self.evaluated_merges >= CONFIDENCE_MIN_EVALUATED_MERGES
+            && self.pending_interactions == 0)
+            .then_some(self.spurious_failures == 0)
+    }
+
     /// Versioned JSON receipt. The exact numerator and denominator are
     /// action-driving; basis points are presentation only and floor-rounded.
     #[must_use]
@@ -297,8 +339,8 @@ impl Calibration {
                 "comparison": "strictly_less_than",
                 "met": self.target_met(),
             },
-            "confidence_claim": null,
-            "confidence_policy": null,
+            "confidence_claim": self.confidence_claim(),
+            "confidence_policy": confidence_policy(),
             "landing_gate_enabled": false,
         })
     }
