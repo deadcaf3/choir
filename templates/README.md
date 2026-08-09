@@ -26,6 +26,62 @@ Then per harness:
 | Codex | [`codex/AGENTS.snippet.md`](codex/AGENTS.snippet.md) | append to the project's `AGENTS.md` |
 | Cursor | [`cursor/choir.mdc`](cursor/choir.mdc) | copy to `.cursor/rules/choir.mdc` |
 
+## Claude Code isolated workspaces
+
+Claude Code can replace its Git worktree implementation with Choir by using
+[`claude-code/choir-worktree.sh`](claude-code/choir-worktree.sh) for both
+`WorktreeCreate` and `WorktreeRemove`. The adapter requires `bash`, `jq`, the
+`choir` CLI, and a Choir node whose workspace paths are accessible on the
+Claude host.
+
+Install the script outside the repository so every checkout can use it:
+
+```bash
+install -d "$HOME/.choir/hooks"
+install -m 0755 templates/claude-code/choir-worktree.sh \
+  "$HOME/.choir/hooks/choir-worktree.sh"
+```
+
+Create a mode-0600 config such as `$HOME/.choir/claude-worktree.json`. It
+contains identities and paths, never credential values:
+
+```json
+{
+  "api": "http://127.0.0.1:8417",
+  "repo": "owner/repo",
+  "owner": "operator/claude",
+  "key_file": "/absolute/path/to/claude.key",
+  "auth_file": "/absolute/path/to/auth",
+  "auth_user": "choir",
+  "choir_bin": "/absolute/path/to/choir"
+}
+```
+
+Copy the hook entries from
+[`claude-code/settings.worktree.example.json`](claude-code/settings.worktree.example.json)
+into `.claude/settings.local.json`, then replace both paths with the installed
+script and config paths. Merge the `hooks` entries with existing settings;
+do not overwrite the file. `WorktreeCreate` and `WorktreeRemove` do not use
+matchers.
+
+Creation binds the caller checkout's exact `HEAD`, a deterministic
+Claude-session workspace name, one owner, and one stable change. Exact hook
+retries reuse the same workspace. Removal validates non-secret metadata under
+the clone's `.git/` directory and calls owner-signed recoverable archive. It
+does not commit, push, or checkpoint automatically.
+
+Operational limits:
+
+- The selected `HEAD` must already exist in the Choir bare repository.
+- The node and Claude Code must share the filesystem path returned by Choir.
+- A custom create hook replaces Claude's default Git behavior, including
+  `.worktreeinclude` processing.
+- Claude cannot be stopped by a failing `WorktreeRemove` hook. Check its debug
+  log and retry the adapter manually when archive did not complete.
+
+The input/output behavior follows the current
+[Claude Code hooks reference](https://code.claude.com/docs/en/hooks#worktreecreate).
+
 ## Optional MCP adapter
 
 Register `choir-mcp` as a stdio server if the harness supports MCP:

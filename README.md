@@ -239,6 +239,8 @@ Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub A
 ### Agent templates
 
 Teach Claude Code / Codex / Cursor to speak choir: see [`templates/README.md`](templates/README.md).
+That guide also includes a tested Claude Code `WorktreeCreate` and
+`WorktreeRemove` adapter for Choir-backed isolated sessions.
 
 ```bash
 source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key

@@ -173,6 +173,9 @@ fn operator_and_template_guidance_matches_the_shipped_paths() {
         std::fs::read_to_string(root.join("templates/README.md")).expect("template guide");
     for required in [
         "Optional MCP adapter",
+        "Claude Code isolated workspaces",
+        "WorktreeCreate",
+        "settings.worktree.example.json",
         "--auth-file <path> --auth-user <name>",
         "/api/submit-batch",
     ] {

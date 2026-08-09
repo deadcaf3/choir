@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/absolute/path/to/choir-worktree.sh\" create \"/absolute/path/to/choir-worktree.json\""
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/absolute/path/to/choir-worktree.sh\" remove \"/absolute/path/to/choir-worktree.json\""
+          }
+        ]
+      }
+    ]
+  }
+}
