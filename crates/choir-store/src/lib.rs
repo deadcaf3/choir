@@ -229,6 +229,12 @@ pub fn put_blob(
 pub fn get_blob(store: &dyn ChunkStore, manifest_hash: &ContentHash) -> Result<Vec<u8>, StoreError> {
     let manifest: Manifest = serde_json::from_slice(&store.get(manifest_hash)?)
         .map_err(|e| StoreError::BadManifest(e.to_string()))?;
+    if manifest.format_version != FORMAT_VERSION {
+        return Err(StoreError::BadManifest(format!(
+            "unsupported manifest format version {} (expected {FORMAT_VERSION})",
+            manifest.format_version
+        )));
+    }
     let mut data = Vec::with_capacity(manifest.len as usize);
     for chunk_hash in &manifest.chunks {
         data.extend_from_slice(&store.get(chunk_hash)?);

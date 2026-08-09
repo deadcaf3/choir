@@ -38,6 +38,9 @@ array means you are caught up, not that something went wrong.
   the boundary mid-catch-up sees one continuous chain. Use it for
   diagnosis, and expect a single catch-up run to change `source` from
   `log` to `window` as it approaches the head.
+- `workspace` is the frozen format-v1 name of the signature-covered
+  attribution channel. It is not a workspace id; current submit clients
+  call this concept `channel`.
 
 ### Outcomes, and what to do about each
 
@@ -122,7 +125,8 @@ all. The author signs *content*, not position, so this survives any
 lie about ordering:
 
 1. Build the signing bytes: `serde_json` of the two-element tuple
-   `[workspace, payload]` — compact, e.g. `["alice",[104,105]]`.
+   `[channel, payload]`, taking `channel` from the entry's legacy
+   `workspace` field — compact, e.g. `["alice",[104,105]]`.
 2. `signing_hash = "1e-" + hex(blake3(those bytes))`.
 3. Verify the ed25519 signature `author_sig_hex` over the **ASCII of
    that hex string** (not the raw digest) using the public key you hold

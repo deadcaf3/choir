@@ -22,11 +22,11 @@ fn curl(args: &[&str]) -> (u16, serde_json::Value) {
     )
 }
 
-fn submit_body(key: &ActorKey, workspace: &str, op: &ViewOp) -> String {
+fn submit_body(key: &ActorKey, channel: &str, op: &ViewOp) -> String {
     let payload = op.to_payload();
-    let sig = key.sign_submission(workspace, &payload);
+    let sig = key.sign_submission(channel, &payload);
     serde_json::json!({
-        "workspace": workspace,
+        "channel": channel,
         "payload_hex": hex_encode(&payload),
         "key_id": sig.key_id,
         "signature_hex": hex_encode(&sig.signature),
@@ -68,6 +68,25 @@ fn signed_submit_and_view_over_http() {
     ]);
     assert_eq!(code, 200, "{resp}");
     assert_eq!(resp["seq"], 0);
+
+    // The transport must not let a payload choose between two scopes. A
+    // transitional client may send both names only when they agree.
+    let payload = op.to_payload();
+    let sig = alice.sign_submission("alice", &payload);
+    let conflicting_names = serde_json::json!({
+        "channel": "alice",
+        "workspace": "someone-else",
+        "payload_hex": hex_encode(&payload),
+        "key_id": sig.key_id,
+        "signature_hex": hex_encode(&sig.signature),
+    })
+    .to_string();
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &conflicting_names,
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert!(resp["error"].as_str().unwrap().contains("disagree"), "{resp}");
 
     // Mallory's unregistered key is rejected.
     let (code, resp) = curl(&[

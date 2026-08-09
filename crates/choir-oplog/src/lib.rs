@@ -17,7 +17,7 @@
 //!     format_version: FORMAT_VERSION,
 //!     parent: None,
 //!     seq: 0,
-//!     workspace: "agent-1".into(),
+//!     channel: "agent-1".into(),
 //!     payload: b"first op".to_vec(),
 //!     witnesses: Vec::new(),
 //!     author_sig: None,
@@ -54,8 +54,14 @@ pub struct OpEntry {
     pub parent: Option<ContentHash>,
     /// Sequence number assigned by the single-writer sequencer.
     pub seq: u64,
-    /// Workspace (agent) that submitted the op.
-    pub workspace: String,
+    /// Signature-covered attribution channel that submitted the op.
+    ///
+    /// Serialized as `workspace` because that field name is frozen into
+    /// format v1 and therefore into every entry hash. The Rust name is
+    /// deliberately accurate: workspace ids live in `ViewOp`, while this
+    /// value identifies the collaboration channel an actor spoke on.
+    #[serde(rename = "workspace")]
+    pub channel: String,
     /// Opaque operation body; interpreted by the layers above L1.
     pub payload: Vec<u8>,
     /// Witness cosignatures; empty until Phase 2 (D16).
@@ -74,7 +80,7 @@ impl OpEntry {
         ContentHash::blake3(&bytes)
     }
 
-    /// What the author signs: a hash over `(workspace, payload)` only.
+    /// What the author signs: a hash over `(channel, payload)` only.
     ///
     /// The author asserts *what* they submitted, not *where* it landed —
     /// `seq`/`parent` are assigned by the sequencer after signing (and
@@ -82,15 +88,17 @@ impl OpEntry {
     /// a different position is rejected by the CAS `prev` carried inside
     /// the payload, not by the signature.
     pub fn signing_hash(&self) -> ContentHash {
-        signing_hash(&self.workspace, &self.payload)
+        signing_hash(&self.channel, &self.payload)
     }
 }
 
 /// Hash over an author's submission content — see
 /// [`OpEntry::signing_hash`]. Standalone so clients can sign before the
 /// sequencer has built the entry.
-pub fn signing_hash(workspace: &str, payload: &[u8]) -> ContentHash {
-    let canonical = serde_json::to_vec(&(workspace, payload)).expect("tuple always serializes");
+pub fn signing_hash(channel: &str, payload: &[u8]) -> ContentHash {
+    // This tuple has no field names, so renaming the concept from the
+    // overloaded `workspace` to `channel` changes no signed bytes.
+    let canonical = serde_json::to_vec(&(channel, payload)).expect("tuple always serializes");
     ContentHash::blake3(&canonical)
 }
 

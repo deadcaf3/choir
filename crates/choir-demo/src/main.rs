@@ -25,7 +25,7 @@ impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
         self.registry
-            .verify_submission(&sub.workspace, &sub.payload, sig)
+            .verify_submission(&sub.channel, &sub.payload, sig)
             .map_err(|e| format!("bad signature: {e:?}"))?;
         let op = ViewOp::from_payload(&sub.payload).map_err(|e| format!("bad op: {e:?}"))?;
         let mut trial = self.view.clone();

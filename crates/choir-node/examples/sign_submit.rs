@@ -1,7 +1,7 @@
 //! Minimal op-signing client: turns a key file + attribution channel +
 //! op JSON into a `POST /api/submit` request body on stdout.
 //!
-//! Usage: `sign_submit <key-file> <workspace> '<op-json>'`
+//! Usage: `sign_submit <key-file> <channel> '<op-json>'`
 //!
 //! `<op-json>` is a serialized [`choir_view::ViewOp`], e.g.
 //! `{"format_version":1,"kind":{"RequestReview":{"id":"r1","target":...,
@@ -17,10 +17,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [key_file, workspace, op_json] = match args.as_slice() {
+    let [key_file, channel, op_json] = match args.as_slice() {
         [a, b, c] => [a, b, c],
         _ => {
-            eprintln!("usage: sign_submit <key-file> <workspace> '<op-json>'");
+            eprintln!("usage: sign_submit <key-file> <channel> '<op-json>'");
             std::process::exit(2);
         }
     };
@@ -42,11 +42,11 @@ fn main() {
     // daemon will decode (signature covers the serialized bytes).
     let op: choir_view::ViewOp = serde_json::from_str(op_json).expect("valid op json");
     let payload = op.to_payload();
-    let sig = key.sign_submission(workspace, &payload);
+    let sig = key.sign_submission(channel, &payload);
     println!(
         "{}",
         serde_json::json!({
-            "workspace": workspace,
+            "channel": channel,
             "payload_hex": hex_encode(&payload),
             "key_id": sig.key_id,
             "signature_hex": hex_encode(&sig.signature),

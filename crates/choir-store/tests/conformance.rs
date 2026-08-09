@@ -2,7 +2,7 @@
 //! dedup behavior of the FastCDC layer.
 
 use choir_store::{
-    get_blob, put_blob, ChunkStore, ChunkerParams, FsStore, MemStore, StoreError,
+    get_blob, put_blob, ChunkStore, ChunkerParams, FsStore, Manifest, MemStore, StoreError,
 };
 
 fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
@@ -97,6 +97,26 @@ fn corrupted_chunk_fails_loudly() {
         "tampered chunk must fail verification, never return silently"
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn unsupported_manifest_version_fails_loudly() {
+    let mut store = MemStore::new();
+    let manifest = Manifest {
+        format_version: choir_store::FORMAT_VERSION + 1,
+        params: ChunkerParams::default(),
+        len: 0,
+        chunks: Vec::new(),
+    };
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let hash = store.put(&bytes).unwrap();
+
+    match get_blob(&store, &hash) {
+        Err(StoreError::BadManifest(reason)) => {
+            assert!(reason.contains("unsupported manifest format version"), "{reason}");
+        }
+        other => panic!("unsupported manifest must fail, got {other:?}"),
+    }
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

@@ -89,7 +89,7 @@ fn submit_path_budget() {
         format_version: FORMAT_VERSION,
         parent: Some(ContentHash::blake3(b"parent")),
         seq: 7,
-        workspace: workspace.to_string(),
+        channel: workspace.to_string(),
         payload: payload.clone(),
         witnesses: Vec::new(),
         author_sig: Some(Witness {

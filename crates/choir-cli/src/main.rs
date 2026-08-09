@@ -104,7 +104,7 @@ fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptio
     let payload = op.to_payload();
     let sig = key.sign_submission(channel, &payload);
     let body = serde_json::json!({
-        "workspace": channel,
+        "channel": channel,
         "payload_hex": hex_encode(&payload),
         "key_id": sig.key_id,
         "signature_hex": hex_encode(&sig.signature),

@@ -118,11 +118,11 @@ fn view_refs(api_base: &str, label: &str) -> BTreeMap<String, ContentHash> {
 const BATCH: usize = 500;
 
 /// Signs one op into its submit-request JSON object.
-fn signed_op(key: &ActorKey, workspace: &str, op: ViewOp) -> serde_json::Value {
+fn signed_op(key: &ActorKey, channel: &str, op: ViewOp) -> serde_json::Value {
     let payload = op.to_payload();
-    let sig = key.sign_submission(workspace, &payload);
+    let sig = key.sign_submission(channel, &payload);
     serde_json::json!({
-        "workspace": workspace,
+        "channel": channel,
         "payload_hex": hex_encode(&payload),
         "key_id": sig.key_id,
         "signature_hex": hex_encode(&sig.signature),

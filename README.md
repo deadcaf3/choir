@@ -109,7 +109,7 @@ choir-spike   the Phase-0 gate measurement, as a binary with an exit code
 
 ### One operation, end to end
 
-A client builds a `ViewOp` and serializes it, signs `(workspace, payload)` with its actor key, and calls `SequencerHandle::try_submit`, which sends it over a channel to the one writer thread. That thread verifies the signature, trial-applies the operation against a cloned view for the compare-and-swap check, and on acceptance stamps `seq` and `parent`, hashes the entry, folds it into the live view, and appends. The caller gets back `Accepted { seq, hash, decision_latency }`. Readers either poll `GET /api/view` or replay the log themselves.
+A client builds a `ViewOp` and serializes it, signs `(channel, payload)` with its actor key, and calls `SequencerHandle::try_submit`, which sends it to the one writer thread. That thread verifies the signature, validates the operation against the cached view for the compare-and-swap check, and on acceptance stamps `seq` and `parent`, hashes the entry, folds it into the live view, appends, and makes the batch durable before acknowledging. The persisted v1 entry still names the channel field `workspace`; that spelling is frozen into historical hashes and does not make it a workspace id. Readers either poll `GET /api/view` or replay the log themselves.
 
 Note what the author does **not** sign: `seq` and `parent` are assigned after signing. Replaying a signed operation at a different position is blocked by the compare-and-swap value inside the payload, not by the signature.
 
@@ -120,7 +120,7 @@ These are the one-way doors. Breaking one is a data migration, not a refactor. `
 1. Every persisted struct carries a `format_version`, and new fields are additive, so old logs still decode and still hash identically.
 2. Hashes are self-describing. A hash always carries its codec byte, which is how git object ids live in the operation log without pretending to be BLAKE3.
 3. Canonical serialization is load-bearing. Map fields in hashed structs are `BTreeMap` for exactly this reason; switching one to `HashMap` silently breaks every hash.
-4. The author signs `(workspace, payload)` only.
+4. The author signs `(channel, payload)` only. Persisted format v1 calls the channel field `workspace`; those bytes stay frozen.
 5. Only the sequencer thread appends.
 6. A conflict is a value, never a failure.
 7. Witness fields exist and stay empty until the transparency-log phase. Do not remove them to tidy up.

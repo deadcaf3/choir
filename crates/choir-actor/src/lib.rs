@@ -33,11 +33,13 @@ pub struct LogState {
 /// `SequencerHandle::try_submit`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubmitOp {
-    /// Workspace (agent) submitting the op.
-    pub workspace: String,
+    /// Signature-covered collaboration channel submitting the op.
+    /// Serialized under the v1 `workspace` name for action compatibility.
+    #[serde(rename = "workspace")]
+    pub channel: String,
     /// Opaque operation body.
     pub payload: Vec<u8>,
-    /// Author signature over `(workspace, payload)`, if signed.
+    /// Author signature over `(channel, payload)`, if signed.
     pub author_sig: Option<Witness>,
 }
 
@@ -100,7 +102,7 @@ impl Handles<SubmitOp> for SequencerActor {
                 format_version: FORMAT_VERSION,
                 parent,
                 seq,
-                workspace: op.workspace,
+                channel: op.channel,
                 payload: op.payload,
                 witnesses: Vec::new(),
                 author_sig: op.author_sig,

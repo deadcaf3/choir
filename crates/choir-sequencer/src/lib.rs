@@ -26,13 +26,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// An operation offered to the sequencer by a workspace.
+/// An operation offered to the sequencer on an attribution channel.
 pub struct Submission {
-    /// Workspace (agent) submitting the op.
-    pub workspace: String,
+    /// Signature-covered collaboration channel submitting the op.
+    pub channel: String,
     /// Opaque operation body, stored as [`OpEntry::payload`].
     pub payload: Vec<u8>,
-    /// Author signature over `(workspace, payload)`; carried into
+    /// Author signature over `(channel, payload)`; carried into
     /// [`OpEntry::author_sig`]. `None` for unsigned (pre-L8) clients.
     pub author_sig: Option<Witness>,
 }
@@ -125,8 +125,8 @@ impl SequencerHandle {
     ///
     /// Panics if the sequencer thread has shut down or the policy
     /// rejects the op.
-    pub fn submit(&self, workspace: &str, payload: Vec<u8>) -> Accepted {
-        self.try_submit(workspace, payload, None)
+    pub fn submit(&self, channel: &str, payload: Vec<u8>) -> Accepted {
+        self.try_submit(channel, payload, None)
             .expect("policy admits this op")
     }
 
@@ -141,7 +141,7 @@ impl SequencerHandle {
     /// Panics if the sequencer thread has already shut down.
     pub fn try_submit(
         &self,
-        workspace: &str,
+        channel: &str,
         payload: Vec<u8>,
         author_sig: Option<Witness>,
     ) -> Result<Accepted, String> {
@@ -149,7 +149,7 @@ impl SequencerHandle {
         self.tx
             .send(Command::Submit(
                 Submission {
-                    workspace: workspace.to_string(),
+                    channel: channel.to_string(),
                     payload,
                     author_sig,
                 },
@@ -296,7 +296,7 @@ impl Sequencer {
                                         format_version: FORMAT_VERSION,
                                         parent: log.head(),
                                         seq,
-                                        workspace: sub.workspace,
+                                        channel: sub.channel,
                                         payload: sub.payload,
                                         witnesses: Vec::new(),
                                         author_sig: sub.author_sig,
