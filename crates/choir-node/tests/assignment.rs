@@ -454,3 +454,88 @@ fn the_draw_excludes_the_requesters_whole_operator_not_just_their_name() {
 
     node.unblock();
 }
+
+#[test]
+fn the_draw_excludes_operators_within_the_configured_graph_distance() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-node-reviewer-conflicts-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let pool_file = work.join("reviewers");
+    let graph_file = work.join("reviewer-conflicts");
+
+    std::fs::write(
+        &pool_file,
+        "alice/sibling\nbob/one\ncarol/one\ndave/one\n",
+    )
+    .unwrap();
+    // Undirected operator edges: bob is one hop from alice, carol two.
+    std::fs::write(&graph_file, "# operator pairs\nalice bob\nbob carol\n").unwrap();
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .unwrap()
+            .with_reviewer_pool(pool_file)
+            .with_reviewer_conflict_graph(graph_file.clone(), 2),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let post = |id: &str| {
+        curl(&[
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&author, "alice/requester", &request(id, id.as_bytes())),
+            &format!("{api}/submit"),
+        ])
+    };
+
+    // Same-operator, one-hop and two-hop candidates are all ineligible.
+    let (code, resp) = post("graph-two-hops");
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["reviewers"], serde_json::json!(["dave/one"]), "{resp}");
+
+    // The graph is read on each draw. Removing bob->carol makes carol
+    // independent without a restart, while bob remains one hop away.
+    std::fs::write(&graph_file, "alice bob\n").unwrap();
+    let (code, resp) = post("graph-reloaded");
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(
+        resp["reviewers"],
+        serde_json::json!(["carol/one", "dave/one"]),
+        "{resp}"
+    );
+
+    // Malformed policy fails closed: the request remains visibly
+    // unassigned rather than drawing from a graph the node misread.
+    std::fs::write(&graph_file, "alice\n").unwrap();
+    let (code, resp) = post("graph-malformed");
+    assert_eq!(code, 200, "{resp}");
+    assert!(
+        resp["assignment_error"]
+            .as_str()
+            .unwrap()
+            .contains("line 1"),
+        "{resp}"
+    );
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(
+        view["reviews"]["graph-malformed"]["reviewers"],
+        serde_json::json!([]),
+        "{view}"
+    );
+
+    node.unblock();
+}

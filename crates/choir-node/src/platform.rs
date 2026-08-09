@@ -19,7 +19,7 @@
 //! covers the exact bytes the author serialized; re-encoding through a
 //! JSON tree could legally reorder/respace them and break verification.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -666,6 +666,10 @@ pub struct Platform {
     /// Read fresh on every draw, so editing it takes effect at once.
     /// `None` = no pool, and unassigned reviews stay unassigned.
     reviewer_pool: Option<std::path::PathBuf>,
+    /// Optional operator conflict graph plus the maximum graph distance
+    /// excluded from a review draw. The file is read fresh on every draw,
+    /// like the reviewer pool. Edges are undirected operator pairs.
+    reviewer_conflict_graph: Option<(std::path::PathBuf, usize)>,
     /// The persisted op log, for readers that have fallen behind the
     /// in-memory window. `None` (an in-memory log) means such a reader
     /// gets a loud gap error instead of a resync.
@@ -850,6 +854,7 @@ impl Platform {
             node_key,
             entries,
             reviewer_pool: None,
+            reviewer_conflict_graph: None,
             log_path: None,
             require_assignment,
             protected_refs,
@@ -1008,6 +1013,26 @@ impl Platform {
         self
     }
 
+    /// Excludes reviewer operators whose shortest path from the requester
+    /// in `path` is at most `max_distance`. Each non-comment line is one
+    /// undirected `<operator> <operator>` edge. Operator names, not full
+    /// `operator/agent` channels, belong in the graph.
+    ///
+    /// The graph is operator-supplied runtime policy rather than op-log
+    /// state: changing it affects future draws without changing persisted
+    /// operations or replay. It is read for every draw and fails closed;
+    /// an unreadable or malformed graph leaves the review unassigned.
+    /// Distance zero retains the existing same-operator exclusion.
+    #[must_use]
+    pub fn with_reviewer_conflict_graph(
+        mut self,
+        path: std::path::PathBuf,
+        max_distance: usize,
+    ) -> Self {
+        self.reviewer_conflict_graph = Some((path, max_distance));
+        self
+    }
+
     /// Routes one git ref update (from a repo's `update` hook) through
     /// the sequencer: CAS against the view, node-signed, totally ordered
     /// with API ops. Refs are namespaced `<repo>:<refname>`; git oids
@@ -1092,9 +1117,10 @@ impl Platform {
     /// a node-signed op.
     ///
     /// Candidates are the pool minus everyone sharing the requester's
-    /// **operator**, and the draw takes at most one reviewer per operator
-    /// so [`REQUIRED_APPROVAL_WEIGHT`] reviewers means that many *independent*
-    /// ones.
+    /// **operator** and, when configured, every operator within the chosen
+    /// conflict-graph distance. The draw takes at most one reviewer per
+    /// operator so [`REQUIRED_APPROVAL_WEIGHT`] reviewers means that many
+    /// *independent* ones under the configured policy.
     ///
     /// Excluding only the requester's own name was the original rule and
     /// it does not survive the multi-operator case, which is the normal
@@ -1110,22 +1136,33 @@ impl Platform {
     ///
     /// # Errors
     ///
-    /// No pool configured, an unreadable pool, no candidate from another
-    /// operator, or the sequencer's rejection reason (e.g. the review was
-    /// assigned by a concurrent request).
+    /// No pool configured, an unreadable pool or conflict graph, malformed
+    /// graph data, no candidate outside the conflict distance, or the
+    /// sequencer's rejection reason (e.g. the review was assigned by a
+    /// concurrent request).
     pub fn assign_reviewers(&self, id: &str, requester: &str) -> Result<Vec<String>, String> {
         let path = self.reviewer_pool.as_ref().ok_or("no reviewer pool configured")?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("read reviewer pool: {e}"))?;
         let mine = reviewer_operator(requester);
+        let excluded_operators = match &self.reviewer_conflict_graph {
+            Some((path, max_distance)) => {
+                operators_within_distance(path, mine, *max_distance)?
+            }
+            None => BTreeSet::from([mine.to_string()]),
+        };
         let mut pool: Vec<String> = text
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#') && reviewer_operator(l) != mine)
+            .filter(|l| {
+                !l.is_empty()
+                    && !l.starts_with('#')
+                    && !excluded_operators.contains(reviewer_operator(l))
+            })
             .map(String::from)
             .collect();
         if pool.is_empty() {
             return Err(format!(
-                "reviewer pool has nobody outside {mine:?}, the requester's operator"
+                "reviewer pool has nobody outside the configured conflict distance from {mine:?}"
             ));
         }
         // Partial Fisher-Yates with a hand-rolled xorshift (no rand
@@ -1585,6 +1622,66 @@ impl Platform {
         }
         resp
     }
+}
+
+/// Parses an undirected operator graph and returns every operator within
+/// `max_distance` of `start`, including `start` itself at distance zero.
+fn operators_within_distance(
+    path: &std::path::Path,
+    start: &str,
+    max_distance: usize,
+) -> Result<BTreeSet<String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("read reviewer conflict graph: {e}"))?;
+    let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let left = fields.next();
+        let right = fields.next();
+        if left.is_none() || right.is_none() || fields.next().is_some() {
+            return Err(format!(
+                "reviewer conflict graph line {} must be '<operator> <operator>'",
+                index + 1
+            ));
+        }
+        let left = left.expect("checked above");
+        let right = right.expect("checked above");
+        if left.contains('/') || right.contains('/') {
+            return Err(format!(
+                "reviewer conflict graph line {} must name operators, not operator/agent channels",
+                index + 1
+            ));
+        }
+        graph
+            .entry(left.to_string())
+            .or_default()
+            .insert(right.to_string());
+        graph
+            .entry(right.to_string())
+            .or_default()
+            .insert(left.to_string());
+    }
+
+    let mut seen = BTreeSet::from([start.to_string()]);
+    let mut queue = VecDeque::from([(start.to_string(), 0usize)]);
+    while let Some((operator, distance)) = queue.pop_front() {
+        if distance == max_distance {
+            continue;
+        }
+        let Some(neighbors) = graph.get(&operator) else {
+            continue;
+        };
+        for neighbor in neighbors {
+            if seen.insert(neighbor.clone()) {
+                queue.push_back((neighbor.clone(), distance + 1));
+            }
+        }
+    }
+    Ok(seen)
 }
 
 /// One decoded `/api/submit` body: the wire fields turned into the bytes

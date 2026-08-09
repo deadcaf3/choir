@@ -3,6 +3,7 @@
 //! Configured usage: `choir-node <repo-root> <port> [--create owner/name.git]...
 //! [--auth-file path] [--keys-file path] [--reviewers-file path]
 //! [--require-assignment] [--protected-refs path] [--require-review]
+//! [--reviewer-conflict-graph path --reviewer-conflict-distance hops]
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
@@ -21,6 +22,10 @@
 //! their own reviewers, and `--protected-refs` (one
 //! `<repo>:<refname>` pattern per line, trailing `*` allowed) refuses
 //! them only for reviews landing on a matching ref.
+//! `--reviewer-conflict-graph` carries undirected `<operator> <operator>`
+//! edges and, with the explicitly chosen `--reviewer-conflict-distance`,
+//! excludes nearby operators from future draws. The graph is re-read per
+//! draw and an unusable graph leaves the review unassigned.
 //! `--require-review` additionally refuses to move a protected ref to
 //! any commit without approval weight from two distinct operators, and
 //! refuses to delete one at all — including for this daemon's own pushes.
@@ -75,7 +80,12 @@ fn main() -> std::io::Result<()> {
     let bind = flag_value("--bind")
         .cloned()
         .unwrap_or_else(|| "127.0.0.1".into());
-    for flag in ["--review-retention", "--review-lapse-after-secs"] {
+    for flag in [
+        "--review-retention",
+        "--review-lapse-after-secs",
+        "--reviewer-conflict-graph",
+        "--reviewer-conflict-distance",
+    ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -106,6 +116,27 @@ fn main() -> std::io::Result<()> {
                 })
         })
         .transpose()?;
+    let reviewer_conflict_graph = flag_value("--reviewer-conflict-graph");
+    let reviewer_conflict_distance = flag_value("--reviewer-conflict-distance")
+        .map(|value| {
+            value.parse::<usize>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--reviewer-conflict-distance needs a non-negative integer",
+                )
+            })
+        })
+        .transpose()?;
+    let reviewer_conflict_policy = match (reviewer_conflict_graph, reviewer_conflict_distance) {
+        (Some(path), Some(distance)) => Some((std::path::PathBuf::from(path), distance)),
+        (None, None) => None,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--reviewer-conflict-graph and --reviewer-conflict-distance must be given together",
+            ));
+        }
+    };
     if review_lapse_after.is_some() && review_retention_count.is_none() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -201,6 +232,10 @@ fn main() -> std::io::Result<()> {
         if let Some(pool) = flag_value("--reviewers-file") {
             platform = platform.with_reviewer_pool(pool.into());
             eprintln!("reviewer assignment enabled ({pool})");
+            if let Some((graph, distance)) = reviewer_conflict_policy {
+                platform = platform.with_reviewer_conflict_graph(graph, distance);
+                eprintln!("reviewer conflict graph enabled (distance {distance})");
+            }
             if rest.iter().any(|a| a == "--require-assignment") {
                 platform = platform.with_required_assignment();
                 eprintln!("reviewer assignment required (self-named reviewers refused)");
@@ -226,13 +261,14 @@ fn main() -> std::io::Result<()> {
             }
         } else if rest.iter().any(|a| a == "--require-assignment")
             || flag_value("--protected-refs").is_some()
+            || reviewer_conflict_policy.is_some()
         {
             // Without a pool nothing can ever be assigned, so every
             // review would stall unassigned. Refuse the combination
             // rather than serve a review system that cannot finish.
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "--require-assignment and --protected-refs need --reviewers-file",
+                "review assignment policy needs --reviewers-file",
             ));
         }
         node.enable_platform(platform);

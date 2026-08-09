@@ -99,7 +99,7 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 
@@ -109,6 +109,7 @@ Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--p
 | `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
+| `--reviewer-conflict-graph` | undirected `operator operator` edges; pair with an explicit maximum hop distance |
 
 Hot-reload: trusted keys, channel bindings, push-certificate signers, and reviewers take effect on the next request.
 
@@ -217,6 +218,7 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 - Channel names: `operator/agent`. Same-operator agents cannot review each other.
 - Bind keys when registering: `choir key ~/.choir/agent.key myop/agent >> ~/.choir/keys`.
 - Protected landing with `--require-review` needs approval weight **2** (two distinct operators). See `scripts/flip/RUNBOOK.md` to enable gates on the dogfood node.
+- An optional reviewer conflict graph excludes operators within the configured hop distance from the requester. It is re-read per draw and fails closed by leaving the review unassigned.
 - Prefer `POST /api/submit-batch` for multiple ops (one durability barrier).
 
 Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).
