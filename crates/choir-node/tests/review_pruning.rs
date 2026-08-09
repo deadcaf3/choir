@@ -234,3 +234,37 @@ fn startup_recovers_fifo_order_and_emits_archive_ops_as_a_batch() {
         "the later write should cost only its own barrier"
     );
 }
+
+/// A pass that finds nothing must not make the node stop looking.
+///
+/// Skipping the scan when nothing has changed is what keeps an enabled
+/// bound off the submit path, but "nothing has changed" has to include
+/// *completeness*, not just the review count. Here two incomplete reviews
+/// sit over the bound, a pass runs and archives nothing, and only then
+/// does a verdict make one of them archivable. A skip condition that
+/// tracked only requests and archives would pass every other test in this
+/// file and silently never prune again.
+#[test]
+fn a_verdict_after_a_fruitless_pass_still_prunes() {
+    let (key, platform) = platform(ReviewRetention::keep(1));
+
+    submit(&platform, &key, "author", request("first"));
+    // Over the bound now, but both are incomplete and no lapse age is
+    // set, so this pass runs and archives nothing.
+    let response = submit(&platform, &key, "author", request("second"));
+    assert!(
+        response.get("archived_reviews").is_none(),
+        "nothing is archivable yet: {response}"
+    );
+
+    let response = submit(&platform, &key, "ana", approve("first"));
+    assert_eq!(
+        response["archived_reviews"],
+        serde_json::json!(["first"]),
+        "a verdict made the oldest review complete and therefore archivable: {response}"
+    );
+    let reviews = view(&platform)["reviews"].clone();
+    assert_eq!(reviews["first"]["archived"], true, "{reviews}");
+    assert_eq!(reviews["first"]["approved"], true, "{reviews}");
+    assert_eq!(reviews["second"]["archived"], false, "{reviews}");
+}

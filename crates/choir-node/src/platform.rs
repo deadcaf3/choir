@@ -78,6 +78,14 @@ struct TrackedReview {
 struct ReviewRetentionState {
     config: ReviewRetention,
     live: VecDeque<TrackedReview>,
+    /// Set when an observed op may have changed what is prunable, cleared
+    /// by a pass. Without it the submit path rescans the whole tracker on
+    /// every write for as long as the node holds more live reviews than
+    /// the bound and none of them is archivable — which is the *default*
+    /// shape, because incomplete reviews never lapse unless an age is
+    /// configured. Measured at 4.4x on the submit path before this
+    /// existed (1,000 unanswered reviews, `--review-retention 10`).
+    prunable_changed: bool,
 }
 
 impl ReviewRetentionState {
@@ -85,17 +93,57 @@ impl ReviewRetentionState {
         Self {
             config,
             live: VecDeque::new(),
+            prunable_changed: false,
         }
     }
 
     fn observe(&mut self, op: &ViewOp, observed_at: Option<Instant>) {
         match &op.kind {
-            OpKind::RequestReview { id, .. } => self.live.push_back(TrackedReview {
-                id: id.clone(),
-                observed_at,
-            }),
-            OpKind::ArchiveReview { id, .. } => self.live.retain(|review| review.id != *id),
-            _ => {}
+            OpKind::RequestReview { id, .. } => {
+                self.live.push_back(TrackedReview {
+                    id: id.clone(),
+                    observed_at,
+                });
+                self.prunable_changed = true;
+            }
+            OpKind::ArchiveReview { id, .. } => {
+                self.live.retain(|review| review.id != *id);
+                self.prunable_changed = true;
+            }
+            // The ops that cannot move a review's count or completeness,
+            // named as an exclusion rather than listing the review ops
+            // positively: a review op added later then defaults to arming
+            // the flag — a wasted scan, never silently stopped pruning.
+            OpKind::SetWorkspaceHead { .. }
+            | OpKind::SetRef { .. }
+            | OpKind::DeleteRef { .. }
+            | OpKind::DeleteWorkspace { .. }
+            | OpKind::RecordProvenance { .. } => {}
+            _ => self.prunable_changed = true,
+        }
+    }
+
+    /// Whether a pass could possibly find work. Deliberately conservative:
+    /// it may say yes when the answer turns out to be no, never no when
+    /// the answer is yes.
+    fn worth_a_pass(&self) -> bool {
+        // Tracked ids are dropped on archive, so this is an upper bound on
+        // the live count: at or under the bound, no pass can find work.
+        if self.live.len() <= self.config.max_live {
+            return false;
+        }
+        if self.prunable_changed {
+            return true;
+        }
+        // Under a lapse policy the clock alone can make the oldest review
+        // eligible with no op arriving. The deque is in request order, so
+        // the front carries the earliest deadline and one comparison
+        // settles it. Count-only retention still reads no clock.
+        match (self.config.lapse_after, self.live.front()) {
+            (Some(age), Some(oldest)) => oldest
+                .observed_at
+                .is_some_and(|at| Instant::now().saturating_duration_since(at) >= age),
+            _ => false,
         }
     }
 }
@@ -1124,7 +1172,14 @@ impl Platform {
             // one writer-consistent snapshot; they are released before any
             // submission is sent back to the sequencer.
             let view = self.view.lock().expect("view lock");
-            let retention = retention.lock().expect("review retention lock");
+            let mut retention = retention.lock().expect("review retention lock");
+            if !retention.worth_a_pass() {
+                return ReviewPruneOutcome::default();
+            }
+            // Cleared while the lock is still held, so an op observed from
+            // here on re-arms the flag instead of being swallowed by the
+            // pass that did not see it.
+            retention.prunable_changed = false;
             let live_count = retention
                 .live
                 .iter()
