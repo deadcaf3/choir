@@ -214,6 +214,7 @@ fn modern_discovery_is_stateless_and_tool_order_is_cache_stable() {
             "choir_submit",
             "choir_submit_batch",
             "choir_view",
+            "choir_appeal",
             "choir_log",
             "choir_workspace",
             "choir_reviews"
@@ -328,6 +329,16 @@ fn tool_calls_cross_real_http_auth_and_preserve_node_results() {
                 }
             }
         }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_meta(),
+                "name": "choir_appeal",
+                "arguments": { "attempt_id": 0 }
+            }
+        }),
     ];
     let api = format!("http://127.0.0.1:{port}");
     let auth_path = auth_file.to_str().unwrap();
@@ -336,7 +347,7 @@ fn tool_calls_cross_real_http_auth_and_preserve_node_results() {
         &messages,
     );
 
-    assert_eq!(responses.len(), 6);
+    assert_eq!(responses.len(), 7);
     for response in &responses[..5] {
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["isError"], false);
@@ -377,6 +388,12 @@ fn tool_calls_cross_real_http_auth_and_preserve_node_results() {
         )
         .unwrap(),
         responses[5]["result"]["structuredContent"]["body"]
+    );
+    assert_eq!(responses[6]["result"]["isError"], true);
+    assert_eq!(responses[6]["result"]["structuredContent"]["status"], 503);
+    assert_eq!(
+        responses[6]["result"]["structuredContent"]["body"]["code"],
+        "policy_unavailable"
     );
 
     node.unblock();

@@ -156,6 +156,15 @@ const REVIEWS_MCP_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
+const APPEAL_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "attempt_id": { "type": "integer", "minimum": 0, "description": "Newcomer attempt id returned with the rejection" }
+  },
+  "required": ["attempt_id"],
+  "additionalProperties": false
+}"#;
+
 /// Every `choir` subcommand, in help order.
 pub const COMMANDS: &[Command] = &[
     Command {
@@ -196,6 +205,12 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: false,
     },
     Command {
+        name: "appeal",
+        args: "<api> <attempt-id>",
+        summary: "appeal a rejected newcomer attempt for operator adjudication; never grants privilege",
+        agent_facing: true,
+    },
+    Command {
         name: "intent",
         args: "<api> <key-file> <channel> <subject> <kind> '<body>'",
         summary: "publish a task spec or plan so other agents can see intent",
@@ -210,7 +225,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "view",
         args: "<api>",
-        summary: "the materialized view: workspace heads, refs, reviews, provenance, T3 concentration, and complete-view growth",
+        summary: "the materialized view plus T3 concentration, T4 newcomer harm, and complete-view growth",
         agent_facing: true,
     },
 ];
@@ -241,11 +256,21 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "GET",
         path: "/api/view",
-        purpose: "The materialized view: workspace heads, refs, reviews, provenance, T3 concentration, and complete-view growth",
+        purpose: "The materialized view plus T3 concentration, T4 newcomer harm, and complete-view growth",
         mcp: Some(McpTool {
             name: "choir_view",
             input_schema: EMPTY_MCP_SCHEMA,
             arguments: McpArguments::Empty,
+        }),
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/appeal",
+        purpose: "Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege",
+        mcp: Some(McpTool {
+            name: "choir_appeal",
+            input_schema: APPEAL_MCP_SCHEMA,
+            arguments: McpArguments::Body,
         }),
     },
     Endpoint {

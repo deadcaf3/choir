@@ -22,6 +22,7 @@
 //! JSON tree could legally reorder/respace them and break verification.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -219,6 +220,489 @@ const REQUIRED_APPROVAL_WEIGHT: usize = 2;
 /// basis points are presentation only and never drive the decision.
 const T3_MAX_AGENT_KEYS_PER_OPERATOR: usize = 100;
 const T3_MAX_SHARE_PERCENT: usize = 1;
+
+/// Version of the append-only newcomer audit and operator adjudication rows.
+/// These files are not part of the signed op log, but they are persisted
+/// measurement inputs and therefore carry the same explicit-version discipline.
+const NEWCOMER_AUDIT_FORMAT_VERSION: u64 = 1;
+
+#[derive(Debug, Clone)]
+struct NewcomerAttempt {
+    started_at_unix_ms: u64,
+    first_outcome: &'static str,
+    first_rejection_code: Option<String>,
+    first_accepted_at_unix_ms: Option<u64>,
+}
+
+/// Sparse, durable T4 evidence. Incumbents are the keys present when the
+/// operator enables the audit; only keys first admitted after that boundary are
+/// newcomers. At most two outcome records are written per actor (first attempt,
+/// then first acceptance after a rejection), so instrumentation cost scales with
+/// newcomers rather than submissions.
+struct NewcomerAudit {
+    file: std::fs::File,
+    adjudications_path: std::path::PathBuf,
+    activated: bool,
+    incumbents: BTreeSet<String>,
+    attempts: BTreeMap<u64, NewcomerAttempt>,
+    by_actor: BTreeMap<String, u64>,
+    appeals: BTreeSet<u64>,
+    next_attempt_id: u64,
+    available: bool,
+}
+
+impl NewcomerAudit {
+    fn open(
+        audit_path: &std::path::Path,
+        adjudications_path: std::path::PathBuf,
+        incumbents: BTreeSet<String>,
+    ) -> Result<Self, String> {
+        if let Some(parent) = audit_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create newcomer audit directory: {e}"))?;
+        }
+        let existing = match std::fs::read_to_string(audit_path) {
+            Ok(existing) => existing,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("read newcomer audit: {error}")),
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(audit_path)
+            .map_err(|e| format!("open newcomer audit: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(audit_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("chmod newcomer audit: {e}"))?;
+        }
+        let mut audit = Self {
+            file,
+            adjudications_path,
+            activated: false,
+            incumbents: BTreeSet::new(),
+            attempts: BTreeMap::new(),
+            by_actor: BTreeMap::new(),
+            appeals: BTreeSet::new(),
+            next_attempt_id: 0,
+            available: true,
+        };
+        for (index, line) in existing.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| format!("newcomer audit line {}: {e}", index + 1))?;
+            audit.replay(&value).map_err(|e| {
+                format!("newcomer audit line {}: {e}", index + 1)
+            })?;
+        }
+        if audit.activated {
+            return Ok(audit);
+        }
+        if existing.lines().any(|line| !line.trim().is_empty()) {
+            return Err("newcomer audit has rows before its activation boundary".to_string());
+        }
+        let record = serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "kind": "activation",
+            "observed_at_unix_ms": unix_ms(),
+            "incumbent_actor_keys": incumbents,
+        });
+        audit.append(&record)?;
+        audit.replay(&record)?;
+        Ok(audit)
+    }
+
+    fn replay(&mut self, value: &serde_json::Value) -> Result<(), String> {
+        if value["format_version"].as_u64() != Some(NEWCOMER_AUDIT_FORMAT_VERSION) {
+            return Err("unsupported format_version".to_string());
+        }
+        let kind = value["kind"].as_str().ok_or("missing kind")?;
+        match kind {
+            "activation" => {
+                if self.activated || !self.attempts.is_empty() || !self.appeals.is_empty() {
+                    return Err("duplicate or late activation boundary".to_string());
+                }
+                value["observed_at_unix_ms"]
+                    .as_u64()
+                    .ok_or("activation needs observed_at_unix_ms")?;
+                let incumbent_actor_keys = value["incumbent_actor_keys"]
+                    .as_array()
+                    .ok_or("activation needs incumbent_actor_keys")?;
+                for actor_key in incumbent_actor_keys {
+                    let actor_key = actor_key
+                        .as_str()
+                        .filter(|actor_key| !actor_key.is_empty())
+                        .ok_or("incumbent actor keys must be non-empty strings")?;
+                    if !self.incumbents.insert(actor_key.to_string()) {
+                        return Err("activation has a duplicate incumbent actor key".to_string());
+                    }
+                }
+                self.activated = true;
+            }
+            "first_attempt" => {
+                if !self.activated {
+                    return Err("first_attempt precedes activation".to_string());
+                }
+                let attempt_id = value["attempt_id"]
+                    .as_u64()
+                    .ok_or("missing attempt_id")?;
+                if self.attempts.contains_key(&attempt_id) {
+                    return Err("duplicate first_attempt".to_string());
+                }
+                let actor_key = value["actor_key"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or("missing actor_key")?
+                    .to_string();
+                if self.incumbents.contains(&actor_key) {
+                    return Err("first_attempt belongs to an incumbent actor key".to_string());
+                }
+                if self.by_actor.contains_key(&actor_key) {
+                    return Err("actor has more than one first_attempt".to_string());
+                }
+                let started_at_unix_ms = value["started_at_unix_ms"]
+                    .as_u64()
+                    .ok_or("missing started_at_unix_ms")?;
+                let first_outcome = match value["outcome"].as_str() {
+                    Some("accepted") => "accepted",
+                    Some("rejected") => "rejected",
+                    _ => return Err("outcome must be accepted or rejected".to_string()),
+                };
+                let first_rejection_code = value["rejection_code"]
+                    .as_str()
+                    .map(str::to_string);
+                if (first_outcome == "rejected") != first_rejection_code.is_some() {
+                    return Err("rejected first attempts need one rejection_code".to_string());
+                }
+                let first_accepted_at_unix_ms = (first_outcome == "accepted")
+                    .then_some(
+                        value["completed_at_unix_ms"]
+                            .as_u64()
+                            .ok_or("accepted attempt needs completed_at_unix_ms")?,
+                    );
+                self.by_actor.insert(actor_key, attempt_id);
+                self.attempts.insert(
+                    attempt_id,
+                    NewcomerAttempt {
+                        started_at_unix_ms,
+                        first_outcome,
+                        first_rejection_code,
+                        first_accepted_at_unix_ms,
+                    },
+                );
+                self.next_attempt_id = self.next_attempt_id.max(attempt_id.saturating_add(1));
+            }
+            "first_accept" => {
+                let attempt_id = value["attempt_id"]
+                    .as_u64()
+                    .ok_or("missing attempt_id")?;
+                let completed = value["completed_at_unix_ms"]
+                    .as_u64()
+                    .ok_or("first_accept needs completed_at_unix_ms")?;
+                let attempt = self
+                    .attempts
+                    .get_mut(&attempt_id)
+                    .ok_or("first_accept precedes first_attempt")?;
+                if attempt.first_outcome != "rejected" {
+                    return Err("first_accept follows an accepted first attempt".to_string());
+                }
+                if attempt.first_accepted_at_unix_ms.replace(completed).is_some() {
+                    return Err("duplicate first_accept".to_string());
+                }
+            }
+            "appeal" => {
+                let attempt_id = value["attempt_id"]
+                    .as_u64()
+                    .ok_or("missing attempt_id")?;
+                if !self.attempts.contains_key(&attempt_id) {
+                    return Err("appeal references an unknown attempt".to_string());
+                }
+                if self.attempts[&attempt_id].first_outcome != "rejected" {
+                    return Err("appeal references an accepted first attempt".to_string());
+                }
+                if !self.appeals.insert(attempt_id) {
+                    return Err("duplicate appeal".to_string());
+                }
+            }
+            _ => return Err("unknown kind".to_string()),
+        }
+        Ok(())
+    }
+
+    fn append(&mut self, value: &serde_json::Value) -> Result<(), String> {
+        serde_json::to_writer(&mut self.file, value)
+            .map_err(|e| format!("write newcomer audit: {e}"))?;
+        self.file
+            .write_all(b"\n")
+            .and_then(|_| self.file.sync_data())
+            .map_err(|e| format!("sync newcomer audit: {e}"))
+    }
+
+    fn observe(
+        &mut self,
+        actor_key: &str,
+        started_at_unix_ms: u64,
+        accepted: bool,
+        rejection_code: Option<&str>,
+    ) -> Result<Option<u64>, String> {
+        if self.incumbents.contains(actor_key) || rejection_code == Some("unknown_key") {
+            return Ok(None);
+        }
+        let completed_at_unix_ms = unix_ms();
+        if let Some(attempt_id) = self.by_actor.get(actor_key).copied() {
+            let needs_accept = accepted
+                && self.attempts[&attempt_id]
+                    .first_accepted_at_unix_ms
+                    .is_none();
+            if needs_accept {
+                let record = serde_json::json!({
+                    "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+                    "kind": "first_accept",
+                    "attempt_id": attempt_id,
+                    "completed_at_unix_ms": completed_at_unix_ms,
+                });
+                if let Err(error) = self.append(&record) {
+                    self.available = false;
+                    return Err(error);
+                }
+                self.attempts
+                    .get_mut(&attempt_id)
+                    .expect("attempt exists")
+                    .first_accepted_at_unix_ms = Some(completed_at_unix_ms);
+            }
+            return Ok(Some(attempt_id));
+        }
+
+        let attempt_id = self.next_attempt_id;
+        let outcome = if accepted { "accepted" } else { "rejected" };
+        let mut record = serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "kind": "first_attempt",
+            "attempt_id": attempt_id,
+            "actor_key": actor_key,
+            "started_at_unix_ms": started_at_unix_ms,
+            "completed_at_unix_ms": completed_at_unix_ms,
+            "outcome": outcome,
+        });
+        if let Some(code) = rejection_code {
+            record["rejection_code"] = serde_json::json!(code);
+        }
+        if let Err(error) = self.append(&record) {
+            self.available = false;
+            return Err(error);
+        }
+        self.replay(&record)?;
+        Ok(Some(attempt_id))
+    }
+
+    fn appeal(&mut self, attempt_id: u64) -> Result<(), String> {
+        let Some(attempt) = self.attempts.get(&attempt_id) else {
+            return Err("no such newcomer attempt".to_string());
+        };
+        if attempt.first_outcome != "rejected" {
+            return Err("only a rejected first attempt can be appealed".to_string());
+        }
+        if self.appeals.contains(&attempt_id) {
+            return Ok(());
+        }
+        let record = serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "kind": "appeal",
+            "attempt_id": attempt_id,
+            "observed_at_unix_ms": unix_ms(),
+        });
+        if let Err(error) = self.append(&record) {
+            self.available = false;
+            return Err(error);
+        }
+        self.replay(&record)
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn median_u64(values: &mut [u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.len() % 2 == 1 {
+        Some(values[middle])
+    } else {
+        Some(((u128::from(values[middle - 1]) + u128::from(values[middle])) / 2) as u64)
+    }
+}
+
+fn read_newcomer_adjudications(
+    path: &std::path::Path,
+    attempts: &BTreeMap<u64, NewcomerAttempt>,
+) -> Result<(BTreeMap<u64, bool>, String), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read adjudications: {e}"))?;
+    let snapshot_hash = ContentHash::blake3(&bytes).to_hex();
+    let text = String::from_utf8(bytes).map_err(|_| "adjudications are not UTF-8".to_string())?;
+    let mut rows = BTreeMap::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("adjudication line {}: {e}", index + 1))?;
+        if value["format_version"].as_u64() != Some(NEWCOMER_AUDIT_FORMAT_VERSION) {
+            return Err(format!(
+                "adjudication line {} has unsupported format_version",
+                index + 1
+            ));
+        }
+        let attempt_id = value["attempt_id"]
+            .as_u64()
+            .ok_or_else(|| format!("adjudication line {} needs attempt_id", index + 1))?;
+        let legitimate = value["legitimate"]
+            .as_bool()
+            .ok_or_else(|| format!("adjudication line {} needs legitimate", index + 1))?;
+        if !attempts.contains_key(&attempt_id) {
+            return Err(format!(
+                "adjudication line {} references an unknown attempt",
+                index + 1
+            ));
+        }
+        if rows.insert(attempt_id, legitimate).is_some() {
+            return Err(format!(
+                "adjudication line {} duplicates an attempt",
+                index + 1
+            ));
+        }
+    }
+    Ok((rows, snapshot_hash))
+}
+
+fn newcomer_harm_json(audit: Option<&Arc<Mutex<NewcomerAudit>>>) -> serde_json::Value {
+    let Some(audit) = audit else {
+        return serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "configured": false,
+            "available": false,
+            "tripwire_status": "indeterminate",
+            "evaluation_complete": false,
+        });
+    };
+    let audit = audit.lock().expect("newcomer audit lock");
+    let adjudications = read_newcomer_adjudications(&audit.adjudications_path, &audit.attempts);
+    let (rows, snapshot_hash, adjudications_available, adjudications_error) = match adjudications {
+        Ok((rows, hash)) => (rows, Some(hash), true, None),
+        Err(error) => (BTreeMap::new(), None, false, Some(error)),
+    };
+
+    let mut first_accepted = 0usize;
+    let mut first_rejected = 0usize;
+    let mut rejection_codes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut legitimate = 0usize;
+    let mut legitimate_first_rejected = 0usize;
+    let mut legitimate_pending_acceptance = 0usize;
+    let mut accepted_latencies = Vec::new();
+    for (attempt_id, attempt) in &audit.attempts {
+        if attempt.first_outcome == "accepted" {
+            first_accepted += 1;
+        } else {
+            first_rejected += 1;
+            *rejection_codes
+                .entry(
+                    attempt
+                        .first_rejection_code
+                        .clone()
+                        .expect("rejected attempts carry a code"),
+                )
+                .or_default() += 1;
+        }
+        if rows.get(attempt_id) != Some(&true) {
+            continue;
+        }
+        legitimate += 1;
+        legitimate_first_rejected += usize::from(attempt.first_outcome == "rejected");
+        match attempt.first_accepted_at_unix_ms {
+            Some(accepted) => accepted_latencies.push(
+                accepted.saturating_sub(attempt.started_at_unix_ms),
+            ),
+            None => legitimate_pending_acceptance += 1,
+        }
+    }
+    let median_time_to_first_accepted_ms = median_u64(&mut accepted_latencies);
+    let adjudicated = rows.len();
+    let total = audit.attempts.len();
+    let unresolved_appeals = audit
+        .appeals
+        .iter()
+        .filter(|attempt_id| !rows.contains_key(attempt_id))
+        .count();
+    let false_reject_rate_basis_points = (legitimate != 0).then(|| {
+        share_basis_points(legitimate_first_rejected, legitimate)
+    });
+    let measurement_complete = audit.available
+        && adjudications_available
+        && legitimate != 0
+        && adjudicated == total
+        && legitimate_pending_acceptance == 0;
+    serde_json::json!({
+        "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+        "configured": true,
+        "available": audit.available && adjudications_available,
+        "scope": "post-activation cryptographically verified signed-API actor keys",
+        "thresholds": {
+            "false_reject_rate_basis_points": null,
+            "median_time_to_first_accepted_ms": null,
+            "status": "unset_pending_first_measurement",
+        },
+        "audit": {
+            "available": audit.available,
+            "incumbent_actor_keys_excluded": audit.incumbents.len(),
+            "first_attempts": total,
+            "first_attempts_accepted": first_accepted,
+            "first_attempts_rejected": first_rejected,
+            "first_rejections_by_code": rejection_codes,
+        },
+        "appeals": {
+            "submitted": audit.appeals.len(),
+            "unresolved": unresolved_appeals,
+        },
+        "adjudications": {
+            "available": adjudications_available,
+            "snapshot_hash": snapshot_hash,
+            "error": adjudications_error,
+            "attempts": adjudicated,
+            "coverage_basis_points": share_basis_points(adjudicated, total),
+            "legitimate_attempts": legitimate,
+        },
+        "measurements": {
+            "legitimate_first_attempts_rejected": legitimate_first_rejected,
+            "false_reject_rate_basis_points": false_reject_rate_basis_points,
+            "accepted_legitimate_newcomers": accepted_latencies.len(),
+            "legitimate_newcomers_pending_acceptance": legitimate_pending_acceptance,
+            "median_time_to_first_accepted_ms": median_time_to_first_accepted_ms,
+        },
+        "measurement_complete": measurement_complete,
+        "tripwire_status": "indeterminate",
+        "evaluation_complete": false,
+        "semantics": {
+            "false_reject": "an operator-adjudicated legitimate actor whose first verified signed-API attempt was rejected",
+            "time_to_first_accepted": "elapsed wall time from that actor's first verified signed-API attempt to its first accepted signed operation",
+            "excluded": "unverified unknown-key claims, incumbent keys, Git/Basic-auth pushes, and HTTP-only workspace provisioning",
+        },
+    })
+}
 
 /// One log author's signed identity claim. Resolution is delayed until a
 /// report is read so a hot-reloaded binding file changes the whole current
@@ -836,9 +1320,8 @@ struct ChoirPolicy {
     registry: Registry,
     view: Arc<Mutex<View>>,
     entries: Arc<Mutex<LogWindow>>,
-    /// When set, the trusted-keys file is re-read after a failed
-    /// signature check if its mtime moved — registering a key becomes
-    /// "append a line", no daemon restart.
+    /// When set, the trusted-keys file is checked before every signature;
+    /// registering or removing a key takes effect on its next submission.
     keys_file: Option<std::path::PathBuf>,
     keys_mtime: Option<std::time::SystemTime>,
     node_pub: Vec<u8>,
@@ -1250,6 +1733,9 @@ pub struct Platform {
     /// Sequence-ordered live reviews, allocated only under an explicit
     /// retention configuration.
     review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
+    /// Opt-in D24 T4 audit. Sparse and separate from the signed op log:
+    /// rejected requests never enter that log, while this evidence must.
+    newcomer_audit: Option<Arc<Mutex<NewcomerAudit>>>,
     /// Serializes concurrent maintenance passes. User submissions still
     /// race normally through the sequencer; only duplicate pruning scans
     /// and archive batches are coalesced.
@@ -1411,6 +1897,7 @@ impl Platform {
             key_names,
             concentration,
             review_retention,
+            newcomer_audit: None,
             review_prune_lock: Mutex::new(()),
             _sequencer: sequencer,
         };
@@ -1427,6 +1914,59 @@ impl Platform {
             }
         }
         Ok(platform)
+    }
+
+    /// Enables sparse, durable D24 T4 newcomer measurement.
+    ///
+    /// `incumbent_actor_keys` is the trusted-key snapshot at activation;
+    /// those actors are excluded because the audit cannot reconstruct their
+    /// first attempt or time-to-first-acceptance. The audit records only a
+    /// later actor's first verified signed-API attempt, its first eventual
+    /// acceptance, and an optional appeal. Operator adjudications are JSONL
+    /// rows in the separate file and are re-read for every report.
+    ///
+    /// Both files are created mode 0600. Neither changes the signed op log or
+    /// any hash input.
+    ///
+    /// # Errors
+    ///
+    /// Unusable paths or an invalid existing audit file.
+    pub fn with_newcomer_audit(
+        mut self,
+        audit_path: std::path::PathBuf,
+        adjudications_path: std::path::PathBuf,
+        incumbent_actor_keys: Vec<String>,
+    ) -> Result<Self, String> {
+        if let Some(parent) = adjudications_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create adjudications directory: {e}"))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&adjudications_path)
+            .map_err(|e| format!("open adjudications: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &adjudications_path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .map_err(|e| format!("chmod adjudications: {e}"))?;
+        }
+        let audit = NewcomerAudit::open(
+            &audit_path,
+            adjudications_path,
+            incumbent_actor_keys.into_iter().collect(),
+        )?;
+        self.newcomer_audit = Some(Arc::new(Mutex::new(audit)));
+        Ok(self)
     }
 
     /// Refuses any `RequestReview` that names its own reviewers, so the
@@ -1857,6 +2397,37 @@ impl Platform {
         }
     }
 
+    fn add_newcomer_outcome(
+        &self,
+        response: &mut serde_json::Value,
+        sub: &DecodedSubmission,
+        started_at_unix_ms: u64,
+        accepted: bool,
+        rejection_code: Option<&str>,
+    ) {
+        let Some(audit) = &self.newcomer_audit else {
+            return;
+        };
+        let Some(actor_key) = sub.author_sig.as_ref().map(|signature| signature.key_id.as_str())
+        else {
+            return;
+        };
+        match audit.lock().expect("newcomer audit lock").observe(
+            actor_key,
+            started_at_unix_ms,
+            accepted,
+            rejection_code,
+        ) {
+            Ok(Some(attempt_id)) => {
+                response["newcomer_attempt_id"] = serde_json::json!(attempt_id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                response["newcomer_audit_error"] = serde_json::json!(error);
+            }
+        }
+    }
+
     /// Whether the sequencer has failed a durability barrier and stopped
     /// accepting.
     ///
@@ -1926,6 +2497,7 @@ impl Platform {
                     &provenance,
                     as_of_seq,
                 );
+                let newcomer_harm = newcomer_harm_json(self.newcomer_audit.as_ref());
                 let body = serde_json::json!({
                     "workspaces": ws,
                     "refs": refs,
@@ -1933,6 +2505,7 @@ impl Platform {
                     "provenance": provenance,
                     "concentration": concentration,
                     "view_growth": view_growth,
+                    "newcomer_harm": newcomer_harm,
                 });
                 (200, body.to_string())
             }
@@ -1954,6 +2527,61 @@ impl Platform {
                     .map(|(id, r)| (id.clone(), review_json(r)))
                     .collect();
                 (200, serde_json::json!({ "pending": pending }).to_string())
+            }
+            ("POST", "/api/appeal") => {
+                let req: serde_json::Value = match serde_json::from_slice(body) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return (
+                            400,
+                            Rejection::new(
+                                Code::MalformedRequest,
+                                format!("request body is not valid JSON: {error}"),
+                                "send {\"attempt_id\": N} using the newcomer_attempt_id from \
+                                 the rejected response",
+                            )
+                            .body(),
+                        );
+                    }
+                };
+                let Some(attempt_id) = req.get("attempt_id").and_then(serde_json::Value::as_u64)
+                else {
+                    return (
+                        400,
+                        Rejection::new(
+                            Code::MalformedRequest,
+                            "appeal needs an integer attempt_id",
+                            "send the newcomer_attempt_id from the rejected response",
+                        )
+                        .body(),
+                    );
+                };
+                let Some(audit) = &self.newcomer_audit else {
+                    return (
+                        503,
+                        Rejection::new(
+                            Code::PolicyUnavailable,
+                            "newcomer audit is not enabled",
+                            "ask the operator to enable the newcomer audit before filing appeals",
+                        )
+                        .body(),
+                    );
+                };
+                match audit.lock().expect("newcomer audit lock").appeal(attempt_id) {
+                    Ok(()) => (
+                        200,
+                        serde_json::json!({ "appealed": attempt_id }).to_string(),
+                    ),
+                    Err(error) => (
+                        400,
+                        Rejection::new(
+                            Code::MalformedRequest,
+                            error,
+                            "use the attempt id from a rejected first-attempt response",
+                        )
+                        .body(),
+                    ),
+                }
             }
             ("POST", "/api/submit") => self.submit(body),
             ("POST", "/api/submit-batch") => {
@@ -1984,6 +2612,8 @@ impl Platform {
                 for op in ops {
                     decoded.push(decode_submission(op));
                 }
+                let started_at_unix_ms: Vec<u64> =
+                    decoded.iter().map(|_| unix_ms()).collect();
                 // Malformed ops never reach the sequencer. Well-formed
                 // ones are pushed in request order, so pulling one
                 // outcome per `Ok` below keeps results aligned with the
@@ -2002,7 +2632,7 @@ impl Platform {
                 let mut accepted = 0u64;
                 let mut rejected = 0u64;
                 let mut results: Vec<serde_json::Value> = Vec::with_capacity(decoded.len());
-                for d in &decoded {
+                for (index, d) in decoded.iter().enumerate() {
                     let value = match d {
                         Err(reason) => {
                             rejected += 1;
@@ -2011,11 +2641,29 @@ impl Platform {
                         Ok(sub) => match outcomes.next().expect("one outcome per submitted op") {
                             Ok(acc) => {
                                 accepted += 1;
-                                self.batch_result(acc, sub)
+                                let mut value = self.batch_result(acc, sub);
+                                self.add_newcomer_outcome(
+                                    &mut value,
+                                    sub,
+                                    started_at_unix_ms[index],
+                                    true,
+                                    None,
+                                );
+                                value
                             }
                             Err(reason) => {
                                 rejected += 1;
-                                serde_json::json!({ "error": reason })
+                                let rejection = Rejection::decode(&reason).to_json();
+                                let code = rejection["code"].as_str().map(str::to_string);
+                                let mut value = serde_json::json!({ "error": reason });
+                                self.add_newcomer_outcome(
+                                    &mut value,
+                                    sub,
+                                    started_at_unix_ms[index],
+                                    false,
+                                    code.as_deref(),
+                                );
+                                value
                             }
                         },
                     };
@@ -2148,6 +2796,7 @@ impl Platform {
             Ok(sub) => sub,
             Err(reason) => return (400, Rejection::decode(&reason).body()),
         };
+        let started_at_unix_ms = unix_ms();
         match self.handle.try_submit(
             &sub.channel,
             sub.payload.clone(),
@@ -2156,6 +2805,13 @@ impl Platform {
             Ok(acc) => {
                 let mut response = self.batch_result(acc, &sub);
                 self.add_retention_outcome(&mut response);
+                self.add_newcomer_outcome(
+                    &mut response,
+                    &sub,
+                    started_at_unix_ms,
+                    true,
+                    None,
+                );
                 (200, response.to_string())
             }
             Err(reason) => {
@@ -2171,17 +2827,30 @@ impl Platform {
                     .expect("entries lock")
                     .already_applied(&sub.channel, &sub.payload)
                 {
-                    return (
-                        200,
-                        serde_json::json!({
-                            "seq": seq,
-                            "hash": hash.to_hex(),
-                            "already_applied": true,
-                        })
-                        .to_string(),
+                    let mut response = serde_json::json!({
+                        "seq": seq,
+                        "hash": hash.to_hex(),
+                        "already_applied": true,
+                    });
+                    self.add_newcomer_outcome(
+                        &mut response,
+                        &sub,
+                        started_at_unix_ms,
+                        true,
+                        None,
                     );
+                    return (200, response.to_string());
                 }
-                (400, Rejection::decode(&reason).body())
+                let mut response = Rejection::decode(&reason).to_json();
+                let code = response["code"].as_str().map(str::to_string);
+                self.add_newcomer_outcome(
+                    &mut response,
+                    &sub,
+                    started_at_unix_ms,
+                    false,
+                    code.as_deref(),
+                );
+                (400, response.to_string())
             }
         }
     }

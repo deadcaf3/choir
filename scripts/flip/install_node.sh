@@ -26,6 +26,8 @@ REPO_DIR="$(cd "$HERE/../.." && pwd)"
 BIN="$REPO_DIR/target/release/choir-node"
 POLICY_MARKER="$STATE/review-gates.enabled"
 PROTECTED_REFS="$STATE/protected-refs"
+NEWCOMER_AUDIT="$STATE/newcomer-audit.jsonl"
+NEWCOMER_ADJUDICATIONS="$STATE/newcomer-adjudications.jsonl"
 
 mkdir -p "$STATE" "$ROOT" "$HOME/Library/LaunchAgents"
 chmod 700 "$STATE"
@@ -56,7 +58,13 @@ if [[ ! -f $STATE/reviewers ]]; then
   chmod 600 "$STATE/reviewers"
 fi
 
-# 5. Optional fail-closed review policy. The marker is explicit state:
+# 5. Sparse D24 T4 evidence and separate operator adjudications. The node
+#    appends only activation, first-attempt, first-acceptance, and appeal
+#    rows; the operator owns the adjudication file.
+touch "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS"
+chmod 600 "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS"
+
+# 6. Optional fail-closed review policy. The marker is explicit state:
 #    once present, a reinstall must preserve the gate or refuse to run.
 #    Every pool member needs a bound key, and two distinct prefixes keep
 #    an accidental one-name or one-operator pool from looking complete.
@@ -64,14 +72,15 @@ if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" \
-    "$PROTECTED_REFS" > "$PLIST"
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
-    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" > "$PLIST"
+    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" \
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" > "$PLIST"
 fi
 
-# 6. launchd agent. The renderer receives absolute paths because launchd
+# 7. launchd agent. The renderer receives absolute paths because launchd
 #    has no shell, no PATH expansion, and no $HOME in program arguments.
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true

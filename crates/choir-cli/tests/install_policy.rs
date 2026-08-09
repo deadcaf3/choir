@@ -18,6 +18,8 @@ fn render(protected: Option<&str>) -> String {
         "/state/reviewers",
         "/state/node.log",
         "owner/repo.git",
+        "/state/newcomer-audit.jsonl",
+        "/state/newcomer-adjudications.jsonl",
     ]);
     if let Some(path) = protected {
         command.arg(path);
@@ -30,6 +32,14 @@ fn render(protected: Option<&str>) -> String {
 #[test]
 fn explicit_policy_renders_all_three_review_gates_or_none() {
     let open = render(None);
+    for required in [
+        "--newcomer-audit",
+        "/state/newcomer-audit.jsonl",
+        "--newcomer-adjudications",
+        "/state/newcomer-adjudications.jsonl",
+    ] {
+        assert!(open.contains(required), "install omits {required}");
+    }
     for flag in [
         "--require-assignment",
         "--protected-refs",

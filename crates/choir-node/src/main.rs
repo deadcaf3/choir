@@ -5,6 +5,7 @@
 //! [--require-assignment] [--protected-refs path] [--require-review]
 //! [--reviewer-conflict-graph path --reviewer-conflict-distance hops]
 //! [--review-retention count] [--review-lapse-after-secs seconds]
+//! [--newcomer-audit path --newcomer-adjudications path]
 //! [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
@@ -85,6 +86,8 @@ fn main() -> std::io::Result<()> {
         "--review-lapse-after-secs",
         "--reviewer-conflict-graph",
         "--reviewer-conflict-distance",
+        "--newcomer-audit",
+        "--newcomer-adjudications",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -137,6 +140,22 @@ fn main() -> std::io::Result<()> {
             ));
         }
     };
+    let newcomer_policy = match (
+        flag_value("--newcomer-audit"),
+        flag_value("--newcomer-adjudications"),
+    ) {
+        (Some(audit), Some(adjudications)) => Some((
+            std::path::PathBuf::from(audit),
+            std::path::PathBuf::from(adjudications),
+        )),
+        (None, None) => None,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--newcomer-audit and --newcomer-adjudications must be given together",
+            ));
+        }
+    };
     if review_lapse_after.is_some() && review_retention_count.is_none() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -158,6 +177,13 @@ fn main() -> std::io::Result<()> {
         }
     };
     let tls_on = tls.is_some();
+
+    if newcomer_policy.is_some() && !rest.iter().any(|arg| arg == "--keys-file") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "newcomer instrumentation needs --keys-file",
+        ));
+    }
 
     let mut node = Node::bind_full(&root, &bind, port, auth, tls)?;
     if let Some(i) = rest.iter().position(|a| a == "--keys-file") {
@@ -199,10 +225,10 @@ fn main() -> std::io::Result<()> {
         let log_path = state_dir.join("ops.jsonl");
         let log = choir_oplog::FileLog::open(&log_path)
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        // Hot-reload, all three halves: appending a key line takes effect
-        // on the next failed signature check for submissions, and on the
-        // next request for push-certificate verification and for channel
-        // name bindings (a tightening, so it must not wait for a failure).
+        // Hot-reload, all three halves: appending or removing a key line
+        // takes effect before the next submission signature check, and on
+        // the next request for push-certificate verification and channel
+        // name bindings.
         node.watch_keys_file(path.into());
         // Same file the sequencer appends to: readers that fall behind
         // the in-memory /api/log window resync from it.
@@ -218,6 +244,13 @@ fn main() -> std::io::Result<()> {
         }
         .map_err(std::io::Error::other)?
         .with_log_path(log_path);
+        if let Some((audit, adjudications)) = newcomer_policy {
+            let incumbents = signers.iter().map(|signer| signer.actor_id.clone()).collect();
+            platform = platform
+                .with_newcomer_audit(audit, adjudications, incumbents)
+                .map_err(std::io::Error::other)?;
+            eprintln!("newcomer harm audit enabled");
+        }
         if let Some(count) = review_retention_count {
             match review_lapse_after {
                 Some(age) => eprintln!(

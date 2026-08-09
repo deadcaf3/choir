@@ -21,7 +21,7 @@ Nothing here is destructive and nothing touches the mirror VM.
    at no new warnings.
 2. `sh scripts/flip/install_node.sh [port] [owner/repo.git]` — builds release binaries,
    mints `~/.choir/auth` (0600) and `~/.choir/agent.key`, creates an
-   empty `~/.choir/reviewers` pool, writes and loads the
+   empty `~/.choir/reviewers` pool plus 0600 newcomer audit/adjudication files, writes and loads the
    `com.choir.node` LaunchAgent serving the named repo. Idempotent:
    re-run after any rebuild.
 3. Add reviewer names to `~/.choir/reviewers`, one per line. Re-read on
@@ -30,6 +30,22 @@ Nothing here is destructive and nothing touches the mirror VM.
 
 Trusted keys, channel bindings, and push-certificate signers also hot-reload
 from the keys file. Registering a key does not require a daemon restart.
+
+The installer enables sparse D24 T4 newcomer-harm evidence. Keys already trusted
+at first activation are durably marked as incumbents. A later verified signed-API
+actor receives `newcomer_attempt_id` on its first outcome; if that outcome was a
+rejection, it may file `choir appeal <api> <attempt-id>`. Appeals do not alter
+admission. The operator adjudicates each observed attempt by appending exactly one
+row to `~/.choir/newcomer-adjudications.jsonl`:
+
+```json
+{"format_version":1,"attempt_id":0,"legitimate":true}
+```
+
+Use `false` for an invalid or abusive attempt. `/api/view.newcomer_harm` reports
+adjudication coverage and hashes the current adjudication snapshot. Unknown-key
+claims and the separate Git/HTTP credential lane are outside this metric. The T4
+thresholds remain unset until a real measurement supplies the adoption bound.
 
 To persistently require assigned review for protected refs, create
 `~/.choir/review-gates.enabled` and `~/.choir/protected-refs`, both mode 0600,

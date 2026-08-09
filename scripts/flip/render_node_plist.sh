@@ -4,8 +4,8 @@
 # secrets, or touching launchd.
 set -eu
 
-if [ "$#" -ne 9 ] && [ "$#" -ne 10 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repo> [protected-refs]" >&2
+if [ "$#" -ne 11 ] && [ "$#" -ne 12 ]; then
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repo> <newcomer-audit> <newcomer-adjudications> [protected-refs]" >&2
   exit 2
 fi
 
@@ -18,7 +18,9 @@ KEYS=$6
 REVIEWERS=$7
 LOG=$8
 REPO=$9
-PROTECTED_REFS=${10:-}
+NEWCOMER_AUDIT=${10}
+NEWCOMER_ADJUDICATIONS=${11}
+PROTECTED_REFS=${12:-}
 
 cat <<PLIST_HEAD
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,6 +36,8 @@ cat <<PLIST_HEAD
     <string>--auth-file</string><string>$AUTH</string>
     <string>--keys-file</string><string>$KEYS</string>
     <string>--reviewers-file</string><string>$REVIEWERS</string>
+    <string>--newcomer-audit</string><string>$NEWCOMER_AUDIT</string>
+    <string>--newcomer-adjudications</string><string>$NEWCOMER_ADJUDICATIONS</string>
 PLIST_HEAD
 
 if [ -n "$PROTECTED_REFS" ]; then

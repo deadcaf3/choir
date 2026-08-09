@@ -237,8 +237,8 @@ fn mcp_tools_cover_public_operations_once_in_table_order() {
     assert_eq!(unique.len(), actual.len(), "duplicate MCP tool name");
     assert_eq!(
         actual.len(),
-        6,
-        "only the six public platform operations are tools"
+        7,
+        "only the seven public platform operations are tools"
     );
     for (tool, endpoint) in tools
         .iter()

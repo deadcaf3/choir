@@ -13,6 +13,7 @@
 //! choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
 //! choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
 //! choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
+//! choir appeal <api> <attempt-id>
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 //! choir reviews <api> <reviewer>
 //! choir view <api>
@@ -229,6 +230,16 @@ fn main() {
             // as every other mutation. Admission checks the key identity,
             // not this attribution string.
             submit(api, node_key_file, "node/slash", &op, auth);
+        }
+        ["appeal", api, attempt_id] => {
+            let attempt_id = attempt_id.parse::<u64>().unwrap_or_else(|_| usage());
+            let (status, resp) = http(
+                api,
+                auth,
+                "choir_appeal",
+                serde_json::json!({ "attempt_id": attempt_id }),
+            );
+            finish(status, &resp);
         }
         ["intent", api, key_file, channel, subject, kind, body] => {
             // D22 provenance record: task spec / plan / rationale for

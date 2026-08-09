@@ -122,6 +122,13 @@ fn cli_end_to_end() {
     assert_eq!(view["reviews"]["r1"]["approved"], true, "{view}");
     assert_eq!(view["reviews"]["r1"]["verdicts"]["bot"]["note"], "lgtm");
 
+    // The command reaches the appeal endpoint. This node has no newcomer
+    // audit, so the expected result is the node's structured 503 rather than
+    // a CLI-side usage or routing failure.
+    let out = choir(&["appeal", &api, "0"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(json(&out)["code"], "policy_unavailable");
+
     // Slashing uses the existing signed-op endpoint but only the node key
     // may authorize it. The operation remains visible and forces a fresh
     // review instead of erasing the original verdict.

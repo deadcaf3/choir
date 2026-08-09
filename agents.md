@@ -16,9 +16,10 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir workspace <api> <owner/repo> <name>` — provision a copy-on-write workspace; prints its path and head
 - `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...` — request review on a commit; name no reviewers and the node draws them
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
+- `choir appeal <api> <attempt-id>` — appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance, T3 concentration, and complete-view growth
+- `choir view <api>` — the materialized view plus T3 concentration, T4 newcomer harm, and complete-view growth
 
 ## Endpoints
 
@@ -26,7 +27,8 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
 | `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
-| `GET /api/view` | The materialized view: workspace heads, refs, reviews, provenance, T3 concentration, and complete-view growth |
+| `GET /api/view` | The materialized view plus T3 concentration, T4 newcomer harm, and complete-view growth |
+| `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
 | `POST /api/workspace` | Provision a copy-on-write workspace and register it in the view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
