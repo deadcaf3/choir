@@ -27,6 +27,14 @@ Nothing here is destructive and nothing touches the mirror VM.
    every draw, so no restart. An empty pool means review requests come
    back with `assignment_error` and stay unassigned (never approved).
 
+To persistently require assigned review for protected refs, create
+`~/.choir/review-gates.enabled` and `~/.choir/protected-refs`, both mode 0600,
+then rerun `choirctl install`. The protected-ref file carries one namespaced
+pattern per line, for example `<owner>/<repo>.git:refs/heads/main`. The installer
+fails closed unless the reviewer pool has at least two prefixes, every reviewer
+has a bound key, and the protected-ref file is non-empty. Removing the marker
+and reinstalling deliberately returns to the ungated policy.
+
 Verify the daemon:
 
 ```sh

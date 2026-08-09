@@ -17,12 +17,15 @@ PORT=${1:-8417}
 # so it lives in the plist permanently: creation is also what installs
 # the pre-receive hook that turns pushes into signed ops.
 REPO=${2:-choir/choir.git}
+HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE=$HOME/.choir
 ROOT="$STATE/repos"
 LABEL=com.choir.node
 PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
-REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+REPO_DIR="$(cd "$HERE/../.." && pwd)"
 BIN="$REPO_DIR/target/release/choir-node"
+POLICY_MARKER="$STATE/review-gates.enabled"
+PROTECTED_REFS="$STATE/protected-refs"
 
 mkdir -p "$STATE" "$ROOT" "$HOME/Library/LaunchAgents"
 chmod 700 "$STATE"
@@ -53,32 +56,23 @@ if [[ ! -f $STATE/reviewers ]]; then
   chmod 600 "$STATE/reviewers"
 fi
 
-# 5. launchd agent. Absolute paths only (launchd has no shell, no PATH
-#    expansion, no $HOME in program arguments).
-cat > "$PLIST" <<PLIST_EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$BIN</string>
-    <string>$ROOT</string>
-    <string>$PORT</string>
-    <string>--auth-file</string><string>$STATE/auth</string>
-    <string>--keys-file</string><string>$STATE/keys</string>
-    <string>--reviewers-file</string><string>$STATE/reviewers</string>
-    <string>--bind</string><string>127.0.0.1</string>
-    <string>--create</string><string>$REPO</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$STATE/node.log</string>
-  <key>StandardErrorPath</key><string>$STATE/node.log</string>
-</dict>
-</plist>
-PLIST_EOF
+# 5. Optional fail-closed review policy. The marker is explicit state:
+#    once present, a reinstall must preserve the gate or refuse to run.
+#    Every pool member needs a bound key, and two distinct prefixes keep
+#    an accidental one-name or one-operator pool from looking complete.
+if [[ -f "$POLICY_MARKER" ]]; then
+  sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
+  sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
+    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" \
+    "$PROTECTED_REFS" > "$PLIST"
+  echo "review gate enabled ($PROTECTED_REFS)"
+else
+  sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
+    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" > "$PLIST"
+fi
+
+# 6. launchd agent. The renderer receives absolute paths because launchd
+#    has no shell, no PATH expansion, and no $HOME in program arguments.
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
