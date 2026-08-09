@@ -16,6 +16,7 @@ GET /sync.md - The sync contract, in full: cursor semantics and how to verify a 
 POST /api/git-update - Internal: the pre-receive hook callback
 
 ## CLI
+For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form
 choir workspace <api> <owner/repo> <name> - provision a copy-on-write workspace; prints its path and head
 choir submit <api> <key-file> <channel> '<op-json>' - sign and submit one raw operation

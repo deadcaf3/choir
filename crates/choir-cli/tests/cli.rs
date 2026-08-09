@@ -4,7 +4,7 @@
 
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_decode;
-use choir_node::{Node, Platform};
+use choir_node::{AuthTable, Node, Platform};
 use choir_oplog::MemLog;
 
 fn choir(args: &[&str]) -> std::process::Output {
@@ -160,6 +160,62 @@ fn cli_end_to_end() {
     assert_eq!(choir(&["review", &api, key_file, "c", "r3", "not-an-oid", "bot"])
         .status
         .code(), Some(2));
+
+    node.unblock();
+}
+
+#[test]
+fn cli_reads_auth_from_file_without_exposing_it() {
+    let work = std::env::temp_dir().join(format!("choir-cli-auth-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let mut auth = AuthTable::new();
+    auth.insert("cli-agent".to_string(), "placeholder-token".to_string());
+    let auth_file = work.join("auth");
+    std::fs::write(&auth_file, "cli-agent:placeholder-token\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&auth_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(auth)).unwrap();
+    node.enable_platform(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .unwrap(),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}");
+
+    assert_eq!(choir(&["view", &api]).status.code(), Some(1));
+    let out = choir(&[
+        "--auth-file",
+        auth_file.to_str().unwrap(),
+        "--auth-user",
+        "cli-agent",
+        "view",
+        &api,
+    ]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    assert!(json(&out)["workspaces"].is_object());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("placeholder-token"));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("placeholder-token"));
+    assert_eq!(
+        choir(&["--auth-user", "cli-agent", "view", &api])
+            .status
+            .code(),
+        Some(2)
+    );
 
     node.unblock();
 }

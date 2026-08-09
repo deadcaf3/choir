@@ -29,6 +29,9 @@ pub const GEN_START: &str = "<!-- generated: choir surface, do not edit -->";
 /// Closing marker of a generated region.
 pub const GEN_END: &str = "<!-- /generated -->";
 
+/// Explicit global options for authenticated node access.
+pub const AUTH_OPTIONS: &str = "[--auth-file <path>] [--auth-user <name>]";
+
 /// One `choir` subcommand.
 pub struct Command {
     /// Subcommand name.
@@ -320,7 +323,7 @@ pub fn mcp_endpoint(name: &str) -> Option<&'static Endpoint> {
 /// The `choir` usage block, as `--help` and a bare invocation print it.
 #[must_use]
 pub fn usage() -> String {
-    let mut out = String::from("usage:\n");
+    let mut out = format!("usage:\n  choir {AUTH_OPTIONS} <command> ...\n\ncommands:\n");
     for c in COMMANDS {
         out.push_str(&format!("  choir {} {}\n", c.name, c.args));
     }
@@ -344,7 +347,10 @@ pub fn api_table() -> String {
 /// The command list the agent templates carry, as a markdown bullet list.
 #[must_use]
 pub fn command_bullets() -> String {
-    let mut out = String::new();
+    let mut out = format!(
+        "For an authenticated node, place `{AUTH_OPTIONS}` before the subcommand. \
+         Credentials are read from the named file, never an environment variable.\n\n"
+    );
     for c in COMMANDS.iter().filter(|c| c.agent_facing) {
         out.push_str(&format!("- `choir {} {}` — {}\n", c.name, c.args, c.summary));
     }
@@ -399,6 +405,9 @@ pub fn llms_txt() -> String {
         out.push_str(&format!("{} {} - {}\n", e.method, e.path, e.purpose));
     }
     out.push_str("\n## CLI\n");
+    out.push_str(&format!(
+        "For authenticated nodes: choir {AUTH_OPTIONS} <command> ...\n"
+    ));
     for c in COMMANDS {
         out.push_str(&format!("choir {} {} - {}\n", c.name, c.args, c.summary));
     }

@@ -80,6 +80,20 @@ impl HttpClient {
         })
     }
 
+    /// Sends one request described by the shared endpoint table.
+    ///
+    /// This is also used by the ordinary CLI so its authenticated HTTP
+    /// path and the MCP adapter cannot diverge on credential handling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport or argument-validation description without
+    /// reflecting credentials or the node address.
+    pub fn request(&self, endpoint: &Endpoint, arguments: &Value) -> Result<(u16, String), String> {
+        self.call(endpoint, arguments)
+            .map(|response| (response.status, response.body))
+    }
+
     fn call(&self, endpoint: &Endpoint, arguments: &Value) -> Result<HttpResponse, String> {
         let object = arguments
             .as_object()

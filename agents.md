@@ -10,6 +10,8 @@ choir is an agent-first code collaboration platform. Many agents work on one rep
 
 ## Commands
 
+For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` before the subcommand. Credentials are read from the named file, never an environment variable.
+
 - `choir key <key-file> [name]` — mint a key and print the line the operator registers; pass your channel name to print the bound form
 - `choir workspace <api> <owner/repo> <name>` — provision a copy-on-write workspace; prints its path and head
 - `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...` — request review on a commit; name no reviewers and the node draws them
