@@ -1,8 +1,9 @@
 //! The landing gate (D24 layer 5, the enforcement half): with
 //! `--protected-refs` plus `--require-review`, a protected ref only moves
-//! to a commit some approved review already named as its destination, and
-//! cannot be deleted at all. A real `git push` is what gets refused — the
-//! gate lives in admission policy, so there is no path around it.
+//! to a commit a review with two independent approvals already named as
+//! its destination, and cannot be deleted at all. A real `git push` is
+//! what gets refused — the gate lives in admission policy, so there is no
+//! path around it.
 
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_encode;
@@ -292,6 +293,156 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
     );
     assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
     assert!(refs()["agents/demo.git:refs/heads/main"].is_string());
+
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}
+
+#[test]
+fn one_operator_cannot_supply_enough_approval_weight_to_land() {
+    let work = std::env::temp_dir().join(format!("choir-landing-cap-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let pool_file = work.join("reviewers");
+    let refs_file = work.join("protected");
+    // Two agent names, but one operator: the draw correctly yields one
+    // seat. That seat must not carry the whole protected-ref threshold.
+    std::fs::write(&pool_file, "reviewer/one\nreviewer/two\n").unwrap();
+    std::fs::write(&refs_file, "agents/demo.git:refs/heads/main\n").unwrap();
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+    let node_secret = ActorKey::generate().secret_bytes();
+    let node_key = ActorKey::from_secret_bytes(&node_secret);
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), node_key)
+            .unwrap()
+            .with_reviewer_pool(pool_file)
+            .with_protected_refs(refs_file)
+            .with_required_review(),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let submit = |key: &ActorKey, channel: &str, op: &ViewOp| {
+        curl(&[
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(key, channel, op),
+            &format!("{api}/submit"),
+        ])
+    };
+    let target_ref = "agents/demo.git:refs/heads/main";
+    let initial = choir_oplog::ContentHash::from_git_oid(&"1".repeat(40)).unwrap();
+    let candidate = choir_oplog::ContentHash::from_git_oid(&"2".repeat(40)).unwrap();
+
+    // Creating the protected ref remains allowed.
+    let create = ViewOp::new(OpKind::SetRef {
+        name: target_ref.into(),
+        commit: initial.clone(),
+        prev: None,
+    });
+    assert_eq!(submit(&author, "writer/agent", &create).0, 200);
+
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "thin-review".into(),
+        target: candidate.clone(),
+        reviewers: Vec::new(),
+        target_ref: Some(target_ref.into()),
+    });
+    let (code, resp) = submit(&author, "writer/agent", &request);
+    assert_eq!(code, 200, "{resp}");
+    let drawn: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).unwrap();
+    assert_eq!(
+        drawn.len(),
+        1,
+        "one operator must get only one seat: {resp}"
+    );
+
+    let verdict = ViewOp::new(OpKind::PostVerdict {
+        id: "thin-review".into(),
+        reviewer: drawn[0].clone(),
+        verdict: Verdict::Approve,
+        note: String::new(),
+    });
+    assert_eq!(submit(&author, &drawn[0], &verdict).0, 200);
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(
+        view["reviews"]["thin-review"]["approved"], true,
+        "{view}"
+    );
+    assert_eq!(
+        view["reviews"]["thin-review"]["approval_weight"], 1,
+        "{view}"
+    );
+
+    let advance = ViewOp::new(OpKind::SetRef {
+        name: target_ref.into(),
+        commit: candidate.clone(),
+        prev: Some(initial),
+    });
+    let (code, resp) = submit(&author, "writer/agent", &advance);
+    assert_eq!(
+        code, 400,
+        "one approval must not meet a two-person threshold: {resp}"
+    );
+    assert_eq!(resp["code"], "review_required", "{resp}");
+    assert_eq!(resp["actual"], "approval weight 1", "{resp}");
+    assert!(
+        resp["next"]
+            .as_str()
+            .unwrap()
+            .contains("two distinct operators"),
+        "{resp}"
+    );
+
+    // Compaction must retain the approval weight as well as the outcome;
+    // otherwise dropping the reviewer list would erase the cap.
+    let archive = ViewOp::new(OpKind::ArchiveReview {
+        id: "thin-review".into(),
+        lapsed: false,
+    });
+    let node_key = ActorKey::from_secret_bytes(&node_secret);
+    assert_eq!(submit(&node_key, "node/archive", &archive).0, 200);
+    let (code, resp) = submit(&author, "writer/agent", &advance);
+    assert_eq!(
+        code, 400,
+        "archiving must not inflate approval weight: {resp}"
+    );
+    assert_eq!(resp["code"], "review_required", "{resp}");
+    assert_eq!(resp["actual"], "approval weight 1", "{resp}");
+
+    // Two weak reviews do not add together. The threshold belongs to
+    // one review; summing rows would let one operator manufacture weight
+    // by opening the same one-seat review twice.
+    let second_request = ViewOp::new(OpKind::RequestReview {
+        id: "thin-review-2".into(),
+        target: candidate,
+        reviewers: Vec::new(),
+        target_ref: Some(target_ref.into()),
+    });
+    let (code, resp) = submit(&author, "writer/agent", &second_request);
+    assert_eq!(code, 200, "{resp}");
+    let second_drawn: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).unwrap();
+    assert_eq!(second_drawn.len(), 1, "{resp}");
+    let second_verdict = ViewOp::new(OpKind::PostVerdict {
+        id: "thin-review-2".into(),
+        reviewer: second_drawn[0].clone(),
+        verdict: Verdict::Approve,
+        note: String::new(),
+    });
+    assert_eq!(submit(&author, &second_drawn[0], &second_verdict).0, 200);
+    let (code, resp) = submit(&author, "writer/agent", &advance);
+    assert_eq!(code, 400, "separate weak reviews must not combine: {resp}");
+    assert_eq!(resp["actual"], "approval weight 1", "{resp}");
 
     node.unblock();
     std::fs::remove_dir_all(&work).ok();

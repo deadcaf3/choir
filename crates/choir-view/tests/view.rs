@@ -420,7 +420,10 @@ fn archiving_freezes_a_review_and_keeps_its_outcome() {
     assert_eq!(r.target_ref.as_deref(), Some("demo.git:refs/heads/main"));
     assert!(matches!(
         r.status,
-        choir_view::ReviewStatus::Archived { approved: true }
+        choir_view::ReviewStatus::Archived {
+            approved: true,
+            approval_weight: 2,
+        }
     ));
 
     // Frozen: no further verdicts, and the refusal says archived rather
@@ -450,6 +453,63 @@ fn archiving_freezes_a_review_and_keeps_its_outcome() {
     // A rejected verdict must not have disturbed the frozen outcome.
     let view = View::materialize(&log).unwrap();
     assert!(view.reviews["r1"].approved());
+}
+
+#[test]
+fn approval_weight_caps_sibling_channels_and_survives_archiving() {
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "author/agent",
+        ViewOp::new(OpKind::RequestReview {
+            id: "weighted".into(),
+            target: ContentHash::blake3(b"weighted change"),
+            reviewers: vec![
+                "reviewer/one".into(),
+                "reviewer/two".into(),
+                "peer/one".into(),
+            ],
+            target_ref: Some("demo.git:refs/heads/main".into()),
+        }),
+    )
+    .unwrap();
+    for reviewer in ["reviewer/one", "reviewer/two", "peer/one"] {
+        append_op(
+            &mut log,
+            reviewer,
+            ViewOp::new(OpKind::PostVerdict {
+                id: "weighted".into(),
+                reviewer: reviewer.into(),
+                verdict: choir_view::Verdict::Approve,
+                note: String::new(),
+            }),
+        )
+        .unwrap();
+    }
+
+    let view = View::materialize(&log).unwrap();
+    assert!(view.reviews["weighted"].approved());
+    assert_eq!(
+        view.reviews["weighted"].approval_weight(),
+        2,
+        "two sibling channels must contribute only one operator's weight"
+    );
+
+    append_op(
+        &mut log,
+        "node/archive",
+        ViewOp::new(OpKind::ArchiveReview {
+            id: "weighted".into(),
+            lapsed: false,
+        }),
+    )
+    .unwrap();
+    let view = View::materialize(&log).unwrap();
+    assert_eq!(
+        view.reviews["weighted"].approval_weight(),
+        2,
+        "archiving must retain capped weight after dropping reviewer detail"
+    );
 }
 
 #[test]
@@ -533,7 +593,10 @@ fn lapsing_settles_an_abandoned_review_without_inventing_an_outcome() {
     assert_eq!(r.target_ref.as_deref(), Some("demo.git:refs/heads/main"));
     assert!(matches!(
         r.status,
-        choir_view::ReviewStatus::Archived { approved: false }
+        choir_view::ReviewStatus::Archived {
+            approved: false,
+            approval_weight: 0,
+        }
     ));
 
     // And it is frozen like any other archived review.

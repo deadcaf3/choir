@@ -21,10 +21,10 @@
 //! `<repo>:<refname>` pattern per line, trailing `*` allowed) refuses
 //! them only for reviews landing on a matching ref.
 //! `--require-review` additionally refuses to move a protected ref to
-//! any commit no approved review named, and refuses to delete one at
-//! all — including for this daemon's own pushes. `--review-retention`
-//! keeps at most that many live reviews when completed reviews can be
-//! archived. Incomplete reviews are never killed by default;
+//! any commit without approval weight from two distinct operators, and
+//! refuses to delete one at all — including for this daemon's own pushes.
+//! `--review-retention` keeps at most that many live reviews when
+//! completed reviews can be archived. Incomplete reviews are never killed by default;
 //! `--review-lapse-after-secs` is the explicit operator policy that lets
 //! an over-limit incomplete review lapse. `--bind` with a non-loopback
 //! address is refused unless TLS is configured.
@@ -210,7 +210,7 @@ fn main() -> std::io::Result<()> {
                 if rest.iter().any(|a| a == "--require-review") {
                     platform = platform.with_required_review();
                     eprintln!(
-                        "protected refs require an approved review to land \
+                        "protected refs require approval from two distinct operators to land \
                          (this daemon's own pushes included)"
                     );
                 }

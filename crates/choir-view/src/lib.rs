@@ -272,7 +272,26 @@ pub enum ReviewStatus {
     Archived {
         /// The verdict the review had reached when it was archived.
         approved: bool,
+        /// Approval weight at settlement time. Reviewer details are
+        /// dropped, so this compact scalar preserves the per-operator
+        /// cap for later protected-ref authorization.
+        approval_weight: usize,
     },
+}
+
+/// Maximum approval weight contributed by one operator, regardless of
+/// how many agent channels that operator controls.
+pub const MAX_APPROVAL_WEIGHT_PER_OPERATOR: usize = 1;
+
+/// The operator a review channel belongs to: the part before the first
+/// `/` in `operator/agent`, or the whole name when no prefix is present.
+///
+/// Unprefixed names remain distinct operators, preserving the original
+/// flat-name behavior. Nodes that rely on this boundary must bind channel
+/// names to trusted keys; otherwise the prefix is only a self-assertion.
+#[must_use]
+pub fn reviewer_operator(name: &str) -> &str {
+    name.split_once('/').map_or(name, |(operator, _)| operator)
 }
 
 /// Materialized state of one review: what is under review, who was
@@ -315,11 +334,45 @@ impl ReviewState {
     /// Whether the review is complete with no `RequestChanges`.
     #[must_use]
     pub fn approved(&self) -> bool {
-        if let ReviewStatus::Archived { approved } = self.status {
+        if let ReviewStatus::Archived { approved, .. } = self.status {
             return approved;
         }
         self.complete()
             && self.verdicts.values().all(|(v, _)| *v == Verdict::Approve)
+    }
+
+    /// Approval weight after capping every operator at one unit.
+    ///
+    /// Multiple agent channels under one `operator/agent` prefix never
+    /// manufacture additional approval weight. Archived reviews return
+    /// the compact weight captured before their reviewer detail was
+    /// dropped.
+    #[must_use]
+    pub fn approval_weight(&self) -> usize {
+        if let ReviewStatus::Archived {
+            approval_weight, ..
+        } = self.status
+        {
+            return approval_weight;
+        }
+
+        self.verdicts
+            .iter()
+            .enumerate()
+            .filter(|(index, (reviewer, (verdict, _)))| {
+                if *verdict != Verdict::Approve {
+                    return false;
+                }
+                let operator = reviewer_operator(reviewer);
+                self.verdicts
+                    .iter()
+                    .take(*index)
+                    .all(|(prior, (prior_verdict, _))| {
+                        *prior_verdict != Verdict::Approve || reviewer_operator(prior) != operator
+                    })
+            })
+            .count()
+            * MAX_APPROVAL_WEIGHT_PER_OPERATOR
     }
 }
 
@@ -605,6 +658,7 @@ impl View {
                     .reviews
                     .get_mut(id)
                     .expect("validate proved the review exists and is settleable");
+                let approval_weight = if *lapsed { 0 } else { review.approval_weight() };
                 review.status = ReviewStatus::Archived {
                     // A lapsed review was never answered, so it never got
                     // approval. Reading it off `approved()` would work
@@ -613,9 +667,10 @@ impl View {
                     // means a later change to `approved()` cannot quietly
                     // turn abandoned reviews into approvals.
                     approved: !*lapsed && review.approved(),
+                    approval_weight,
                 };
-                // The bulk goes; the gate's triple (target_ref, target,
-                // and the outcome now in `status`) stays.
+                // The bulk goes; the gate's compact authorization row
+                // (target_ref, target, outcome, approval weight) stays.
                 review.reviewers = Vec::new();
                 review.verdicts = BTreeMap::new();
             }

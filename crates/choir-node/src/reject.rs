@@ -51,7 +51,7 @@ pub enum Code {
     AssignmentRequired,
     /// The target ref is protected and needs a node-drawn reviewer list.
     ProtectedRef,
-    /// The target ref is protected and no approved review authorises it.
+    /// The target ref lacks the required independent approval weight.
     ReviewRequired,
     /// The target ref is protected and cannot be deleted.
     RefUndeletable,
@@ -288,7 +288,7 @@ impl Code {
             Self::NodeOnly => "Only the node's own key may author this operation",
             Self::AssignmentRequired => "This node assigns reviewers; a self-named list was refused",
             Self::ProtectedRef => "The target ref is protected and needs a node-drawn reviewer list",
-            Self::ReviewRequired => "The target ref is protected and no approved review authorises this commit",
+            Self::ReviewRequired => "The target ref lacks the required independent approval weight",
             Self::RefUndeletable => "The target ref is protected and cannot be deleted",
             Self::StaleHead => "Compare-and-swap failed: the state moved under the submission",
             Self::ReviewState => "A review-op precondition failed (duplicate id, unknown review, already assigned, archived)",
@@ -311,7 +311,7 @@ impl Code {
             Self::NodeOnly => "Nothing to retry: this operation is the node's to author. For                 reviewer assignment, request a review with an empty reviewer list.",
             Self::AssignmentRequired => "Resubmit with an empty reviewer list. The node draws                 reviewers and returns their names in the response.",
             Self::ProtectedRef => "Resubmit with an empty reviewer list. On a protected ref only                 a node-drawn list is accepted.",
-            Self::ReviewRequired => "Open a review naming this ref and commit                 (`choir review ... --ref <repo:ref>`), get it approved, then push again.",
+            Self::ReviewRequired => "Open a review naming this ref and commit                 (`choir review ... --ref <repo:ref>`), obtain approvals from two distinct                 operators, then push again.",
             Self::RefUndeletable => "Do not delete this ref, or ask the operator to remove it                 from the protected-ref list.",
             Self::StaleHead => "Re-read `GET /api/view`, rebase your intent on the value in                 `actual`, and resubmit with that as `prev`. If you are retrying a submission                 whose response you lost, check for `already_applied` first — a completed retry                 answers 200, not this.",
             Self::ReviewState => "Read `reviews` in `GET /api/view` for this id. A review that                 is already assigned, complete, or archived does not accept the op you sent.",

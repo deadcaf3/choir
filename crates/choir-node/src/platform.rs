@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
-use choir_view::{OpKind, View, ViewOp};
+use choir_view::{reviewer_operator, OpKind, View, ViewOp};
 
 use crate::reject::{Code, Rejection};
 
@@ -204,9 +204,11 @@ const LOG_WINDOW_CAP: usize = 100_000;
 /// Entries per `/api/log` page, whichever source served them.
 const LOG_PAGE: usize = 500;
 
-/// Reviewers drawn per unassigned review: two-person integrity, capped
-/// by the pool size (D24 layer 5; design choice, not a measured number).
-const ASSIGNMENT_SIZE: usize = 2;
+/// Approval weight required to move a protected ref. The assignment draw
+/// targets the same number of independent operators, but a thin pool may
+/// return fewer; under-assignment stays visible and cannot lower this
+/// landing threshold (D24 layer 5).
+const REQUIRED_APPROVAL_WEIGHT: usize = 2;
 
 /// Nanosecond clock reading, as a nonzero xorshift seed.
 fn seed_from_clock() -> u64 {
@@ -214,19 +216,6 @@ fn seed_from_clock() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0x9e37_79b9_7f4a_7c15, |d| d.as_nanos() as u64)
         | 1
-}
-
-/// The operator a reviewer name belongs to: the part before the first
-/// `/` in `operator/agent`, or the whole name when it carries no prefix.
-///
-/// An unprefixed name is its own operator, which keeps a flat pool
-/// behaving exactly as it did before namespacing existed. The prefix is
-/// asserted by the node operator in the trusted-keys file, never by the
-/// agent — an agent cannot claim a different one, because the channel
-/// binding refuses any channel that is not the name bound to its key.
-/// Without that binding the prefix would be self-declared and worthless.
-fn operator_of(name: &str) -> &str {
-    name.split_once('/').map_or(name, |(op, _)| op)
 }
 
 /// FNV-1a, so two reviews drawn in the same nanosecond still diverge.
@@ -440,23 +429,26 @@ impl ChoirPolicy {
         }))
     }
 
-    /// Whether some approved review named exactly this `(ref, commit)`
-    /// pair as where it wanted to land.
+    /// The greatest capped approval weight of any approved review that
+    /// named exactly this `(ref, commit)` pair as where it wanted to land.
     ///
     /// Both halves matter. Matching only the commit would let an approval
     /// for a scratch branch land the same commit on `main`; matching only
     /// the ref would let any approved review authorize any later commit.
-    fn approved_for(&self, name: &str, commit: &ContentHash) -> bool {
+    fn approval_weight_for(&self, name: &str, commit: &ContentHash) -> usize {
         self.view
             .lock()
             .expect("view lock")
             .reviews
             .values()
-            .any(|r| {
+            .filter(|r| {
                 r.target_ref.as_deref() == Some(name)
                     && r.target.as_ref() == Some(commit)
                     && r.approved()
             })
+            .map(choir_view::ReviewState::approval_weight)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -572,8 +564,8 @@ impl SubmitPolicy for ChoirPolicy {
             }
         }
         // The landing half of the gate: a protected ref only moves to a
-        // commit that some approved review already named as its
-        // destination. This is what turns `--protected-refs` from an
+        // commit that some independently approved review already named
+        // as its destination. This is what turns `--protected-refs` from an
         // advisory into enforcement — without it a requester escapes by
         // simply omitting `target_ref`.
         //
@@ -589,16 +581,24 @@ impl SubmitPolicy for ChoirPolicy {
                     // Creating a protected ref is allowed: there is no
                     // history to hijack yet, and deletion is refused
                     // below, so "delete then re-create" is not a way in.
-                    if prev.is_some() && !self.approved_for(name, commit) {
+                    let approval_weight = self.approval_weight_for(name, commit);
+                    if prev.is_some() && approval_weight < REQUIRED_APPROVAL_WEIGHT {
                         return Err(Rejection::new(
                             Code::ReviewRequired,
-                            format!("{name} is protected and this commit is not approved for it"),
+                            format!(
+                                "{name} is protected and this commit has approval weight \
+                                 {approval_weight}, below the required {REQUIRED_APPROVAL_WEIGHT}"
+                            ),
                             "open a review naming this ref and commit (`choir review ... --ref \
-                             <repo:ref>`), get it approved, then push again",
+                             <repo:ref>`), obtain approvals from two distinct operators, then \
+                             push again",
                         )
                         .with_states(
-                            Some(format!("an approved review of {}", commit.to_hex())),
-                            Some("none".to_string()),
+                            Some(format!(
+                                "approval weight {REQUIRED_APPROVAL_WEIGHT} for {}",
+                                commit.to_hex()
+                            )),
+                            Some(format!("approval weight {approval_weight}")),
                         )
                         .encode());
                     }
@@ -909,8 +909,9 @@ impl Platform {
         self
     }
 
-    /// A protected ref only moves to a commit that some **approved**
-    /// review already named as its destination, and can never be deleted.
+    /// A protected ref only moves to a commit that an **approved** review
+    /// with weight from two distinct operators already named as its
+    /// destination, and can never be deleted.
     /// This is the landing half of the gate: with it, omitting
     /// `target_ref` stops being an escape and becomes a refusal, because
     /// the push itself is what gets checked.
@@ -930,8 +931,9 @@ impl Platform {
     ///
     /// Not covered, and not silently implied: force-pushes and
     /// non-fast-forward updates are only constrained by the CAS `prev`
-    /// git itself supplies. An approved review of commit X authorizes
-    /// landing X, whether or not X is a descendant of the current tip.
+    /// git itself supplies. A sufficiently weighted approval of commit X
+    /// authorizes landing X, whether or not X is a descendant of the
+    /// current tip.
     #[must_use]
     pub fn with_required_review(self) -> Self {
         self.require_review
@@ -1082,7 +1084,7 @@ impl Platform {
     ///
     /// Candidates are the pool minus everyone sharing the requester's
     /// **operator**, and the draw takes at most one reviewer per operator
-    /// so [`ASSIGNMENT_SIZE`] reviewers means that many *independent*
+    /// so [`REQUIRED_APPROVAL_WEIGHT`] reviewers means that many *independent*
     /// ones.
     ///
     /// Excluding only the requester's own name was the original rule and
@@ -1093,7 +1095,7 @@ impl Platform {
     /// says must be blocked at the operator level, so the exclusion has
     /// to be at that level too.
     ///
-    /// A pool that cannot supply [`ASSIGNMENT_SIZE`] distinct operators
+    /// A pool that cannot supply [`REQUIRED_APPROVAL_WEIGHT`] distinct operators
     /// draws fewer rather than doubling up — a visibly under-assigned
     /// review beats one that looks independent and is not.
     ///
@@ -1105,11 +1107,11 @@ impl Platform {
     pub fn assign_reviewers(&self, id: &str, requester: &str) -> Result<Vec<String>, String> {
         let path = self.reviewer_pool.as_ref().ok_or("no reviewer pool configured")?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("read reviewer pool: {e}"))?;
-        let mine = operator_of(requester);
+        let mine = reviewer_operator(requester);
         let mut pool: Vec<String> = text
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#') && operator_of(l) != mine)
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && reviewer_operator(l) != mine)
             .map(String::from)
             .collect();
         if pool.is_empty() {
@@ -1126,7 +1128,7 @@ impl Platform {
         let mut seen_operators: BTreeSet<String> = BTreeSet::new();
         seen_operators.insert(mine.to_string());
         for i in 0..pool.len() {
-            if drawn.len() == ASSIGNMENT_SIZE {
+            if drawn.len() == REQUIRED_APPROVAL_WEIGHT {
                 break;
             }
             state ^= state << 13;
@@ -1136,7 +1138,7 @@ impl Platform {
             pool.swap(i, j);
             // One seat per operator: a second agent from an operator
             // already drawn would add a name, not a second opinion.
-            if seen_operators.insert(operator_of(&pool[i]).to_string()) {
+            if seen_operators.insert(reviewer_operator(&pool[i]).to_string()) {
                 drawn.push(pool[i].clone());
             }
         }
@@ -1742,6 +1744,7 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
         "verdicts": verdicts,
         "complete": r.complete(),
         "approved": r.approved(),
+        "approval_weight": r.approval_weight(),
         // Empty reviewers on a live review means unassigned; on an
         // archived one it means emptied. A reader must be able to tell.
         "archived": matches!(r.status, choir_view::ReviewStatus::Archived { .. }),
