@@ -13,4 +13,5 @@
 //! assert!(usage.contains("choir review"));
 //! ```
 
+pub mod mcp;
 pub mod surface;

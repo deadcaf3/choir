@@ -49,7 +49,99 @@ pub struct Endpoint {
     pub path: &'static str,
     /// What it is for, one line.
     pub purpose: &'static str,
+    /// MCP tool metadata when this endpoint is safe for agents to call.
+    /// Internal hook endpoints deliberately carry `None`.
+    pub mcp: Option<McpTool>,
 }
+
+/// How an MCP tool's arguments become one HTTP request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpArguments {
+    /// The endpoint takes no arguments or request body.
+    Empty,
+    /// The argument object is forwarded as the JSON request body.
+    Body,
+    /// One argument is URL-encoded as a query parameter.
+    Query {
+        /// Name of the argument and query parameter.
+        parameter: &'static str,
+    },
+}
+
+/// The MCP-specific part of one HTTP endpoint.
+pub struct McpTool {
+    /// Stable programmatic tool name.
+    pub name: &'static str,
+    /// JSON Schema for the tool's argument object.
+    pub input_schema: &'static str,
+    /// How those arguments map onto the endpoint.
+    pub arguments: McpArguments,
+}
+
+const EMPTY_MCP_SCHEMA: &str = r#"{"type":"object","additionalProperties":false}"#;
+
+const SUBMISSION_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "workspace": { "type": "string", "description": "Signature-covered attribution channel" },
+    "payload_hex": { "type": "string", "description": "Hex-encoded ViewOp payload bytes" },
+    "key_id": { "type": "string", "description": "Actor key id" },
+    "signature_hex": { "type": "string", "description": "Hex-encoded submission signature" }
+  },
+  "required": ["workspace", "payload_hex", "key_id", "signature_hex"],
+  "additionalProperties": false
+}"#;
+
+const BATCH_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "ops": {
+      "type": "array",
+      "description": "Signed operations, admitted in array order",
+      "items": {
+        "type": "object",
+        "properties": {
+          "workspace": { "type": "string" },
+          "payload_hex": { "type": "string" },
+          "key_id": { "type": "string" },
+          "signature_hex": { "type": "string" }
+        },
+        "required": ["workspace", "payload_hex", "key_id", "signature_hex"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["ops"],
+  "additionalProperties": false
+}"#;
+
+const WORKSPACE_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "repo": { "type": "string", "description": "Repository name as owner/repo" },
+    "name": { "type": "string", "description": "New workspace name" }
+  },
+  "required": ["repo", "name"],
+  "additionalProperties": false
+}"#;
+
+const LOG_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "from": { "type": "integer", "minimum": 0, "description": "Absolute sequence cursor" }
+  },
+  "required": ["from"],
+  "additionalProperties": false
+}"#;
+
+const REVIEWS_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "reviewer": { "type": "string", "description": "Reviewer channel name" }
+  },
+  "required": ["reviewer"],
+  "additionalProperties": false
+}"#;
 
 /// Every `choir` subcommand, in help order.
 pub const COMMANDS: &[Command] = &[
@@ -110,17 +202,32 @@ pub const ENDPOINTS: &[Endpoint] = &[
         method: "POST",
         path: "/api/submit",
         purpose: "Submit one signed operation (hex payload, hex signature)",
+        mcp: Some(McpTool {
+            name: "choir_submit",
+            input_schema: SUBMISSION_MCP_SCHEMA,
+            arguments: McpArguments::Body,
+        }),
     },
     Endpoint {
         method: "POST",
         path: "/api/submit-batch",
         purpose: "Same, in array order; the primary path for agent workloads \
                   (throughput figures live in PHASE0.md, not here, so they cannot go stale)",
+        mcp: Some(McpTool {
+            name: "choir_submit_batch",
+            input_schema: BATCH_MCP_SCHEMA,
+            arguments: McpArguments::Body,
+        }),
     },
     Endpoint {
         method: "GET",
         path: "/api/view",
         purpose: "The materialized view: workspace heads, refs, reviews, provenance",
+        mcp: Some(McpTool {
+            name: "choir_view",
+            input_schema: EMPTY_MCP_SCHEMA,
+            arguments: McpArguments::Empty,
+        }),
     },
     Endpoint {
         method: "GET",
@@ -131,34 +238,84 @@ pub const ENDPOINTS: &[Endpoint] = &[
                   rather than a page with a hole in it. Each entry carries its hash, parent and \
                   author signature so pages can be chained and verified without trusting the \
                   node; SYNC.md is that procedure",
+        mcp: Some(McpTool {
+            name: "choir_log",
+            input_schema: LOG_MCP_SCHEMA,
+            arguments: McpArguments::Query { parameter: "from" },
+        }),
     },
     Endpoint {
         method: "POST",
         path: "/api/workspace",
         purpose: "Provision a copy-on-write workspace and register it in the view",
+        mcp: Some(McpTool {
+            name: "choir_workspace",
+            input_schema: WORKSPACE_MCP_SCHEMA,
+            arguments: McpArguments::Body,
+        }),
     },
     Endpoint {
         method: "GET",
         path: "/api/reviews?reviewer=X",
         purpose: "One actor's pending review queue",
+        mcp: Some(McpTool {
+            name: "choir_reviews",
+            input_schema: REVIEWS_MCP_SCHEMA,
+            arguments: McpArguments::Query {
+                parameter: "reviewer",
+            },
+        }),
     },
     Endpoint {
         method: "GET",
         path: "/llms.txt",
         purpose: "This surface, as text, for an agent that has never seen choir",
+        mcp: None,
     },
     Endpoint {
         method: "GET",
         path: "/sync.md",
         purpose: "The sync contract, in full: cursor semantics and how to verify a page's \
                   hash chain and author signatures without trusting the node serving them",
+        mcp: None,
     },
     Endpoint {
         method: "POST",
         path: "/api/git-update",
         purpose: "Internal: the pre-receive hook callback",
+        mcp: None,
     },
 ];
+
+/// MCP tools in deterministic endpoint-table order.
+///
+/// The order is deliberately not sorted at runtime: stable tool order
+/// improves client prompt-cache hits, and table order is the one source
+/// shared with the README and discovery documents.
+#[must_use]
+pub fn mcp_tools() -> Vec<serde_json::Value> {
+    ENDPOINTS
+        .iter()
+        .filter_map(|endpoint| {
+            let tool = endpoint.mcp.as_ref()?;
+            let schema: serde_json::Value =
+                serde_json::from_str(tool.input_schema).expect("static MCP schema is valid JSON");
+            Some(serde_json::json!({
+                "name": tool.name,
+                "description": endpoint.purpose,
+                "inputSchema": schema,
+            }))
+        })
+        .collect()
+}
+
+/// Finds the HTTP endpoint backing an MCP tool.
+#[must_use]
+pub fn mcp_endpoint(name: &str) -> Option<&'static Endpoint> {
+    ENDPOINTS
+        .iter()
+        .find(|endpoint| endpoint.mcp.as_ref().is_some_and(|tool| tool.name == name))
+}
 
 /// The `choir` usage block, as `--help` and a bare invocation print it.
 #[must_use]

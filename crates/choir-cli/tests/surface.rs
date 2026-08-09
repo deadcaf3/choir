@@ -58,6 +58,61 @@ fn every_command_appears_in_the_agent_facing_docs() {
 }
 
 #[test]
+fn mcp_tools_cover_public_operations_once_in_table_order() {
+    // Order is a protocol property here: clients inject this array into
+    // prompts, so a reorder loses prompt-cache hits even when the set is
+    // identical. Derive the expected order from the endpoint table, not
+    // from a separately-maintained name list.
+    let tools = surface::mcp_tools();
+    let actual: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    let expected: Vec<&str> = surface::ENDPOINTS
+        .iter()
+        .filter_map(|endpoint| endpoint.mcp.as_ref().map(|tool| tool.name))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "MCP tool order drifted from endpoint order"
+    );
+    assert_eq!(
+        tools,
+        surface::mcp_tools(),
+        "MCP rendering is not deterministic"
+    );
+
+    let unique: std::collections::BTreeSet<_> = actual.iter().copied().collect();
+    assert_eq!(unique.len(), actual.len(), "duplicate MCP tool name");
+    assert_eq!(
+        actual.len(),
+        6,
+        "only the six public platform operations are tools"
+    );
+    for (tool, endpoint) in tools
+        .iter()
+        .zip(surface::ENDPOINTS.iter().filter(|e| e.mcp.is_some()))
+    {
+        assert_eq!(tool["description"], endpoint.purpose);
+        assert_eq!(tool["inputSchema"]["type"], "object");
+        assert!(
+            surface::mcp_endpoint(tool["name"].as_str().expect("name")).is_some(),
+            "listed tool has no HTTP endpoint"
+        );
+    }
+
+    // Discovery documents are already served directly; the hook is
+    // privileged and internal. None belongs in model-controlled tools.
+    for path in ["/llms.txt", "/sync.md", "/api/git-update"] {
+        let endpoint = surface::ENDPOINTS
+            .iter()
+            .find(|endpoint| endpoint.path == path)
+            .expect("documented endpoint");
+        assert!(endpoint.mcp.is_none(), "{path} must not be an MCP tool");
+    }
+}
+
+#[test]
 fn splicing_refuses_a_file_without_markers_rather_than_appending() {
     // Appending would produce two generated regions and a file that
     // regenerates differently every run.
