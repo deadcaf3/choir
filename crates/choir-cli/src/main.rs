@@ -8,7 +8,7 @@
 //! ```text
 //! choir [--auth-file <path>] [--auth-user <name>] <command> ...
 //! choir key <key-file> [name]
-//! choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]
+//! choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
 //! choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
 //! choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
 //! choir submit <api> <key-file> <channel> '<op-json>'
@@ -23,7 +23,7 @@
 //! error body is printed), 2 = usage error.
 
 use choir_identity::ActorKey;
-use choir_view::{ArchiveAuthorization, OpKind, Verdict, ViewOp};
+use choir_view::{ArchiveAuthorization, CreateAuthorization, OpKind, Verdict, ViewOp};
 
 #[derive(Clone, Copy)]
 struct AuthOptions<'a> {
@@ -150,7 +150,8 @@ fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
     if rest.is_empty() {
         return serde_json::json!({ "repo": repo, "name": name });
     }
-    let (mut base, mut owner, mut change, mut idempotency_key) = (None, None, None, None);
+    let (mut base, mut owner, mut key_file, mut change, mut idempotency_key) =
+        (None, None, None, None, None);
     let mut index = 0;
     while index < rest.len() {
         let Some(value) = rest.get(index + 1).copied() else {
@@ -159,6 +160,7 @@ fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
         let slot = match rest[index] {
             "--base" if base.is_none() => &mut base,
             "--owner" if owner.is_none() => &mut owner,
+            "--key-file" if key_file.is_none() => &mut key_file,
             "--change" if change.is_none() => &mut change,
             "--idempotency-key" if idempotency_key.is_none() => &mut idempotency_key,
             _ => usage(),
@@ -166,19 +168,30 @@ fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
         *slot = Some(value);
         index += 2;
     }
-    let (Some(base), Some(owner), Some(change), Some(idempotency_key)) =
-        (base, owner, change, idempotency_key)
+    let (Some(base), Some(owner), Some(key_file), Some(change), Some(idempotency_key)) =
+        (base, owner, key_file, change, idempotency_key)
     else {
         usage();
     };
-    serde_json::json!({
-        "repo": repo,
-        "name": name,
-        "base": base,
-        "owner": owner,
-        "change": change,
-        "idempotency_key": idempotency_key,
-    })
+    let Some(base_revision) = choir_hash::ContentHash::from_git_oid(base) else {
+        eprintln!("<git-oid> must be a 40- or 64-char hex object id");
+        std::process::exit(2);
+    };
+    let authorization = CreateAuthorization::new(
+        change.into(),
+        owner.into(),
+        format!("{repo}/{name}"),
+        base_revision,
+        idempotency_key.into(),
+    );
+    let mut body = signed_payload_body(key_file, owner, &authorization.to_payload());
+    body["repo"] = serde_json::json!(repo);
+    body["name"] = serde_json::json!(name);
+    body["base"] = serde_json::json!(base);
+    body["owner"] = serde_json::json!(owner);
+    body["change"] = serde_json::json!(change);
+    body["idempotency_key"] = serde_json::json!(idempotency_key);
+    body
 }
 
 fn parse_content_hash_hex(value: &str) -> Option<choir_hash::ContentHash> {

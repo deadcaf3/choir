@@ -114,6 +114,8 @@ fn cli_end_to_end() {
         &head,
         "--owner",
         "cli-agent",
+        "--key-file",
+        key_file,
         "--change",
         "change-1",
         "--idempotency-key",

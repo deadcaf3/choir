@@ -26,6 +26,18 @@ Then per harness:
 | Codex | [`codex/AGENTS.snippet.md`](codex/AGENTS.snippet.md) | append to the project's `AGENTS.md` |
 | Cursor | [`cursor/choir.mdc`](cursor/choir.mdc) | copy to `.cursor/rules/choir.mdc` |
 
+## Symphony workspace backend
+
+[`symphony/choir-workspace-backend.sh`](symphony/choir-workspace-backend.sh)
+implements a versioned external backend contract for exact-base create/reuse,
+strict revision checkpoint, and recoverable archive. See the
+[`Symphony integration guide`](symphony/README.md) for the pinned upstream
+contract and the required workspace-manager seam.
+
+Do not wire it through Symphony's current workspace hooks. The reference
+implementation ignores `before_remove` failures and then deletes the directory,
+which cannot preserve Choir's recoverable archive guarantee.
+
 ## Claude Code isolated workspaces
 
 Claude Code can replace its Git worktree implementation with Choir by using

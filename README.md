@@ -166,7 +166,7 @@ usage:
 
 commands:
   choir key <key-file> [name]
-  choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]
+  choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
   choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
   choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
   choir submit <api> <key-file> <channel> '<op-json>'

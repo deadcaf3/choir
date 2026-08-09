@@ -68,7 +68,7 @@ done
 case "${1:-}" in
   workspace)
     printf '{"workspace":"%s/%s","path":"%s","change_id":"%s"}\n' \
-      "$3" "$4" "$CHOIR_TEST_WORKSPACE" "${10}"
+      "$3" "$4" "$CHOIR_TEST_WORKSPACE" "${12}"
     ;;
   workspace-archive)
     printf '{"workspace":"%s/%s","change_id":"%s","already_archived":false}\n' \
@@ -226,6 +226,8 @@ fn create_and_remove_translate_the_claude_hook_contract() {
             "1111111111111111111111111111111111111111".to_string(),
             "--owner".to_string(),
             "operator/claude".to_string(),
+            "--key-file".to_string(),
+            fixture.root.join("agent.key").display().to_string(),
             "--change".to_string(),
             change_id.clone(),
             "--idempotency-key".to_string(),

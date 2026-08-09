@@ -7,7 +7,7 @@ use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_encode;
 use choir_node::{Node, Platform};
 use choir_oplog::MemLog;
-use choir_view::ArchiveAuthorization;
+use choir_view::{ArchiveAuthorization, CreateAuthorization};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
@@ -34,6 +34,33 @@ fn api(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, serde_j
     let text = String::from_utf8_lossy(&out.stdout);
     let (body, code) = text.rsplit_once('\n').expect("status line");
     (code.trim().parse().expect("numeric status"), serde_json::from_str(body).expect("json"))
+}
+
+fn signed_create_body(
+    key: &ActorKey,
+    repo: &str,
+    name: &str,
+    base: &str,
+    owner: &str,
+    change: &str,
+    idempotency_key: &str,
+) -> String {
+    let authorization = CreateAuthorization::new(
+        change.into(),
+        owner.into(),
+        format!("{repo}/{name}"),
+        choir_oplog::ContentHash::from_git_oid(base).unwrap(),
+        idempotency_key.into(),
+    )
+    .to_payload();
+    let signature = key.sign_submission(owner, &authorization);
+    serde_json::json!({
+        "repo": repo, "name": name, "base": base, "owner": owner,
+        "change": change, "idempotency_key": idempotency_key,
+        "channel": owner, "payload_hex": hex_encode(&authorization),
+        "key_id": signature.key_id, "signature_hex": hex_encode(&signature.signature),
+    })
+    .to_string()
 }
 
 #[test]
@@ -135,15 +162,28 @@ fn workspace_provisioning_end_to_end() {
     let head2 = String::from_utf8_lossy(&git(&seed, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();
-    let advanced = serde_json::json!({
-        "repo": "agents/demo",
-        "name": "adapter-1",
-        "base": head,
-        "owner": "operator/agent",
-        "change": "change-1",
-        "idempotency_key": "request-1",
-    })
-    .to_string();
+    let advanced = signed_create_body(
+        &owner_key,
+        "agents/demo",
+        "adapter-1",
+        &head,
+        "operator/agent",
+        "change-1",
+        "request-1",
+    );
+    let forged = signed_create_body(
+        &ActorKey::generate(),
+        "agents/demo",
+        "forged",
+        &head,
+        "operator/agent",
+        "change-forged",
+        "request-forged",
+    );
+    let (code, problem) = api(port, "POST", "/api/workspace", Some(&forged));
+    assert_eq!(code, 409, "{problem}");
+    assert_eq!(problem["code"], "unknown_key", "{problem}");
+    assert!(!root.join(".choir/workspaces/agents/demo/forged").exists());
     let (code, created) = api(port, "POST", "/api/workspace", Some(&advanced));
     assert_eq!(code, 200, "{created}");
     assert_eq!(created["head"], head);
@@ -261,14 +301,76 @@ fn workspace_provisioning_end_to_end() {
     );
     assert_eq!(archived_again["operation"]["already_applied"], true);
 
-    // Identical concurrent lifecycle requests converge on one durable
-    // change and one physical workspace.
-    let idem_body = serde_json::json!({
-        "repo": "agents/demo", "name": "adapter-racer", "base": head2,
-        "owner": "operator/racer", "change": "change-racer",
-        "idempotency_key": "request-racer",
+    // Simulate the original single-generation archive layout. Reopening
+    // below must migrate it into the versioned directory without losing
+    // data before archiving the successor generation.
+    let archive_root = archived_path.parent().unwrap().to_path_buf();
+    let legacy_staging = archive_root
+        .parent()
+        .unwrap()
+        .join("adapter-1-legacy-staging");
+    std::fs::rename(&archived_path, &legacy_staging).unwrap();
+    std::fs::remove_dir(&archive_root).unwrap();
+    std::fs::rename(&legacy_staging, &archive_root).unwrap();
+    assert!(archive_root.join(".git").exists());
+
+    // A later logical generation may reuse Symphony's deterministic
+    // issue workspace name. Each generation gets a distinct recoverable
+    // archive path, so the second terminal cleanup cannot collide with
+    // the first one's retained dirty state.
+    let reopened_create = signed_create_body(
+        &owner_key,
+        "agents/demo",
+        "adapter-1",
+        &head2,
+        "operator/agent",
+        "change-1-reopened",
+        "request-1-reopened",
+    );
+    let (code, reopened) = api(port, "POST", "/api/workspace", Some(&reopened_create));
+    assert_eq!(code, 200, "{reopened}");
+    assert_eq!(reopened["created"], true);
+    let reopened_path = std::path::PathBuf::from(reopened["path"].as_str().unwrap());
+    assert!(reopened_path.exists());
+    let reopened_authorization = ArchiveAuthorization::new(
+        "change-1-reopened".into(),
+        "agents/demo/adapter-1".into(),
+        choir_oplog::ContentHash::from_git_oid(&head2).unwrap(),
+    )
+    .to_payload();
+    let reopened_signature = owner_key.sign_submission("operator/agent", &reopened_authorization);
+    let reopened_archive = serde_json::json!({
+        "repo": "agents/demo", "name": "adapter-1", "change": "change-1-reopened",
+        "idempotency_key": "request-1-reopened", "channel": "operator/agent",
+        "payload_hex": hex_encode(&reopened_authorization),
+        "key_id": reopened_signature.key_id,
+        "signature_hex": hex_encode(&reopened_signature.signature),
     })
     .to_string();
+    let (code, reopened_archived) = api(
+        port,
+        "POST",
+        "/api/workspace/archive",
+        Some(&reopened_archive),
+    );
+    assert_eq!(code, 200, "{reopened_archived}");
+    let reopened_archived_path =
+        std::path::PathBuf::from(reopened_archived["archived_path"].as_str().unwrap());
+    assert_ne!(reopened_archived_path, archived_path);
+    assert!(archived_path.exists());
+    assert!(reopened_archived_path.exists());
+
+    // Identical concurrent lifecycle requests converge on one durable
+    // change and one physical workspace.
+    let idem_body = signed_create_body(
+        &owner_key,
+        "agents/demo",
+        "adapter-racer",
+        &head2,
+        "operator/racer",
+        "change-racer",
+        "request-racer",
+    );
     let lifecycle_handles: Vec<_> = (0..8)
         .map(|_| {
             let body = idem_body.clone();

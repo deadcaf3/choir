@@ -27,7 +27,7 @@ use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
 use choir_view::{
-    reviewer_operator, ArchiveAuthorization, ChangeState, OpKind, View, ViewOp,
+    reviewer_operator, ArchiveAuthorization, ChangeState, CreateAuthorization, OpKind, View, ViewOp,
 };
 
 use crate::reject::{Code, Rejection};
@@ -548,6 +548,41 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode());
         }
+        if let OpKind::CreateChange {
+            id,
+            owner,
+            workspace,
+            base_revision,
+            idempotency_key,
+            owner_sig: Some(owner_sig),
+        } = &op.kind
+        {
+            let authorization = CreateAuthorization::new(
+                id.clone(),
+                owner.clone(),
+                workspace.clone(),
+                base_revision.clone(),
+                idempotency_key.clone(),
+            )
+            .to_payload();
+            let mut verified_owner =
+                self.registry
+                    .verify_submission(owner, &authorization, owner_sig);
+            if verified_owner.is_err() && self.reload_keys() {
+                verified_owner = self
+                    .registry
+                    .verify_submission(owner, &authorization, owner_sig);
+            }
+            let owner_actor = verified_owner.map_err(|error| {
+                Rejection::new(
+                    Code::UnknownKey,
+                    format!("create owner signature check failed: {error:?}"),
+                    "register the owner key, then retry the same signed create authorization",
+                )
+                .encode()
+            })?;
+            self.channel_is_owned(&owner_actor, owner)?;
+        }
         if let OpKind::CheckpointChange { id, .. } = &op.kind {
             let owner = self
                 .view
@@ -789,6 +824,23 @@ pub struct Platform {
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
+}
+
+/// Exact owner-authorized binding the node records after materializing a
+/// physical workspace.
+pub struct AuthorizedChangeCreate<'a> {
+    /// Stable logical contribution id.
+    pub id: &'a str,
+    /// Bound signing channel.
+    pub owner: &'a str,
+    /// Namespaced physical workspace id.
+    pub workspace: &'a str,
+    /// Full Git object id selected as the immutable base.
+    pub base_hex: &'a str,
+    /// Owner-scoped retry identity.
+    pub idempotency_key: &'a str,
+    /// Owner proof over the matching [`CreateAuthorization`].
+    pub owner_sig: Witness,
 }
 
 impl Platform {
@@ -1190,13 +1242,17 @@ impl Platform {
     /// an exact Git revision with a node-signed operation.
     pub fn create_change(
         &self,
-        id: &str,
-        owner: &str,
-        workspace: &str,
-        base_hex: &str,
-        idempotency_key: &str,
+        request: AuthorizedChangeCreate<'_>,
         attribution: &str,
     ) -> Result<choir_sequencer::Accepted, String> {
+        let AuthorizedChangeCreate {
+            id,
+            owner,
+            workspace,
+            base_hex,
+            idempotency_key,
+            owner_sig,
+        } = request;
         let base_revision = ContentHash::from_git_oid(base_hex).ok_or("bad base revision")?;
         let payload = ViewOp::new(OpKind::CreateChange {
             id: id.to_string(),
@@ -1204,39 +1260,54 @@ impl Platform {
             workspace: workspace.to_string(),
             base_revision,
             idempotency_key: idempotency_key.to_string(),
+            owner_sig: Some(owner_sig),
         })
         .to_payload();
         let sig = self.node_key.sign_submission(attribution, &payload);
-        self.handle.try_submit(attribution, payload, Some(sig))
+        match self
+            .handle
+            .try_submit(attribution, payload.clone(), Some(sig))
+        {
+            Ok(accepted) => Ok(accepted),
+            Err(reason) => match self
+                .entries
+                .lock()
+                .expect("entries lock")
+                .already_applied(attribution, &payload)
+            {
+                Some((seq, hash)) => Ok(choir_sequencer::Accepted {
+                    seq,
+                    hash,
+                    decision_latency: Duration::ZERO,
+                }),
+                None => Err(reason),
+            },
+        }
     }
 
-    /// Original operation identity for a recently landed identical
-    /// change-create request. The index is rebuilt from the durable log
-    /// window on restart, so ordinary response-loss retries recover the
-    /// same receipt without appending another operation.
-    #[must_use]
-    pub fn create_change_receipt(
+    /// Decodes the exact owner-signed create binding before any physical
+    /// workspace is copied. Sequencer admission verifies the embedded
+    /// signature before recording the node-authored change operation.
+    pub fn decode_create_change_request(
         &self,
-        id: &str,
-        owner: &str,
-        workspace: &str,
-        base_hex: &str,
-        idempotency_key: &str,
-        attribution: &str,
-    ) -> Option<(u64, ContentHash)> {
-        let base_revision = ContentHash::from_git_oid(base_hex)?;
-        let payload = ViewOp::new(OpKind::CreateChange {
-            id: id.to_string(),
-            owner: owner.to_string(),
-            workspace: workspace.to_string(),
-            base_revision,
-            idempotency_key: idempotency_key.to_string(),
-        })
-        .to_payload();
-        self.entries
-            .lock()
-            .expect("entries lock")
-            .already_applied(attribution, &payload)
+        request: &serde_json::Value,
+        expected_id: &str,
+        expected_owner: &str,
+        expected_workspace: &str,
+        expected_revision: &ContentHash,
+        expected_idempotency_key: &str,
+    ) -> Result<Witness, String> {
+        let sub = decode_create_submission(
+            request,
+            expected_id,
+            expected_owner,
+            expected_workspace,
+            expected_revision,
+            expected_idempotency_key,
+        )?;
+        Ok(sub
+            .author_sig
+            .expect("decode_submission always returns a signature"))
     }
 
     /// Submits a node-authored [`OpKind::ArchiveChange`] carrying the
@@ -1343,6 +1414,23 @@ impl Platform {
             .iter()
             .find(|(_, change)| change.owner == owner && change.idempotency_key == key)
             .map(|(id, change)| (id.clone(), change.clone()))
+    }
+
+    /// Inactive change generations that previously used `workspace`.
+    /// This supports migration of the original unversioned archive path
+    /// when a later generation reuses a deterministic workspace name.
+    #[must_use]
+    pub fn archived_change_ids_for_workspace(&self, workspace: &str) -> Vec<String> {
+        self.view
+            .lock()
+            .expect("view lock")
+            .changes
+            .iter()
+            .filter(|(_, change)| {
+                change.workspace_id == workspace && change.active_workspace.is_none()
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Current exact head of an active workspace.
@@ -1881,6 +1969,47 @@ struct DecodedSubmission {
     /// Review id when this op opens a review naming no reviewers, so the
     /// node knows to draw for it once the op is admitted.
     unassigned_review: Option<String>,
+}
+
+fn decode_create_submission(
+    request: &serde_json::Value,
+    expected_id: &str,
+    expected_owner: &str,
+    expected_workspace: &str,
+    expected_revision: &ContentHash,
+    expected_idempotency_key: &str,
+) -> Result<DecodedSubmission, String> {
+    let sub = decode_submission(request).map_err(|reason| {
+        Rejection::new(
+            Code::MalformedRequest,
+            reason,
+            "sign the exact CreateAuthorization payload with the requested owner key and include channel, payload_hex, key_id and signature_hex",
+        )
+        .encode()
+    })?;
+    let authorization = CreateAuthorization::from_payload(&sub.payload)
+        .map_err(|error| crate::reject::from_view_error(&error).encode())?;
+    match authorization {
+        CreateAuthorization {
+            id,
+            owner,
+            workspace,
+            base_revision,
+            idempotency_key,
+            ..
+        } if id == expected_id
+            && owner == expected_owner
+            && sub.channel == expected_owner
+            && workspace == expected_workspace
+            && &base_revision == expected_revision
+            && idempotency_key == expected_idempotency_key => Ok(sub),
+        _ => Err(Rejection::new(
+            Code::WorkspaceState,
+            "signed create payload does not match the requested owner, change, workspace, base and idempotency key",
+            "rebuild CreateAuthorization from the exact request binding, sign it on the owner channel and retry",
+        )
+        .encode()),
+    }
 }
 
 fn decode_archive_submission(

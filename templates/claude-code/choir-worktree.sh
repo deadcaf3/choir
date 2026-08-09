@@ -110,7 +110,7 @@ if [[ "$mode" == "create" ]]; then
 
   response=""
   if ! response=$("$choir_bin" "${auth_args[@]}" workspace "$api" "$repo" "$workspace_name" \
-    --base "$base" --owner "$owner" --change "$change_id" \
+    --base "$base" --owner "$owner" --key-file "$key_file" --change "$change_id" \
     --idempotency-key "$idempotency_key" 2>/dev/null); then
     choir_error "$response"
   fi

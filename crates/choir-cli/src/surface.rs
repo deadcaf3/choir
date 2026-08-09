@@ -136,9 +136,28 @@ const WORKSPACE_MCP_SCHEMA: &str = r#"{
     "base": { "type": "string", "description": "Exact full Git commit oid; advanced requests provide this with owner, change and idempotency_key" },
     "owner": { "type": "string", "description": "Registered signing channel allowed to checkpoint and archive the stable change" },
     "change": { "type": "string", "description": "Stable logical change id" },
-    "idempotency_key": { "type": "string", "description": "Owner-scoped create retry identity" }
+    "idempotency_key": { "type": "string", "description": "Owner-scoped create retry identity" },
+    "channel": { "type": "string", "description": "Owner and signature-covered attribution channel" },
+    "payload_hex": { "type": "string", "description": "Hex-encoded CreateAuthorization for the exact binding" },
+    "key_id": { "type": "string", "description": "Owner key id" },
+    "signature_hex": { "type": "string", "description": "Owner signature over the create authorization" }
   },
   "required": ["repo", "name"],
+  "oneOf": [
+    {
+      "not": {
+        "anyOf": [
+          { "required": ["base"] }, { "required": ["owner"] },
+          { "required": ["change"] }, { "required": ["idempotency_key"] },
+          { "required": ["channel"] }, { "required": ["payload_hex"] },
+          { "required": ["key_id"] }, { "required": ["signature_hex"] }
+        ]
+      }
+    },
+    {
+      "required": ["base", "owner", "change", "idempotency_key", "channel", "payload_hex", "key_id", "signature_hex"]
+    }
+  ],
   "additionalProperties": false
 }"#;
 
@@ -187,8 +206,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "workspace",
-        args: "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]",
-        summary: "provision a CoW workspace; advanced flags bind an exact base and stable change",
+        args: "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]",
+        summary: "provision a CoW workspace; advanced flags owner-sign an exact base and stable change",
         agent_facing: true,
     },
     Command {

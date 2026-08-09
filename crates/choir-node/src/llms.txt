@@ -19,7 +19,7 @@ POST /api/git-update - Internal: the pre-receive hook callback
 ## CLI
 For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form
-choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>] - provision a CoW workspace; advanced flags bind an exact base and stable change
+choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] - provision a CoW workspace; advanced flags owner-sign an exact base and stable change
 choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid> - publish an immutable change revision after committing and pushing its Git object
 choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key> - owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 choir submit <api> <key-file> <channel> '<op-json>' - sign and submit one raw operation

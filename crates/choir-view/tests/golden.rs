@@ -47,7 +47,7 @@ use choir_hash::ContentHash;
 use choir_oplog::{signing_hash, OpEntry, Witness, FORMAT_VERSION as OPLOG_FORMAT_VERSION};
 use choir_store::{ChunkerParams, Manifest, FORMAT_VERSION as STORE_FORMAT_VERSION};
 use choir_view::{
-    ArchiveAuthorization, Commit, OpKind, TreeEntry, Verdict, ViewOp,
+    ArchiveAuthorization, Commit, CreateAuthorization, OpKind, TreeEntry, Verdict, ViewOp,
     FORMAT_VERSION as VIEW_FORMAT_VERSION,
 };
 
@@ -279,6 +279,7 @@ fn view_op_variants_are_frozen() {
             workspace: "repo/agent".into(),
             base_revision: h(b"commit one"),
             idempotency_key: "request-1".into(),
+            owner_sig: None,
         }),
         r#"{"format_version":1,"kind":{"CreateChange":{"id":"change-1","owner":"operator/agent","workspace":"repo/agent","base_revision":{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]},"idempotency_key":"request-1"}}}"#,
         "1e-a64d00f040ad8ac87e8d120f57b6fc186a576bf1c9d5a92df8379514c428d7d1",
@@ -322,6 +323,42 @@ fn archive_authorization_is_frozen() {
         ),
         r#"{"format_version":1,"id":"change-1","workspace":"repo/agent","prev_revision":{"codec":30,"digest":[85,132,118,97,239,147,219,56,81,251,10,83,89,23,246,20,25,60,73,118,206,203,90,41,65,69,251,150,168,140,62,8]}}"#,
         "1e-d8ea0a752dd478142674409c07b78547d8833ee57a31671088cd288c578448a7",
+    );
+}
+
+#[test]
+fn create_authorization_is_frozen() {
+    assert_golden(
+        "CreateAuthorization",
+        &CreateAuthorization::new(
+            "change-1".into(),
+            "operator/agent".into(),
+            "repo/agent".into(),
+            h(b"commit one"),
+            "request-1".into(),
+        ),
+        r#"{"format_version":1,"id":"change-1","owner":"operator/agent","workspace":"repo/agent","base_revision":{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]},"idempotency_key":"request-1"}"#,
+        "1e-d7555586b9295c393ecb2118db7a36943de6a789ebd056c6867d656020749a84",
+    );
+}
+
+#[test]
+fn owner_authorized_create_change_is_frozen() {
+    assert_golden(
+        "owner-authorized CreateChange",
+        &ViewOp::new(OpKind::CreateChange {
+            id: "change-1".into(),
+            owner: "operator/agent".into(),
+            workspace: "repo/agent".into(),
+            base_revision: h(b"commit one"),
+            idempotency_key: "request-1".into(),
+            owner_sig: Some(Witness {
+                key_id: "owner-key".into(),
+                signature: vec![4, 5, 6],
+            }),
+        }),
+        r#"{"format_version":1,"kind":{"CreateChange":{"id":"change-1","owner":"operator/agent","workspace":"repo/agent","base_revision":{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]},"idempotency_key":"request-1","owner_sig":{"key_id":"owner-key","signature":[4,5,6]}}}}"#,
+        "1e-600348c35115eb72878f3c005c1732e14ffdc576fd8b9e5b4f90266724e5ca7f",
     );
 }
 

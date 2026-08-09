@@ -9,10 +9,11 @@
 
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_encode;
+use choir_node::platform::AuthorizedChangeCreate;
 use choir_node::reject::{Code, Rejection};
 use choir_node::{Node, Platform};
 use choir_oplog::MemLog;
-use choir_view::{ArchiveAuthorization, OpKind, ViewOp};
+use choir_view::{ArchiveAuthorization, CreateAuthorization, OpKind, ViewOp};
 
 fn curl(args: &[&str]) -> (u16, serde_json::Value) {
     let out = std::process::Command::new("curl")
@@ -52,13 +53,25 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
 
     let platform =
         Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap();
+    let create_authorization = CreateAuthorization::new(
+        "change-1".into(),
+        "alice".into(),
+        "demo/alice".into(),
+        choir_oplog::ContentHash::from_git_oid("1111111111111111111111111111111111111111").unwrap(),
+        "request-1".into(),
+    )
+    .to_payload();
+    let create_signature = author.sign_submission("alice", &create_authorization);
     platform
         .create_change(
-            "change-1",
-            "alice",
-            "demo/alice",
-            "1111111111111111111111111111111111111111",
-            "request-1",
+            AuthorizedChangeCreate {
+                id: "change-1",
+                owner: "alice",
+                workspace: "demo/alice",
+                base_hex: "1111111111111111111111111111111111111111",
+                idempotency_key: "request-1",
+                owner_sig: create_signature,
+            },
             "git/test",
         )
         .unwrap();
@@ -95,6 +108,7 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
         )
         .unwrap(),
         idempotency_key: "request-2".into(),
+        owner_sig: None,
     });
     let (code, direct) = post(&create_directly);
     assert_eq!(code, 400, "{direct}");

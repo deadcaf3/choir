@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use choir_oplog::ContentHash;
 
-use crate::platform::Platform;
+use crate::platform::{AuthorizedChangeCreate, Platform};
 use crate::reject::{Code, Rejection};
 
 /// Path segment allowed in repo/workspace names: no traversal, no
@@ -175,6 +175,30 @@ pub fn create_workspace(
 
     let ws_dir = root.join(".choir").join("workspaces").join(repo).join(name);
     let workspace = format!("{repo}/{name}");
+    let owner_sig = if advanced {
+        let base_revision = ContentHash::from_git_oid(&head).expect("verified git oid");
+        match platform.decode_create_change_request(
+            &req,
+            field("change"),
+            field("owner"),
+            &workspace,
+            &base_revision,
+            field("idempotency_key"),
+        ) {
+            Ok(owner_sig) => Some(owner_sig),
+            Err(reason) => {
+                let rejection = Rejection::decode(&reason);
+                let status = if rejection.code == Code::WorkspaceState.as_str() {
+                    409
+                } else {
+                    400
+                };
+                return (status, rejection.body());
+            }
+        }
+    } else {
+        None
+    };
     if ws_dir.exists() {
         if advanced {
             return reuse_or_conflict(
@@ -186,6 +210,7 @@ pub fn create_workspace(
                     owner: field("owner"),
                     change_id: field("change"),
                     idempotency_key: field("idempotency_key"),
+                    owner_sig: owner_sig.expect("advanced request was verified"),
                     attribution: &attribution,
                 },
             );
@@ -209,11 +234,14 @@ pub fn create_workspace(
             let registration = if advanced {
                 platform
                     .create_change(
-                        field("change"),
-                        field("owner"),
-                        &workspace,
-                        &head,
-                        field("idempotency_key"),
+                        AuthorizedChangeCreate {
+                            id: field("change"),
+                            owner: field("owner"),
+                            workspace: &workspace,
+                            base_hex: &head,
+                            idempotency_key: field("idempotency_key"),
+                            owner_sig: owner_sig.expect("advanced request was verified"),
+                        },
                         &attribution,
                     )
                     .map(Some)
@@ -333,9 +361,24 @@ pub fn archive_workspace(
     }
 
     let live = root.join(".choir").join("workspaces").join(repo).join(name);
-    let archived = root.join(".choir").join("archive").join("workspaces").join(repo).join(name);
+    let archive_root = root
+        .join(".choir")
+        .join("archive")
+        .join("workspaces")
+        .join(repo)
+        .join(name);
+    let archived = archive_root.join(archive_generation(field("change")));
     if change.active_workspace.is_none() {
-        if archived.exists() && !live.exists() {
+        let existing_archive = if archived.exists() {
+            Some(archived.as_path())
+        } else if archive_root.join(".git").exists() {
+            // Compatibility with the first lifecycle slice, which put
+            // one archived checkout directly at `<repo>/<name>`.
+            Some(archive_root.as_path())
+        } else {
+            None
+        };
+        if let Some(existing_archive) = existing_archive.filter(|_| !live.exists()) {
             let operation = platform.archive_change_receipt(
                 &req,
                 field("change"),
@@ -346,7 +389,7 @@ pub fn archive_workspace(
             let mut response = serde_json::json!({
                 "workspace": workspace,
                 "change_id": field("change"),
-                "archived_path": archived.display().to_string(),
+                "archived_path": existing_archive.display().to_string(),
                 "already_archived": true,
             });
             if let Some((seq, hash)) = operation {
@@ -380,6 +423,10 @@ pub fn archive_workspace(
         return (status, rejection.body());
     }
 
+    if let Err(error) = migrate_legacy_archive(&archive_root, platform, &workspace, field("change"))
+    {
+        return (500, serde_json::json!({ "error": error }).to_string());
+    }
     let recovering_rename = archived.exists() && !live.exists();
     if !recovering_rename {
         if !live.exists() || archived.exists() {
@@ -387,7 +434,7 @@ pub fn archive_workspace(
                 "the active workspace filesystem state does not match the durable view",
             );
         }
-        if let Err(e) = std::fs::create_dir_all(archived.parent().expect("archive has parent")) {
+        if let Err(e) = std::fs::create_dir_all(&archive_root) {
             return (500, serde_json::json!({ "error": format!("create archive dir: {e}") }).to_string());
         }
         if let Err(e) = std::fs::rename(&live, &archived) {
@@ -428,11 +475,60 @@ pub fn archive_workspace(
     }
 }
 
+fn archive_generation(change_id: &str) -> String {
+    ContentHash::blake3(change_id.as_bytes()).to_hex()
+}
+
+fn migrate_legacy_archive(
+    archive_root: &Path,
+    platform: &Platform,
+    workspace: &str,
+    current_change: &str,
+) -> Result<(), String> {
+    if !archive_root.join(".git").exists() {
+        return Ok(());
+    }
+    let prior: Vec<String> = platform
+        .archived_change_ids_for_workspace(workspace)
+        .into_iter()
+        .filter(|id| id != current_change)
+        .collect();
+    let [prior_change] = prior.as_slice() else {
+        return Err(
+            "legacy archive cannot be assigned to exactly one prior change generation".into(),
+        );
+    };
+    let parent = archive_root.parent().expect("archive root has parent");
+    let name = archive_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("validated workspace name");
+    let generation = archive_generation(prior_change);
+    let temporary = parent.join(format!(".{name}.migrating-{generation}"));
+    if temporary.exists() {
+        return Err("legacy archive migration temporary path already exists".into());
+    }
+    std::fs::rename(archive_root, &temporary)
+        .map_err(|error| format!("stage legacy archive migration: {error}"))?;
+    if let Err(error) = std::fs::create_dir_all(archive_root) {
+        std::fs::rename(&temporary, archive_root).ok();
+        return Err(format!("create versioned archive directory: {error}"));
+    }
+    let destination = archive_root.join(generation);
+    if let Err(error) = std::fs::rename(&temporary, &destination) {
+        std::fs::remove_dir(archive_root).ok();
+        std::fs::rename(&temporary, archive_root).ok();
+        return Err(format!("finish legacy archive migration: {error}"));
+    }
+    Ok(())
+}
+
 struct AdvancedBinding<'a> {
     base_hex: &'a str,
     owner: &'a str,
     change_id: &'a str,
     idempotency_key: &'a str,
+    owner_sig: choir_oplog::Witness,
     attribution: &'a str,
 }
 
@@ -447,6 +543,7 @@ fn reuse_or_conflict(
         owner,
         change_id,
         idempotency_key,
+        owner_sig,
         attribution,
     } = binding;
     let Some(change) = platform.change_state(change_id) else {
@@ -488,14 +585,22 @@ fn reuse_or_conflict(
             "created": false,
             "reused": true,
         });
-    if let Some((seq, hash)) = platform.create_change_receipt(
-        change_id,
-        owner,
-        workspace,
-        base_hex,
-        idempotency_key,
+    let accepted = match platform.create_change(
+        AuthorizedChangeCreate {
+            id: change_id,
+            owner,
+            workspace,
+            base_hex,
+            idempotency_key,
+            owner_sig,
+        },
         attribution,
     ) {
+        Ok(accepted) => accepted,
+        Err(reason) => return (409, Rejection::decode(&reason).body()),
+    };
+    {
+        let (seq, hash) = (accepted.seq, accepted.hash);
         response["operation"] = serde_json::json!({
             "seq": seq,
             "hash": hash.to_hex(),

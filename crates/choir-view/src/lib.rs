@@ -80,6 +80,59 @@ impl ViewOp {
 }
 
 /// Owner-signed authorization carried into a node-authored physical
+/// workspace creation operation.
+///
+/// This is separate from [`ViewOp`]: submitting the authorization to the
+/// raw operation endpoint cannot create a directory or a change. The
+/// workspace endpoint first verifies and materializes the exact binding,
+/// then the node wraps it in [`OpKind::CreateChange`] under its own key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAuthorization {
+    /// Wire-format version; see [`FORMAT_VERSION`].
+    pub format_version: u16,
+    /// Stable logical contribution id.
+    pub id: String,
+    /// Owner channel that must match the signature attribution.
+    pub owner: String,
+    /// Workspace being created.
+    pub workspace: String,
+    /// Exact immutable starting revision.
+    pub base_revision: ContentHash,
+    /// Owner-scoped retry identity.
+    pub idempotency_key: String,
+}
+
+impl CreateAuthorization {
+    /// Creates an authorization at the current wire-format version.
+    pub fn new(
+        id: String,
+        owner: String,
+        workspace: String,
+        base_revision: ContentHash,
+        idempotency_key: String,
+    ) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            id,
+            owner,
+            workspace,
+            base_revision,
+            idempotency_key,
+        }
+    }
+
+    /// Canonical bytes covered by the owner's submission signature.
+    pub fn to_payload(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("CreateAuthorization is always serializable")
+    }
+
+    /// Decodes signed authorization bytes.
+    pub fn from_payload(payload: &[u8]) -> Result<Self, ViewError> {
+        serde_json::from_slice(payload).map_err(|error| ViewError::Decode(error.to_string()))
+    }
+}
+
+/// Owner-signed authorization carried into a node-authored physical
 /// workspace archive operation.
 ///
 /// This is separate from [`ViewOp`]: submitting the authorization to the
@@ -308,6 +361,11 @@ pub enum OpKind {
         base_revision: ContentHash,
         /// Retry identity, unique within `owner`.
         idempotency_key: String,
+        /// Owner signature over the matching [`CreateAuthorization`].
+        /// Absent only on operations accepted before creation
+        /// authorization was introduced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner_sig: Option<Witness>,
     },
     /// Publish an immutable revision of an existing change and advance
     /// its bound workspace under compare-and-set.
@@ -750,13 +808,12 @@ impl View {
                         "workspace {workspace} already exists"
                     )));
                 }
-                if let Some((existing, _)) = self
-                    .changes
-                    .iter()
-                    .find(|(_, change)| change.workspace_id == *workspace)
-                {
+                if let Some((existing, _)) = self.changes.iter().find(|(_, change)| {
+                    change.workspace_id == *workspace
+                        && change.active_workspace.as_deref() == Some(workspace)
+                }) {
                     return Err(ViewError::Change(format!(
-                        "workspace {workspace} already belongs to change {existing}"
+                        "workspace {workspace} is active on change {existing}"
                     )));
                 }
                 if let Some((existing, _)) = self.changes.iter().find(|(_, change)| {
@@ -950,6 +1007,7 @@ impl View {
                 workspace,
                 base_revision,
                 idempotency_key,
+                ..
             } => {
                 self.workspaces
                     .insert(workspace.clone(), base_revision.clone());
