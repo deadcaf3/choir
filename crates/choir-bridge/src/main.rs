@@ -22,7 +22,7 @@
 use choir_bridge::github;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use choir_hash::ContentHash;
 use choir_identity::ActorKey;
@@ -231,6 +231,91 @@ const CI_POLL: std::time::Duration = std::time::Duration::from_secs(15);
 /// branch-conditional workflows the train branch never ran).
 const POST_LAND_WATCH: std::time::Duration = std::time::Duration::from_secs(180);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DifferentialConfig {
+    runner: PathBuf,
+    command: PathBuf,
+    state: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueArgs {
+    positional: Vec<String>,
+    land: bool,
+    watch: Option<u64>,
+    differential: Option<DifferentialConfig>,
+}
+
+fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
+    let mut land = false;
+    let mut watch = None;
+    let mut runner = None;
+    let mut command = None;
+    let mut state = None;
+    let mut positional = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let next_path = |value: Option<&String>, flag: &str| {
+            value
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| format!("{flag} needs a path"))
+        };
+        match arg.as_str() {
+            "--land" => land = true,
+            "--watch" => {
+                watch = Some(
+                    it.next()
+                        .ok_or("--watch needs an interval in seconds")?
+                        .parse()
+                        .map_err(|_| "--watch needs an interval in seconds")?,
+                );
+            }
+            "--differential-runner" => {
+                if runner.is_some() {
+                    return Err("--differential-runner may be supplied only once".to_string());
+                }
+                runner = Some(next_path(it.next(), "--differential-runner")?);
+            }
+            "--differential-command" => {
+                if command.is_some() {
+                    return Err("--differential-command may be supplied only once".to_string());
+                }
+                command = Some(next_path(it.next(), "--differential-command")?);
+            }
+            "--differential-state" => {
+                if state.is_some() {
+                    return Err("--differential-state may be supplied only once".to_string());
+                }
+                state = Some(next_path(it.next(), "--differential-state")?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unknown queue option {value}"));
+            }
+            value => positional.push(value.to_string()),
+        }
+    }
+    let differential = match (runner, command, state) {
+        (None, None, None) => None,
+        (Some(runner), Some(command), Some(state)) => Some(DifferentialConfig {
+            runner,
+            command,
+            state,
+        }),
+        _ => {
+            return Err(
+                "differential mode needs runner, command, and state paths together".to_string(),
+            );
+        }
+    };
+    Ok(QueueArgs {
+        positional,
+        land,
+        watch,
+        differential,
+    })
+}
+
 /// One queue-as-bot round (D21 queue stage, verdict-only): fetch the
 /// open PRs, build the speculative train locally, publish it as the
 /// `choir/train` branch so the forge's CI runs on it, wait for the
@@ -253,6 +338,7 @@ fn queue_round(
     repo: &str,
     workdir: &Path,
     land: bool,
+    differential: Option<&DifferentialConfig>,
 ) -> Result<(), String> {
     let token = github::app_jwt(app_id, pem).and_then(|jwt| github::installation_token(&jwt))?;
     let base_branch = github::default_branch(&token, repo)?;
@@ -282,6 +368,29 @@ fn queue_round(
     let heads: Vec<(u64, String)> =
         prs.iter().map(|p| (p.number, format!("refs/choirq/pr/{}", p.number))).collect();
     let train = choir_bridge::queue::build_train(workdir, &base, &heads)?;
+    if let Some(config) = differential {
+        for (entry_id, result) in choir_bridge::queue::run_train_differentials(
+                workdir,
+                &train,
+                &config.runner,
+                &config.command,
+                &config.state,
+            ) {
+            match result {
+                Ok(outcome) => println!(
+                    "queue: PR #{}: advisory differential {:?} (observation {}, pending {})",
+                    entry_id,
+                    outcome.verdict,
+                    outcome.observation_id,
+                    outcome.pending_interactions,
+                ),
+                Err(error) => eprintln!(
+                    "queue: PR #{}: advisory differential unavailable: {error}",
+                    entry_id
+                ),
+            }
+        }
+    }
     if train.tip == base {
         println!("queue: no PR merged cleanly; train == base, skipping CI");
     } else {
@@ -461,43 +570,40 @@ fn main() {
     // auto-reverts if post-land CI goes red); --watch repeats rounds
     // forever, sleeping <secs> between them.
     if args.first().map(String::as_str) == Some("queue") {
-        let mut land = false;
-        let mut watch: Option<u64> = None;
-        let mut rest: Vec<&String> = Vec::new();
-        let mut it = args[1..].iter();
-        while let Some(a) = it.next() {
-            match a.as_str() {
-                "--land" => land = true,
-                "--watch" => {
-                    watch = Some(it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-                        eprintln!("--watch needs an interval in seconds");
-                        std::process::exit(2);
-                    }));
-                }
-                _ => rest.push(a),
-            }
-        }
-        let [app_id, pem, repo, workdir] = match rest.as_slice() {
-            [a, b, c, d] => [*a, *b, *c, *d],
+        let queue_args = parse_queue_args(&args[1..]).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
+        let [app_id, pem, repo, workdir] = match queue_args.positional.as_slice() {
+            [a, b, c, d] => [a, b, c, d],
             _ => {
                 eprintln!(
-                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]"
+                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>] [--differential-runner <path> --differential-command <path> --differential-state <dir>]"
                 );
                 std::process::exit(2);
             }
         };
         loop {
-            match queue_round(app_id, Path::new(pem), repo, Path::new(workdir), land) {
+            match queue_round(
+                app_id,
+                Path::new(pem),
+                repo,
+                Path::new(workdir),
+                queue_args.land,
+                queue_args.differential.as_ref(),
+            ) {
                 Ok(()) => {}
                 // In watch mode a failed round (network, rate limit) is
                 // logged and retried; one-shot mode exits nonzero.
-                Err(e) if watch.is_some() => eprintln!("queue round failed (will retry): {e}"),
+                Err(e) if queue_args.watch.is_some() => {
+                    eprintln!("queue round failed (will retry): {e}")
+                }
                 Err(e) => {
                     eprintln!("queue round failed: {e}");
                     std::process::exit(1);
                 }
             }
-            match watch {
+            match queue_args.watch {
                 Some(secs) => std::thread::sleep(std::time::Duration::from_secs(secs)),
                 None => break,
             }
@@ -553,5 +659,32 @@ mod tests {
 
         assert_eq!(body["channel"], "operator/bridge");
         assert_eq!(body["workspace"], body["channel"]);
+    }
+
+    #[test]
+    fn differential_queue_mode_requires_all_explicit_paths() {
+        let base = ["1", "key", "owner/repo", "work"].map(str::to_string);
+        let mut complete = base.to_vec();
+        complete.extend(
+            [
+                "--differential-runner",
+                "runner",
+                "--differential-command",
+                "command.json",
+                "--differential-state",
+                "state",
+            ]
+            .map(str::to_string),
+        );
+        let parsed = parse_queue_args(&complete).expect("complete differential options");
+        assert_eq!(parsed.positional, base);
+        assert_eq!(parsed.differential.unwrap().runner, PathBuf::from("runner"));
+
+        let mut incomplete = base.to_vec();
+        incomplete.extend(
+            ["--differential-runner", "runner", "--differential-state", "state"]
+                .map(str::to_string),
+        );
+        assert!(parse_queue_args(&incomplete).is_err());
     }
 }

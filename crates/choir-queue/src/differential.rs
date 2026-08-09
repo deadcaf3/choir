@@ -21,6 +21,35 @@ pub struct Observation {
     pub exit_code: Option<i32>,
 }
 
+impl Observation {
+    /// Versioned-report representation used by the calibration ledger.
+    #[must_use]
+    pub fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "success": self.success,
+            "exit_code": self.exit_code,
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let success = value["success"]
+            .as_bool()
+            .ok_or("differential observation needs boolean success")?;
+        let exit_code = match &value["exit_code"] {
+            serde_json::Value::Null => None,
+            value => Some(
+                i32::try_from(
+                    value
+                        .as_i64()
+                        .ok_or("differential observation exit_code must be an integer or null")?,
+                )
+                .map_err(|_| "differential observation exit_code is outside i32")?,
+            ),
+        };
+        Ok(Self { success, exit_code })
+    }
+}
+
 /// What the three executions establish about the merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -30,6 +59,27 @@ pub enum Verdict {
     InteractionFailure,
     /// At least one parent failed, so the merge cannot be blamed.
     InconclusiveParentFailure,
+}
+
+impl Verdict {
+    /// Stable spelling used in versioned receipts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::InteractionFailure => "interaction_failure",
+            Self::InconclusiveParentFailure => "inconclusive_parent_failure",
+        }
+    }
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "clean" => Ok(Self::Clean),
+            "interaction_failure" => Ok(Self::InteractionFailure),
+            "inconclusive_parent_failure" => Ok(Self::InconclusiveParentFailure),
+            _ => Err("unknown differential verdict".to_string()),
+        }
+    }
 }
 
 /// Complete three-revision receipt for one command.
@@ -45,10 +95,58 @@ pub struct DifferentialReport {
     pub verdict: Verdict,
 }
 
+impl DifferentialReport {
+    /// Stable JSON embedded in each versioned observation row.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "parent_a": self.parent_a.to_json(),
+            "parent_b": self.parent_b.to_json(),
+            "merged": self.merged.to_json(),
+            "verdict": self.verdict.as_str(),
+        })
+    }
+
+    /// Parses and independently rechecks the recorded classification.
+    ///
+    /// # Errors
+    ///
+    /// A required field is absent, malformed, or claims a verdict that does
+    /// not follow from the three process observations.
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let parent_a = Observation::from_json(&value["parent_a"])?;
+        let parent_b = Observation::from_json(&value["parent_b"])?;
+        let merged = Observation::from_json(&value["merged"])?;
+        let recorded = Verdict::from_str(
+            value["verdict"]
+                .as_str()
+                .ok_or("differential report needs a verdict")?,
+        )?;
+        let derived = if !parent_a.success || !parent_b.success {
+            Verdict::InconclusiveParentFailure
+        } else if !merged.success {
+            Verdict::InteractionFailure
+        } else {
+            Verdict::Clean
+        };
+        if recorded != derived {
+            return Err("differential report verdict disagrees with its observations".to_string());
+        }
+        Ok(Self {
+            parent_a,
+            parent_b,
+            merged,
+            verdict: derived,
+        })
+    }
+}
+
 fn run_one(program: &str, args: &[String], dir: &Path) -> Result<Observation, String> {
     let status = std::process::Command::new(program)
         .args(args)
         .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|error| format!("run differential command in {}: {error}", dir.display()))?;
     Ok(Observation {
@@ -92,10 +190,10 @@ pub fn run_merged_vs_parents(
 
 /// Count-based false-positive calibration for differential failures.
 ///
-/// Every interaction failure must be adjudicated before it enters the
-/// denominator. The operational D23 target is exact rational arithmetic:
-/// spurious failures / evaluated merges must be strictly below 1/1000. This
-/// reports the observed rate; it makes no statistical confidence claim.
+/// Every interaction failure must be adjudicated before the target has a
+/// verdict. The operational D23 target is exact rational arithmetic: spurious
+/// failures / evaluated merges must be strictly below 1/1000. This reports the
+/// observed rate; it makes no statistical confidence claim.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Calibration {
     evaluated_merges: u64,
@@ -103,6 +201,7 @@ pub struct Calibration {
     interaction_failures: u64,
     confirmed_interactions: u64,
     spurious_failures: u64,
+    pending_interactions: u64,
 }
 
 impl Calibration {
@@ -147,11 +246,28 @@ impl Calibration {
         Ok(())
     }
 
+    /// Records an interaction flag whose ground truth has not been decided.
+    /// It enters the observed denominator, but suppresses the target verdict
+    /// until an adjudication-led replay replaces it with [`Self::record`].
+    ///
+    /// # Errors
+    ///
+    /// The report is not an interaction failure.
+    pub fn record_pending(&mut self, report: &DifferentialReport) -> Result<(), String> {
+        if report.verdict != Verdict::InteractionFailure {
+            return Err("only an interaction failure can be pending adjudication".to_string());
+        }
+        self.evaluated_merges = self.evaluated_merges.saturating_add(1);
+        self.interaction_failures = self.interaction_failures.saturating_add(1);
+        self.pending_interactions = self.pending_interactions.saturating_add(1);
+        Ok(())
+    }
+
     /// Whether the observed spurious-failure rate is strictly below 0.1%.
     /// `None` means no merge has produced a conclusive three-revision result.
     #[must_use]
     pub fn target_met(&self) -> Option<bool> {
-        (self.evaluated_merges != 0)
+        (self.evaluated_merges != 0 && self.pending_interactions == 0)
             .then(|| u128::from(self.spurious_failures) * 1000 < u128::from(self.evaluated_merges))
     }
 
@@ -169,6 +285,7 @@ impl Calibration {
             "interaction_failures": self.interaction_failures,
             "confirmed_interactions": self.confirmed_interactions,
             "spurious_failures": self.spurious_failures,
+            "pending_interactions": self.pending_interactions,
             "spurious_failure_rate": {
                 "numerator": self.spurious_failures,
                 "denominator": self.evaluated_merges,
@@ -181,6 +298,8 @@ impl Calibration {
                 "met": self.target_met(),
             },
             "confidence_claim": null,
+            "confidence_policy": null,
+            "landing_gate_enabled": false,
         })
     }
 }

@@ -3,6 +3,9 @@
 use choir_queue::differential::{
     run_merged_vs_parents, Calibration, DifferentialReport, Observation, Verdict,
 };
+use choir_queue::differential_ledger::{
+    adjudicate, load_command, record_observation, refresh, Revisions,
+};
 
 fn report(verdict: Verdict) -> DifferentialReport {
     let pass = Observation {
@@ -108,10 +111,104 @@ fn calibration_uses_exact_strict_point_one_percent_boundary() {
     assert_eq!(receipt["target"]["met"], true);
     assert_eq!(receipt["target"]["comparison"], "strictly_less_than");
     assert_eq!(receipt["confidence_claim"], serde_json::Value::Null);
+    assert_eq!(receipt["confidence_policy"], serde_json::Value::Null);
+    assert_eq!(receipt["landing_gate_enabled"], false);
 
     let mut confirmed = Calibration::default();
     confirmed.record(&flagged, Some(true)).unwrap();
     let receipt = confirmed.receipt();
     assert_eq!(receipt["confirmed_interactions"], 1);
     assert_eq!(receipt["spurious_failures"], 0);
+}
+
+#[test]
+fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-differential-ledger-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let command_file = work.join("command.json");
+    std::fs::write(
+        &command_file,
+        r#"{"format_version":1,"program":"sh","args":["check.sh"]}"#,
+    )
+    .unwrap();
+    let command = load_command(&command_file).unwrap();
+    let state = work.join("state");
+    let revisions = Revisions {
+        parent_a: "a".repeat(40),
+        parent_b: "b".repeat(40),
+        merged: "c".repeat(40),
+    };
+
+    let clean = record_observation(
+        &state,
+        &command.snapshot_hash,
+        &revisions,
+        &report(Verdict::Clean),
+    )
+    .unwrap();
+    assert_eq!(clean.observation_id, 1);
+    assert_eq!(clean.calibration["target"]["met"], true);
+    assert_eq!(clean.calibration["landing_gate_enabled"], false);
+    assert_eq!(
+        clean.calibration["confidence_claim"],
+        serde_json::Value::Null
+    );
+
+    let pending = record_observation(
+        &state,
+        &command.snapshot_hash,
+        &revisions,
+        &report(Verdict::InteractionFailure),
+    )
+    .unwrap();
+    assert_eq!(pending.observation_id, 2);
+    assert_eq!(pending.calibration["pending_interactions"], 1);
+    assert_eq!(
+        pending.calibration["target"]["met"],
+        serde_json::Value::Null,
+        "an unadjudicated flag must suppress the target verdict"
+    );
+    assert_eq!(pending.calibration["has_conclusive_observation"], true);
+    assert_eq!(pending.calibration["all_flags_adjudicated"], false);
+
+    let receipt = adjudicate(&state, &command.snapshot_hash, 2, false).unwrap();
+    assert_eq!(receipt["pending_interactions"], 0);
+    assert_eq!(receipt["spurious_failures"], 1);
+    assert_eq!(receipt["spurious_failure_rate"]["denominator"], 2);
+    assert_eq!(receipt["target"]["met"], false);
+    assert_eq!(receipt["all_flags_adjudicated"], true);
+    assert!(adjudicate(&state, &command.snapshot_hash, 2, false).is_err());
+
+    let rebuilt = refresh(&state, &command.snapshot_hash).unwrap();
+    assert_eq!(rebuilt, receipt);
+    let observations = std::fs::read_to_string(state.join("observations.jsonl")).unwrap();
+    assert_eq!(observations.lines().count(), 2);
+    assert!(observations.lines().all(|line| {
+        serde_json::from_str::<serde_json::Value>(line).unwrap()["format_version"] == 1
+    }));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(state.join("receipt.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    std::fs::write(
+        &command_file,
+        r#"{"format_version":1,"program":"sh","args":["different.sh"]}"#,
+    )
+    .unwrap();
+    let changed = load_command(&command_file).unwrap();
+    assert!(refresh(&state, &changed.snapshot_hash).is_err());
+    std::fs::remove_dir_all(work).ok();
 }
