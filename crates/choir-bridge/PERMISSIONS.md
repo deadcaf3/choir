@@ -43,7 +43,8 @@ the check-runs API, not from workflow-run introspection.
 - **`Pull requests: read` cannot be dropped.** Knowing which PRs to test
   is the queue's whole job, so the untrusted-input leg of the trifecta is
   permanent. What is mitigated is the *channel*: no PR text reaches a
-  decision. See `tests/bridge_trifecta.rs`.
+  decision. The behavior is enforced by
+  [`tests/bridge_trifecta.rs`](tests/bridge_trifecta.rs).
 - **`Contents: write` cannot be dropped while `--land` exists.** It is
   the external-write leg. Mitigations: `--land` is per-invocation with no
   config default, so a bridge started without it cannot land whatever

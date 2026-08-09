@@ -8,6 +8,40 @@ fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn assert_local_links_resolve(root: &std::path::Path, rel: &str) {
+    let path = root.join(rel);
+    let doc = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let mut rest = doc.as_str();
+    while let Some(open) = rest.find("](") {
+        rest = &rest[open + 2..];
+        let close = rest
+            .find(')')
+            .unwrap_or_else(|| panic!("{rel} has an unterminated Markdown link"));
+        let raw = &rest[..close];
+        rest = &rest[close + 1..];
+        let target = raw
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(['<', '>'])
+            .split('#')
+            .next()
+            .unwrap_or_default();
+        if target.is_empty()
+            || target.starts_with('/')
+            || target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("mailto:")
+        {
+            continue;
+        }
+        assert!(
+            path.parent().expect("document parent").join(target).exists(),
+            "{rel} links to missing local target `{raw}`"
+        );
+    }
+}
+
 #[test]
 fn every_generated_artifact_is_current() {
     let root = repo_root();
@@ -17,7 +51,12 @@ fn every_generated_artifact_is_current() {
     for (path, expected) in artifacts {
         let actual = std::fs::read_to_string(&path).unwrap_or_default();
         if actual != expected {
-            stale.push(path.display().to_string());
+            stale.push(
+                path.strip_prefix(&root)
+                    .expect("generated artifact stays under the repository")
+                    .display()
+                    .to_string(),
+            );
         }
     }
     assert!(
@@ -34,6 +73,10 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
         "The signed-operation API is the primary agent path",
         "git push` remains the compatibility",
         "choir-mcp http://127.0.0.1:8417 --auth-file",
+        "configured invocations must supply both `<repo-root>` and `<port>`",
+        "trusted keys, channel bindings, push-certificate signers",
+        "--review-retention <count>",
+        "#### The `choir` CLI",
     ] {
         assert!(readme.contains(required), "README.md omits `{required}`");
     }
@@ -60,19 +103,18 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
 }
 
 #[test]
-fn local_internal_markdown_stays_ignored() {
+fn local_only_files_stay_ignored() {
     let root = repo_root();
-    let ignored = std::process::Command::new("git")
-        .args(["check-ignore", "--no-index", "internal/STATUS.md"])
-        .current_dir(&root)
-        .output()
-        .expect("git check-ignore runs");
-    assert!(
-        ignored.status.success(),
-        "local STATUS.md became publishable"
-    );
+    for local in ["internal/STATUS.md", ".codex/config.toml"] {
+        let ignored = std::process::Command::new("git")
+            .args(["check-ignore", "--no-index", local])
+            .current_dir(&root)
+            .output()
+            .expect("git check-ignore runs");
+        assert!(ignored.status.success(), "local file became publishable: {local}");
+    }
 
-    for public in ["internal/design.md", "internal/measurements.md"] {
+    for public in ["agents.md", "internal/design.md", "internal/measurements.md"] {
         let check = std::process::Command::new("git")
             .args(["check-ignore", "--no-index", public])
             .current_dir(&root)
@@ -83,6 +125,56 @@ fn local_internal_markdown_stays_ignored() {
             "tracked design doc is ignored: {public}"
         );
     }
+    assert!(root.join("agents.md").is_file(), "generated agents.md is missing");
+    assert!(
+        !root.join("AGENT_GUIDE.md").exists(),
+        "the transport brief requires the root artifact to remain agents.md"
+    );
+}
+
+#[test]
+fn local_markdown_links_resolve() {
+    let root = repo_root();
+    for rel in [
+        "README.md",
+        "SYNC.md",
+        "crates/choir-bridge/PERMISSIONS.md",
+        "scripts/flip/RUNBOOK.md",
+        "templates/README.md",
+    ] {
+        assert_local_links_resolve(&root, rel);
+    }
+}
+
+#[test]
+fn operator_and_template_guidance_matches_the_shipped_paths() {
+    let root = repo_root();
+    let runbook = std::fs::read_to_string(root.join("scripts/flip/RUNBOOK.md"))
+        .expect("flip runbook");
+    for required in [
+        "current branch by name",
+        "target/release/choir --auth-file",
+        "push-certificate signers also hot-reload",
+        "[sync contract](../../SYNC.md)",
+    ] {
+        assert!(runbook.contains(required), "runbook omits `{required}`");
+    }
+
+    let templates =
+        std::fs::read_to_string(root.join("templates/README.md")).expect("template guide");
+    for required in [
+        "Optional MCP adapter",
+        "--auth-file <path> --auth-user <name>",
+        "/api/submit-batch",
+    ] {
+        assert!(templates.contains(required), "template guide omits `{required}`");
+    }
+    let env_template =
+        std::fs::read_to_string(root.join("templates/choir.env.sh")).expect("environment template");
+    assert!(
+        !env_template.contains("CHOIR_AUTH_FILE"),
+        "CLI and MCP auth must stay explicit flags plus a named file"
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! The agent-facing surface, as data, and the generators that render it.
 //!
-//! `choir --help`, the README's API and CLI tables, the three
+//! `choir --help`, the README's API and CLI sections, the three
 //! `templates/` snippets, the root `agents.md` and the node's `llms.txt`
 //! all describe one surface. Hand-maintained, they drift — and they had
 //! already started to: the README's API table carried a throughput
@@ -354,6 +354,16 @@ pub fn api_table() -> String {
     out
 }
 
+/// The README's generated API and CLI reference.
+#[must_use]
+pub fn readme_surface() -> String {
+    format!(
+        "#### HTTP endpoints\n\n{}\n#### The `choir` CLI\n\n```text\n{}```\n",
+        api_table(),
+        usage()
+    )
+}
+
 /// The command list the agent templates carry, as a markdown bullet list.
 #[must_use]
 pub fn command_bullets() -> String {
@@ -367,7 +377,7 @@ pub fn command_bullets() -> String {
     out
 }
 
-/// `agents.md`: the first thing a coding agent should read.
+/// `agents.md`: the generated choir reference for coding agents.
 #[must_use]
 pub fn agents_md() -> String {
     format!(
@@ -469,7 +479,8 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
         (root.join("ERRORS.md"), choir_node::reject::errors_md()),
         (
             root.join("README.md"),
-            splice(&read("README.md")?, &api_table()).map_err(|e| format!("README.md: {e}"))?,
+            splice(&read("README.md")?, &readme_surface())
+                .map_err(|e| format!("README.md: {e}"))?,
         ),
     ];
     for rel in [

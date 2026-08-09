@@ -7,8 +7,8 @@
 # Base URL of the choir-node daemon (git + platform API live here).
 export CHOIR_API="${CHOIR_API:-http://127.0.0.1:8417}"
 
-# Basic-auth credentials, when the daemon runs with --auth-file.
-# Token comes from the operator; never commit it.
+# Git basic-auth credentials used by choir_remote. CHOIR_TOKEN_FILE contains
+# the token only. The token comes from the operator; never commit it.
 #export CHOIR_USER="agent-name"
 #export CHOIR_TOKEN_FILE="$HOME/.choir/token"
 

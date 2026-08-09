@@ -2,8 +2,10 @@
 //!
 //! This is the production composition the sequencer's `policy.rs` test
 //! proved: signature verification (choir-identity) + cached-view CAS
-//! (choir-view) running inside the single-writer thread, now fronted by
-//! two endpoints on the daemon:
+//! (choir-view) running inside the single-writer thread. The daemon fronts
+//! it with signed single and batch submission, materialized-view and log
+//! reads, workspace provisioning, and review-queue endpoints. The two core
+//! operation paths are:
 //!
 //! - `POST /api/submit` — body `{"channel", "payload_hex",
 //!   "key_id", "signature_hex"}`; `workspace` remains accepted as the
@@ -198,8 +200,8 @@ pub struct LogWindow {
     by_signing: std::collections::HashMap<ContentHash, u64>,
 }
 
-/// Entries retained in memory for `/api/log`; older reads fall back to
-/// the persisted op log (not served over HTTP yet).
+/// Entries retained in memory for `/api/log`; older reads are served from
+/// the persisted op log when the node has one.
 const LOG_WINDOW_CAP: usize = 100_000;
 
 /// Entries per `/api/log` page, whichever source served them.

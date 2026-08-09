@@ -68,7 +68,7 @@ cargo test --workspace          # hermetic: no network, no external services
 
 ## Run a node
 
-The daemon serves **git smart-HTTP** and the **platform API** on one port (default **8417**). Repos must be created with `--create` (or the installer) so the `pre-receive` hook is installed — a bare repo made any other way is **not** sequenced.
+The daemon serves **git smart-HTTP** and the **platform API** on one port (default **8417**). Repos must be created with `--create` (or the installer) so the `pre-receive` hook is installed — a bare repo made any other way is **not** sequenced. With no arguments, the binary uses `./repos` and port 8417; configured invocations must supply both `<repo-root>` and `<port>` before any flags.
 
 ### Option A — macOS dogfood (supervised)
 
@@ -99,7 +99,7 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--protected-refs <file>`, `--require-review`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `AGENTS.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 
@@ -110,7 +110,9 @@ Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--p
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
 
-Hot-reload: keys and reviewers take effect on the next request. Push-cert `allowed_signers` is loaded at startup only (restart after adding signing keys).
+Hot-reload: trusted keys, channel bindings, push-certificate signers, and reviewers take effect on the next request.
+
+Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
 ## Use the node
 
@@ -141,6 +143,8 @@ Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **ne
 
 <!-- generated: choir surface, do not edit -->
 
+#### HTTP endpoints
+
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
@@ -152,18 +156,26 @@ Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **ne
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
-<!-- /generated -->
+
+#### The `choir` CLI
 
 ```text
-choir key <key-file> [name]
-choir workspace <api> <owner/repo> <name>
-choir submit <api> <key-file> <channel> '<op-json>'
-choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
-choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
-choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
-choir reviews <api> <reviewer>
-choir view <api>
+usage:
+  choir [--auth-file <path>] [--auth-user <name>] <command> ...
+
+commands:
+  choir key <key-file> [name]
+  choir workspace <api> <owner/repo> <name>
+  choir submit <api> <key-file> <channel> '<op-json>'
+  choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
+  choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+  choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
+  choir reviews <api> <reviewer>
+  choir view <api>
+
+Exit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), 2 usage error.
 ```
+<!-- /generated -->
 
 Live surface on a running node: `GET /llms.txt`. Sync verification: `SYNC.md` / `GET /sync.md`.
 
@@ -209,6 +221,8 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 
 Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).
 
+Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), and exercise one commit-status write (`post-status`). Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
+
 ### Agent templates
 
 Teach Claude Code / Codex / Cursor to speak choir: see [`templates/README.md`](templates/README.md).
@@ -240,7 +254,7 @@ Rejection code table: [`ERRORS.md`](ERRORS.md).
 
 | Doc | What it is |
 |---|---|
-| [`AGENTS.md`](AGENTS.md) | Agent-facing surface (generated; edit `crates/choir-cli/src/surface.rs`) |
+| [`agents.md`](agents.md) | Agent-facing surface (generated; edit `crates/choir-cli/src/surface.rs`) |
 | [`ERRORS.md`](ERRORS.md) | Rejection codes and repair hints |
 | [`SYNC.md`](SYNC.md) | Log catch-up + hash/signature verification |
 | [`templates/`](templates/README.md) | Drop-in agent harness snippets |

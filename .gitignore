@@ -1,6 +1,7 @@
 /target
 CLAUDE.md
 .claude/
+/.codex/
 # Local scratch under internal/; tracked design notes are allowlisted.
 internal/*
 !internal/design.md

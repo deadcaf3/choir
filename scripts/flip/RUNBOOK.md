@@ -1,12 +1,13 @@
-# D20 flip runbook
+# Canonical-node flip runbook
 
 Nothing below needs memorizing: `sh scripts/choirctl` with no arguments
 lists every command. The long forms are kept here so the procedure is
-auditable, but `choirctl install`, `choirctl status`, `choirctl push`
-and `choirctl mirror` are the four you actually run.
+auditable, but `choirctl install`, `choirctl status`, `choirctl sync`,
+and `choirctl logs` are the usual operator path.
 
-The flip makes the choir node canonical and Forgejo a follower (D21
-single-canonical invariant — one direction, never dual-write). The
+This is the D20 operator procedure. The flip makes the choir node canonical
+and Forgejo a follower (D21 single-canonical invariant — one direction,
+never dual-write). The
 git-bundle cron on the mirror VM continues unchanged as insurance.
 
 Every step below was rehearsed on a throwaway loopback node; the
@@ -27,6 +28,9 @@ Nothing here is destructive and nothing touches the mirror VM.
    every draw, so no restart. An empty pool means review requests come
    back with `assignment_error` and stay unassigned (never approved).
 
+Trusted keys, channel bindings, and push-certificate signers also hot-reload
+from the keys file. Registering a key does not require a daemon restart.
+
 To persistently require assigned review for protected refs, create
 `~/.choir/review-gates.enabled` and `~/.choir/protected-refs`, both mode 0600,
 then rerun `choirctl install`. The protected-ref file carries one namespaced
@@ -40,12 +44,12 @@ Verify the daemon:
 ```sh
 launchctl print gui/$(id -u)/com.choir.node | head       # loaded, KeepAlive
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8417/api/view   # 401
-curl -s -u choir:$(cut -d: -f2 ~/.choir/auth) http://127.0.0.1:8417/api/view
+target/release/choir --auth-file ~/.choir/auth --auth-user choir view http://127.0.0.1:8417
 tail ~/.choir/node.log
 ```
 
-The 401 is the point of checklist item 1: the rehearsal node ran with
-no auth at all.
+The unauthenticated request must return 401. A 200 means the real node was
+started without the required auth file.
 
 ## Flip day
 
@@ -54,8 +58,9 @@ no auth at all.
    Creation is also what installs the `pre-receive` hook that turns
    pushes into signed ops, so a repo made any other way will not be
    sequenced.
-2. `sh scripts/flip/push_canonical.sh [port] [owner/repo.git]` — pushes
-   `--all` **and** `--tags`.
+2. `sh scripts/flip/push_canonical.sh [port] [owner/repo.git]` pushes the
+   current branch by name, then pushes all tags. It deliberately avoids
+   `--all`, which would include transient worktree branches.
 
    Checklist item 3, measured: `git push --all` sent 1 branch and **0
    tags**; the view's `refs` gained the tag only after the second push.
@@ -63,7 +68,7 @@ no auth at all.
 3. Verify every ref is in the log as a sequenced op:
 
 ```sh
-curl -s -u choir:$(cut -d: -f2 ~/.choir/auth) http://127.0.0.1:8417/api/view
+target/release/choir --auth-file ~/.choir/auth --auth-user choir view http://127.0.0.1:8417
 git rev-parse HEAD     # must equal the oid under refs/heads/main
 ```
 
@@ -96,10 +101,9 @@ log on restart (rehearsed: refs and workspaces survived a kill).
 
 ## Still open
 
-- Push-cert `allowed_signers` is written at startup only, so registering
-  a *signing* key still needs a restart (the trusted-keys file does hot
-  reload).
-- No TLS, so the bind stays loopback (invariant 9 refuses anything else
-  without a cert). Remote access is an SSH tunnel.
-- Readers more than 100k entries behind the `/api/log` window have no
-  resync path.
+- This dogfood installation has no TLS, so its bind stays loopback
+  (invariant 9 refuses anything else without a cert). Remote access is an
+  SSH tunnel.
+- A node without a persisted log returns `log_evicted` when a reader falls
+  behind its in-memory window. The reader can resume at `window_base`, but
+  cannot verify continuity across the gap. See the [sync contract](../../SYNC.md).
