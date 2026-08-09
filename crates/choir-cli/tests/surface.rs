@@ -76,6 +76,7 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
         "configured invocations must supply both `<repo-root>` and `<port>`",
         "trusted keys, channel bindings, push-certificate signers",
         "--review-retention <count>",
+        "total_authoritative_view",
         "#### The `choir` CLI",
     ] {
         assert!(readme.contains(required), "README.md omits `{required}`");

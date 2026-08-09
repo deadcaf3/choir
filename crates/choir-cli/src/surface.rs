@@ -210,7 +210,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "view",
         args: "<api>",
-        summary: "the materialized view: workspace heads, refs, reviews, provenance, T3 concentration",
+        summary: "the materialized view: workspace heads, refs, reviews, provenance, T3 concentration, and complete-view growth",
         agent_facing: true,
     },
 ];
@@ -241,7 +241,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "GET",
         path: "/api/view",
-        purpose: "The materialized view: workspace heads, refs, reviews, provenance, T3 concentration",
+        purpose: "The materialized view: workspace heads, refs, reviews, provenance, T3 concentration, and complete-view growth",
         mcp: Some(McpTool {
             name: "choir_view",
             input_schema: EMPTY_MCP_SCHEMA,

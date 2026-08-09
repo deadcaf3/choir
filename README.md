@@ -150,7 +150,7 @@ Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **ne
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
 | `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
-| `GET /api/view` | The materialized view: workspace heads, refs, reviews, provenance, T3 concentration |
+| `GET /api/view` | The materialized view: workspace heads, refs, reviews, provenance, T3 concentration, and complete-view growth |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
 | `POST /api/workspace` | Provision a copy-on-write workspace and register it in the view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
@@ -222,6 +222,7 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 - Operators can invalidate a bad approval with `choir slash`; it lowers future approval weight and marks re-review required, but never rewrites an already-landed ref.
 - An optional reviewer conflict graph excludes operators within the configured hop distance from the requester. It is re-read per draw and fails closed by leaving the review unassigned.
 - `choir view` reports T3 concentration using exact counts and integer shares. Active branches mean last attributable mover, and protected updates mean admitted ref updates under the current policy; unknown and ambiguous attribution stay visible and make the overall status `indeterminate` rather than a pass.
+- `choir view` also reports `view_growth`: record counts and compact JSON bytes for workspaces, refs, reviews, and provenance. `total_authoritative_view` covers exactly those four sections and excludes runtime projections. This measures complete-view growth; it does not prune or expire anything.
 - Prefer `POST /api/submit-batch` for multiple ops (one durability barrier).
 
 Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).

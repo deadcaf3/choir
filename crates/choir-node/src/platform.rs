@@ -12,9 +12,9 @@
 //!   legacy v1 alias for `channel`. Payload bytes are a serialized
 //!   [`ViewOp`]. Admitted ops answer `{"seq", "hash"}`; rejections are
 //!   HTTP 400 with the policy's reason.
-//! - `GET /api/view` — the current materialized state plus the D24 T3
-//!   concentration projection. The latter is runtime metadata derived
-//!   from signed entries and current operator files, never persisted op
+//! - `GET /api/view` — the current materialized state plus runtime-only
+//!   projections for D24 T3 concentration and complete-view growth. They
+//!   derive from the same coherent snapshot and never enter persisted ops
 //!   or hash input.
 //!
 //! Hex (not JSON-embedding) carries the payload because the signature
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
-use choir_view::{reviewer_operator, OpKind, View, ViewOp};
+use choir_view::{reviewer_operator, OpKind, ReviewStatus, View, ViewOp};
 
 use crate::reject::{Code, Rejection};
 
@@ -684,6 +684,63 @@ fn concentration_json(
             "active_branches": "current branch refs grouped by last attributable mover, not ownership",
             "protected_updates": "admitted non-creation ref updates matching the current protected policy, not proof of Git publication or merge commits",
         },
+    })
+}
+
+/// Deterministic read-time measurement of the complete authoritative view.
+///
+/// The serialized total deliberately contains only the four sections owned by
+/// `View`. Runtime projections are excluded so adding this report cannot make
+/// its own byte count grow recursively, and adding another projection later
+/// cannot rewrite the historical meaning of the measurement.
+fn view_growth_json(
+    counts: serde_json::Value,
+    workspaces: &serde_json::Value,
+    refs: &serde_json::Value,
+    reviews: &serde_json::Value,
+    provenance: &serde_json::Value,
+    as_of_seq: Option<u64>,
+) -> serde_json::Value {
+    let serialized_bytes = |value: &serde_json::Value| {
+        serde_json::to_vec(value)
+            .expect("materialized view JSON is always serializable")
+            .len()
+    };
+    let authoritative = serde_json::json!({
+        "workspaces": workspaces,
+        "refs": refs,
+        "reviews": reviews,
+        "provenance": provenance,
+    });
+    serde_json::json!({
+        "format_version": 1,
+        "as_of_seq": as_of_seq,
+        "counts": counts,
+        "serialized_bytes": {
+            "workspaces": serialized_bytes(workspaces),
+            "refs": serialized_bytes(refs),
+            "reviews": serialized_bytes(reviews),
+            "provenance": serialized_bytes(provenance),
+            "total_authoritative_view": serialized_bytes(&authoritative),
+        },
+    })
+}
+
+fn view_growth_counts(view: &View) -> serde_json::Value {
+    let live_reviews = view
+        .reviews
+        .values()
+        .filter(|review| matches!(review.status, ReviewStatus::Live))
+        .count();
+    let provenance_records = view.provenance.values().map(BTreeMap::len).sum::<usize>();
+    serde_json::json!({
+        "workspaces": view.workspaces.len(),
+        "refs": view.refs.len(),
+        "reviews": view.reviews.len(),
+        "live_reviews": live_reviews,
+        "archived_reviews": view.reviews.len() - live_reviews,
+        "provenance_subjects": view.provenance.len(),
+        "provenance_records": provenance_records,
     })
 }
 
@@ -1818,10 +1875,13 @@ impl Platform {
                     .clone();
                 let protected = ProtectedPolicySnapshot::read(protected_path.as_deref());
                 // Writer order is view -> concentration. Holding both
-                // while rendering prevents a response whose heads include
-                // op N while `as_of_seq` and attribution stop at N-1.
+                // through snapshot construction prevents a response whose
+                // heads include op N while `as_of_seq` and attribution stop
+                // at N-1. The guards are dropped before byte measurement
+                // and final response serialization.
                 let view = self.view.lock().expect("view lock");
-                let concentration = self.concentration.lock().expect("concentration lock");
+                let concentration_state =
+                    self.concentration.lock().expect("concentration lock");
                 let key_names = self.key_names.lock().expect("key names lock");
                 let ws: BTreeMap<_, _> = view
                     .workspaces
@@ -1838,16 +1898,35 @@ impl Platform {
                     .iter()
                     .map(|(id, r)| (id.clone(), review_json(r)))
                     .collect();
+                let ws = serde_json::json!(ws);
+                let refs = serde_json::json!(refs);
+                let reviews = serde_json::json!(reviews);
+                let provenance = serde_json::json!(&view.provenance);
+                let counts = view_growth_counts(&view);
+                let as_of_seq = concentration_state.as_of_seq;
+                let concentration = concentration_json(
+                    &concentration_state,
+                    &key_names,
+                    &protected,
+                );
+                drop(key_names);
+                drop(concentration_state);
+                drop(view);
+                let view_growth = view_growth_json(
+                    counts,
+                    &ws,
+                    &refs,
+                    &reviews,
+                    &provenance,
+                    as_of_seq,
+                );
                 let body = serde_json::json!({
                     "workspaces": ws,
                     "refs": refs,
                     "reviews": reviews,
-                    "provenance": view.provenance,
-                    "concentration": concentration_json(
-                        &concentration,
-                        &key_names,
-                        &protected,
-                    ),
+                    "provenance": provenance,
+                    "concentration": concentration,
+                    "view_growth": view_growth,
                 });
                 (200, body.to_string())
             }
