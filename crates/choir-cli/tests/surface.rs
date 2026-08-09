@@ -28,6 +28,64 @@ fn every_generated_artifact_is_current() {
 }
 
 #[test]
+fn readme_keeps_the_primary_path_and_complete_gate() {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("README.md");
+    for required in [
+        "The signed-operation API is the primary agent path",
+        "git push` remains the compatibility",
+        "choir-mcp http://127.0.0.1:8417 --auth-file",
+    ] {
+        assert!(readme.contains(required), "README.md omits `{required}`");
+    }
+    let gate = readme
+        .split_once("Full gate:\n\n```bash\n")
+        .and_then(|(_, rest)| rest.split_once("\n```").map(|(gate, _)| gate))
+        .expect("README.md has a Full gate shell block");
+    for command in [
+        "cargo test --workspace",
+        "cargo clippy --workspace --all-targets",
+        "cargo run -p choir-spike --release",
+    ] {
+        assert!(
+            gate.lines().any(|line| line == command),
+            "README.md Full gate omits `{command}`"
+        );
+    }
+    for path in ["internal/design.md", "internal/measurements.md"] {
+        assert!(
+            repo_root().join(path).is_file(),
+            "README target is missing: {path}"
+        );
+    }
+}
+
+#[test]
+fn local_internal_markdown_stays_ignored() {
+    let root = repo_root();
+    let ignored = std::process::Command::new("git")
+        .args(["check-ignore", "--no-index", "internal/STATUS.md"])
+        .current_dir(&root)
+        .output()
+        .expect("git check-ignore runs");
+    assert!(
+        ignored.status.success(),
+        "local STATUS.md became publishable"
+    );
+
+    for public in ["internal/design.md", "internal/measurements.md"] {
+        let check = std::process::Command::new("git")
+            .args(["check-ignore", "--no-index", public])
+            .current_dir(&root)
+            .output()
+            .expect("git check-ignore runs");
+        assert!(
+            !check.status.success(),
+            "tracked design doc is ignored: {public}"
+        );
+    }
+}
+
+#[test]
 fn the_binarys_help_is_the_tables_help() {
     // A CLI whose help disagrees with the README is the drift this exists
     // to stop, so check the shipped binary rather than the function.
