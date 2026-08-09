@@ -24,6 +24,7 @@ struct Fixture {
     script: PathBuf,
     config: PathBuf,
     workspace: PathBuf,
+    returned_path: PathBuf,
     log: PathBuf,
     git_log: PathBuf,
     path: String,
@@ -34,10 +35,14 @@ impl Fixture {
         let root = tempdir();
         let fake_bin = root.join("bin");
         let cwd = root.join("project");
-        let workspace = root.join("cc-feature-auth-session-123");
+        let workspace_root = root.join("workspaces");
+        let workspace = workspace_root.join("cc-feature-auth-session-123");
+        let workspace_alias = root.join("workspace-alias");
         std::fs::create_dir_all(&fake_bin).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        std::os::unix::fs::symlink(&workspace_root, &workspace_alias).unwrap();
+        let returned_path = workspace_alias.join("cc-feature-auth-session-123");
         let log = root.join("choir.log");
         let git_log = root.join("git.log");
         write_executable(
@@ -107,6 +112,7 @@ esac
             script,
             config,
             workspace,
+            returned_path,
             log,
             git_log,
             path,
@@ -148,7 +154,7 @@ esac
                 "CHOIR_TEST_HEAD",
                 "1111111111111111111111111111111111111111",
             )
-            .env("CHOIR_TEST_WORKSPACE", &self.path)
+            .env("CHOIR_TEST_WORKSPACE", &self.returned_path)
             .env("CHOIR_TEST_FAIL", if fail { "1" } else { "0" })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

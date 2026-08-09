@@ -124,7 +124,6 @@ if [[ "$mode" == "create" ]]; then
   [[ "$path" == /* && -d "$path" && ! -L "$path" ]] \
     || fail "choir returned an inaccessible or unsafe workspace path"
   canonical_path=$(cd "$path" && pwd -P)
-  [[ "$canonical_path" == "$path" ]] || fail "choir returned a symlinked workspace path"
   [[ -d "$canonical_path/.git" && ! -L "$canonical_path/.git" ]] \
     || fail "choir workspace has no standalone Git metadata"
 
