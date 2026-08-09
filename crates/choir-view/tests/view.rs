@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use choir_hash::ContentHash;
-use choir_oplog::MemLog;
+use choir_oplog::{MemLog, Witness};
 use choir_store::{put_blob, ChunkerParams, MemStore};
 use choir_view::{append_op, Commit, OpKind, TreeEntry, View, ViewError, ViewOp};
 
@@ -77,6 +77,107 @@ fn stale_cas_is_rejected_and_log_unchanged() {
         View::materialize(&log).unwrap().workspaces.get("w1"),
         Some(&c2)
     );
+}
+
+#[test]
+fn stable_change_survives_checkpoints_and_workspace_archive() {
+    let mut log = MemLog::new();
+    let base = ContentHash::blake3(b"base");
+    let checkpoint = ContentHash::blake3(b"checkpoint");
+    let create = ViewOp::new(OpKind::CreateChange {
+        id: "change-1".into(),
+        owner: "operator/agent".into(),
+        workspace: "repo/agent".into(),
+        base_revision: base.clone(),
+        idempotency_key: "request-1".into(),
+    });
+    append_op(&mut log, "node", create).unwrap();
+
+    let created = View::materialize(&log).unwrap();
+    let change = created.changes.get("change-1").unwrap();
+    assert_eq!(change.revision_id, base);
+    assert_eq!(change.active_workspace.as_deref(), Some("repo/agent"));
+    assert_eq!(created.workspaces.get("repo/agent"), Some(&base));
+
+    append_op(
+        &mut log,
+        "operator/agent",
+        ViewOp::new(OpKind::CheckpointChange {
+            id: "change-1".into(),
+            workspace: "repo/agent".into(),
+            revision: checkpoint.clone(),
+            prev_revision: base,
+        }),
+    )
+    .unwrap();
+    let checkpointed = View::materialize(&log).unwrap();
+    assert_eq!(
+        checkpointed.changes["change-1"].revision_id,
+        checkpoint
+    );
+    assert_eq!(checkpointed.workspaces["repo/agent"], checkpoint);
+
+    append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::ArchiveChange {
+            id: "change-1".into(),
+            workspace: "repo/agent".into(),
+            prev_revision: checkpoint.clone(),
+            owner: "operator/agent".into(),
+            owner_sig: Witness {
+                key_id: "owner-key".into(),
+                signature: vec![1, 2, 3],
+            },
+        }),
+    )
+    .unwrap();
+    let archived = View::materialize(&log).unwrap();
+    assert!(!archived.workspaces.contains_key("repo/agent"));
+    assert_eq!(archived.changes["change-1"].active_workspace, None);
+    assert_eq!(archived.changes["change-1"].revision_id, checkpoint);
+}
+
+#[test]
+fn change_checkpoint_rejects_stale_revision_without_mutation() {
+    let base = ContentHash::blake3(b"base");
+    let mut view = View::default();
+    view.apply(&ViewOp::new(OpKind::CreateChange {
+        id: "change-1".into(),
+        owner: "operator/agent".into(),
+        workspace: "repo/agent".into(),
+        base_revision: base,
+        idempotency_key: "request-1".into(),
+    }))
+    .unwrap();
+    let before = view.clone();
+    let result = view.apply(&ViewOp::new(OpKind::CheckpointChange {
+        id: "change-1".into(),
+        workspace: "repo/agent".into(),
+        revision: ContentHash::blake3(b"checkpoint"),
+        prev_revision: ContentHash::blake3(b"stale"),
+    }));
+    assert!(matches!(result, Err(ViewError::StaleHead { .. })));
+    assert_eq!(view, before);
+}
+
+#[test]
+fn legacy_workspace_move_detaches_change_identity() {
+    let base = ContentHash::blake3(b"base");
+    let moved = ContentHash::blake3(b"legacy move");
+    let mut view = View::default();
+    view.apply(&ViewOp::new(OpKind::CreateChange {
+        id: "change-1".into(),
+        owner: "operator/agent".into(),
+        workspace: "repo/agent".into(),
+        base_revision: base.clone(),
+        idempotency_key: "request-1".into(),
+    }))
+    .unwrap();
+    view.apply(&set_head("repo/agent", &moved, Some(&base)))
+        .unwrap();
+    assert_eq!(view.workspaces["repo/agent"], moved);
+    assert_eq!(view.changes["change-1"].active_workspace, None);
 }
 
 fn log_len(log: &MemLog) -> u64 {

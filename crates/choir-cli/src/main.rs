@@ -8,7 +8,9 @@
 //! ```text
 //! choir [--auth-file <path>] [--auth-user <name>] <command> ...
 //! choir key <key-file> [name]
-//! choir workspace <api> <owner/repo> <name>
+//! choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]
+//! choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
+//! choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
 //! choir submit <api> <key-file> <channel> '<op-json>'
 //! choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
 //! choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
@@ -21,7 +23,7 @@
 //! error body is printed), 2 = usage error.
 
 use choir_identity::ActorKey;
-use choir_view::{OpKind, Verdict, ViewOp};
+use choir_view::{ArchiveAuthorization, OpKind, Verdict, ViewOp};
 
 #[derive(Clone, Copy)]
 struct AuthOptions<'a> {
@@ -99,16 +101,23 @@ fn finish(status: u16, body: &str) -> ! {
 }
 
 /// Signs `op` on attribution channel `channel` and posts it.
-fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptions<'_>) -> ! {
+fn signed_body(key_file: &str, channel: &str, op: &ViewOp) -> serde_json::Value {
+    signed_payload_body(key_file, channel, &op.to_payload())
+}
+
+fn signed_payload_body(key_file: &str, channel: &str, payload: &[u8]) -> serde_json::Value {
     let key = load_key(key_file);
-    let payload = op.to_payload();
-    let sig = key.sign_submission(channel, &payload);
-    let body = serde_json::json!({
+    let sig = key.sign_submission(channel, payload);
+    serde_json::json!({
         "channel": channel,
-        "payload_hex": hex_encode(&payload),
+        "payload_hex": hex_encode(payload),
         "key_id": sig.key_id,
         "signature_hex": hex_encode(&sig.signature),
-    });
+    })
+}
+
+fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptions<'_>) -> ! {
+    let body = signed_body(key_file, channel, op);
     let (status, resp) = http(api, auth, "choir_submit", body);
     finish(status, &resp);
 }
@@ -137,6 +146,83 @@ fn parse_auth(args: &[String]) -> (AuthOptions<'_>, &[String]) {
     (AuthOptions { file, user }, &args[index..])
 }
 
+fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
+    if rest.is_empty() {
+        return serde_json::json!({ "repo": repo, "name": name });
+    }
+    let (mut base, mut owner, mut change, mut idempotency_key) = (None, None, None, None);
+    let mut index = 0;
+    while index < rest.len() {
+        let Some(value) = rest.get(index + 1).copied() else {
+            usage();
+        };
+        let slot = match rest[index] {
+            "--base" if base.is_none() => &mut base,
+            "--owner" if owner.is_none() => &mut owner,
+            "--change" if change.is_none() => &mut change,
+            "--idempotency-key" if idempotency_key.is_none() => &mut idempotency_key,
+            _ => usage(),
+        };
+        *slot = Some(value);
+        index += 2;
+    }
+    let (Some(base), Some(owner), Some(change), Some(idempotency_key)) =
+        (base, owner, change, idempotency_key)
+    else {
+        usage();
+    };
+    serde_json::json!({
+        "repo": repo,
+        "name": name,
+        "base": base,
+        "owner": owner,
+        "change": change,
+        "idempotency_key": idempotency_key,
+    })
+}
+
+fn parse_content_hash_hex(value: &str) -> Option<choir_hash::ContentHash> {
+    let (codec, digest) = value.split_once('-')?;
+    let codec = u8::from_str_radix(codec, 16).ok()?;
+    if digest.is_empty() || digest.len() % 2 != 0 {
+        return None;
+    }
+    let digest = (0..digest.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(digest.get(index..index + 2)?, 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(choir_hash::ContentHash { codec, digest })
+}
+
+fn current_change_revision(
+    api: &str,
+    auth: AuthOptions<'_>,
+    change_id: &str,
+) -> choir_hash::ContentHash {
+    let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
+    if !(200..300).contains(&status) {
+        finish(status, &body);
+    }
+    let view: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(view) => view,
+        Err(error) => {
+            eprintln!("choir: view returned invalid JSON: {error}");
+            std::process::exit(1);
+        }
+    };
+    let Some(revision) = view["changes"][change_id]["revision_id"].as_str() else {
+        eprintln!("choir: no such change or revision in GET /api/view");
+        std::process::exit(1);
+    };
+    match parse_content_hash_hex(revision) {
+        Some(revision) => revision,
+        None => {
+            eprintln!("choir: change revision has an invalid content-hash envelope");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (auth, args) = parse_auth(&args);
@@ -153,9 +239,39 @@ fn main() {
                 None => println!("{hex}"),
             }
         }
-        ["workspace", api, repo, name] => {
-            let body = serde_json::json!({ "repo": repo, "name": name });
+        ["workspace", api, repo, name, rest @ ..] => {
+            let body = workspace_body(repo, name, rest);
             let (status, resp) = http(api, auth, "choir_workspace", body);
+            finish(status, &resp);
+        }
+        ["checkpoint", api, key_file, channel, change_id, workspace, oid] => {
+            let Some(revision) = choir_hash::ContentHash::from_git_oid(oid) else {
+                eprintln!("<git-oid> must be a 40- or 64-char hex object id");
+                std::process::exit(2);
+            };
+            let prev_revision = current_change_revision(api, auth, change_id);
+            let op = ViewOp::new(OpKind::CheckpointChange {
+                id: (*change_id).into(),
+                workspace: (*workspace).into(),
+                revision,
+                prev_revision,
+            });
+            submit(api, key_file, channel, &op, auth);
+        }
+        ["workspace-archive", api, key_file, channel, repo, name, change_id, idempotency_key] => {
+            let prev_revision = current_change_revision(api, auth, change_id);
+            let authorization = ArchiveAuthorization::new(
+                (*change_id).into(),
+                format!("{repo}/{name}"),
+                prev_revision,
+            );
+            let mut body =
+                signed_payload_body(key_file, channel, &authorization.to_payload());
+            body["repo"] = serde_json::json!(repo);
+            body["name"] = serde_json::json!(name);
+            body["change"] = serde_json::json!(change_id);
+            body["idempotency_key"] = serde_json::json!(idempotency_key);
+            let (status, resp) = http(api, auth, "choir_workspace_archive", body);
             finish(status, &resp);
         }
         ["submit", api, key_file, channel, op_json] => {

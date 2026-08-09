@@ -132,9 +132,29 @@ const WORKSPACE_MCP_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
     "repo": { "type": "string", "description": "Repository name as owner/repo" },
-    "name": { "type": "string", "description": "New workspace name" }
+    "name": { "type": "string", "description": "Workspace name" },
+    "base": { "type": "string", "description": "Exact full Git commit oid; advanced requests provide this with owner, change and idempotency_key" },
+    "owner": { "type": "string", "description": "Registered signing channel allowed to checkpoint and archive the stable change" },
+    "change": { "type": "string", "description": "Stable logical change id" },
+    "idempotency_key": { "type": "string", "description": "Owner-scoped create retry identity" }
   },
   "required": ["repo", "name"],
+  "additionalProperties": false
+}"#;
+
+const WORKSPACE_ARCHIVE_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "repo": { "type": "string", "description": "Repository name as owner/repo" },
+    "name": { "type": "string", "description": "Workspace name" },
+    "change": { "type": "string", "description": "Stable logical change id returned by creation" },
+    "idempotency_key": { "type": "string", "description": "Bound create retry identity" },
+    "channel": { "type": "string", "description": "Bound change owner and signature-covered attribution channel" },
+    "payload_hex": { "type": "string", "description": "Hex-encoded ArchiveAuthorization naming this exact change, workspace and revision" },
+    "key_id": { "type": "string", "description": "Owner key id" },
+    "signature_hex": { "type": "string", "description": "Hex-encoded owner submission signature" }
+  },
+  "required": ["repo", "name", "change", "idempotency_key", "channel", "payload_hex", "key_id", "signature_hex"],
   "additionalProperties": false
 }"#;
 
@@ -167,8 +187,20 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "workspace",
-        args: "<api> <owner/repo> <name>",
-        summary: "provision a copy-on-write workspace; prints its path and head",
+        args: "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]",
+        summary: "provision a CoW workspace; advanced flags bind an exact base and stable change",
+        agent_facing: true,
+    },
+    Command {
+        name: "checkpoint",
+        args: "<api> <key-file> <channel> <change-id> <workspace-id> <git-oid>",
+        summary: "publish an immutable change revision after committing and pushing its Git object",
+        agent_facing: true,
+    },
+    Command {
+        name: "workspace-archive",
+        args: "<api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>",
+        summary: "owner-sign and recoverably archive a bound workspace; exact retries are idempotent",
         agent_facing: true,
     },
     Command {
@@ -204,7 +236,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "view",
         args: "<api>",
-        summary: "the materialized view: workspace heads, refs, reviews, provenance",
+        summary: "the materialized view: changes, workspace heads, refs, reviews, provenance",
         agent_facing: true,
     },
 ];
@@ -235,7 +267,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "GET",
         path: "/api/view",
-        purpose: "The materialized view: workspace heads, refs, reviews, provenance",
+        purpose: "The materialized view: changes, workspace heads, refs, reviews, provenance",
         mcp: Some(McpTool {
             name: "choir_view",
             input_schema: EMPTY_MCP_SCHEMA,
@@ -260,10 +292,20 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "POST",
         path: "/api/workspace",
-        purpose: "Provision a copy-on-write workspace and register it in the view",
+        purpose: "Provision a CoW workspace; optional exact base/change binding makes retries idempotent",
         mcp: Some(McpTool {
             name: "choir_workspace",
             input_schema: WORKSPACE_MCP_SCHEMA,
+            arguments: McpArguments::Body,
+        }),
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/workspace/archive",
+        purpose: "Recoverably archive a change-bound workspace and remove it from the active view",
+        mcp: Some(McpTool {
+            name: "choir_workspace_archive",
+            input_schema: WORKSPACE_ARCHIVE_MCP_SCHEMA,
             arguments: McpArguments::Body,
         }),
     },
@@ -403,6 +445,8 @@ pub fn agents_md() -> String {
          sharing your operator prefix, so agents run by the same person cannot review each other.\n\
          - Publish your task spec with `choir intent` when you pick up work, and update it when \
          scope changes. Other agents and the merge machinery can both see it.\n\
+         - For a stable change, commit and push the Git object before `choir checkpoint`; the \
+         signed checkpoint advances identity and CAS, it does not transfer workspace-local objects.\n\
          - Secrets live under `~/.choir/`. Never write one into the repository.\n",
         command_bullets(),
         api_table()

@@ -94,7 +94,11 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
             "README.md Full gate omits `{command}`"
         );
     }
-    for path in ["internal/design.md", "internal/measurements.md"] {
+    for path in [
+        "internal/design.md",
+        "internal/integration-workflows.md",
+        "internal/measurements.md",
+    ] {
         assert!(
             repo_root().join(path).is_file(),
             "README target is missing: {path}"
@@ -114,7 +118,12 @@ fn local_only_files_stay_ignored() {
         assert!(ignored.status.success(), "local file became publishable: {local}");
     }
 
-    for public in ["agents.md", "internal/design.md", "internal/measurements.md"] {
+    for public in [
+        "agents.md",
+        "internal/design.md",
+        "internal/integration-workflows.md",
+        "internal/measurements.md",
+    ] {
         let check = std::process::Command::new("git")
             .args(["check-ignore", "--no-index", public])
             .current_dir(&root)
@@ -236,8 +245,8 @@ fn mcp_tools_cover_public_operations_once_in_table_order() {
     assert_eq!(unique.len(), actual.len(), "duplicate MCP tool name");
     assert_eq!(
         actual.len(),
-        6,
-        "only the six public platform operations are tools"
+        7,
+        "only the seven public platform operations are tools"
     );
     for (tool, endpoint) in tools
         .iter()
@@ -271,6 +280,16 @@ fn mcp_tools_cover_public_operations_once_in_table_order() {
     assert!(batch_item["properties"]["channel"].is_object());
     assert!(batch_item["properties"]["workspace"].is_object());
     assert_eq!(batch_item["anyOf"].as_array().map(Vec::len), Some(2));
+    let workspace = tools
+        .iter()
+        .find(|tool| tool["name"] == "choir_workspace")
+        .expect("workspace tool");
+    for field in ["base", "owner", "change", "idempotency_key"] {
+        assert!(
+            workspace["inputSchema"]["properties"][field].is_object(),
+            "workspace schema omits {field}"
+        );
+    }
 
     // Discovery documents are already served directly; the hook is
     // privileged and internal. None belongs in model-controlled tools.

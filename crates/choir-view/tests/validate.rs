@@ -17,10 +17,18 @@
 //! precondition into `apply` alone gets caught.
 
 use choir_hash::ContentHash;
+use choir_oplog::Witness;
 use choir_view::{OpKind, Verdict, View, ViewOp};
 
 fn h(tag: &[u8]) -> ContentHash {
     ContentHash::blake3(tag)
+}
+
+fn witness() -> Witness {
+    Witness {
+        key_id: "owner-key".into(),
+        signature: vec![1, 2, 3],
+    }
 }
 
 /// Every op shape, in both admissible and inadmissible states. Hand-rolled
@@ -58,6 +66,14 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             target_ref: None,
         }))
         .expect("setup");
+        v.apply(&ViewOp::new(OpKind::CreateChange {
+            id: "change-1".into(),
+            owner: "operator/agent".into(),
+            workspace: "bound-ws".into(),
+            base_revision: h(b"base"),
+            idempotency_key: "request-1".into(),
+        }))
+        .expect("setup");
         v
     };
     let empty = View::default();
@@ -89,6 +105,50 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
         workspace: "nobody".into() });
     push("delete present workspace", &populated, OpKind::DeleteWorkspace {
         workspace: "ws".into() });
+
+    // Stable change creation and revision checkpoint CAS.
+    push("create change", &empty, OpKind::CreateChange {
+        id: "change-1".into(), owner: "operator/agent".into(), workspace: "bound-ws".into(),
+        base_revision: h(b"base"), idempotency_key: "request-1".into() });
+    push("duplicate change", &populated, OpKind::CreateChange {
+        id: "change-1".into(), owner: "operator/agent".into(), workspace: "other-ws".into(),
+        base_revision: h(b"base"), idempotency_key: "request-2".into() });
+    push("duplicate idempotency key", &populated, OpKind::CreateChange {
+        id: "change-2".into(), owner: "operator/agent".into(), workspace: "other-ws".into(),
+        base_revision: h(b"base"), idempotency_key: "request-1".into() });
+    push("create change on occupied workspace", &populated, OpKind::CreateChange {
+        id: "change-2".into(), owner: "operator/agent".into(), workspace: "ws".into(),
+        base_revision: h(b"base"), idempotency_key: "request-2".into() });
+    push("checkpoint current revision", &populated, OpKind::CheckpointChange {
+        id: "change-1".into(), workspace: "bound-ws".into(), revision: h(b"checkpoint"),
+        prev_revision: h(b"base") });
+    push("checkpoint stale revision", &populated, OpKind::CheckpointChange {
+        id: "change-1".into(), workspace: "bound-ws".into(), revision: h(b"checkpoint"),
+        prev_revision: h(b"stale") });
+    push("checkpoint wrong workspace", &populated, OpKind::CheckpointChange {
+        id: "change-1".into(), workspace: "ws".into(), revision: h(b"checkpoint"),
+        prev_revision: h(b"base") });
+    push("checkpoint unknown change", &populated, OpKind::CheckpointChange {
+        id: "missing".into(), workspace: "bound-ws".into(), revision: h(b"checkpoint"),
+        prev_revision: h(b"base") });
+    push("checkpoint no-op revision", &populated, OpKind::CheckpointChange {
+        id: "change-1".into(), workspace: "bound-ws".into(), revision: h(b"base"),
+        prev_revision: h(b"base") });
+    push("archive current revision", &populated, OpKind::ArchiveChange {
+        id: "change-1".into(), workspace: "bound-ws".into(), prev_revision: h(b"base"),
+        owner: "operator/agent".into(), owner_sig: witness() });
+    push("archive stale revision", &populated, OpKind::ArchiveChange {
+        id: "change-1".into(), workspace: "bound-ws".into(), prev_revision: h(b"stale"),
+        owner: "operator/agent".into(), owner_sig: witness() });
+    push("archive wrong workspace", &populated, OpKind::ArchiveChange {
+        id: "change-1".into(), workspace: "ws".into(), prev_revision: h(b"base"),
+        owner: "operator/agent".into(), owner_sig: witness() });
+    push("archive wrong owner", &populated, OpKind::ArchiveChange {
+        id: "change-1".into(), workspace: "bound-ws".into(), prev_revision: h(b"base"),
+        owner: "other/agent".into(), owner_sig: witness() });
+    push("archive unknown change", &populated, OpKind::ArchiveChange {
+        id: "missing".into(), workspace: "bound-ws".into(), prev_revision: h(b"base"),
+        owner: "operator/agent".into(), owner_sig: witness() });
 
     // Reviews.
     push("new review", &populated, OpKind::RequestReview {

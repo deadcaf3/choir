@@ -102,6 +102,113 @@ fn cli_end_to_end() {
     let dup = choir(&["workspace", &api, "agents/demo", "cli-agent"]);
     assert_eq!(dup.status.code(), Some(1));
 
+    // Advanced creation binds an exact base and stable change. The same
+    // CLI invocation is an idempotent retry, and checkpoints are signed by
+    // the bound owner after the Git object has been pushed.
+    let advanced_args = [
+        "workspace",
+        &api,
+        "agents/demo",
+        "cli-change",
+        "--base",
+        &head,
+        "--owner",
+        "cli-agent",
+        "--change",
+        "change-1",
+        "--idempotency-key",
+        "request-1",
+    ];
+    let created = choir(&advanced_args);
+    assert!(
+        created.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&created.stdout)
+    );
+    let created = json(&created);
+    assert_eq!(created["created"], true);
+    assert_eq!(created["change_id"], "change-1");
+    let retried = choir(&advanced_args);
+    assert!(retried.status.success());
+    assert_eq!(json(&retried)["reused"], true);
+
+    let change_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    std::fs::write(change_path.join("f.txt"), "checkpoint\n").unwrap();
+    git(&change_path, &["add", "."]);
+    git(&change_path, &["commit", "-q", "-m", "checkpoint"]);
+    let checkpoint_oid = String::from_utf8_lossy(&git(&change_path, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+    assert!(
+        git(
+            &change_path,
+            &["push", "-q", "origin", "HEAD:refs/heads/cli-change"]
+        )
+        .status
+        .success()
+    );
+    let wrong_owner = choir(&[
+        "checkpoint",
+        &api,
+        key_file,
+        "other-agent",
+        "change-1",
+        "agents/demo/cli-change",
+        &checkpoint_oid,
+    ]);
+    assert_eq!(wrong_owner.status.code(), Some(1));
+    assert_eq!(json(&wrong_owner)["code"], "channel_not_owned");
+    let checkpointed = choir(&[
+        "checkpoint",
+        &api,
+        key_file,
+        "cli-agent",
+        "change-1",
+        "agents/demo/cli-change",
+        &checkpoint_oid,
+    ]);
+    assert!(
+        checkpointed.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&checkpointed.stdout)
+    );
+    let view = json(&choir(&["view", &api]));
+    assert_eq!(
+        view["changes"]["change-1"]["revision_id"],
+        format!("11-{checkpoint_oid}")
+    );
+
+    let archive_args = [
+        "workspace-archive",
+        &api,
+        key_file,
+        "cli-agent",
+        "agents/demo",
+        "cli-change",
+        "change-1",
+        "request-1",
+    ];
+    let wrong_archive = choir(&[
+        "workspace-archive",
+        &api,
+        key_file,
+        "other-agent",
+        "agents/demo",
+        "cli-change",
+        "change-1",
+        "request-1",
+    ]);
+    assert_eq!(wrong_archive.status.code(), Some(1));
+    assert!(change_path.exists(), "rejected archive must restore the live path");
+    let archived = choir(&archive_args);
+    assert!(archived.status.success());
+    let archived = json(&archived);
+    assert_eq!(archived["already_archived"], false);
+    assert!(std::path::Path::new(archived["archived_path"].as_str().unwrap()).exists());
+    let archived_again = choir(&archive_args);
+    assert!(archived_again.status.success());
+    assert_eq!(json(&archived_again)["already_archived"], true);
+
     // Review round: request (sugar), pending queue, verdict, view.
     let out = choir(&["review", &api, key_file, "cli-agent", "r1", &head, "bot"]);
     assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));

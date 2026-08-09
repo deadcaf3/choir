@@ -26,12 +26,14 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
 For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` before the subcommand. Credentials are read from the named file, never an environment variable.
 
 - `choir key <key-file> [name]` — mint a key and print the line the operator registers; pass your channel name to print the bound form
-- `choir workspace <api> <owner/repo> <name>` — provision a copy-on-write workspace; prints its path and head
+- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]` — provision a CoW workspace; advanced flags bind an exact base and stable change
+- `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>` — publish an immutable change revision after committing and pushing its Git object
+- `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>` — owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 - `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...` — request review on a commit; name no reviewers and the node draws them
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance
+- `choir view <api>` — the materialized view: changes, workspace heads, refs, reviews, provenance
 <!-- /generated -->
 
 Signatures above are generated; these conventions are not, and they are
@@ -63,10 +65,13 @@ the part that matters:
 - `POST $CHOIR_API/api/submit` — submit a signed op (workspace head or
   ref move with CAS). Requires `$CHOIR_KEY_FILE`; ask the operator to
   register your key if submissions are rejected `unknown key`.
-- `POST $CHOIR_API/api/workspace` with `{"repo":"owner/repo","name":"<you>"}`
-  — instant CoW workspace: returns your working-copy `path` and `head`,
-  registers the workspace in the view. Push with a full refname
-  (`HEAD:refs/heads/<branch>`) — workspaces start on a detached HEAD.
+- Prefer advanced `choir workspace` flags for writing work. They pin an
+  exact base and bind one stable change, owner, and idempotency key. The
+  shorter `{repo,name}` request remains the legacy compatibility path.
+- Before `choir checkpoint`, commit and push the Git object with a full
+  refname (`HEAD:refs/heads/<branch>`). A checkpoint records identity and
+  CAS; it does not transfer objects. Use owner-signed `workspace-archive`
+  when the writing attempt ends.
 
 ## Reviews
 
@@ -82,8 +87,8 @@ the part that matters:
 
 ## Conventions
 
-- One workspace per agent, named after you; set your workspace head
-  rather than committing to shared branches directly.
+- One active writing attempt per exclusively owned workspace and stable
+  change. Shared checkouts are for research and review, not parallel writers.
 - A conflicted merge is a **valid state** here, not an error: commit it,
   keep working, resolve in a follow-up commit.
 - Never write secrets (tokens, key files) into the repo; they live

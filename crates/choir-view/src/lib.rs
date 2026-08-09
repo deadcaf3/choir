@@ -38,7 +38,7 @@
 use std::collections::BTreeMap;
 
 use choir_hash::ContentHash;
-use choir_oplog::{LogError, OpEntry, OpLog};
+use choir_oplog::{LogError, OpEntry, OpLog, Witness};
 use choir_store::{ChunkStore, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +76,47 @@ impl ViewOp {
     /// Returns [`ViewError::Decode`] when the bytes are not a valid op.
     pub fn from_payload(payload: &[u8]) -> Result<Self, ViewError> {
         serde_json::from_slice(payload).map_err(|e| ViewError::Decode(e.to_string()))
+    }
+}
+
+/// Owner-signed authorization carried into a node-authored physical
+/// workspace archive operation.
+///
+/// This is separate from [`ViewOp`]: submitting the authorization to the
+/// raw operation endpoint cannot detach a workspace. The archive endpoint
+/// first moves the filesystem, then the node wraps this proof in
+/// [`OpKind::ArchiveChange`] and submits that operation under its own key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveAuthorization {
+    /// Wire-format version; see [`FORMAT_VERSION`].
+    pub format_version: u16,
+    /// Stable logical contribution id.
+    pub id: String,
+    /// Currently active workspace.
+    pub workspace: String,
+    /// Expected current change/workspace revision.
+    pub prev_revision: ContentHash,
+}
+
+impl ArchiveAuthorization {
+    /// Creates an authorization at the current wire-format version.
+    pub fn new(id: String, workspace: String, prev_revision: ContentHash) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            id,
+            workspace,
+            prev_revision,
+        }
+    }
+
+    /// Canonical bytes covered by the owner's submission signature.
+    pub fn to_payload(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("ArchiveAuthorization is always serializable")
+    }
+
+    /// Decodes signed authorization bytes.
+    pub fn from_payload(payload: &[u8]) -> Result<Self, ViewError> {
+        serde_json::from_slice(payload).map_err(|error| ViewError::Decode(error.to_string()))
     }
 }
 
@@ -247,6 +288,56 @@ pub enum OpKind {
         /// visible "withdrawn" state, not a deletion).
         body: String,
     },
+    /// Create stable logical change `id` and bind its first active
+    /// workspace at an immutable base revision (additive variant;
+    /// existing operation bytes are unchanged).
+    ///
+    /// The change id survives later checkpoints and workspace archival.
+    /// `idempotency_key` is scoped to `owner`; the view rejects a second
+    /// change using the same pair so a lost create response cannot fork
+    /// one logical request into two changes.
+    CreateChange {
+        /// Stable logical contribution id.
+        id: String,
+        /// Channel allowed to checkpoint the change (enforced by L2
+        /// admission because signatures are not part of the pure view).
+        owner: String,
+        /// Exclusively bound active workspace.
+        workspace: String,
+        /// Exact immutable revision the workspace starts from.
+        base_revision: ContentHash,
+        /// Retry identity, unique within `owner`.
+        idempotency_key: String,
+    },
+    /// Publish an immutable revision of an existing change and advance
+    /// its bound workspace under compare-and-set.
+    CheckpointChange {
+        /// Stable logical contribution id.
+        id: String,
+        /// The change's currently bound workspace.
+        workspace: String,
+        /// Newly published immutable revision.
+        revision: ContentHash,
+        /// Expected current change/workspace revision.
+        prev_revision: ContentHash,
+    },
+    /// Archive a stable change's active workspace under revision CAS.
+    /// The revision remains addressable on the change after the mutable
+    /// filesystem surface is detached.
+    ArchiveChange {
+        /// Stable logical contribution id.
+        id: String,
+        /// The change's currently bound workspace.
+        workspace: String,
+        /// Expected current change/workspace revision.
+        prev_revision: ContentHash,
+        /// Owner channel that signed the matching
+        /// [`ArchiveAuthorization`].
+        owner: String,
+        /// Signature over the canonical authorization bytes. Admission
+        /// verifies it before this node-authored operation may land.
+        owner_sig: Witness,
+    },
 }
 
 /// A reviewer's answer to a review request.
@@ -312,6 +403,30 @@ pub struct ReviewState {
     /// [`ReviewStatus::Live`], so replaying a log written before
     /// archiving existed yields exactly the previous behaviour.
     pub status: ReviewStatus,
+}
+
+/// Materialized identity and current revision of one logical change.
+///
+/// Revision history remains in the append-only op log. The view keeps the
+/// latest exact revision needed for CAS and review selection, plus the
+/// create binding needed to make workspace retries deterministic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeState {
+    /// Channel allowed to checkpoint this change.
+    pub owner: String,
+    /// Workspace identity originally bound to the change. Retained after
+    /// archival so a delayed retry cannot target a later workspace that
+    /// reused the same name.
+    pub workspace_id: String,
+    /// Active mutable workspace, or `None` after archival.
+    pub active_workspace: Option<String>,
+    /// Immutable revision from which the change began.
+    pub base_revision: ContentHash,
+    /// Latest immutable revision published for the change. This equals
+    /// `base_revision` until the first checkpoint.
+    pub revision_id: ContentHash,
+    /// Owner-scoped identity of the create request.
+    pub idempotency_key: String,
 }
 
 impl ReviewState {
@@ -399,6 +514,9 @@ pub enum ViewError {
     Review(String),
     /// Provenance-record precondition failure (empty subject or kind).
     Provenance(String),
+    /// Change lifecycle precondition failure (duplicate identity,
+    /// invalid binding, unknown/archived change, or no-op checkpoint).
+    Change(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -475,6 +593,8 @@ impl Commit {
 pub struct View {
     /// Workspace name → head commit id.
     pub workspaces: BTreeMap<String, ContentHash>,
+    /// Stable logical change id → owner, workspace and exact revision.
+    pub changes: BTreeMap<String, ChangeState>,
     /// Ref name → target commit id.
     pub refs: BTreeMap<String, ContentHash>,
     /// Review id → review state (fan-out and verdicts).
@@ -605,6 +725,123 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::CreateChange {
+                id,
+                owner,
+                workspace,
+                idempotency_key,
+                ..
+            } => {
+                if id.is_empty()
+                    || owner.is_empty()
+                    || workspace.is_empty()
+                    || idempotency_key.is_empty()
+                {
+                    return Err(ViewError::Change(
+                        "change id, owner, workspace and idempotency key must be non-empty"
+                            .to_string(),
+                    ));
+                }
+                if self.changes.contains_key(id) {
+                    return Err(ViewError::Change(format!("change {id} already exists")));
+                }
+                if self.workspaces.contains_key(workspace) {
+                    return Err(ViewError::Change(format!(
+                        "workspace {workspace} already exists"
+                    )));
+                }
+                if let Some((existing, _)) = self
+                    .changes
+                    .iter()
+                    .find(|(_, change)| change.workspace_id == *workspace)
+                {
+                    return Err(ViewError::Change(format!(
+                        "workspace {workspace} already belongs to change {existing}"
+                    )));
+                }
+                if let Some((existing, _)) = self.changes.iter().find(|(_, change)| {
+                    change.owner == *owner && change.idempotency_key == *idempotency_key
+                }) {
+                    return Err(ViewError::Change(format!(
+                        "idempotency key already belongs to change {existing}"
+                    )));
+                }
+                Ok(())
+            }
+            OpKind::CheckpointChange {
+                id,
+                workspace,
+                revision,
+                prev_revision,
+            } => {
+                if id.is_empty() || workspace.is_empty() {
+                    return Err(ViewError::Change(
+                        "change id and workspace must be non-empty".to_string(),
+                    ));
+                }
+                let change = self
+                    .changes
+                    .get(id)
+                    .ok_or_else(|| ViewError::Change(format!("no such change {id}")))?;
+                if change.active_workspace.as_deref() != Some(workspace) {
+                    return Err(ViewError::Change(format!(
+                        "change {id} is not active in workspace {workspace}"
+                    )));
+                }
+                cas(
+                    Some(&change.revision_id),
+                    &Some(prev_revision.clone()),
+                    &format!("change {id}"),
+                )?;
+                cas(
+                    self.workspaces.get(workspace),
+                    &Some(prev_revision.clone()),
+                    workspace,
+                )?;
+                if revision == prev_revision {
+                    return Err(ViewError::Change(format!(
+                        "checkpoint for change {id} must advance to a different revision"
+                    )));
+                }
+                Ok(())
+            }
+            OpKind::ArchiveChange {
+                id,
+                workspace,
+                prev_revision,
+                owner,
+                ..
+            } => {
+                if id.is_empty() || workspace.is_empty() || owner.is_empty() {
+                    return Err(ViewError::Change(
+                        "change id, workspace and owner must be non-empty".to_string(),
+                    ));
+                }
+                let change = self
+                    .changes
+                    .get(id)
+                    .ok_or_else(|| ViewError::Change(format!("no such change {id}")))?;
+                if change.active_workspace.as_deref() != Some(workspace) {
+                    return Err(ViewError::Change(format!(
+                        "change {id} is not active in workspace {workspace}"
+                    )));
+                }
+                if change.owner != *owner {
+                    return Err(ViewError::Change(format!(
+                        "change {id} is owned by a different channel"
+                    )));
+                }
+                cas(
+                    Some(&change.revision_id),
+                    &Some(prev_revision.clone()),
+                    &format!("change {id}"),
+                )?;
+                cas(
+                    self.workspaces.get(workspace),
+                    &Some(prev_revision.clone()),
+                    workspace,
+                )
+            }
         }
     }
 
@@ -622,6 +859,13 @@ impl View {
             OpKind::SetWorkspaceHead {
                 workspace, commit, ..
             } => {
+                // A legacy move cannot leave a stale logical-change label
+                // attached to a revision it did not checkpoint.
+                for change in self.changes.values_mut() {
+                    if change.active_workspace.as_deref() == Some(workspace) {
+                        change.active_workspace = None;
+                    }
+                }
                 self.workspaces.insert(workspace.clone(), commit.clone());
             }
             OpKind::SetRef { name, commit, .. } => {
@@ -629,6 +873,11 @@ impl View {
             }
             OpKind::DeleteWorkspace { workspace } => {
                 self.workspaces.remove(workspace);
+                for change in self.changes.values_mut() {
+                    if change.active_workspace.as_deref() == Some(workspace) {
+                        change.active_workspace = None;
+                    }
+                }
             }
             OpKind::RequestReview {
                 id,
@@ -694,6 +943,46 @@ impl View {
             }
             OpKind::DeleteRef { name, .. } => {
                 self.refs.remove(name);
+            }
+            OpKind::CreateChange {
+                id,
+                owner,
+                workspace,
+                base_revision,
+                idempotency_key,
+            } => {
+                self.workspaces
+                    .insert(workspace.clone(), base_revision.clone());
+                self.changes.insert(
+                    id.clone(),
+                    ChangeState {
+                        owner: owner.clone(),
+                        workspace_id: workspace.clone(),
+                        active_workspace: Some(workspace.clone()),
+                        base_revision: base_revision.clone(),
+                        revision_id: base_revision.clone(),
+                        idempotency_key: idempotency_key.clone(),
+                    },
+                );
+            }
+            OpKind::CheckpointChange {
+                id,
+                workspace,
+                revision,
+                ..
+            } => {
+                self.workspaces.insert(workspace.clone(), revision.clone());
+                self.changes
+                    .get_mut(id)
+                    .expect("validate proved the change exists and is active")
+                    .revision_id = revision.clone();
+            }
+            OpKind::ArchiveChange { id, workspace, .. } => {
+                self.workspaces.remove(workspace);
+                self.changes
+                    .get_mut(id)
+                    .expect("validate proved the change exists and is active")
+                    .active_workspace = None;
             }
         }
         Ok(())

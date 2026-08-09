@@ -149,9 +149,10 @@ Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **ne
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
 | `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
-| `GET /api/view` | The materialized view: workspace heads, refs, reviews, provenance |
+| `GET /api/view` | The materialized view: changes, workspace heads, refs, reviews, provenance |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
-| `POST /api/workspace` | Provision a copy-on-write workspace and register it in the view |
+| `POST /api/workspace` | Provision a CoW workspace; optional exact base/change binding makes retries idempotent |
+| `POST /api/workspace/archive` | Recoverably archive a change-bound workspace and remove it from the active view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
@@ -165,7 +166,9 @@ usage:
 
 commands:
   choir key <key-file> [name]
-  choir workspace <api> <owner/repo> <name>
+  choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]
+  choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
+  choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
   choir submit <api> <key-file> <channel> '<op-json>'
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
@@ -194,19 +197,29 @@ It serves the measured legacy handshakes and the stateless 2026-07-28 request pa
 ```bash
 API=http://127.0.0.1:8417
 A=(--auth-file "$HOME/.choir/auth" --auth-user choir)
+OWNER=myop/agent
+CHANGE=change-1
+WORKSPACE=owner/demo/agent-a
 
 # 1. Confirm the node
 choir "${A[@]}" view "$API"
 
-# 2. CoW workspace (repo must exist on the node with at least one commit)
-choir "${A[@]}" workspace "$API" owner/demo agent-a
+# 2. Exact-base CoW workspace and stable change
+choir "${A[@]}" workspace "$API" owner/demo agent-a \
+  --base "$(git rev-parse HEAD)" --owner "$OWNER" --change "$CHANGE" \
+  --idempotency-key request-1
 
-# 3. Publish intent, then request review (name no reviewers — node draws)
-choir "${A[@]}" intent "$API" "$HOME/.choir/agent.key" myop/agent HEAD task 'ship feature X'
-choir "${A[@]}" review "$API" "$HOME/.choir/agent.key" myop/agent rev-1 "$(git rev-parse HEAD)" \
+# 3. Publish intent. After editing, commit and push before checkpointing.
+choir "${A[@]}" intent "$API" "$HOME/.choir/agent.key" "$OWNER" "$CHANGE" task 'ship feature X'
+git push origin HEAD:refs/heads/agent-a
+choir "${A[@]}" checkpoint "$API" "$HOME/.choir/agent.key" "$OWNER" \
+  "$CHANGE" "$WORKSPACE" "$(git rev-parse HEAD)"
+
+# 4. Request review with no reviewer names so the node draws them
+choir "${A[@]}" review "$API" "$HOME/.choir/agent.key" "$OWNER" rev-1 "$(git rev-parse HEAD)" \
   --ref owner/demo.git:refs/heads/main
 
-# 4. Drawn reviewers answer
+# 5. Drawn reviewers answer
 choir "${A[@]}" reviews "$API" otherop/reviewer
 choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 approve
 ```
@@ -263,6 +276,7 @@ Rejection code table: [`ERRORS.md`](ERRORS.md).
 | [`PHASE0.md`](PHASE0.md) | Build log and gate status (source of truth) |
 | [`plan.md`](plan.md) | Design blueprint + decision register |
 | [`internal/design.md`](internal/design.md) | Architecture, invariants, conventions |
+| [`internal/integration-workflows.md`](internal/integration-workflows.md) | Agent workflow targets, identifier contract, implementation order |
 | [`internal/measurements.md`](internal/measurements.md) | Phase-0 numbers |
 
 ## License

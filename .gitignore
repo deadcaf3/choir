@@ -5,4 +5,5 @@ CLAUDE.md
 # Local scratch under internal/; tracked design notes are allowlisted.
 internal/*
 !internal/design.md
+!internal/integration-workflows.md
 !internal/measurements.md

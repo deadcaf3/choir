@@ -4,8 +4,10 @@
 //! path. Includes a small p50 measurement (printed with --nocapture).
 
 use choir_identity::{ActorKey, Registry};
+use choir_node::platform::hex_encode;
 use choir_node::{Node, Platform};
 use choir_oplog::MemLog;
+use choir_view::ArchiveAuthorization;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
@@ -47,9 +49,12 @@ fn workspace_provisioning_end_to_end() {
     std::fs::create_dir_all(&work).unwrap();
     let root = work.join("repos");
 
+    let owner_key = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&owner_key.public_key_bytes()).unwrap();
     let mut node = Node::bind(&root, 0).unwrap();
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
     );
     let port = node.port();
     node.create_repo("agents/demo.git").unwrap();
@@ -120,6 +125,181 @@ fn workspace_provisioning_end_to_end() {
         Some(r#"{"repo":"agents/nope","name":"x"}"#));
     assert_eq!(code, 404);
 
+    // Adapter-grade creation is pinned to an exact base even after the
+    // repository advances. The stable change binding makes retries
+    // idempotent and exposes change/revision identity in the view.
+    std::fs::write(seed.join("f.txt"), "v2\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-q", "-m", "second"]);
+    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    let head2 = String::from_utf8_lossy(&git(&seed, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+    let advanced = serde_json::json!({
+        "repo": "agents/demo",
+        "name": "adapter-1",
+        "base": head,
+        "owner": "operator/agent",
+        "change": "change-1",
+        "idempotency_key": "request-1",
+    })
+    .to_string();
+    let (code, created) = api(port, "POST", "/api/workspace", Some(&advanced));
+    assert_eq!(code, 200, "{created}");
+    assert_eq!(created["head"], head);
+    assert_eq!(created["created"], true);
+    let adapter_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(adapter_path.join("f.txt")).unwrap(), "v1\n");
+    let (code, reused) = api(port, "POST", "/api/workspace", Some(&advanced));
+    assert_eq!(code, 200, "{reused}");
+    assert_eq!(reused["created"], false);
+    assert_eq!(reused["reused"], true);
+    assert_eq!(reused["path"], created["path"]);
+    assert_eq!(reused["operation"]["seq"], created["operation"]["seq"]);
+    assert_eq!(reused["operation"]["hash"], created["operation"]["hash"]);
+    assert_eq!(reused["operation"]["already_applied"], true);
+
+    let (_, view) = api(port, "GET", "/api/view", None);
+    assert_eq!(view["changes"]["change-1"]["owner"], "operator/agent");
+    assert_eq!(
+        view["changes"]["change-1"]["active_workspace"],
+        "agents/demo/adapter-1"
+    );
+    assert_eq!(
+        view["changes"]["change-1"]["base_revision"],
+        format!("11-{head}")
+    );
+    assert_eq!(
+        view["workspaces"]["agents/demo/adapter-1"],
+        format!("11-{head}")
+    );
+
+    for (field, value) in [
+        ("base", head2.as_str()),
+        ("owner", "other/agent"),
+        ("change", "change-2"),
+        ("idempotency_key", "request-2"),
+    ] {
+        let mut mismatch: serde_json::Value = serde_json::from_str(&advanced).unwrap();
+        mismatch[field] = serde_json::json!(value);
+        let (code, problem) = api(
+            port,
+            "POST",
+            "/api/workspace",
+            Some(&mismatch.to_string()),
+        );
+        assert_eq!(code, 409, "{field}: {problem}");
+        assert_eq!(problem["code"], "workspace_state", "{field}: {problem}");
+    }
+    let invalid = serde_json::json!({
+        "repo": "agents/demo", "name": "invalid-base", "base": "abc",
+        "owner": "operator/agent", "change": "invalid-change",
+        "idempotency_key": "invalid-request",
+    })
+    .to_string();
+    let (code, problem) = api(port, "POST", "/api/workspace", Some(&invalid));
+    assert_eq!(code, 400, "{problem}");
+    assert!(!root.join(".choir/workspaces/agents/demo/invalid-base").exists());
+
+    // Archive retains dirty and unpushed workspace data, removes only the
+    // active view row, and is idempotent under a lost response.
+    std::fs::write(adapter_path.join("unpublished.txt"), "keep me\n").unwrap();
+    let archive_payload = ArchiveAuthorization::new(
+        "change-1".into(),
+        "agents/demo/adapter-1".into(),
+        choir_oplog::ContentHash::from_git_oid(&head).unwrap(),
+    )
+    .to_payload();
+    let wrong_signature = ActorKey::generate().sign_submission("operator/agent", &archive_payload);
+    let wrong_archive = serde_json::json!({
+        "repo": "agents/demo", "name": "adapter-1", "change": "change-1",
+        "idempotency_key": "request-1", "channel": "operator/agent",
+        "payload_hex": hex_encode(&archive_payload), "key_id": wrong_signature.key_id,
+        "signature_hex": hex_encode(&wrong_signature.signature),
+    })
+    .to_string();
+    let (code, problem) = api(
+        port,
+        "POST",
+        "/api/workspace/archive",
+        Some(&wrong_archive),
+    );
+    assert_eq!(code, 409, "{problem}");
+    assert_eq!(problem["code"], "unknown_key", "{problem}");
+    assert!(adapter_path.exists());
+
+    let archive_signature = owner_key.sign_submission("operator/agent", &archive_payload);
+    let archive = serde_json::json!({
+        "repo": "agents/demo", "name": "adapter-1", "change": "change-1",
+        "idempotency_key": "request-1", "channel": "operator/agent",
+        "payload_hex": hex_encode(&archive_payload), "key_id": archive_signature.key_id,
+        "signature_hex": hex_encode(&archive_signature.signature),
+    })
+    .to_string();
+    let (code, archived) = api(port, "POST", "/api/workspace/archive", Some(&archive));
+    assert_eq!(code, 200, "{archived}");
+    assert_eq!(archived["already_archived"], false);
+    let archived_path = std::path::PathBuf::from(archived["archived_path"].as_str().unwrap());
+    assert!(!adapter_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(archived_path.join("unpublished.txt")).unwrap(),
+        "keep me\n"
+    );
+    let (_, view) = api(port, "GET", "/api/view", None);
+    assert!(view["workspaces"].get("agents/demo/adapter-1").is_none());
+    assert!(view["changes"]["change-1"]["active_workspace"].is_null());
+    let (code, archived_again) = api(port, "POST", "/api/workspace/archive", Some(&archive));
+    assert_eq!(code, 200, "{archived_again}");
+    assert_eq!(archived_again["already_archived"], true);
+    assert_eq!(
+        archived_again["operation"]["seq"],
+        archived["operation"]["seq"]
+    );
+    assert_eq!(
+        archived_again["operation"]["hash"],
+        archived["operation"]["hash"]
+    );
+    assert_eq!(archived_again["operation"]["already_applied"], true);
+
+    // Identical concurrent lifecycle requests converge on one durable
+    // change and one physical workspace.
+    let idem_body = serde_json::json!({
+        "repo": "agents/demo", "name": "adapter-racer", "base": head2,
+        "owner": "operator/racer", "change": "change-racer",
+        "idempotency_key": "request-racer",
+    })
+    .to_string();
+    let lifecycle_handles: Vec<_> = (0..8)
+        .map(|_| {
+            let body = idem_body.clone();
+            std::thread::spawn(move || api(port, "POST", "/api/workspace", Some(&body)))
+        })
+        .collect();
+    let lifecycle_results: Vec<_> = lifecycle_handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert!(
+        lifecycle_results.iter().all(|(code, _)| *code == 200),
+        "{lifecycle_results:?}"
+    );
+    assert_eq!(
+        lifecycle_results
+            .iter()
+            .filter(|(_, body)| body["created"] == true)
+            .count(),
+        1,
+        "{lifecycle_results:?}"
+    );
+    assert_eq!(
+        lifecycle_results
+            .iter()
+            .filter(|(_, body)| body["reused"] == true)
+            .count(),
+        7,
+        "{lifecycle_results:?}"
+    );
+
     // Concurrent provisioning: 8 parallel requests on one repo — the
     // per-repo lock must serialize template refresh, so every workspace
     // comes out whole. Two of them race for the same name: exactly one
@@ -140,7 +320,7 @@ fn workspace_provisioning_end_to_end() {
     assert_eq!(results.iter().filter(|(code, _)| *code == 409).count(), 1);
     for (_, resp) in &ok {
         let p = std::path::PathBuf::from(resp["path"].as_str().unwrap());
-        assert_eq!(std::fs::read_to_string(p.join("f.txt")).unwrap(), "v1\n",
+        assert_eq!(std::fs::read_to_string(p.join("f.txt")).unwrap(), "v2\n",
             "no torn copies under concurrency");
     }
 

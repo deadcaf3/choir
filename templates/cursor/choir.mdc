@@ -24,19 +24,22 @@ platform) at `$CHOIR_API`.
 For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` before the subcommand. Credentials are read from the named file, never an environment variable.
 
 - `choir key <key-file> [name]` — mint a key and print the line the operator registers; pass your channel name to print the bound form
-- `choir workspace <api> <owner/repo> <name>` — provision a copy-on-write workspace; prints its path and head
+- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --change <id> --idempotency-key <key>]` — provision a CoW workspace; advanced flags bind an exact base and stable change
+- `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>` — publish an immutable change revision after committing and pushing its Git object
+- `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>` — owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 - `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...` — request review on a commit; name no reviewers and the node draws them
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance
+- `choir view <api>` — the materialized view: changes, workspace heads, refs, reviews, provenance
 <!-- /generated -->
 - `GET $CHOIR_API/api/view` shows where every workspace and ref points;
   prefer it over guessing. `GET $CHOIR_API/api/log?from=N` is the
   ordered signed history — use it to catch up.
-- `POST $CHOIR_API/api/workspace` (`{"repo":"owner/repo","name":"<you>"}`)
-  provisions your own instant CoW working copy; push from it with a full
-  refname (`HEAD:refs/heads/<branch>`) — it starts on a detached HEAD.
+- Prefer the advanced `choir workspace` flags for writing work. They pin
+  an exact base and bind one stable change, owner, and idempotency key.
+  Commit and push the Git object before `choir checkpoint`; use the
+  owner-signed `workspace-archive` when the writing attempt ends.
 - Publish what you're working on with
   `choir intent $CHOIR_API $CHOIR_KEY_FILE <you> <you> task-spec '<spec>'`
   (update it when scope changes); everyone's current records are under
@@ -51,5 +54,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
   `git push` there is refused until the review is approved.
 - A conflicted merge is a valid committed state here, not an error:
   commit it, keep working, resolve in a follow-up commit.
+- Keep each active writing attempt in its own exclusive workspace and
+  stable change. Shared checkouts are for research and review.
 - Secrets (tokens, keys) live under `~/.choir/`; never write them into
   the repo.

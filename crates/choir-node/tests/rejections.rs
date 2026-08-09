@@ -12,7 +12,7 @@ use choir_node::platform::hex_encode;
 use choir_node::reject::{Code, Rejection};
 use choir_node::{Node, Platform};
 use choir_oplog::MemLog;
-use choir_view::{OpKind, ViewOp};
+use choir_view::{ArchiveAuthorization, OpKind, ViewOp};
 
 fn curl(args: &[&str]) -> (u16, serde_json::Value) {
     let out = std::process::Command::new("curl")
@@ -50,10 +50,20 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
     let mut registry = Registry::new();
     registry.register(&author.public_key_bytes()).unwrap();
 
+    let platform =
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap();
+    platform
+        .create_change(
+            "change-1",
+            "alice",
+            "demo/alice",
+            "1111111111111111111111111111111111111111",
+            "request-1",
+            "git/test",
+        )
+        .unwrap();
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
-    node.enable_platform(
-        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
-    );
+    node.enable_platform(platform);
     let port = node.port();
     let node = std::sync::Arc::new(node);
     {
@@ -73,6 +83,86 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
             &format!("{api}/submit"),
         ])
     };
+
+    // Stable changes are provisioned by the node, checkpointed only by
+    // their signed owner, and cannot be bypassed with a legacy head move.
+    let create_directly = ViewOp::new(OpKind::CreateChange {
+        id: "change-2".into(),
+        owner: "alice".into(),
+        workspace: "demo/alice-2".into(),
+        base_revision: choir_oplog::ContentHash::from_git_oid(
+            "1111111111111111111111111111111111111111",
+        )
+        .unwrap(),
+        idempotency_key: "request-2".into(),
+    });
+    let (code, direct) = post(&create_directly);
+    assert_eq!(code, 400, "{direct}");
+    assert_eq!(direct["code"], "node_only", "{direct}");
+
+    let archive_authorization = ArchiveAuthorization::new(
+        "change-1".into(),
+        "demo/alice".into(),
+        choir_oplog::ContentHash::from_git_oid(
+            "1111111111111111111111111111111111111111",
+        )
+        .unwrap(),
+    );
+    let raw_archive = ViewOp::new(OpKind::ArchiveChange {
+        id: "change-1".into(),
+        workspace: "demo/alice".into(),
+        prev_revision: choir_oplog::ContentHash::from_git_oid(
+            "1111111111111111111111111111111111111111",
+        )
+        .unwrap(),
+        owner: "alice".into(),
+        owner_sig: author.sign_submission("alice", &archive_authorization.to_payload()),
+    });
+    let (code, raw_archive) = post(&raw_archive);
+    assert_eq!(code, 400, "{raw_archive}");
+    assert_eq!(raw_archive["code"], "node_only", "{raw_archive}");
+
+    let checkpoint = ViewOp::new(OpKind::CheckpointChange {
+        id: "change-1".into(),
+        workspace: "demo/alice".into(),
+        revision: choir_oplog::ContentHash::from_git_oid(
+            "2222222222222222222222222222222222222222",
+        )
+        .unwrap(),
+        prev_revision: choir_oplog::ContentHash::from_git_oid(
+            "1111111111111111111111111111111111111111",
+        )
+        .unwrap(),
+    });
+    let wrong_owner_body = submit_body(&author, "mallory", &checkpoint);
+    let (code, wrong_owner) = curl(&[
+        "-X",
+        "POST",
+        "-d",
+        &wrong_owner_body,
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{wrong_owner}");
+    assert_eq!(wrong_owner["code"], "channel_not_owned", "{wrong_owner}");
+    let (code, checkpointed) = post(&checkpoint);
+    assert_eq!(code, 200, "{checkpointed}");
+
+    let legacy_move = ViewOp::new(OpKind::SetWorkspaceHead {
+        workspace: "demo/alice".into(),
+        commit: choir_oplog::ContentHash::from_git_oid(
+            "3333333333333333333333333333333333333333",
+        )
+        .unwrap(),
+        prev: Some(
+            choir_oplog::ContentHash::from_git_oid(
+                "2222222222222222222222222222222222222222",
+            )
+            .unwrap(),
+        ),
+    });
+    let (code, bypass) = post(&legacy_move);
+    assert_eq!(code, 400, "{bypass}");
+    assert_eq!(bypass["code"], "workspace_state", "{bypass}");
 
     let (code, first) = post(&set_main);
     assert_eq!(code, 200, "{first}");

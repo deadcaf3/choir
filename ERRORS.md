@@ -21,6 +21,8 @@ Every rejection body carries `code`, `error` and `next`. `expected` and `actual`
 | `stale_head` | Compare-and-swap failed: the state moved under the submission | Re-read `GET /api/view`, rebase your intent on the value in `actual`, and resubmit with that as `prev`. If you are retrying a submission whose response you lost, check for `already_applied` first — a completed retry answers 200, not this. |
 | `review_state` | A review-op precondition failed (duplicate id, unknown review, already assigned, archived) | Read `reviews` in `GET /api/view` for this id. A review that is already assigned, complete, or archived does not accept the op you sent. |
 | `provenance_state` | A provenance record was missing a subject or kind | Resubmit with a non-empty subject and kind. |
+| `change_state` | A stable change was unknown, duplicated, archived, or mismatched | Read `changes` in `GET /api/view`, then use its owner, workspace and revision or choose a new change id. |
+| `workspace_state` | A workspace lifecycle request conflicted with its durable binding | Read `changes` and `workspaces` in `GET /api/view`; retry only with the exact existing binding, or choose a new workspace name. |
 | `policy_unavailable` | The operator's protected-ref list could not be read, so the gate failed closed | Operator problem, not a client one: the gate fails closed rather than guessing. Retry once the file is restored. |
 | `log_evicted` | Requested log entries are older than anything this node can serve | Resync from the sequence in `window_base`; entries before it are gone from this node. |
 | `unclassified` | A rejection that did not originate as a structured one | Read `error`. This path does not name a repair yet — that is a gap, and worth reporting. |

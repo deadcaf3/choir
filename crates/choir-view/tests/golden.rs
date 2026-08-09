@@ -46,7 +46,10 @@ use std::collections::BTreeMap;
 use choir_hash::ContentHash;
 use choir_oplog::{signing_hash, OpEntry, Witness, FORMAT_VERSION as OPLOG_FORMAT_VERSION};
 use choir_store::{ChunkerParams, Manifest, FORMAT_VERSION as STORE_FORMAT_VERSION};
-use choir_view::{Commit, OpKind, TreeEntry, Verdict, ViewOp, FORMAT_VERSION as VIEW_FORMAT_VERSION};
+use choir_view::{
+    ArchiveAuthorization, Commit, OpKind, TreeEntry, Verdict, ViewOp,
+    FORMAT_VERSION as VIEW_FORMAT_VERSION,
+};
 
 /// Whether this run prints fresh constants instead of checking frozen ones.
 fn regenerating() -> bool {
@@ -267,6 +270,58 @@ fn view_op_variants_are_frozen() {
         }),
         r#"{"format_version":1,"kind":{"RecordProvenance":{"subject":"agent-1","kind":"task-spec","body":"make the thing"}}}"#,
         "1e-f64fa277e20b2169ae1787abd98159f5f446680be3ddb5eda8f48ffce7c9e1b9",
+    );
+    assert_golden(
+        "CreateChange",
+        &ViewOp::new(OpKind::CreateChange {
+            id: "change-1".into(),
+            owner: "operator/agent".into(),
+            workspace: "repo/agent".into(),
+            base_revision: h(b"commit one"),
+            idempotency_key: "request-1".into(),
+        }),
+        r#"{"format_version":1,"kind":{"CreateChange":{"id":"change-1","owner":"operator/agent","workspace":"repo/agent","base_revision":{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]},"idempotency_key":"request-1"}}}"#,
+        "1e-a64d00f040ad8ac87e8d120f57b6fc186a576bf1c9d5a92df8379514c428d7d1",
+    );
+    assert_golden(
+        "CheckpointChange",
+        &ViewOp::new(OpKind::CheckpointChange {
+            id: "change-1".into(),
+            workspace: "repo/agent".into(),
+            revision: h(b"commit two"),
+            prev_revision: h(b"commit one"),
+        }),
+        r#"{"format_version":1,"kind":{"CheckpointChange":{"id":"change-1","workspace":"repo/agent","revision":{"codec":30,"digest":[85,132,118,97,239,147,219,56,81,251,10,83,89,23,246,20,25,60,73,118,206,203,90,41,65,69,251,150,168,140,62,8]},"prev_revision":{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]}}}}"#,
+        "1e-ed94035812d9ddd3018557c3c1e98a12b64a1ebd44b8a290c409f240975d2195",
+    );
+    assert_golden(
+        "ArchiveChange",
+        &ViewOp::new(OpKind::ArchiveChange {
+            id: "change-1".into(),
+            workspace: "repo/agent".into(),
+            prev_revision: h(b"commit two"),
+            owner: "operator/agent".into(),
+            owner_sig: Witness {
+                key_id: "owner-key".into(),
+                signature: vec![1, 2, 3],
+            },
+        }),
+        r#"{"format_version":1,"kind":{"ArchiveChange":{"id":"change-1","workspace":"repo/agent","prev_revision":{"codec":30,"digest":[85,132,118,97,239,147,219,56,81,251,10,83,89,23,246,20,25,60,73,118,206,203,90,41,65,69,251,150,168,140,62,8]},"owner":"operator/agent","owner_sig":{"key_id":"owner-key","signature":[1,2,3]}}}}"#,
+        "1e-86f079f00edc377222fd784aaff45ee30e887979385b6e77b2abd60b19fdf2d3",
+    );
+}
+
+#[test]
+fn archive_authorization_is_frozen() {
+    assert_golden(
+        "ArchiveAuthorization",
+        &ArchiveAuthorization::new(
+            "change-1".into(),
+            "repo/agent".into(),
+            h(b"commit two"),
+        ),
+        r#"{"format_version":1,"id":"change-1","workspace":"repo/agent","prev_revision":{"codec":30,"digest":[85,132,118,97,239,147,219,56,81,251,10,83,89,23,246,20,25,60,73,118,206,203,90,41,65,69,251,150,168,140,62,8]}}"#,
+        "1e-d8ea0a752dd478142674409c07b78547d8833ee57a31671088cd288c578448a7",
     );
 }
 

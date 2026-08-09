@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
-use choir_view::{reviewer_operator, OpKind, View, ViewOp};
+use choir_view::{
+    reviewer_operator, ArchiveAuthorization, ChangeState, OpKind, View, ViewOp,
+};
 
 use crate::reject::{Code, Rejection};
 
@@ -121,7 +123,10 @@ impl ReviewRetentionState {
             | OpKind::SetRef { .. }
             | OpKind::DeleteRef { .. }
             | OpKind::DeleteWorkspace { .. }
-            | OpKind::RecordProvenance { .. } => {}
+            | OpKind::RecordProvenance { .. }
+            | OpKind::CreateChange { .. }
+            | OpKind::CheckpointChange { .. }
+            | OpKind::ArchiveChange { .. } => {}
             _ => self.prunable_changed = true,
         }
     }
@@ -525,6 +530,99 @@ impl SubmitPolicy for ChoirPolicy {
                 Code::NodeOnly,
                 "only the node may archive reviews",
                 "nothing to do: archiving is retention, performed by the node",
+            )
+            .encode());
+        }
+        // Stable change creation is coupled to physical workspace
+        // provisioning. Only the node may record it, after the exact base
+        // was verified and the checkout was materialized.
+        if matches!(
+            op.kind,
+            OpKind::CreateChange { .. } | OpKind::ArchiveChange { .. }
+        ) && actor_id != self.node_id
+        {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may author physical workspace lifecycle operations",
+                "call POST /api/workspace to create, or POST /api/workspace/archive with an owner-signed authorization to archive",
+            )
+            .encode());
+        }
+        if let OpKind::CheckpointChange { id, .. } = &op.kind {
+            let owner = self
+                .view
+                .lock()
+                .expect("view lock")
+                .changes
+                .get(id)
+                .map(|change| change.owner.clone());
+            if let Some(owner) = owner {
+                if owner != sub.channel {
+                    return Err(Rejection::new(
+                        Code::ChannelNotOwned,
+                        format!("change {id} is owned by a different channel"),
+                        "sign the change operation on the owner channel reported in GET /api/view, or \
+                         create a separate change",
+                    )
+                    .with_states(Some(owner), Some(sub.channel.clone()))
+                    .encode());
+                }
+                self.channel_is_owned(&actor_id, &sub.channel)?;
+            }
+        }
+        if let OpKind::ArchiveChange {
+            id,
+            workspace,
+            prev_revision,
+            owner,
+            owner_sig,
+        } = &op.kind
+        {
+            let authorization = ArchiveAuthorization::new(
+                id.clone(),
+                workspace.clone(),
+                prev_revision.clone(),
+            )
+            .to_payload();
+            let mut verified_owner = self
+                .registry
+                .verify_submission(owner, &authorization, owner_sig);
+            if verified_owner.is_err() && self.reload_keys() {
+                verified_owner = self
+                    .registry
+                    .verify_submission(owner, &authorization, owner_sig);
+            }
+            let owner_actor = verified_owner.map_err(|error| {
+                Rejection::new(
+                    Code::UnknownKey,
+                    format!("archive owner signature check failed: {error:?}"),
+                    "register the owner key, then retry the same signed archive authorization",
+                )
+                .encode()
+            })?;
+            self.channel_is_owned(&owner_actor, owner)?;
+        }
+        // Legacy workspace moves and deletes remain compatible for
+        // legacy workspaces. Once a workspace is enrolled in a stable
+        // change, non-node callers must use CheckpointChange and the
+        // recoverable archive endpoint so identity cannot be bypassed.
+        let bound_workspace = match &op.kind {
+            OpKind::SetWorkspaceHead { workspace, .. }
+            | OpKind::DeleteWorkspace { workspace } => self
+                .view
+                .lock()
+                .expect("view lock")
+                .changes
+                .values()
+                .any(|change| change.active_workspace.as_deref() == Some(workspace)),
+            _ => false,
+        };
+        if bound_workspace && actor_id != self.node_id {
+            return Err(Rejection::new(
+                Code::WorkspaceState,
+                "a change-bound workspace cannot be moved or removed through a legacy op",
+                "use choir checkpoint to publish a revision, or choir workspace-archive to \
+                 archive the bound workspace",
             )
             .encode());
         }
@@ -1088,6 +1186,176 @@ impl Platform {
         self.handle.try_submit(attribution, payload, Some(sig)).map(|_| ())
     }
 
+    /// Atomically creates a stable change and registers its workspace at
+    /// an exact Git revision with a node-signed operation.
+    pub fn create_change(
+        &self,
+        id: &str,
+        owner: &str,
+        workspace: &str,
+        base_hex: &str,
+        idempotency_key: &str,
+        attribution: &str,
+    ) -> Result<choir_sequencer::Accepted, String> {
+        let base_revision = ContentHash::from_git_oid(base_hex).ok_or("bad base revision")?;
+        let payload = ViewOp::new(OpKind::CreateChange {
+            id: id.to_string(),
+            owner: owner.to_string(),
+            workspace: workspace.to_string(),
+            base_revision,
+            idempotency_key: idempotency_key.to_string(),
+        })
+        .to_payload();
+        let sig = self.node_key.sign_submission(attribution, &payload);
+        self.handle.try_submit(attribution, payload, Some(sig))
+    }
+
+    /// Original operation identity for a recently landed identical
+    /// change-create request. The index is rebuilt from the durable log
+    /// window on restart, so ordinary response-loss retries recover the
+    /// same receipt without appending another operation.
+    #[must_use]
+    pub fn create_change_receipt(
+        &self,
+        id: &str,
+        owner: &str,
+        workspace: &str,
+        base_hex: &str,
+        idempotency_key: &str,
+        attribution: &str,
+    ) -> Option<(u64, ContentHash)> {
+        let base_revision = ContentHash::from_git_oid(base_hex)?;
+        let payload = ViewOp::new(OpKind::CreateChange {
+            id: id.to_string(),
+            owner: owner.to_string(),
+            workspace: workspace.to_string(),
+            base_revision,
+            idempotency_key: idempotency_key.to_string(),
+        })
+        .to_payload();
+        self.entries
+            .lock()
+            .expect("entries lock")
+            .already_applied(attribution, &payload)
+    }
+
+    /// Submits a node-authored [`OpKind::ArchiveChange`] carrying the
+    /// owner's signed authorization, after verifying that the signed
+    /// payload names exactly the resource the endpoint already moved.
+    pub fn submit_archive_change(
+        &self,
+        request: &serde_json::Value,
+        expected_id: &str,
+        expected_workspace: &str,
+        expected_revision: &ContentHash,
+        attribution: &str,
+    ) -> Result<choir_sequencer::Accepted, String> {
+        let sub = decode_archive_submission(
+            request,
+            expected_id,
+            expected_workspace,
+            expected_revision,
+        )?;
+        let payload = ViewOp::new(OpKind::ArchiveChange {
+            id: expected_id.to_string(),
+            workspace: expected_workspace.to_string(),
+            prev_revision: expected_revision.clone(),
+            owner: sub.channel,
+            owner_sig: sub
+                .author_sig
+                .expect("decode_submission always returns a signature"),
+        })
+        .to_payload();
+        let signature = self.node_key.sign_submission(attribution, &payload);
+        self.handle
+            .try_submit(attribution, payload, Some(signature))
+    }
+
+    /// Checks the archive request's signed payload shape before the
+    /// filesystem is renamed. Signature and current-state admission still
+    /// happen on the sequencer after the rename, with rollback on refusal.
+    pub fn validate_archive_change_request(
+        &self,
+        request: &serde_json::Value,
+        expected_id: &str,
+        expected_workspace: &str,
+        expected_revision: &ContentHash,
+    ) -> Result<(), String> {
+        decode_archive_submission(
+            request,
+            expected_id,
+            expected_workspace,
+            expected_revision,
+        )
+        .map(|_| ())
+    }
+
+    /// Original operation identity for an identical completed archive
+    /// request still present in the durable log window.
+    #[must_use]
+    pub fn archive_change_receipt(
+        &self,
+        request: &serde_json::Value,
+        expected_id: &str,
+        expected_workspace: &str,
+        expected_revision: &ContentHash,
+        attribution: &str,
+    ) -> Option<(u64, ContentHash)> {
+        let sub = decode_archive_submission(
+            request,
+            expected_id,
+            expected_workspace,
+            expected_revision,
+        )
+        .ok()?;
+        let payload = ViewOp::new(OpKind::ArchiveChange {
+            id: expected_id.to_string(),
+            workspace: expected_workspace.to_string(),
+            prev_revision: expected_revision.clone(),
+            owner: sub.channel,
+            owner_sig: sub.author_sig?,
+        })
+        .to_payload();
+        self.entries
+            .lock()
+            .expect("entries lock")
+            .already_applied(attribution, &payload)
+    }
+
+    /// Current materialized state for one stable change.
+    #[must_use]
+    pub fn change_state(&self, id: &str) -> Option<ChangeState> {
+        self.view
+            .lock()
+            .expect("view lock")
+            .changes
+            .get(id)
+            .cloned()
+    }
+
+    /// Finds the change created by one owner-scoped idempotency key.
+    #[must_use]
+    pub fn change_for_idempotency(&self, owner: &str, key: &str) -> Option<(String, ChangeState)> {
+        self.view
+            .lock()
+            .expect("view lock")
+            .changes
+            .iter()
+            .find(|(_, change)| change.owner == owner && change.idempotency_key == key)
+            .map(|(id, change)| (id.clone(), change.clone()))
+    }
+
+    /// Current exact head of an active workspace.
+    #[must_use]
+    pub fn workspace_head(&self, workspace: &str) -> Option<ContentHash> {
+        self.view
+            .lock()
+            .expect("view lock")
+            .workspaces
+            .get(workspace)
+            .cloned()
+    }
+
     /// Draws reviewers for unassigned review `id` and records them with
     /// a node-signed op.
     ///
@@ -1308,8 +1576,25 @@ impl Platform {
                     .iter()
                     .map(|(id, r)| (id.clone(), review_json(r)))
                     .collect();
+                let changes: std::collections::BTreeMap<_, _> = view
+                    .changes
+                    .iter()
+                    .map(|(id, change)| {
+                        (
+                            id.clone(),
+                            serde_json::json!({
+                                "owner": change.owner,
+                                "workspace_id": change.workspace_id,
+                                "active_workspace": change.active_workspace,
+                                "base_revision": change.base_revision.to_hex(),
+                                "revision_id": change.revision_id.to_hex(),
+                            }),
+                        )
+                    })
+                    .collect();
                 let body = serde_json::json!({
                     "workspaces": ws,
+                    "changes": changes,
                     "refs": refs,
                     "reviews": reviews,
                     "provenance": view.provenance,
@@ -1596,6 +1881,40 @@ struct DecodedSubmission {
     /// Review id when this op opens a review naming no reviewers, so the
     /// node knows to draw for it once the op is admitted.
     unassigned_review: Option<String>,
+}
+
+fn decode_archive_submission(
+    request: &serde_json::Value,
+    expected_id: &str,
+    expected_workspace: &str,
+    expected_revision: &ContentHash,
+) -> Result<DecodedSubmission, String> {
+    let sub = decode_submission(request).map_err(|reason| {
+        Rejection::new(
+            Code::MalformedRequest,
+            reason,
+            "sign the exact ArchiveAuthorization payload with the bound owner key and include channel, payload_hex, key_id and signature_hex",
+        )
+        .encode()
+    })?;
+    let authorization = ArchiveAuthorization::from_payload(&sub.payload)
+        .map_err(|error| crate::reject::from_view_error(&error).encode())?;
+    match authorization {
+        ArchiveAuthorization {
+            id,
+            workspace,
+            prev_revision,
+            ..
+        } if id == expected_id
+            && workspace == expected_workspace
+            && &prev_revision == expected_revision => Ok(sub),
+        _ => Err(Rejection::new(
+            Code::WorkspaceState,
+            "signed archive payload does not match the requested change, workspace and revision",
+            "re-read GET /api/view, rebuild ArchiveAuthorization from that exact state, sign it on the owner channel and retry",
+        )
+        .encode()),
+    }
 }
 
 /// Turns one already-parsed request object into a submission.

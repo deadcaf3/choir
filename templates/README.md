@@ -36,7 +36,7 @@ choir-mcp <api> [--auth-file <path>] [--auth-user <name>]
 
 For an authenticated node, use the node URL as `<api>` and name the credential
 file with `--auth-file`; use `--auth-user` when it has multiple entries. The
-adapter exposes six public platform operations. It does not expose discovery
+adapter exposes seven public platform operations. It does not expose discovery
 documents or the internal Git hook as tools.
 
 ## What the templates teach an agent

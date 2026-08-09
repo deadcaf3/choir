@@ -216,6 +216,7 @@ fn modern_discovery_is_stateless_and_tool_order_is_cache_stable() {
             "choir_view",
             "choir_log",
             "choir_workspace",
+            "choir_workspace_archive",
             "choir_reviews"
         ]
     );
@@ -328,6 +329,25 @@ fn tool_calls_cross_real_http_auth_and_preserve_node_results() {
                 }
             }
         }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_meta(),
+                "name": "choir_workspace_archive",
+                "arguments": {
+                    "repo": "missing/repository",
+                    "name": "mcp-workspace",
+                    "change": "missing-change",
+                    "idempotency_key": "missing-request",
+                    "channel": "operator/agent",
+                    "payload_hex": "00",
+                    "key_id": "missing-key",
+                    "signature_hex": "00"
+                }
+            }
+        }),
     ];
     let api = format!("http://127.0.0.1:{port}");
     let auth_path = auth_file.to_str().unwrap();
@@ -336,7 +356,7 @@ fn tool_calls_cross_real_http_auth_and_preserve_node_results() {
         &messages,
     );
 
-    assert_eq!(responses.len(), 6);
+    assert_eq!(responses.len(), 7);
     for response in &responses[..5] {
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["isError"], false);
@@ -377,6 +397,12 @@ fn tool_calls_cross_real_http_auth_and_preserve_node_results() {
         )
         .unwrap(),
         responses[5]["result"]["structuredContent"]["body"]
+    );
+    assert_eq!(responses[6]["result"]["isError"], true);
+    assert_eq!(responses[6]["result"]["structuredContent"]["status"], 409);
+    assert_eq!(
+        responses[6]["result"]["structuredContent"]["body"]["code"],
+        "workspace_state"
     );
 
     node.unblock();
