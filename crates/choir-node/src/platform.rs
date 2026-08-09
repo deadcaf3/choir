@@ -528,6 +528,18 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode());
         }
+        // A slash can withdraw authorization from a review whose detail
+        // has already been compacted. Only the node key may make that
+        // durable attestation; otherwise any trusted author could erase
+        // another operator's approval weight.
+        if matches!(op.kind, OpKind::SlashApproval { .. }) && actor_id != self.node_id {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may slash approvals",
+                "ask the operator to run `choir slash` with the node key",
+            )
+            .encode());
+        }
         // Required-assignment closes the other half of the same loop:
         // naming your own reviewers is refused, so the node's draw is the
         // only way a review gets reviewers. Two ways to switch it on —
@@ -1855,9 +1867,11 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
         "target_ref": r.target_ref,
         "reviewers": r.reviewers,
         "verdicts": verdicts,
+        "slashes": r.slashes,
         "complete": r.complete(),
         "approved": r.approved(),
         "approval_weight": r.approval_weight(),
+        "re_review_required": r.re_review_required(),
         // Empty reviewers on a live review means unassigned; on an
         // archived one it means emptied. A reader must be able to tell.
         "archived": matches!(r.status, choir_view::ReviewStatus::Archived { .. }),

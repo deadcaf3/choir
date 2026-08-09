@@ -66,8 +66,16 @@ fn cli_end_to_end() {
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
     let pool = work.join("reviewers");
     std::fs::write(&pool, "bot\nana\n").unwrap();
+    let node_key_file = work.join("node.key");
+    let node_key = ActorKey::generate();
+    std::fs::write(&node_key_file, node_key.secret_bytes()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&node_key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     node.enable_platform(
-        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+        Platform::start(registry, Box::new(MemLog::new()), node_key)
             .unwrap()
             .with_reviewer_pool(pool),
     );
@@ -114,6 +122,32 @@ fn cli_end_to_end() {
     assert_eq!(view["reviews"]["r1"]["approved"], true, "{view}");
     assert_eq!(view["reviews"]["r1"]["verdicts"]["bot"]["note"], "lgtm");
 
+    // Slashing uses the existing signed-op endpoint but only the node key
+    // may authorize it. The operation remains visible and forces a fresh
+    // review instead of erasing the original verdict.
+    let out = choir(&[
+        "slash", &api, key_file, "r1", "bot", "retroactive policy finding",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let out = choir(&[
+        "slash",
+        &api,
+        node_key_file.to_str().unwrap(),
+        "r1",
+        "bot",
+        "retroactive policy finding",
+    ]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    let view = json(&choir(&["view", &api]));
+    assert_eq!(view["reviews"]["r1"]["re_review_required"], true, "{view}");
+    assert_eq!(view["reviews"]["r1"]["approved"], false, "{view}");
+    assert_eq!(view["reviews"]["r1"]["approval_weight"], 0, "{view}");
+    assert_eq!(
+        view["reviews"]["r1"]["slashes"]["bot"],
+        "retroactive policy finding",
+        "{view}"
+    );
+
     // `review` with no reviewer names asks the node to draw them from
     // the operator's pool (D24 layer 5) — the requester never picks.
     // `--ref` records where the change wants to land, which is what
@@ -157,6 +191,19 @@ fn cli_end_to_end() {
     assert_eq!(out.status.code(), Some(1));
     // Usage errors are exit 2, before any network traffic.
     assert_eq!(choir(&["verdict", &api]).status.code(), Some(2));
+    assert_eq!(
+        choir(&[
+            "slash",
+            &api,
+            work.join("missing.key").to_str().unwrap(),
+            "r1",
+            "bot",
+            "reason",
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
     assert_eq!(choir(&["review", &api, key_file, "c", "r3", "not-an-oid", "bot"])
         .status
         .code(), Some(2));

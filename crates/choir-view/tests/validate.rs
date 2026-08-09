@@ -27,7 +27,7 @@ fn h(tag: &[u8]) -> ContentHash {
 /// rather than generated: the repo hand-rolls its randomness elsewhere for
 /// the same reason (no `rand`/`proptest` dependency), and an enumerated set
 /// covering each variant's success and failure arms is more legible than a
-/// generator for eight variants.
+/// generator for ten variants.
 fn cases() -> Vec<(&'static str, View, ViewOp)> {
     // A view with one workspace, one ref, one assigned review.
     let populated = {
@@ -128,6 +128,16 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             verdict: Verdict::Approve, note: String::new() })).expect("setup");
         v
     };
+    let slashed = {
+        let mut v = complete.clone();
+        v.apply(&ViewOp::new(OpKind::SlashApproval {
+            id: "rev".into(),
+            reviewer: "ana".into(),
+            reason: "policy finding".into(),
+        }))
+        .expect("setup");
+        v
+    };
     push("archive a complete review", &complete, OpKind::ArchiveReview { id: "rev".into(), lapsed: false });
     push("archive an incomplete review", &populated, OpKind::ArchiveReview { id: "rev".into(), lapsed: false });
     push("archive an unassigned review", &populated, OpKind::ArchiveReview { id: "unassigned".into(), lapsed: false });
@@ -137,6 +147,23 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
         id: "rev".into(), reviewer: "ana".into(), verdict: Verdict::Approve, note: String::new() });
     push("assign an archived review", &archived, OpKind::AssignReviewers {
         id: "rev".into(), reviewers: vec!["bo".into()] });
+    push("slash a live approval", &complete, OpKind::SlashApproval {
+        id: "rev".into(), reviewer: "ana".into(), reason: "policy finding".into() });
+    push("slash an archived approval", &archived, OpKind::SlashApproval {
+        id: "rev".into(), reviewer: "ana".into(), reason: "policy finding".into() });
+    push("slash without an approval", &populated, OpKind::SlashApproval {
+        id: "rev".into(), reviewer: "ana".into(), reason: "policy finding".into() });
+    push("slash an unlisted reviewer", &complete, OpKind::SlashApproval {
+        id: "rev".into(), reviewer: "bo".into(), reason: "policy finding".into() });
+    push("slash an unknown review", &complete, OpKind::SlashApproval {
+        id: "ghost".into(), reviewer: "ana".into(), reason: "policy finding".into() });
+    push("slash without a reason", &complete, OpKind::SlashApproval {
+        id: "rev".into(), reviewer: "ana".into(), reason: String::new() });
+    push("slash twice", &slashed, OpKind::SlashApproval {
+        id: "rev".into(), reviewer: "ana".into(), reason: "again".into() });
+    push("verdict after slash", &slashed, OpKind::PostVerdict {
+        id: "rev".into(), reviewer: "ana".into(), verdict: Verdict::Approve,
+        note: String::new() });
 
     // Provenance.
     push("provenance ok", &populated, OpKind::RecordProvenance {

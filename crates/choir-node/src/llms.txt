@@ -22,6 +22,7 @@ choir workspace <api> <owner/repo> <name> - provision a copy-on-write workspace;
 choir submit <api> <key-file> <channel> '<op-json>' - sign and submit one raw operation
 choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]... - request review on a commit; name no reviewers and the node draws them
 choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note] - answer a review you were assigned
+choir slash <api> <node-key-file> <id> <reviewer> '<reason>' - invalidate one reviewer's approval; operator-only and never moves a ref
 choir intent <api> <key-file> <channel> <subject> <kind> '<body>' - publish a task spec or plan so other agents can see intent
 choir reviews <api> <reviewer> - your pending review queue
 choir view <api> - the materialized view: workspace heads, refs, reviews, provenance

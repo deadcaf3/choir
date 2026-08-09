@@ -99,6 +99,15 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
     let url = format!("http://127.0.0.1:{port}/agents/demo.git");
     let api = format!("http://127.0.0.1:{port}/api");
     let refs = || curl(&[&format!("{api}/view")]).1["refs"].clone();
+    let submit = |key: &ActorKey, channel: &str, op: &ViewOp| {
+        curl(&[
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(key, channel, op),
+            &format!("{api}/submit"),
+        ])
+    };
 
     let clone = work.join("clone");
     assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
@@ -284,6 +293,46 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         "archived approval failed to authorize: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
+
+    // Retroactive slashing is node-authorized. It invalidates one
+    // operator's approval for future authorization and marks the review,
+    // but does not rewrite the ref that already landed.
+    let slash = ViewOp::new(OpKind::SlashApproval {
+        id: "land-3".into(),
+        reviewer: drawn3[0].clone(),
+        reason: "retroactive policy finding".into(),
+    });
+    let (code, resp) = submit(&author, "writer/agent", &slash);
+    assert_eq!(code, 400, "non-node slash must be refused: {resp}");
+    assert_eq!(resp["code"], "node_only", "{resp}");
+
+    let node_key = ActorKey::from_secret_bytes(&node_secret);
+    let (code, resp) = submit(&node_key, "node/slash", &slash);
+    assert_eq!(code, 200, "{resp}");
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(view["reviews"]["land-3"]["re_review_required"], true, "{view}");
+    assert_eq!(view["reviews"]["land-3"]["approval_weight"], 1, "{view}");
+    assert_eq!(
+        view["reviews"]["land-3"]["slashes"][&drawn3[0]],
+        "retroactive policy finding",
+        "{view}"
+    );
+    assert_eq!(
+        refs()["agents/demo.git:refs/heads/main"],
+        format!("11-{c3}"),
+        "slashing must never auto-revert an already-landed ref"
+    );
+
+    let retry = ViewOp::new(OpKind::SetRef {
+        name: "agents/demo.git:refs/heads/main".into(),
+        commit: choir_oplog::ContentHash::from_git_oid(&c3).unwrap(),
+        prev: Some(choir_oplog::ContentHash::from_git_oid(&c3).unwrap()),
+    });
+    let (code, resp) = submit(&author, "writer/agent", &retry);
+    assert_eq!(code, 400, "slashed approval must not authorize again: {resp}");
+    assert_eq!(resp["code"], "review_required", "{resp}");
+    assert_eq!(resp["actual"], "approval weight 1", "{resp}");
     assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
 
     // A protected ref cannot be deleted, reviewed or not.

@@ -12,6 +12,7 @@
 //! choir submit <api> <key-file> <channel> '<op-json>'
 //! choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
 //! choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+//! choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 //! choir reviews <api> <reviewer>
 //! choir view <api>
@@ -213,6 +214,21 @@ fn main() {
             // The channel is the reviewer name: admission policy rejects
             // any verdict whose reviewer differs from the signed channel.
             submit(api, key_file, reviewer, &op, auth);
+        }
+        ["slash", api, node_key_file, id, reviewer, reason] => {
+            if !std::path::Path::new(node_key_file).is_file() {
+                eprintln!("choir: <node-key-file> must name the node's existing key file");
+                std::process::exit(2);
+            }
+            let op = ViewOp::new(OpKind::SlashApproval {
+                id: (*id).into(),
+                reviewer: (*reviewer).into(),
+                reason: (*reason).into(),
+            });
+            // This operator-only command uses the same signed-op endpoint
+            // as every other mutation. Admission checks the key identity,
+            // not this attribution string.
+            submit(api, node_key_file, "node/slash", &op, auth);
         }
         ["intent", api, key_file, channel, subject, kind, body] => {
             // D22 provenance record: task spec / plan / rationale for

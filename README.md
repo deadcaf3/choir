@@ -170,6 +170,7 @@ commands:
   choir submit <api> <key-file> <channel> '<op-json>'
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+  choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
   choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
   choir reviews <api> <reviewer>
   choir view <api>
@@ -218,6 +219,7 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 - Channel names: `operator/agent`. Same-operator agents cannot review each other.
 - Bind keys when registering: `choir key ~/.choir/agent.key myop/agent >> ~/.choir/keys`.
 - Protected landing with `--require-review` needs approval weight **2** (two distinct operators). See `scripts/flip/RUNBOOK.md` to enable gates on the dogfood node.
+- Operators can invalidate a bad approval with `choir slash`; it lowers future approval weight and marks re-review required, but never rewrites an already-landed ref.
 - An optional reviewer conflict graph excludes operators within the configured hop distance from the requester. It is re-read per draw and fails closed by leaving the review unassigned.
 - Prefer `POST /api/submit-batch` for multiple ops (one durability barrier).
 

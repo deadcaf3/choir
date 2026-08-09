@@ -513,6 +513,176 @@ fn approval_weight_caps_sibling_channels_and_survives_archiving() {
 }
 
 #[test]
+fn slashing_a_live_approval_removes_only_that_operators_weight() {
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "author/agent",
+        ViewOp::new(OpKind::RequestReview {
+            id: "slashed-live".into(),
+            target: ContentHash::blake3(b"live slash"),
+            reviewers: vec![
+                "reviewer/one".into(),
+                "reviewer/two".into(),
+                "peer/one".into(),
+            ],
+            target_ref: Some("demo.git:refs/heads/main".into()),
+        }),
+    )
+    .unwrap();
+    for reviewer in ["reviewer/one", "reviewer/two", "peer/one"] {
+        append_op(
+            &mut log,
+            reviewer,
+            ViewOp::new(OpKind::PostVerdict {
+                id: "slashed-live".into(),
+                reviewer: reviewer.into(),
+                verdict: choir_view::Verdict::Approve,
+                note: String::new(),
+            }),
+        )
+        .unwrap();
+    }
+
+    append_op(
+        &mut log,
+        "node/slash",
+        ViewOp::new(OpKind::SlashApproval {
+            id: "slashed-live".into(),
+            reviewer: "reviewer/one".into(),
+            reason: "reviewer key compromised".into(),
+        }),
+    )
+    .unwrap();
+    let view = View::materialize(&log).unwrap();
+    let review = &view.reviews["slashed-live"];
+    assert!(review.re_review_required());
+    assert_eq!(
+        review.approval_weight(),
+        1,
+        "a slash removes the affected operator's capped seat"
+    );
+    assert!(review.approved());
+    assert_eq!(review.slashes["reviewer/one"], "reviewer key compromised");
+
+    // A sibling channel from the same operator was already capped into
+    // the same seat. Slashing it too must not subtract that seat twice.
+    append_op(
+        &mut log,
+        "node/slash",
+        ViewOp::new(OpKind::SlashApproval {
+            id: "slashed-live".into(),
+            reviewer: "reviewer/two".into(),
+            reason: "same operator".into(),
+        }),
+    )
+    .unwrap();
+    let view = View::materialize(&log).unwrap();
+    assert_eq!(view.reviews["slashed-live"].approval_weight(), 1);
+
+    // Slashing is final for this review. A later verdict cannot silently
+    // restore the invalidated approval, and the same slash is not replayed.
+    assert!(matches!(
+        append_op(
+            &mut log,
+            "reviewer/one",
+            ViewOp::new(OpKind::PostVerdict {
+                id: "slashed-live".into(),
+                reviewer: "reviewer/one".into(),
+                verdict: choir_view::Verdict::Approve,
+                note: "try again".into(),
+            }),
+        ),
+        Err(ViewError::Review(_))
+    ));
+    assert!(matches!(
+        append_op(
+            &mut log,
+            "node/slash",
+            ViewOp::new(OpKind::SlashApproval {
+                id: "slashed-live".into(),
+                reviewer: "reviewer/one".into(),
+                reason: "duplicate".into(),
+            }),
+        ),
+        Err(ViewError::Review(_))
+    ));
+
+    // Archiving after a live slash must not subtract it twice. The
+    // archived scalar captures the original capped weight; replay then
+    // applies the append-only slash records exactly once.
+    append_op(
+        &mut log,
+        "node/archive",
+        ViewOp::new(OpKind::ArchiveReview {
+            id: "slashed-live".into(),
+            lapsed: false,
+        }),
+    )
+    .unwrap();
+    let view = View::materialize(&log).unwrap();
+    assert_eq!(view.reviews["slashed-live"].approval_weight(), 1);
+}
+
+#[test]
+fn slashing_an_archived_approval_keeps_the_row_compact_and_invalidates_it() {
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "author/agent",
+        ViewOp::new(OpKind::RequestReview {
+            id: "slashed-archive".into(),
+            target: ContentHash::blake3(b"archived slash"),
+            reviewers: vec!["reviewer/one".into(), "peer/one".into()],
+            target_ref: Some("demo.git:refs/heads/main".into()),
+        }),
+    )
+    .unwrap();
+    for reviewer in ["reviewer/one", "peer/one"] {
+        append_op(
+            &mut log,
+            reviewer,
+            ViewOp::new(OpKind::PostVerdict {
+                id: "slashed-archive".into(),
+                reviewer: reviewer.into(),
+                verdict: choir_view::Verdict::Approve,
+                note: "bulk".into(),
+            }),
+        )
+        .unwrap();
+    }
+    append_op(
+        &mut log,
+        "node/archive",
+        ViewOp::new(OpKind::ArchiveReview {
+            id: "slashed-archive".into(),
+            lapsed: false,
+        }),
+    )
+    .unwrap();
+
+    for reviewer in ["reviewer/one", "peer/one"] {
+        append_op(
+            &mut log,
+            "node/slash",
+            ViewOp::new(OpKind::SlashApproval {
+                id: "slashed-archive".into(),
+                reviewer: reviewer.into(),
+                reason: "retroactive policy finding".into(),
+            }),
+        )
+        .unwrap();
+    }
+    let view = View::materialize(&log).unwrap();
+    let review = &view.reviews["slashed-archive"];
+    assert!(review.reviewers.is_empty() && review.verdicts.is_empty());
+    assert!(review.re_review_required());
+    assert_eq!(review.approval_weight(), 0);
+    assert!(!review.approved());
+    assert_eq!(review.slashes.len(), 2);
+}
+
+#[test]
 fn archiving_preserves_a_rejection_too() {
     // The dangerous direction: if archiving lost the outcome and fell
     // back to recomputing from an emptied verdict map, a RequestChanges

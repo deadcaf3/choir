@@ -259,6 +259,16 @@ fn view_op_variants_are_frozen() {
         "1e-a6fb60395b7baf9077da33bb41ea8e1edfc299f489979742702c4f282a264545",
     );
     assert_golden(
+        "SlashApproval",
+        &ViewOp::new(OpKind::SlashApproval {
+            id: "review-1".into(),
+            reviewer: "alice/agent".into(),
+            reason: "retroactive policy finding".into(),
+        }),
+        r#"{"format_version":1,"kind":{"SlashApproval":{"id":"review-1","reviewer":"alice/agent","reason":"retroactive policy finding"}}}"#,
+        "1e-0860735ec01966d4aa4986add081a8038e3d644a38dd141506dd668c5298be63",
+    );
+    assert_golden(
         "RecordProvenance",
         &ViewOp::new(OpKind::RecordProvenance {
             subject: "agent-1".into(),

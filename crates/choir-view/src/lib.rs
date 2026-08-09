@@ -204,6 +204,26 @@ pub enum OpKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         lapsed: bool,
     },
+    /// Invalidate one reviewer's approval after a policy or trust finding
+    /// (additive variant, wire-format unchanged).
+    ///
+    /// The operation is append-only: it never moves a ref back and never
+    /// erases the original verdict. A review with any slash visibly needs
+    /// re-review, and its affected operator no longer contributes approval
+    /// weight to future protected-ref authorization.
+    ///
+    /// Live rows verify that `reviewer` currently has an approval. Archived
+    /// rows deliberately no longer retain reviewer detail, so admission
+    /// accepts this operation only from the node key; the signed operation
+    /// is the compact authority attestation and replay input.
+    SlashApproval {
+        /// The review whose approval is invalidated.
+        id: String,
+        /// Reviewer channel whose approval is invalidated.
+        reviewer: String,
+        /// Operator-visible reason for requiring re-review (non-empty).
+        reason: String,
+    },
     /// Record `reviewer`'s verdict on review `id` (additive variant).
     /// Only listed reviewers may post; re-posting overwrites the
     /// reviewer's own earlier verdict (re-review after changes).
@@ -304,6 +324,10 @@ pub struct ReviewState {
     pub reviewers: Vec<String>,
     /// reviewer → (verdict, note); absent = not answered yet.
     pub verdicts: BTreeMap<String, (Verdict, String)>,
+    /// reviewer → node-recorded reason for retroactively invalidating
+    /// that approval. Kept separately from verdict bulk so archived rows
+    /// remain compact while the append-only decision stays visible.
+    pub slashes: BTreeMap<String, String>,
     /// The ref the review proposes to land on (`<repo>:<refname>`), or
     /// `None` for a review that named no destination. Policy reads this
     /// to decide whether a review is privilege-bearing.
@@ -315,6 +339,50 @@ pub struct ReviewState {
 }
 
 impl ReviewState {
+    fn operator_is_slashed(&self, reviewer: &str) -> bool {
+        let operator = reviewer_operator(reviewer);
+        self.slashes
+            .keys()
+            .any(|slashed| reviewer_operator(slashed) == operator)
+    }
+
+    fn live_approval_weight(&self, apply_slashes: bool) -> usize {
+        self.verdicts
+            .iter()
+            .enumerate()
+            .filter(|(index, (reviewer, (verdict, _)))| {
+                if *verdict != Verdict::Approve
+                    || (apply_slashes && self.operator_is_slashed(reviewer))
+                {
+                    return false;
+                }
+                let operator = reviewer_operator(reviewer);
+                self.verdicts
+                    .iter()
+                    .take(*index)
+                    .all(|(prior, (prior_verdict, _))| {
+                        *prior_verdict != Verdict::Approve
+                            || reviewer_operator(prior) != operator
+                    })
+            })
+            .count()
+            * MAX_APPROVAL_WEIGHT_PER_OPERATOR
+    }
+
+    fn slashed_operator_count(&self) -> usize {
+        self.slashes
+            .keys()
+            .enumerate()
+            .filter(|(index, reviewer)| {
+                let operator = reviewer_operator(reviewer);
+                self.slashes
+                    .keys()
+                    .take(*index)
+                    .all(|prior| reviewer_operator(prior) != operator)
+            })
+            .count()
+    }
+
     /// Whether every listed reviewer has answered. An unassigned review
     /// (no reviewers yet) is never complete — vacuous truth must not
     /// turn "asked nobody" into a finished review.
@@ -335,10 +403,26 @@ impl ReviewState {
     #[must_use]
     pub fn approved(&self) -> bool {
         if let ReviewStatus::Archived { approved, .. } = self.status {
-            return approved;
+            return approved && self.approval_weight() > 0;
         }
-        self.complete()
-            && self.verdicts.values().all(|(v, _)| *v == Verdict::Approve)
+        if !self.complete() {
+            return false;
+        }
+        let mut eligible = self
+            .reviewers
+            .iter()
+            .filter(|reviewer| !self.slashes.contains_key(*reviewer));
+        let Some(first) = eligible.next() else {
+            return false;
+        };
+        self.verdicts
+            .get(first)
+            .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
+            && eligible.all(|reviewer| {
+                self.verdicts
+                    .get(reviewer)
+                    .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
+            })
     }
 
     /// Approval weight after capping every operator at one unit.
@@ -353,26 +437,18 @@ impl ReviewState {
             approval_weight, ..
         } = self.status
         {
-            return approval_weight;
+            return approval_weight.saturating_sub(
+                self.slashed_operator_count() * MAX_APPROVAL_WEIGHT_PER_OPERATOR,
+            );
         }
+        self.live_approval_weight(true)
+    }
 
-        self.verdicts
-            .iter()
-            .enumerate()
-            .filter(|(index, (reviewer, (verdict, _)))| {
-                if *verdict != Verdict::Approve {
-                    return false;
-                }
-                let operator = reviewer_operator(reviewer);
-                self.verdicts
-                    .iter()
-                    .take(*index)
-                    .all(|(prior, (prior_verdict, _))| {
-                        *prior_verdict != Verdict::Approve || reviewer_operator(prior) != operator
-                    })
-            })
-            .count()
-            * MAX_APPROVAL_WEIGHT_PER_OPERATOR
+    /// Whether a retroactive invalidation requires a fresh review before
+    /// the same `(ref, commit)` can authorize another protected landing.
+    #[must_use]
+    pub fn re_review_required(&self) -> bool {
+        !self.slashes.is_empty()
     }
 }
 
@@ -569,6 +645,57 @@ impl View {
                         "{reviewer} is not a reviewer of {id}"
                     )));
                 }
+                if review.slashes.contains_key(reviewer) {
+                    return Err(ViewError::Review(format!(
+                        "{reviewer}'s approval on {id} was slashed; open a new review"
+                    )));
+                }
+                Ok(())
+            }
+            OpKind::SlashApproval {
+                id,
+                reviewer,
+                reason,
+            } => {
+                if reviewer.is_empty() || reason.is_empty() {
+                    return Err(ViewError::Review(
+                        "a slash must name a reviewer and a non-empty reason".to_string(),
+                    ));
+                }
+                let review = self
+                    .reviews
+                    .get(id)
+                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if review.slashes.contains_key(reviewer) {
+                    return Err(ViewError::Review(format!(
+                        "{reviewer}'s approval on {id} is already slashed"
+                    )));
+                }
+                match review.status {
+                    ReviewStatus::Live => {
+                        if !review.reviewers.iter().any(|listed| listed == reviewer) {
+                            return Err(ViewError::Review(format!(
+                                "{reviewer} is not a reviewer of {id}"
+                            )));
+                        }
+                        if !review
+                            .verdicts
+                            .get(reviewer)
+                            .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
+                        {
+                            return Err(ViewError::Review(format!(
+                                "{reviewer} has no approval to slash on {id}"
+                            )));
+                        }
+                    }
+                    ReviewStatus::Archived { approved, .. } => {
+                        if !approved || review.approval_weight() == 0 {
+                            return Err(ViewError::Review(format!(
+                                "archived review {id} carries no approval to slash"
+                            )));
+                        }
+                    }
+                }
                 Ok(())
             }
             OpKind::ArchiveReview { id, lapsed } => {
@@ -642,6 +769,7 @@ impl View {
                         target: Some(target.clone()),
                         reviewers: reviewers.clone(),
                         verdicts: BTreeMap::new(),
+                        slashes: BTreeMap::new(),
                         target_ref: target_ref.clone(),
                         status: ReviewStatus::Live,
                     },
@@ -658,7 +786,15 @@ impl View {
                     .reviews
                     .get_mut(id)
                     .expect("validate proved the review exists and is settleable");
-                let approval_weight = if *lapsed { 0 } else { review.approval_weight() };
+                let approval_weight = if *lapsed {
+                    0
+                } else {
+                    // Store the pre-slash baseline. Archived reads apply
+                    // the durable slash map, so capturing the already-
+                    // discounted live value here would subtract a slash
+                    // twice after compaction.
+                    review.live_approval_weight(false)
+                };
                 review.status = ReviewStatus::Archived {
                     // A lapsed review was never answered, so it never got
                     // approval. Reading it off `approved()` would work
@@ -685,6 +821,17 @@ impl View {
                     .expect("validate proved the review exists, is live, and lists this reviewer")
                     .verdicts
                     .insert(reviewer.clone(), (*verdict, note.clone()));
+            }
+            OpKind::SlashApproval {
+                id,
+                reviewer,
+                reason,
+            } => {
+                self.reviews
+                    .get_mut(id)
+                    .expect("validate proved the review has an approval to slash")
+                    .slashes
+                    .insert(reviewer.clone(), reason.clone());
             }
             OpKind::RecordProvenance { subject, kind, body } => {
                 self.provenance

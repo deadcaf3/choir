@@ -190,6 +190,12 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "slash",
+        args: "<api> <node-key-file> <id> <reviewer> '<reason>'",
+        summary: "invalidate one reviewer's approval; operator-only and never moves a ref",
+        agent_facing: false,
+    },
+    Command {
         name: "intent",
         args: "<api> <key-file> <channel> <subject> <kind> '<body>'",
         summary: "publish a task spec or plan so other agents can see intent",
