@@ -118,11 +118,12 @@ fn view_refs(api_base: &str, label: &str) -> BTreeMap<String, ContentHash> {
 const BATCH: usize = 500;
 
 /// Signs one op into its submit-request JSON object.
-fn signed_op(key: &ActorKey, workspace: &str, op: ViewOp) -> serde_json::Value {
+fn signed_op(key: &ActorKey, channel: &str, op: ViewOp) -> serde_json::Value {
     let payload = op.to_payload();
-    let sig = key.sign_submission(workspace, &payload);
+    let sig = key.sign_submission(channel, &payload);
     serde_json::json!({
-        "workspace": workspace,
+        "channel": channel,
+        "workspace": channel,
         "payload_hex": hex_encode(&payload),
         "key_id": sig.key_id,
         "signature_hex": hex_encode(&sig.signature),
@@ -533,5 +534,24 @@ fn main() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_ops_carry_both_channel_spellings() {
+        let key = ActorKey::from_secret_bytes(&[19; 32]);
+        let op = ViewOp::new(choir_view::OpKind::RecordProvenance {
+            subject: "repo/shared".to_string(),
+            kind: "plan".to_string(),
+            body: "test".to_string(),
+        });
+        let body = signed_op(&key, "operator/bridge", op);
+
+        assert_eq!(body["channel"], "operator/bridge");
+        assert_eq!(body["workspace"], body["channel"]);
     }
 }

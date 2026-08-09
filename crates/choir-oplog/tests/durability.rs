@@ -40,7 +40,7 @@ fn entry(seq: u64, parent: Option<choir_oplog::ContentHash>) -> OpEntry {
         format_version: FORMAT_VERSION,
         parent,
         seq,
-        workspace: "agent-1".into(),
+        channel: "agent-1".into(),
         payload: format!("op{seq}").into_bytes(),
         witnesses: Vec::new(),
         author_sig: None,

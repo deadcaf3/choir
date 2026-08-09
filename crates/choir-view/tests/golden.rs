@@ -125,7 +125,7 @@ fn op_entry_is_frozen() {
         format_version: OPLOG_FORMAT_VERSION,
         parent: Some(h(b"parent entry")),
         seq: 7,
-        workspace: "agent-1".into(),
+        channel: "agent-1".into(),
         payload: b"opaque payload".to_vec(),
         witnesses: vec![Witness {
             key_id: "1e-witness".into(),
@@ -162,7 +162,7 @@ fn op_entry_without_author_sig_omits_the_field() {
         format_version: OPLOG_FORMAT_VERSION,
         parent: None,
         seq: 0,
-        workspace: "agent-1".into(),
+        channel: "agent-1".into(),
         payload: b"genesis".to_vec(),
         witnesses: Vec::new(),
         author_sig: None,
@@ -181,7 +181,7 @@ fn op_entry_without_author_sig_omits_the_field() {
 }
 
 /// What an author signs, held separate from what the entry hashes to.
-/// `signing_hash` covers `(workspace, payload)` only; changing either the
+/// `signing_hash` covers `(channel, payload)` only; changing either the
 /// tuple shape or its encoding invalidates every signature ever issued.
 #[test]
 fn signing_hash_is_frozen() {

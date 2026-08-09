@@ -8,7 +8,7 @@ fn entry(parent: Option<choir_oplog::ContentHash>, seq: u64, ws: &str) -> OpEntr
         format_version: FORMAT_VERSION,
         parent,
         seq,
-        workspace: ws.to_string(),
+        channel: ws.to_string(),
         payload: format!("op-{seq}").into_bytes(),
         witnesses: Vec::new(),
             author_sig: None,
@@ -34,7 +34,7 @@ fn conformance(log: &mut dyn OpLog) {
 
     // Reads.
     let e0 = log.get(0).expect("get(0)");
-    assert_eq!(e0.workspace, "a");
+    assert_eq!(e0.channel, "a");
     assert!(log.get(99).is_none());
 
     // Witness fields exist and are empty pre-Phase-2.

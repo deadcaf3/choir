@@ -8,7 +8,7 @@ use choir_node::{AuthTable, Node, Platform};
 use choir_oplog::MemLog;
 use choir_view::{OpKind, ViewOp};
 use serde_json::{json, Value};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 
 fn run_mcp(args: &[&str], messages: &[Value]) -> (std::process::ExitStatus, Vec<Value>) {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_choir-mcp"))
@@ -49,6 +49,77 @@ fn modern_meta() -> Value {
             "version": "1.0.0"
         }
     })
+}
+
+fn capture_json_requests(
+    count: usize,
+) -> (
+    String,
+    std::sync::mpsc::Receiver<Value>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for _ in 0..count {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut content_length = None;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+            }
+            let mut body = vec![0; content_length.expect("curl sends Content-Length")];
+            reader.read_exact(&mut body).unwrap();
+            sent.send(serde_json::from_slice(&body).unwrap()).unwrap();
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .unwrap();
+        }
+    });
+    (format!("http://{address}"), received, server)
+}
+
+#[test]
+fn submission_calls_carry_both_channel_spellings_for_rolling_upgrades() {
+    let (api, bodies, server) = capture_json_requests(2);
+    let client = choir_cli::mcp::HttpClient::new(&api, None, None).unwrap();
+    let signed = json!({
+        "channel": "operator/agent",
+        "payload_hex": "00",
+        "key_id": "key",
+        "signature_hex": "00"
+    });
+
+    let single = choir_cli::surface::mcp_endpoint("choir_submit").unwrap();
+    assert_eq!(client.request(single, &signed).unwrap().0, 200);
+    let batch = choir_cli::surface::mcp_endpoint("choir_submit_batch").unwrap();
+    assert_eq!(
+        client
+            .request(batch, &json!({ "ops": [signed] }))
+            .unwrap()
+            .0,
+        200
+    );
+
+    for body in [
+        bodies.recv().unwrap(),
+        bodies.recv().unwrap()["ops"][0].clone(),
+    ] {
+        assert_eq!(body["channel"], "operator/agent", "{body}");
+        assert_eq!(body["workspace"], body["channel"], "{body}");
+    }
+    server.join().unwrap();
 }
 
 #[test]

@@ -5,8 +5,9 @@
 //! (choir-view) running inside the single-writer thread, now fronted by
 //! two endpoints on the daemon:
 //!
-//! - `POST /api/submit` — body `{"workspace", "payload_hex",
-//!   "key_id", "signature_hex"}`; payload bytes are a serialized
+//! - `POST /api/submit` — body `{"channel", "payload_hex",
+//!   "key_id", "signature_hex"}`; `workspace` remains accepted as the
+//!   legacy v1 alias for `channel`. Payload bytes are a serialized
 //!   [`ViewOp`]. Admitted ops answer `{"seq", "hash"}`; rejections are
 //!   HTTP 400 with the policy's reason.
 //! - `GET /api/view` — the current materialized view as
@@ -169,7 +170,7 @@ pub struct LogWindow {
     /// Entries kept before the oldest is dropped. A field rather than a
     /// constant so a test can drive eviction without writing 100k ops.
     cap: usize,
-    /// `signing_hash(workspace, payload)` → the `(seq, hash)` it landed
+    /// `signing_hash(channel, payload)` → the `(seq, hash)` it landed
     /// as, for the entries currently in the window.
     ///
     /// Lets a resubmission be told "this already landed, here is where"
@@ -227,7 +228,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 impl LogWindow {
     fn push(&mut self, entry: OpEntry) {
-        // `signing_hash` covers only (workspace, payload); `content_hash`
+        // `signing_hash` covers only (channel, payload); `content_hash`
         // would serialize the whole entry, and this runs per admitted op.
         self.by_signing.insert(entry.signing_hash(), entry.seq);
         self.entries.push_back(entry);
@@ -239,13 +240,13 @@ impl LogWindow {
     /// Keyed on the **signing** hash, not the entry hash: an entry's hash
     /// covers `seq` and `parent`, which the sequencer assigns after the
     /// author signs, so a resubmitted identical op hashes differently
-    /// every time and could never match. `signing_hash(workspace,
+    /// every time and could never match. `signing_hash(channel,
     /// payload)` is position-independent by construction, which is
     /// exactly the identity "the same submission" needs.
-    fn already_applied(&self, workspace: &str, payload: &[u8]) -> Option<(u64, ContentHash)> {
+    fn already_applied(&self, channel: &str, payload: &[u8]) -> Option<(u64, ContentHash)> {
         let seq = *self
             .by_signing
-            .get(&choir_oplog::signing_hash(workspace, payload))?;
+            .get(&choir_oplog::signing_hash(channel, payload))?;
         // Hash the entry only on a hit, which is a client retry rather
         // than the common path.
         let entry = self.entries.get(seq.checked_sub(self.base)? as usize)?;
@@ -300,9 +301,8 @@ struct ChoirPolicy {
     keys_file: Option<std::path::PathBuf>,
     keys_mtime: Option<std::time::SystemTime>,
     node_pub: Vec<u8>,
-    /// The node key's actor id (hex): the only author allowed to assign
-    /// reviewers.
-    node_id: String,
+    /// The node key's actor id: the only author allowed to assign reviewers.
+    node_id: ContentHash,
     /// When set, a `RequestReview` may not name its own reviewers —
     /// every review must go through the node's draw (D24 layer 5).
     /// Shared with [`Platform`] so the switch is one value, not two.
@@ -313,7 +313,7 @@ struct ChoirPolicy {
     /// When set, a protected ref only moves to a commit some approved
     /// review already named — the landing half of the gate.
     require_review: Arc<std::sync::atomic::AtomicBool>,
-    /// `key_id` (actor id hex) → the channel name that key is bound to,
+    /// Actor id → the channel name that key is bound to,
     /// for keys whose trusted-keys line carries a name. Keys absent from
     /// this map are unconstrained, which is what every key was before the
     /// name column existed.
@@ -321,7 +321,7 @@ struct ChoirPolicy {
     /// Shared with [`Platform`], because a *tightening* must not wait for
     /// an unrelated event: the accept loop refreshes it on mtime change,
     /// while the failed-signature path below refreshes it too.
-    key_names: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    key_names: Arc<Mutex<std::collections::HashMap<ContentHash, String>>>,
     /// Present only when the operator enabled review retention. Updated
     /// after the view fold on the same writer thread, so its FIFO order
     /// matches the sequencer order exactly.
@@ -350,11 +350,10 @@ impl ChoirPolicy {
         if let Ok(node_pub) = <[u8; 32]>::try_from(self.node_pub.as_slice()) {
             registry.register(&node_pub).ok();
         }
-        let mut key_names = std::collections::BTreeMap::new();
+        let mut key_names = std::collections::HashMap::new();
         for signer in &signers {
-            registry.register(&signer.key).ok();
-            if let Some(name) = &signer.name {
-                key_names.insert(signer.actor_id.clone(), name.clone());
+            if let (Ok(actor_id), Some(name)) = (registry.register(&signer.key), &signer.name) {
+                key_names.insert(actor_id, name.clone());
             }
         }
         self.registry = registry;
@@ -366,18 +365,19 @@ impl ChoirPolicy {
     /// Enforces the name a key is bound to, for ops whose submission
     /// channel is an identity claim rather than a workspace name.
     ///
-    /// Scope is deliberately narrow. `sub.workspace` does double duty: it
-    /// is the reviewer/requester identity for review ops, but it is also
-    /// a workspace name and the daemon's push-attribution channel
+    /// Scope is deliberately narrow. `sub.channel` is the
+    /// signature-covered attribution/identity channel, not a workspace id.
+    /// The v1 wire field was named `workspace`; the daemon also uses
+    /// synthetic push-attribution channels
     /// (`git/<user>`, `key/<principal>`). Binding every channel would
     /// break workspace provisioning and every git-derived op.
     ///
     /// A key with no bound name is unconstrained — exactly its behaviour
     /// before the name column existed — so this cannot break a running
     /// node, and the operator opts in one line at a time.
-    fn channel_is_owned(&self, key_id: &str, channel: &str) -> Result<(), String> {
+    fn channel_is_owned(&self, actor_id: &ContentHash, channel: &str) -> Result<(), String> {
         let names = self.key_names.lock().expect("key names lock");
-        match names.get(key_id) {
+        match names.get(actor_id) {
             Some(bound) if bound != channel => Err(Rejection::new(
                 Code::ChannelNotOwned,
                 "this key is bound to a different channel",
@@ -455,16 +455,16 @@ impl ChoirPolicy {
 impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
-        let mut verified = self
+        let mut verified_actor = self
             .registry
-            .verify_submission(&sub.workspace, &sub.payload, sig);
+            .verify_submission(&sub.channel, &sub.payload, sig);
         // Unknown/failed key: maybe the operator just registered it.
-        if verified.is_err() && self.reload_keys() {
-            verified = self
+        if verified_actor.is_err() && self.reload_keys() {
+            verified_actor = self
                 .registry
-                .verify_submission(&sub.workspace, &sub.payload, sig);
+                .verify_submission(&sub.channel, &sub.payload, sig);
         }
-        verified.map_err(|e| {
+        let actor_id = verified_actor.map_err(|e| {
             Rejection::new(
                 Code::UnknownKey,
                 format!("signature check failed: {e:?}"),
@@ -484,13 +484,13 @@ impl SubmitPolicy for ChoirPolicy {
         // submission channel: the log's author attribution and the
         // view's verdict attribution can never diverge.
         if let OpKind::PostVerdict { reviewer, .. } = &op.kind {
-            if *reviewer != sub.workspace {
+            if *reviewer != sub.channel {
                 return Err(Rejection::new(
                     Code::ReviewerMismatch,
                     "a verdict's reviewer must be the channel it was signed on",
                     "resubmit on your own channel: `choir verdict` signs on the reviewer name                      by construction",
                 )
-                .with_states(Some(sub.workspace.clone()), Some(reviewer.clone()))
+                .with_states(Some(sub.channel.clone()), Some(reviewer.clone()))
                 .encode());
             }
         }
@@ -501,13 +501,13 @@ impl SubmitPolicy for ChoirPolicy {
             op.kind,
             OpKind::PostVerdict { .. } | OpKind::RequestReview { .. }
         ) {
-            self.channel_is_owned(&sig.key_id, &sub.workspace)?;
+            self.channel_is_owned(&actor_id, &sub.channel)?;
         }
         // D24 layer 5: the requester does not choose who reviews them.
         // Only the daemon's own key may fill in a reviewer list; every
         // other author gets a rejection, so an accepted assignment in
         // the log always came from the node's pool draw.
-        if matches!(op.kind, OpKind::AssignReviewers { .. }) && sig.key_id != self.node_id {
+        if matches!(op.kind, OpKind::AssignReviewers { .. }) && actor_id != self.node_id {
             return Err(Rejection::new(
                 Code::NodeOnly,
                 "only the node may assign reviewers",
@@ -518,7 +518,7 @@ impl SubmitPolicy for ChoirPolicy {
         // Archiving drops a review's verdicts, so an unguarded one is a
         // way to erase a RequestChanges you did not like. Node key only,
         // same reasoning as assignment: it is retention, not review.
-        if matches!(op.kind, OpKind::ArchiveReview { .. }) && sig.key_id != self.node_id {
+        if matches!(op.kind, OpKind::ArchiveReview { .. }) && actor_id != self.node_id {
             return Err(Rejection::new(
                 Code::NodeOnly,
                 "only the node may archive reviews",
@@ -677,8 +677,8 @@ pub struct Platform {
     /// Shared with the policy: when set, a protected ref only moves to a
     /// commit an approved review already named.
     require_review: Arc<std::sync::atomic::AtomicBool>,
-    /// Shared with the policy: `key_id` → bound channel name.
-    key_names: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    /// Shared with the policy: actor id → bound channel name.
+    key_names: Arc<Mutex<std::collections::HashMap<ContentHash, String>>>,
     /// Sequence-ordered live reviews, allocated only under an explicit
     /// retention configuration.
     review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
@@ -814,7 +814,10 @@ impl Platform {
                 .map(|signers| {
                     signers
                         .into_iter()
-                        .filter_map(|s| s.name.map(|n| (s.actor_id, n)))
+                        .filter_map(|s| {
+                            s.name
+                                .map(|name| (ContentHash::blake3(&s.key), name))
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -834,7 +837,7 @@ impl Platform {
                 keys_file,
                 keys_mtime,
                 node_pub: node_key.public_key_bytes().to_vec(),
-                node_id: node_key.actor_id().to_hex(),
+                node_id: node_key.actor_id(),
                 key_names: key_names.clone(),
                 review_retention: review_retention.clone(),
             }),
@@ -955,7 +958,7 @@ impl Platform {
         self
     }
 
-    /// Replaces the `key_id` → bound-name map from a freshly parsed
+    /// Replaces the actor-id → bound-name map from a freshly parsed
     /// trusted-keys file.
     ///
     /// Called from the daemon's accept loop when the file's mtime moves,
@@ -966,7 +969,11 @@ impl Platform {
     pub fn set_key_names(&self, signers: &[crate::TrustedKey]) {
         let map = signers
             .iter()
-            .filter_map(|s| s.name.clone().map(|n| (s.actor_id.clone(), n)))
+            .filter_map(|s| {
+                s.name
+                    .clone()
+                    .map(|name| (ContentHash::blake3(&s.key), name))
+            })
             .collect();
         *self.key_names.lock().expect("key names lock") = map;
     }
@@ -1238,7 +1245,7 @@ impl Platform {
                 })
                 .to_payload();
                 Submission {
-                    workspace: channel.to_string(),
+                    channel: channel.to_string(),
                     author_sig: Some(self.node_key.sign_submission(channel, &payload)),
                     payload,
                 }
@@ -1363,7 +1370,7 @@ impl Platform {
                     .iter()
                     .filter_map(|d| d.as_ref().ok())
                     .map(|sub| Submission {
-                        workspace: sub.workspace.clone(),
+                        channel: sub.channel.clone(),
                         payload: sub.payload.clone(),
                         author_sig: sub.author_sig.clone(),
                     })
@@ -1520,7 +1527,7 @@ impl Platform {
             Err(reason) => return (400, Rejection::decode(&reason).body()),
         };
         match self.handle.try_submit(
-            &sub.workspace,
+            &sub.channel,
             sub.payload.clone(),
             sub.author_sig.clone(),
         ) {
@@ -1540,7 +1547,7 @@ impl Platform {
                     .entries
                     .lock()
                     .expect("entries lock")
-                    .already_applied(&sub.workspace, &sub.payload)
+                    .already_applied(&sub.channel, &sub.payload)
                 {
                     return (
                         200,
@@ -1567,7 +1574,7 @@ impl Platform {
     fn batch_result(&self, acc: choir_sequencer::Accepted, sub: &DecodedSubmission) -> serde_json::Value {
         let mut resp = serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() });
         if let Some(id) = &sub.unassigned_review {
-            match self.assign_reviewers(id, &sub.workspace) {
+            match self.assign_reviewers(id, &sub.channel) {
                 Ok(reviewers) => resp["reviewers"] = serde_json::json!(reviewers),
                 // The request stands; it is visibly unassigned, which is
                 // a state no verdict can complete.
@@ -1581,7 +1588,7 @@ impl Platform {
 /// One decoded `/api/submit` body: the wire fields turned into the bytes
 /// the sequencer wants, plus whatever the response will need afterwards.
 struct DecodedSubmission {
-    workspace: String,
+    channel: String,
     payload: Vec<u8>,
     author_sig: Option<Witness>,
     /// Review id when this op opens a review naming no reviewers, so the
@@ -1598,13 +1605,20 @@ struct DecodedSubmission {
 /// avoid per-op overhead.
 fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, String> {
     let field = |name: &str| req.get(name).and_then(|v| v.as_str());
-    let (Some(workspace), Some(payload_hex), Some(key_id), Some(signature_hex)) = (
-        field("workspace"),
+    let channel = match (field("channel"), field("workspace")) {
+        (Some(channel), None) | (None, Some(channel)) => channel,
+        (Some(channel), Some(legacy)) if channel == legacy => channel,
+        (Some(_), Some(_)) => {
+            return Err("channel and legacy workspace fields disagree".to_string())
+        }
+        (None, None) => return Err("need channel (or legacy workspace)".to_string()),
+    };
+    let (Some(payload_hex), Some(key_id), Some(signature_hex)) = (
         field("payload_hex"),
         field("key_id"),
         field("signature_hex"),
     ) else {
-        return Err("need workspace, payload_hex, key_id, signature_hex".to_string());
+        return Err("need payload_hex, key_id, signature_hex".to_string());
     };
     let (Some(payload), Some(signature)) = (hex_decode(payload_hex), hex_decode(signature_hex))
     else {
@@ -1618,7 +1632,7 @@ fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, Strin
         Err(_) => None,
     };
     Ok(DecodedSubmission {
-        workspace: workspace.to_string(),
+        channel: channel.to_string(),
         payload,
         author_sig: Some(Witness {
             key_id: key_id.to_string(),
@@ -1641,7 +1655,7 @@ fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, Strin
 fn entry_json(e: &OpEntry) -> serde_json::Value {
     serde_json::json!({
         "seq": e.seq,
-        "workspace": e.workspace,
+        "workspace": e.channel,
         "payload_hex": hex_encode(&e.payload),
         "author_key": e.author_sig.as_ref().map(|w| w.key_id.clone()),
         // Chain position. `parent` alone lets a client join two pages

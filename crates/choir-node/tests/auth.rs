@@ -6,7 +6,18 @@ use choir_node::{AuthTable, Node};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.interactive=false",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -40,10 +51,13 @@ fn auth_gates_clone_and_push() {
     let out = git(&work, &["clone", "-q", &anon, "anon"]);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    // git reacts to the 401 challenge by trying to collect credentials;
-    // with prompts disabled that surfaces as "could not read Username".
+    // Git reacts to the 401 challenge by trying to collect credentials;
+    // with prompts disabled that surfaces as a username/password failure.
     assert!(
-        err.contains("401") || err.contains("Authentication") || err.contains("Username"),
+        err.contains("401")
+            || err.contains("Authentication")
+            || err.contains("Username")
+            || err.contains("password"),
         "{err}"
     );
 
@@ -60,8 +74,12 @@ fn auth_gates_clone_and_push() {
         .success());
     std::fs::write(c1.join("f.txt"), "authed\n").unwrap();
     assert!(git(&c1, &["add", "."]).status.success());
-    assert!(git(&c1, &["commit", "-q", "-m", "authed commit"]).status.success());
-    assert!(git(&c1, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&c1, &["commit", "-q", "-m", "authed commit"])
+        .status
+        .success());
+    assert!(git(&c1, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
     let c2 = work.join("clone2");
     assert!(git(&work, &["clone", "-q", &good, c2.to_str().unwrap()])
         .status

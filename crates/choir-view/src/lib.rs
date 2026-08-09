@@ -746,7 +746,7 @@ pub fn append_op(
         format_version: choir_oplog::FORMAT_VERSION,
         parent: log.head(),
         seq: log.len(),
-        workspace: submitter.to_string(),
+        channel: submitter.to_string(),
         payload: op.to_payload(),
         witnesses: Vec::new(),
             author_sig: None,

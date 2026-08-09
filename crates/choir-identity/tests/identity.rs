@@ -9,7 +9,7 @@ fn entry(payload: &[u8]) -> OpEntry {
         format_version: FORMAT_VERSION,
         parent: None,
         seq: 0,
-        workspace: "w".into(),
+        channel: "w".into(),
         payload: payload.to_vec(),
         witnesses: Vec::new(),
         author_sig: None,
@@ -34,7 +34,7 @@ fn sign_verify_roundtrip_and_tamper_detection() {
         Err(IdentityError::BadSignature)
     );
     let mut rews = e.clone();
-    rews.workspace = "someone-else".into();
+    rews.channel = "someone-else".into();
     assert_eq!(registry.verify_entry(&rews), Err(IdentityError::BadSignature));
 
     // seq/parent are deliberately NOT covered: the sequencer assigns

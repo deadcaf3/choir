@@ -312,7 +312,7 @@ fn an_unsigned_entry_hashes_without_the_field_at_all() {
             format_version: FORMAT_VERSION,
             parent: None,
             seq: 0,
-            workspace: "pre-l8".into(),
+            channel: "pre-l8".into(),
             payload: op.to_payload(),
             witnesses: Vec::new(),
             author_sig: None,

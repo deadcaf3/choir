@@ -118,7 +118,8 @@ impl HttpClient {
                 None
             }
             McpArguments::Body => {
-                let file = BodyFile::new(arguments)?;
+                let body = submission_body(endpoint, arguments);
+                let file = BodyFile::new(&body)?;
                 command.args(["-H", "Content-Type: application/json", "--data-binary"]);
                 command.arg(format!("@{}", file.path.display()));
                 Some(file)
@@ -185,6 +186,43 @@ impl HttpClient {
                 // this quoted line cannot grow a second config directive.
                 format!("user = \"{}:{}\"\n", credentials.user, credentials.token)
             })
+    }
+}
+
+/// Adds the frozen v1 submission spelling alongside the current name.
+///
+/// During a rolling upgrade an updated CLI or MCP adapter can still be
+/// talking to a node that only reads `workspace`. Current nodes accept
+/// both names when their values agree. Preserve a caller's conflicting
+/// pair so the node rejects it rather than silently choosing a scope.
+fn submission_body(endpoint: &Endpoint, arguments: &Value) -> Value {
+    let mut body = arguments.clone();
+    match endpoint.path {
+        "/api/submit" => add_channel_aliases(&mut body),
+        "/api/submit-batch" => {
+            if let Some(ops) = body.get_mut("ops").and_then(Value::as_array_mut) {
+                for op in ops {
+                    add_channel_aliases(op);
+                }
+            }
+        }
+        _ => {}
+    }
+    body
+}
+
+fn add_channel_aliases(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    match (object.get("channel").cloned(), object.get("workspace").cloned()) {
+        (Some(channel), None) => {
+            object.insert("workspace".to_string(), channel);
+        }
+        (None, Some(workspace)) => {
+            object.insert("channel".to_string(), workspace);
+        }
+        _ => {}
     }
 }
 

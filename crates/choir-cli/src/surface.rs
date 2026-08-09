@@ -86,12 +86,17 @@ const EMPTY_MCP_SCHEMA: &str = r#"{"type":"object","additionalProperties":false}
 const SUBMISSION_MCP_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
-    "workspace": { "type": "string", "description": "Signature-covered attribution channel" },
+    "channel": { "type": "string", "description": "Signature-covered attribution channel" },
+    "workspace": { "type": "string", "description": "Deprecated v1 alias for channel" },
     "payload_hex": { "type": "string", "description": "Hex-encoded ViewOp payload bytes" },
     "key_id": { "type": "string", "description": "Actor key id" },
     "signature_hex": { "type": "string", "description": "Hex-encoded submission signature" }
   },
-  "required": ["workspace", "payload_hex", "key_id", "signature_hex"],
+  "required": ["payload_hex", "key_id", "signature_hex"],
+  "anyOf": [
+    { "required": ["channel"] },
+    { "required": ["workspace"] }
+  ],
   "additionalProperties": false
 }"#;
 
@@ -104,12 +109,17 @@ const BATCH_MCP_SCHEMA: &str = r#"{
       "items": {
         "type": "object",
         "properties": {
-          "workspace": { "type": "string" },
+          "channel": { "type": "string", "description": "Signature-covered attribution channel" },
+          "workspace": { "type": "string", "description": "Deprecated v1 alias for channel" },
           "payload_hex": { "type": "string" },
           "key_id": { "type": "string" },
           "signature_hex": { "type": "string" }
         },
-        "required": ["workspace", "payload_hex", "key_id", "signature_hex"],
+        "required": ["payload_hex", "key_id", "signature_hex"],
+        "anyOf": [
+          { "required": ["channel"] },
+          { "required": ["workspace"] }
+        ],
         "additionalProperties": false
       }
     }

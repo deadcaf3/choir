@@ -101,6 +101,27 @@ fn mcp_tools_cover_public_operations_once_in_table_order() {
         );
     }
 
+    // New clients say `channel`; the frozen v1 transport spelling remains
+    // discoverable so existing MCP callers keep validating.
+    let submit = tools
+        .iter()
+        .find(|tool| tool["name"] == "choir_submit")
+        .expect("submit tool");
+    assert!(submit["inputSchema"]["properties"]["channel"].is_object());
+    assert!(submit["inputSchema"]["properties"]["workspace"].is_object());
+    assert_eq!(
+        submit["inputSchema"]["anyOf"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let batch = tools
+        .iter()
+        .find(|tool| tool["name"] == "choir_submit_batch")
+        .expect("batch tool");
+    let batch_item = &batch["inputSchema"]["properties"]["ops"]["items"];
+    assert!(batch_item["properties"]["channel"].is_object());
+    assert!(batch_item["properties"]["workspace"].is_object());
+    assert_eq!(batch_item["anyOf"].as_array().map(Vec::len), Some(2));
+
     // Discovery documents are already served directly; the hook is
     // privileged and internal. None belongs in model-controlled tools.
     for path in ["/llms.txt", "/sync.md", "/api/git-update"] {
