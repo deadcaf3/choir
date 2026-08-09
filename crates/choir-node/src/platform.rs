@@ -861,7 +861,7 @@ struct ChoirPolicy {
     ///
     /// Shared with [`Platform`], because a *tightening* must not wait for
     /// an unrelated event: the accept loop refreshes it on mtime change,
-    /// while the failed-signature path below refreshes it too.
+    /// while submission admission refreshes the signature registry too.
     key_names: Arc<Mutex<KeyBindings>>,
     /// Entry-author-aware runtime projection for D24 T3. Updated on the
     /// writer thread immediately after the ordinary view fold.
@@ -996,10 +996,16 @@ impl ChoirPolicy {
 impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
+        // Refresh before verification so removing a trusted key takes
+        // effect on that key's very next request. A failed verification
+        // cannot trigger this tightening: a removed key is still present
+        // in the stale registry and would verify successfully.
+        self.reload_keys();
         let mut verified_actor = self
             .registry
             .verify_submission(&sub.channel, &sub.payload, sig);
-        // Unknown/failed key: maybe the operator just registered it.
+        // Retry a failed signature in case the file changed between the
+        // pre-verification metadata check and this verification.
         if verified_actor.is_err() && self.reload_keys() {
             verified_actor = self
                 .registry
@@ -1289,9 +1295,9 @@ impl Platform {
     }
 
     /// [`Platform::start`] with a trusted-keys file that is hot-reloaded
-    /// (on mtime change) whenever a signature check fails: registering a
-    /// key is appending a line, no restart. The file's contents replace
-    /// the whole registry on reload, so key *removal* also takes effect.
+    /// (on mtime change) before signature verification: registering a key
+    /// is appending a line, no restart, and removing one refuses its next
+    /// submission. The file's contents replace the whole registry.
     ///
     /// # Errors
     ///

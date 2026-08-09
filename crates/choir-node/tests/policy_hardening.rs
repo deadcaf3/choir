@@ -117,5 +117,25 @@ fn keys_hot_reload_and_reviewer_binding() {
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(view["reviews"]["h-1"]["approved"], true, "{view}");
 
+    // Revocation is a tightening too. Removing a trusted key must take
+    // effect on that key's very next submission, without waiting for an
+    // unrelated bad signature to make the policy refresh its registry.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&keys_file, "").unwrap();
+    let revoked_request = ViewOp::new(OpKind::RequestReview {
+        id: "h-revoked".into(),
+        target: choir_oplog::ContentHash::blake3(b"revoked target"),
+        reviewers: vec!["late".into()],
+        target_ref: None,
+    });
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&late, "late", &revoked_request),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "unknown_key", "{resp}");
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert!(view["reviews"].get("h-revoked").is_none(), "{view}");
+
     node.unblock();
 }
