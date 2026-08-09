@@ -1,44 +1,140 @@
 # choir
 
-An agent-first code collaboration platform: many agents working concurrently on one repository, ordered by a single-writer sequencer, with first-class merge conflicts.
+Agent-first code collaboration: many agents on one repo, one total order from a single-writer sequencer, merge conflicts as first-class values.
 
-Git forges today assume human tempo: a handful of contributors, a handful of branches, merges that are rare and negotiated. Coding agents invert that. Published measurements put the conflict rate on agent-authored pull requests between 15 and 32 percent, and even after a clean structural merge a 5 to 10 percent residual semantic-conflict rate remains. choir is a forge built for that regime instead of retrofitted to it.
+**Status:** research prototype. Phase-0 gate passed; Phase 1 in progress. No CI — run the gate by hand. Not production software.
 
-**Status: research prototype.** The Phase-0 feasibility gate passed on the Linux target; Phase 1 is in progress. Nothing here is production software, there is no CI, and the gate is run by hand.
+| You want to… | Start here |
+|---|---|
+| See it work once | [Try it](#try-it) |
+| Install tools / unblock build | [Prerequisites](#prerequisites) |
+| Run a local node | [Run a node](#run-a-node) |
+| Push, review, provision workspaces | [Use the node](#use-the-node) |
+| Wire coding agents | [Agent templates](#agent-templates) |
+| Design / numbers / invariants | [`internal/`](internal/design.md) |
 
-## The four ideas
+## Prerequisites
 
-1. **One writer, one order.** Every change to a repository, whether it arrives as a signed API operation or as a `git push`, is serialized by a single-writer sequencer thread into one total order. The result is a hash-chained, per-actor-signed operation log that any reader can replay and verify independently.
-2. **A conflict is a value, never a failure.** A conflicted tree entry is a legal committed state that child commits build on top of. A merge strategy that cannot resolve returns a conflict rather than picking a side. There is no silent auto-resolve anywhere in the codebase.
-3. **Speculative merge trains.** A Zuul-style queue assumes every change will pass, tests them in parallel, and evicts the failure. Window sizing follows TCP flow control: start at 20, add one per success, halve on failure.
-4. **Workspaces in milliseconds.** Agent workspaces are provisioned by a single tree-level copy-on-write clone (btrfs subvolume snapshot or APFS `clonefile`), measured at p50 4 ms on the Linux target, so starting an agent costs nothing worth budgeting for.
+| Tool | Required? | Notes |
+|---|---|---|
+| Rust stable + Cargo | **yes** | Built with **1.97.1**, edition 2021. Install via [rustup](https://rustup.rs/) or Homebrew. |
+| `git` | **yes** | Smart-HTTP CGI + all integration tests. |
+| `curl` | **yes** | Only HTTP client the crates use. |
+| `openssl` | **yes** | Auth tokens, bridge RS256; tests shell out to it. |
+| `ssh-keygen` | **yes** | Integration tests / signed-push setup. |
+| `mergiraf` | optional | Structured merge slot. Without it, line merge + first-class conflicts still work. Homebrew: `brew install mergiraf`. |
+| `jj` | optional | Not required to build or run choir. |
 
-## Quick start
+**OS / filesystem**
+
+- **macOS (APFS):** supported. Fast CoW workspaces via `clonefile` / `cp -Rc`. Dogfood installer uses **launchd** (`scripts/choirctl`).
+- **Linux:** supported. Prefer a **btrfs** volume for workspace snapshots (Phase-0 gate used btrfs). Without CoW, provisioning still works but is slower.
+- **Non-loopback bind** requires TLS (`--tls-cert` + `--tls-key`). Plain HTTP is loopback-only by design.
+
+**Do not remove** `.cargo/config.toml` (`LIBSQLITE3_FLAGS`). Every workspace build needs it (rivetkit / sqlite workaround).
+
+**Secrets:** keys, tokens, PEMs under `~/.choir/` at mode `0600` (daemon key: `<repo-root>/.choir/node.key`). Never commit them.
+
+## Build
 
 ```bash
-cargo test --workspace          # full suite, hermetic: no network, no external services
-cargo run -p choir-demo         # narrated walkthrough of every layer, including a real git push
-cargo run -p choir-spike --release   # the Phase-0 gate as a binary; exits nonzero on gate failure
+git clone <this-repo> && cd choir
+cargo build --release -p choir-node -p choir-cli
 ```
 
-`choir-demo` is the fastest way to see what this is. It mints keys, submits signed operations, shows a rejection, commits a first-class conflict, undoes work by prefix replay, and pushes through the daemon over real git, narrating each step.
-
-Requirements: stable Rust (built with cargo 1.97.1, edition 2021), plus `git`, `curl`, `openssl` and `ssh-keygen` on PATH, which the integration tests drive as real subprocesses.
-
-## Running a node
+Default `cargo build` / `cargo test` skip `choir-actor` (heavy Rivet dep). Full gate:
 
 ```bash
-cargo run -p choir-node -- <repo-root> [port] [--create owner/name.git]... \
-  [--auth-file f] [--keys-file f] [--reviewers-file f] [--protected-refs f] \
-  [--require-assignment] [--require-review] [--bind addr] \
-  [--tls-cert c --tls-key k]
+cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
 
-The daemon serves git over smart-HTTP (via `git http-backend` as CGI) and a platform API on the same port. HTTP basic auth is mandatory when an auth file is given, and the node refuses a non-loopback bind without TLS: that is the privacy rule expressed as code, not as a note.
+Put the CLI on your PATH (or use `cargo run -p choir-cli -- …`):
 
-Repositories created by the daemon get a `pre-receive` hook that calls back into the API, so a `git push` becomes a node-signed ref operation in the same total order as everything else. A repository created any other way is not sequenced.
+```bash
+export PATH="$PWD/target/release:$PATH"
+```
 
-### API surface
+## Try it
+
+```bash
+cargo run -p choir-demo         # narrated walkthrough: keys, ops, conflict, real git push
+cargo run -p choir-spike --release   # Phase-0 gate binary; nonzero exit = gate fail
+cargo test --workspace          # hermetic: no network, no external services
+```
+
+`choir-demo` is the fastest “what is this?” path.
+
+## Run a node
+
+The daemon serves **git smart-HTTP** and the **platform API** on one port (default **8417**). Repos must be created with `--create` (or the installer) so the `pre-receive` hook is installed — a bare repo made any other way is **not** sequenced.
+
+### Option A — macOS dogfood (supervised)
+
+```bash
+sh scripts/choirctl install              # build, mint ~/.choir secrets, load launchd
+sh scripts/choirctl status
+sh scripts/choirctl url                  # clone/push URL with credentials
+sh scripts/choirctl logs
+# sh scripts/choirctl stop | uninstall   # stop keeps data under ~/.choir
+```
+
+Override port with `CHOIR_PORT`. Full flip procedure: `scripts/flip/RUNBOOK.md`.
+
+### Option B — any Unix (foreground)
+
+```bash
+mkdir -p /tmp/choir-repos ~/.choir
+# user:token per line, mode 0600
+printf 'choir:%s\n' "$(openssl rand -hex 32)" > ~/.choir/auth && chmod 600 ~/.choir/auth
+: > ~/.choir/keys && chmod 600 ~/.choir/keys
+cargo run -p choir-cli -- key ~/.choir/agent.key myop/agent >> ~/.choir/keys
+printf '# reviewer channels, one per line\n' > ~/.choir/reviewers && chmod 600 ~/.choir/reviewers
+
+cargo run -p choir-node -- /tmp/choir-repos 8417 \
+  --create owner/demo.git \
+  --auth-file ~/.choir/auth \
+  --keys-file ~/.choir/keys \
+  --reviewers-file ~/.choir/reviewers
+```
+
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--protected-refs <file>`, `--require-review`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `AGENTS.md`.
+
+**File formats (all mode 0600)**
+
+| File | Format |
+|---|---|
+| `--auth-file` | `user:token` per line |
+| `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
+| `--reviewers-file` | channel name per line; re-read on each draw |
+| `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
+
+Hot-reload: keys and reviewers take effect on the next request. Push-cert `allowed_signers` is loaded at startup only (restart after adding signing keys).
+
+## Use the node
+
+Auth on the CLI is flags, not env:
+
+```bash
+choir --auth-file ~/.choir/auth --auth-user choir <command> ...
+```
+
+Exit codes: **0** accepted, **1** rejected (JSON body printed — see `ERRORS.md`), **2** usage.
+
+### Git
+
+```bash
+# after choirctl install:
+git clone "$(sh scripts/choirctl url owner/repo.git)"
+# or manually:
+# git clone http://choir:<token>@127.0.0.1:8417/owner/demo.git
+
+git push origin HEAD:main
+```
+
+Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **never force-push** over a sequencer rejection.
+
+### CLI (preferred over hand-rolled curl)
 
 <!-- generated: choir surface, do not edit -->
 
@@ -55,8 +151,6 @@ Repositories created by the daemon get a `pre-receive` hook that calls back into
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
 <!-- /generated -->
 
-### The `choir` CLI
-
 ```text
 choir key <key-file> [name]
 choir workspace <api> <owner/repo> <name>
@@ -68,108 +162,82 @@ choir reviews <api> <reviewer>
 choir view <api>
 ```
 
-Exit codes: 0 accepted, 1 rejected by the node with the error body printed, 2 usage error.
+Live surface on a running node: `GET /llms.txt`. Sync verification: `SYNC.md` / `GET /sync.md`.
 
-`choir review` with no reviewer names is the preferred form: the node draws reviewers from an operator-curated pool and signs the assignment itself, so a requester cannot pick their own reviewers. `--require-assignment` makes that the only form node-wide; `--protected-refs` makes it the only form for reviews whose `--ref` names a protected ref, which is how "privilege-bearing" gets a definition the code can read.
-
-A trusted-keys line may bind a key to a channel name — `<name> <hex>` instead of a bare `<hex>` — and a bound key's `RequestReview` or `PostVerdict` is refused on any other channel. Names are conventionally `operator/agent`, and the reviewer draw excludes everyone sharing the requester's operator prefix, taking at most one seat per operator: without that, someone running three agents in the pool satisfies two-person review by themselves. An unprefixed name is its own operator, so a flat pool behaves as it did before. Without it, "the verdict's reviewer matches the signed submission channel" only proves a claim is self-consistent, not that it is true: any trusted key could post as any name. Binding is opt-in per key and additive, so an existing keys file keeps working unchanged, and an edit takes effect on the next request.
-
-Adding `--require-review` turns that from a convention into a gate: a protected ref only moves to a commit some approved review with weight from at least two distinct operators already named as its destination, and cannot be deleted at all. Each operator contributes at most one approval unit even if it controls several agent channels; `/api/view` exposes the resulting `approval_weight`. There is no exemption for the daemon's own key, because every `git push` reaches the sequencer as a node-signed `SetRef` — so switching it on means this node's own repository can only be advanced through a review. Creating a protected ref is still allowed; nothing exists yet to hijack, and since deletion is refused, delete-then-recreate is not a way back in.
-
-### The bridge
+### Minimal day-one loop
 
 ```bash
-cargo run -p choir-bridge -- <upstream-url> <mirror-path> <api-base> <bridge-key-file> <label> [--once]
-cargo run -p choir-bridge -- queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]
+API=http://127.0.0.1:8417
+A=(--auth-file "$HOME/.choir/auth" --auth-user choir)
+
+# 1. Confirm the node
+choir "${A[@]}" view "$API"
+
+# 2. CoW workspace (repo must exist on the node with at least one commit)
+choir "${A[@]}" workspace "$API" owner/demo agent-a
+
+# 3. Publish intent, then request review (name no reviewers — node draws)
+choir "${A[@]}" intent "$API" "$HOME/.choir/agent.key" myop/agent HEAD task 'ship feature X'
+choir "${A[@]}" review "$API" "$HOME/.choir/agent.key" myop/agent rev-1 "$(git rev-parse HEAD)" \
+  --ref owner/demo.git:refs/heads/main
+
+# 4. Drawn reviewers answer
+choir "${A[@]}" reviews "$API" otherop/reviewer
+choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 approve
 ```
 
-The bridge mirrors an existing forge and submits the ref delta as signed operations, so choir follows and upstream stays canonical. There is no dual-write. The `queue` mode runs speculative merge trains against a GitHub repository as a bot: build the train, push it so the host's CI runs on it, post a per-pull-request verdict, optionally fast-forward the base branch, and revert the whole train if the landed commit later fails.
+**Review rules that matter in practice**
 
-The point of the bridge is that the queue sees things per-branch CI cannot. In the live run, a pull request whose own CI was green got a red verdict because it conflicted with the train.
+- Name **no** reviewers on `choir review`; empty list ⇒ node assignment. Self-picked lists may be refused under `--require-assignment` / protected refs.
+- Channel names: `operator/agent`. Same-operator agents cannot review each other.
+- Bind keys when registering: `choir key ~/.choir/agent.key myop/agent >> ~/.choir/keys`.
+- Protected landing with `--require-review` needs approval weight **2** (two distinct operators). See `scripts/flip/RUNBOOK.md` to enable gates on the dogfood node.
+- Prefer `POST /api/submit-batch` for multiple ops (one durability barrier).
 
-## Architecture
+Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).
 
-```
-choir-hash      content-address envelope (codec byte + digest); BLAKE3 and git-oid codecs
-  choir-oplog   L1 wire format: hash-chained OpEntry, OpLog seam (MemLog | FileLog)
-    choir-view       L1 typed ViewOp -> pure fold -> View (workspace heads + refs)
-    choir-identity   L8 ed25519 per actor; actor id = hash(pubkey)
-    choir-sequencer  L2 single-writer thread owns the log; SubmitPolicy seam
-      choir-queue    L2 speculative merge train (Zuul window: start 20, +1/pass, halve/fail)
-      choir-actor    L2 same contract on the Rivet actor runtime (2nd seam impl)
-    choir-merge   ordered 3-way strategies: trivial -> line (diffy) -> mergiraf subprocess
-  choir-store   L0 BLAKE3 + FastCDC chunk store (MemStore | FsStore)
+### Agent templates
 
-choir-node    L3 daemon: git smart-HTTP via `git http-backend` CGI + the platform API
-choir-cli     the agent-facing command line
-choir-bridge  forge bridge: mirrors an upstream, runs speculative trains as a bot
-choir-demo    composes everything, narrated
-choir-spike   the Phase-0 gate measurement, as a binary with an exit code
+Teach Claude Code / Codex / Cursor to speak choir: see [`templates/README.md`](templates/README.md).
+
+```bash
+source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key
+# then install the harness snippet listed in templates/README.md
 ```
 
-### One operation, end to end
+## Troubleshooting
 
-A client builds a `ViewOp` and serializes it, signs `(workspace, payload)` with its actor key, and calls `SequencerHandle::try_submit`, which sends it over a channel to the one writer thread. That thread verifies the signature, trial-applies the operation against a cloned view for the compare-and-swap check, and on acceptance stamps `seq` and `parent`, hashes the entry, folds it into the live view, and appends. The caller gets back `Accepted { seq, hash, decision_latency }`. Readers either poll `GET /api/view` or replay the log themselves.
-
-Note what the author does **not** sign: `seq` and `parent` are assigned after signing. Replaying a signed operation at a different position is blocked by the compare-and-swap value inside the payload, not by the signature.
-
-## Invariants
-
-These are the one-way doors. Breaking one is a data migration, not a refactor. `plan.md` carries the reasoning and the tripwire that would reverse each bet.
-
-1. Every persisted struct carries a `format_version`, and new fields are additive, so old logs still decode and still hash identically.
-2. Hashes are self-describing. A hash always carries its codec byte, which is how git object ids live in the operation log without pretending to be BLAKE3.
-3. Canonical serialization is load-bearing. Map fields in hashed structs are `BTreeMap` for exactly this reason; switching one to `HashMap` silently breaks every hash.
-4. The author signs `(workspace, payload)` only.
-5. Only the sequencer thread appends.
-6. A conflict is a value, never a failure.
-7. Witness fields exist and stay empty until the transparency-log phase. Do not remove them to tidy up.
-8. Mergiraf is GPLv3 and runs as a subprocess only. Linking it as a crate would GPL our binaries.
-9. The node refuses a non-loopback bind without TLS.
-10. The bridge follows, never co-leads.
-
-## House conventions
-
-Several deliberate choices look like omissions:
-
-- Synchronous and thread-based everywhere except `choir-actor`. No tokio in the rest of the workspace.
-- No HTTP client crate. Outbound HTTP shells out to `curl`.
-- No base64, ssh-format or JWT crates. Those are hand-rolled; RS256 signing shells out to `openssl` so a private key never becomes parsed key material in our address space.
-- No environment variables. Everything is CLI flags and files.
-- Dependencies are added reluctantly. A test that needs randomness hand-rolls an xorshift rather than pulling in `rand`.
-- `missing_docs` is a warning and broken intra-doc links are denied, so every public item is documented and every crate's module doc carries a runnable example.
-
-Testing follows two rules. A seam is only real when a shared conformance suite plus a second implementation both pass it, so `MemLog` and `FileLog`, `MemStore` and `FsStore`, and the in-process and Rivet sequencers each run the same assertions. Integration tests use the real thing rather than mocks: they bind a real node on port 0 and drive it with real `git`, `curl` and `openssl` subprocesses. Gate thresholds are assertions, not reports.
-
-## Measured results
-
-From the Linux target (GCP n2-standard-4, Debian 12, btrfs), continuous integration excluded per the gate definition:
-
-| Measurement | Result | Target |
+| Symptom | Likely cause | Fix |
 |---|---|---|
-| Workspace provisioning (btrfs snapshot, 2000-file tree) | p50 4 ms, p90 5 ms | p50 under 50 ms |
-| Firecracker snapshot restore | p50 10 ms, p90 35 ms | under 500 ms |
-| Merge decision latency, integrated spike | p99 114 microseconds | under 100 ms |
-| Silent merge picks | 0 | 0 |
+| `cargo build` pulls huge tree / sqlite errors | `choir-actor` / rivetkit | Keep `.cargo/config.toml`. Default members already exclude actor; use `-p choir-actor` only when needed. |
+| `choir-actor` ignored test fails / download broken | rivetkit 2.3.10 auto-download | Workarounds in `PHASE0.md`. Run: `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored` |
+| Node refuses bind address | Non-loopback without TLS | Add `--tls-cert` / `--tls-key`, or stay on `127.0.0.1` / SSH tunnel |
+| `/api/view` → 401 | Auth enabled (expected) | Pass `-u user:token` or `--auth-file` / `--auth-user` |
+| Push not in `/api/view` | Repo created without `--create` | Recreate via node/`choirctl` so `pre-receive` exists |
+| `unknown_key` | Key not in `--keys-file` | `choir key … [channel] >> keys-file` (hot-reloaded) |
+| `stale_head` | CAS lost the race | Re-read `/api/view`, rebase on `actual`, resubmit |
+| `assignment_error` / empty reviewers | Empty `--reviewers-file` | Add at least two `operator/…` channels for meaningful review |
+| `review_required` | Protected ref, insufficient weight | Node-drawn review + two operators approve, then push |
+| Workspace slow / fails | No CoW FS | Use APFS or btrfs; see `internal/measurements.md` |
+| Lost submit response | Network blip after accept | Resubmit **identical** signed bytes → `already_applied: true` (`ERRORS.md`) |
 
-On the daemon itself, measured with the ForgeMark harness on a laptop over loopback: roughly 46 pushes/s and 86 shallow clones/s at 32 concurrent clients, against Phase-1 targets of 5 commits/s/repo through the queue and 10,000 clones/hour.
+Rejection code table: [`ERRORS.md`](ERRORS.md).
 
-Full evidence, including the corrections and the failed approaches, is in `PHASE0.md`.
+## Docs map
 
-## Repository map
-
-- `plan.md` is the design blueprint. Its decision register classifies every bet as a one-way or two-way door and records the tripwire that reverses it. Code comments cite these rows by number.
-- `PHASE0.md` is the running build log and gate tracker, and the source of truth for status.
-- `crates/` holds the 14 workspace crates listed above.
-- `templates/` is a deliverable, not configuration: snippets that teach someone else's coding agent (Claude Code, Codex, Cursor) how to talk to a choir node.
-- `scripts/` holds the benchmarks and the operator tooling. `sh scripts/choirctl` with no arguments lists the node commands (`install`, `status`, `logs`, `stop`, `uninstall`, `sync`, `push`, `mirror`, `url`).
-
-## Notes on running your own
-
-Keys, tokens and PEM files belong under `~/.choir/` at mode 0600, and the daemon's own key lives at `<root>/.choir/node.key`. Never in the repository, never in a commit message, never in a document. Host addresses and account names stay as placeholders in tracked files.
-
-The `choir-actor` conformance test is ignored by default because it spawns a local Rivet engine. Run it with `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored`. That download is broken upstream in rivetkit 2.3.10; `PHASE0.md` records the four workarounds, one of which is the `LIBSQLITE3_FLAGS` setting in `.cargo/config.toml`. Do not remove it, every build in the workspace needs it.
+| Doc | What it is |
+|---|---|
+| [`AGENTS.md`](AGENTS.md) | Agent-facing surface (generated; edit `crates/choir-cli/src/surface.rs`) |
+| [`ERRORS.md`](ERRORS.md) | Rejection codes and repair hints |
+| [`SYNC.md`](SYNC.md) | Log catch-up + hash/signature verification |
+| [`templates/`](templates/README.md) | Drop-in agent harness snippets |
+| [`scripts/choirctl`](scripts/choirctl) | Dogfood node operator entrypoint |
+| [`scripts/flip/RUNBOOK.md`](scripts/flip/RUNBOOK.md) | Supervised install + protected-ref gates |
+| [`PHASE0.md`](PHASE0.md) | Build log and gate status (source of truth) |
+| [`plan.md`](plan.md) | Design blueprint + decision register |
+| [`internal/design.md`](internal/design.md) | Architecture, invariants, conventions |
+| [`internal/measurements.md`](internal/measurements.md) | Phase-0 numbers |
 
 ## License
 
-Crates are declared `MIT OR Apache-2.0` in the workspace manifest. License files are not yet in the tree. Mergiraf, invoked as an optional subprocess, is GPLv3 and is deliberately never linked.
+Workspace crates: `MIT OR Apache-2.0` (declared in the manifest; license files not yet in-tree). Mergiraf (optional subprocess) is GPLv3 and is never linked.

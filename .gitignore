@@ -1,4 +1,6 @@
 /target
 CLAUDE.md
-internal/
 .claude/
+# Local scratch under internal/; tracked design notes are the *.md files.
+internal/*
+!internal/*.md
