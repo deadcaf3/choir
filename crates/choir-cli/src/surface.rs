@@ -128,7 +128,9 @@ pub const ENDPOINTS: &[Endpoint] = &[
         purpose: "Ordered log entries, the catch-up and sync primitive. Absolute `from`: \
                   entries evicted from the in-memory window are served from the persisted log \
                   (`source` says which), and a node that cannot reach that far back answers 409 \
-                  rather than a page with a hole in it",
+                  rather than a page with a hole in it. Each entry carries its hash, parent and \
+                  author signature so pages can be chained and verified without trusting the \
+                  node; SYNC.md is that procedure",
     },
     Endpoint {
         method: "POST",
@@ -144,6 +146,12 @@ pub const ENDPOINTS: &[Endpoint] = &[
         method: "GET",
         path: "/llms.txt",
         purpose: "This surface, as text, for an agent that has never seen choir",
+    },
+    Endpoint {
+        method: "GET",
+        path: "/sync.md",
+        purpose: "The sync contract, in full: cursor semantics and how to verify a page's \
+                  hash chain and author signatures without trusting the node serving them",
     },
     Endpoint {
         method: "POST",

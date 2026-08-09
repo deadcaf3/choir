@@ -1266,12 +1266,35 @@ fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, Strin
 
 /// JSON shape of one log entry, shared by the in-memory window and the
 /// on-disk resync path so a catching-up reader cannot tell them apart.
+///
+/// Every field of the hashed form is here, which is what makes the
+/// chain checkable by someone who does not trust this node: the client
+/// rebuilds the canonical bytes, hashes them, and compares against
+/// `hash`. `SYNC.md` writes that recipe out, and
+/// `tests/sync_contract.rs` executes it — if a field is added here and
+/// not there, that test fails rather than a third-party client
+/// silently losing the ability to verify.
 fn entry_json(e: &OpEntry) -> serde_json::Value {
     serde_json::json!({
         "seq": e.seq,
         "workspace": e.workspace,
         "payload_hex": hex_encode(&e.payload),
         "author_key": e.author_sig.as_ref().map(|w| w.key_id.clone()),
+        // Chain position. `parent` alone lets a client join two pages
+        // (page N+1's first parent is page N's last hash); `hash` is
+        // the node's claim about this entry, which the client is meant
+        // to recompute from the fields below rather than believe.
+        "hash": e.content_hash().to_hex(),
+        "parent": e.parent.as_ref().map(ContentHash::to_hex),
+        "format_version": e.format_version,
+        // Empty until Phase 2 (D16), and sent anyway: witnesses are
+        // inside the hashed form, so a client that left them out of its
+        // recomputation would verify fine today and break on the first
+        // cosigned entry.
+        "witnesses": &e.witnesses,
+        // The signature itself, not just whose it is. Without the bytes
+        // a client can only take the node's word for authorship.
+        "author_sig_hex": e.author_sig.as_ref().map(|w| hex_encode(&w.signature)),
     })
 }
 

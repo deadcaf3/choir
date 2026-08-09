@@ -217,6 +217,17 @@ fn llms_txt_is_served_and_describes_the_surface() {
     assert!(body.contains("git push is the compatibility path"), "{body}");
     assert!(body.contains("choir review"), "{body}");
 
+    // And the document it tells the agent to follow is reachable from
+    // the same node, not only from a clone of the repository.
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-w", "\n%{http_code}", &format!("http://127.0.0.1:{port}/sync.md")])
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text.rsplit_once('\n').expect("status line");
+    assert_eq!(code.trim(), "200", "{body}");
+    assert!(body.starts_with("# The sync contract"), "{body}");
+
     node.unblock();
     std::fs::remove_dir_all(&work).ok();
 }

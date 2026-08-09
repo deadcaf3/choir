@@ -363,8 +363,17 @@ impl Node {
                 // The surface as plain text, for an agent that has never
                 // seen choir. Behind auth like everything else; it
                 // describes the node rather than exposing its contents.
-                if request.url() == "/llms.txt" {
-                    let response = tiny_http::Response::from_string(LLMS_TXT).with_header(
+                // The surface as plain text, and the sync contract it
+                // points at. `llms.txt` naming a file only a cloner can
+                // read would be worse than not naming it, so the
+                // document a remote agent is told to follow is served
+                // from the same place it is told about.
+                if let Some(text) = match request.url() {
+                    "/llms.txt" => Some(LLMS_TXT),
+                    "/sync.md" => Some(SYNC_MD),
+                    _ => None,
+                } {
+                    let response = tiny_http::Response::from_string(text).with_header(
                         tiny_http::Header::from_bytes(
                             &b"Content-Type"[..],
                             &b"text/plain; charset=utf-8"[..],
@@ -605,6 +614,11 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 /// node has no business linking the CLI, and a generated file with a
 /// staleness test is the cheaper coupling.
 const LLMS_TXT: &str = include_str!("llms.txt");
+
+/// The sync contract, served at `/sync.md`. Hand-authored, unlike
+/// `llms.txt`, and included from the repository root so the served copy
+/// and the committed one cannot disagree.
+const SYNC_MD: &str = include_str!("../../../SYNC.md");
 
 /// Routes one `/api/...` request to the platform (503 when disabled).
 fn handle_api(
