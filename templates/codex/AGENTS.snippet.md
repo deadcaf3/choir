@@ -31,7 +31,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance
+- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance, T3 concentration
 <!-- /generated -->
 
 Signatures above are generated; these conventions are not, and they are

@@ -29,7 +29,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance
+- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance, T3 concentration
 <!-- /generated -->
 - `GET $CHOIR_API/api/view` shows where every workspace and ref points;
   prefer it over guessing. `GET $CHOIR_API/api/log?from=N` is the

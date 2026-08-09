@@ -12,8 +12,10 @@
 //!   legacy v1 alias for `channel`. Payload bytes are a serialized
 //!   [`ViewOp`]. Admitted ops answer `{"seq", "hash"}`; rejections are
 //!   HTTP 400 with the policy's reason.
-//! - `GET /api/view` — the current materialized view as
-//!   `{"workspaces": {name: id}, "refs": {name: id}}`.
+//! - `GET /api/view` — the current materialized state plus the D24 T3
+//!   concentration projection. The latter is runtime metadata derived
+//!   from signed entries and current operator files, never persisted op
+//!   or hash input.
 //!
 //! Hex (not JSON-embedding) carries the payload because the signature
 //! covers the exact bytes the author serialized; re-encoding through a
@@ -213,6 +215,478 @@ const LOG_PAGE: usize = 500;
 /// landing threshold (D24 layer 5).
 const REQUIRED_APPROVAL_WEIGHT: usize = 2;
 
+/// D24 T3 fires above these bounds. Shares use exact integer arithmetic;
+/// basis points are presentation only and never drive the decision.
+const T3_MAX_AGENT_KEYS_PER_OPERATOR: usize = 100;
+const T3_MAX_SHARE_PERCENT: usize = 1;
+
+/// One log author's signed identity claim. Resolution is delayed until a
+/// report is read so a hot-reloaded binding file changes the whole current
+/// projection consistently, including entries replayed before the reload.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ActorEvidence {
+    key_id: Option<String>,
+    channel: String,
+}
+
+impl ActorEvidence {
+    fn from_entry(entry: &OpEntry) -> Self {
+        Self {
+            key_id: entry.author_sig.as_ref().map(|sig| sig.key_id.clone()),
+            channel: entry.channel.clone(),
+        }
+    }
+}
+
+/// Evidence available for one ref move. A directly bound signer wins. A
+/// node-signed Git move may instead be attributed to the unique bound
+/// operator whose approved review named the exact `(ref, target)` pair.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RefAttribution {
+    direct: ActorEvidence,
+    approved_requesters: Vec<ActorEvidence>,
+}
+
+/// Current binding snapshot. The effective map preserves admission's
+/// existing one-name-per-actor behaviour; the deterministic records retain
+/// enough information to report duplicate cross-operator bindings as
+/// ambiguous rather than choosing whichever row happened to come last.
+#[derive(Default)]
+struct KeyBindings {
+    effective: std::collections::HashMap<ContentHash, String>,
+    operators_by_actor: BTreeMap<String, BTreeSet<String>>,
+    names_by_actor: BTreeMap<String, BTreeSet<String>>,
+    unbound_actors: BTreeSet<String>,
+    configured: bool,
+    available: bool,
+}
+
+impl KeyBindings {
+    fn unavailable(configured: bool) -> Self {
+        Self {
+            configured,
+            ..Self::default()
+        }
+    }
+
+    fn from_signers(signers: &[crate::TrustedKey]) -> Self {
+        let mut effective = std::collections::HashMap::new();
+        let mut names_by_actor: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut all_actors = BTreeSet::new();
+        for signer in signers {
+            all_actors.insert(signer.actor_id.clone());
+            if let Some(name) = &signer.name {
+                effective.insert(ContentHash::blake3(&signer.key), name.clone());
+                names_by_actor
+                    .entry(signer.actor_id.clone())
+                    .or_default()
+                    .insert(name.clone());
+            }
+        }
+        let operators_by_actor = names_by_actor
+            .iter()
+            .map(|(actor, names)| {
+                (
+                    actor.clone(),
+                    names
+                        .iter()
+                        .map(|name| reviewer_operator(name).to_string())
+                        .collect(),
+                )
+            })
+            .collect();
+        let unbound_actors = all_actors
+            .iter()
+            .filter(|actor| !names_by_actor.contains_key(*actor))
+            .cloned()
+            .collect();
+        Self {
+            effective,
+            operators_by_actor,
+            names_by_actor,
+            unbound_actors,
+            configured: true,
+            available: true,
+        }
+    }
+
+    fn bound_name(&self, actor_id: &ContentHash) -> Option<&str> {
+        self.effective.get(actor_id).map(String::as_str)
+    }
+
+    fn resolve_evidence(&self, evidence: &ActorEvidence) -> AttributionResolution {
+        let Some(key_id) = evidence.key_id.as_ref() else {
+            return AttributionResolution::Unknown;
+        };
+        let Some(names) = self.names_by_actor.get(key_id) else {
+            return AttributionResolution::Unknown;
+        };
+        if !names.contains(&evidence.channel) {
+            return AttributionResolution::Unknown;
+        }
+        let Some(operators) = self.operators_by_actor.get(key_id) else {
+            return AttributionResolution::Unknown;
+        };
+        match operators.len() {
+            0 => AttributionResolution::Unknown,
+            1 => AttributionResolution::Operator(
+                operators.first().expect("one operator").clone(),
+            ),
+            _ => AttributionResolution::Ambiguous,
+        }
+    }
+
+    fn snapshot_hash(&self) -> Option<String> {
+        self.available.then(|| {
+            let mut records = self.names_by_actor.clone();
+            for actor in &self.unbound_actors {
+                records.entry(actor.clone()).or_default();
+            }
+            let bytes = serde_json::to_vec(&records)
+                .expect("binding snapshot is always serializable");
+            ContentHash::blake3(&bytes).to_hex()
+        })
+    }
+}
+
+#[derive(Default)]
+struct ConcentrationState {
+    review_requesters: BTreeMap<String, ActorEvidence>,
+    active_branches: BTreeMap<String, RefAttribution>,
+    ref_updates: BTreeMap<String, BTreeMap<RefAttribution, usize>>,
+    as_of_seq: Option<u64>,
+}
+
+impl ConcentrationState {
+    fn observe(&mut self, entry: &OpEntry, op: &ViewOp, view: &View) {
+        self.as_of_seq = Some(entry.seq);
+        match &op.kind {
+            OpKind::RequestReview { id, .. } => {
+                self.review_requesters
+                    .insert(id.clone(), ActorEvidence::from_entry(entry));
+            }
+            OpKind::SetRef {
+                name,
+                commit,
+                prev,
+            } => {
+                let mut approved_requesters: Vec<_> = view
+                    .reviews
+                    .iter()
+                    .filter(|(_, review)| {
+                        review.target_ref.as_deref() == Some(name)
+                            && review.target.as_ref() == Some(commit)
+                            && review.approved()
+                    })
+                    .filter_map(|(id, _)| self.review_requesters.get(id).cloned())
+                    .collect();
+                approved_requesters.sort();
+                approved_requesters.dedup();
+                let attribution = RefAttribution {
+                    direct: ActorEvidence::from_entry(entry),
+                    approved_requesters,
+                };
+                if is_branch_ref(name) {
+                    self.active_branches
+                        .insert(name.clone(), attribution.clone());
+                }
+                if prev.is_some() {
+                    *self
+                        .ref_updates
+                        .entry(name.clone())
+                        .or_default()
+                        .entry(attribution)
+                        .or_default() += 1;
+                }
+            }
+            OpKind::DeleteRef { name, .. } => {
+                self.active_branches.remove(name);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_branch_ref(name: &str) -> bool {
+    name.strip_prefix("refs/heads/")
+        .or_else(|| name.split_once(":refs/heads/").map(|(_, branch)| branch))
+        .is_some_and(|branch| !branch.is_empty())
+}
+
+fn share_basis_points(part: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    ((part as u128 * 10_000) / total as u128) as usize
+}
+
+fn share_tripped(part: usize, total: usize) -> bool {
+    total != 0 && part as u128 * 100 > total as u128 * T3_MAX_SHARE_PERCENT as u128
+}
+
+enum AttributionResolution {
+    Operator(String),
+    Unknown,
+    Ambiguous,
+}
+
+fn resolve_attribution(
+    attribution: &RefAttribution,
+    bindings: &KeyBindings,
+) -> AttributionResolution {
+    match bindings.resolve_evidence(&attribution.direct) {
+        AttributionResolution::Operator(operator) => {
+            return AttributionResolution::Operator(operator);
+        }
+        AttributionResolution::Ambiguous => return AttributionResolution::Ambiguous,
+        AttributionResolution::Unknown => {}
+    }
+    let mut operators = BTreeSet::new();
+    let mut ambiguous = false;
+    let mut unknown = false;
+    for requester in &attribution.approved_requesters {
+        match bindings.resolve_evidence(requester) {
+            AttributionResolution::Operator(operator) => {
+                operators.insert(operator);
+            }
+            AttributionResolution::Ambiguous => ambiguous = true,
+            AttributionResolution::Unknown => unknown = true,
+        }
+    }
+    if ambiguous || (unknown && !operators.is_empty()) {
+        return AttributionResolution::Ambiguous;
+    }
+    if unknown {
+        return AttributionResolution::Unknown;
+    }
+    match operators.len() {
+        0 => AttributionResolution::Unknown,
+        1 => AttributionResolution::Operator(
+            operators
+                .first()
+                .expect("one requester operator")
+                .clone(),
+        ),
+        _ => AttributionResolution::Ambiguous,
+    }
+}
+
+#[derive(Default)]
+struct OperatorConcentration {
+    agent_keys: usize,
+    active_branches: usize,
+    protected_updates: usize,
+}
+
+struct ProtectedPolicySnapshot {
+    configured: bool,
+    available: bool,
+    hash: Option<String>,
+    patterns: Vec<String>,
+}
+
+impl ProtectedPolicySnapshot {
+    fn read(path: Option<&std::path::Path>) -> Self {
+        let Some(path) = path else {
+            return Self {
+                configured: false,
+                available: false,
+                hash: None,
+                patterns: Vec::new(),
+            };
+        };
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self {
+                configured: true,
+                available: true,
+                hash: Some(ContentHash::blake3(text.as_bytes()).to_hex()),
+                patterns: text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_string)
+                    .collect(),
+            },
+            Err(_) => Self {
+                configured: true,
+                available: false,
+                hash: None,
+                patterns: Vec::new(),
+            },
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        self.patterns.iter().any(|pattern| {
+            pattern
+                .strip_suffix('*')
+                .map_or(name == pattern, |prefix| name.starts_with(prefix))
+        })
+    }
+}
+
+fn concentration_json(
+    state: &ConcentrationState,
+    bindings: &KeyBindings,
+    protected: &ProtectedPolicySnapshot,
+) -> serde_json::Value {
+    let mut operators: BTreeMap<String, OperatorConcentration> = BTreeMap::new();
+    let mut ambiguous_agent_keys = 0usize;
+    for operator_set in bindings.operators_by_actor.values() {
+        match operator_set.len() {
+            0 => {}
+            1 => {
+                operators
+                    .entry(operator_set.first().expect("one operator").clone())
+                    .or_default()
+                    .agent_keys += 1;
+            }
+            _ => ambiguous_agent_keys += 1,
+        }
+    }
+
+    let active_total = state.active_branches.len();
+    let mut unknown_active = 0usize;
+    let mut ambiguous_active = 0usize;
+    for attribution in state.active_branches.values() {
+        match resolve_attribution(attribution, bindings) {
+            AttributionResolution::Operator(operator) => {
+                operators.entry(operator).or_default().active_branches += 1;
+            }
+            AttributionResolution::Unknown => unknown_active += 1,
+            AttributionResolution::Ambiguous => ambiguous_active += 1,
+        }
+    }
+
+    let mut protected_total = 0usize;
+    let mut unknown_protected = 0usize;
+    let mut ambiguous_protected = 0usize;
+    if protected.available {
+        for (name, by_attribution) in &state.ref_updates {
+            if !protected.matches(name) {
+                continue;
+            }
+            for (attribution, count) in by_attribution {
+                protected_total += count;
+                match resolve_attribution(attribution, bindings) {
+                    AttributionResolution::Operator(operator) => {
+                        operators
+                            .entry(operator)
+                            .or_default()
+                            .protected_updates += count;
+                    }
+                    AttributionResolution::Unknown => unknown_protected += count,
+                    AttributionResolution::Ambiguous => ambiguous_protected += count,
+                }
+            }
+        }
+    }
+
+    let mut any_tripwire = false;
+    let operator_rows: BTreeMap<String, serde_json::Value> = operators
+        .into_iter()
+        .map(|(operator, row)| {
+            let agent_keys_tripped = row.agent_keys > T3_MAX_AGENT_KEYS_PER_OPERATOR;
+            let active_tripped = share_tripped(row.active_branches, active_total);
+            let protected_tripped = protected
+                .available
+                .then(|| share_tripped(row.protected_updates, protected_total));
+            any_tripwire |=
+                agent_keys_tripped || active_tripped || protected_tripped.unwrap_or(false);
+            let protected_updates = protected.available.then_some(row.protected_updates);
+            let protected_share = protected
+                .available
+                .then(|| share_basis_points(row.protected_updates, protected_total));
+            (
+                operator,
+                serde_json::json!({
+                    "agent_keys": row.agent_keys,
+                    "active_branches": row.active_branches,
+                    "active_branch_share_basis_points":
+                        share_basis_points(row.active_branches, active_total),
+                    "protected_updates": protected_updates,
+                    "protected_update_share_basis_points": protected_share,
+                    "tripwires": {
+                        "agent_keys": agent_keys_tripped,
+                        "active_branch_share": active_tripped,
+                        "protected_update_share": protected_tripped,
+                    },
+                }),
+            )
+        })
+        .collect();
+
+    let attributed_active = active_total - unknown_active - ambiguous_active;
+    let attributed_protected = protected_total - unknown_protected - ambiguous_protected;
+    let evaluation_complete = bindings.available
+        && bindings.unbound_actors.is_empty()
+        && ambiguous_agent_keys == 0
+        && unknown_active == 0
+        && ambiguous_active == 0
+        && protected.available
+        && unknown_protected == 0
+        && ambiguous_protected == 0;
+    let tripwire_status = if any_tripwire {
+        "observed"
+    } else if evaluation_complete {
+        "not_observed"
+    } else {
+        "indeterminate"
+    };
+    serde_json::json!({
+        "format_version": 1,
+        "as_of_seq": state.as_of_seq,
+        "thresholds": {
+            "max_agent_keys_per_operator": T3_MAX_AGENT_KEYS_PER_OPERATOR,
+            "max_share_basis_points": T3_MAX_SHARE_PERCENT * 100,
+            "comparison": "strictly_greater_than",
+        },
+        "bindings": {
+            "configured": bindings.configured,
+            "available": bindings.available,
+            "snapshot_hash": bindings.snapshot_hash(),
+        },
+        "protected_policy": {
+            "configured": protected.configured,
+            "available": protected.available,
+            "snapshot_hash": protected.hash.as_deref(),
+            "classification": "current_policy",
+        },
+        "totals": {
+            "bound_agent_keys": bindings.available.then_some(bindings.names_by_actor.len()),
+            "unbound_agent_keys": bindings.available.then_some(bindings.unbound_actors.len()),
+            "ambiguous_agent_keys": bindings.available.then_some(ambiguous_agent_keys),
+            "active_branches": active_total,
+            "attributed_active_branches": attributed_active,
+            "unattributed_active_branches": unknown_active + ambiguous_active,
+            "unknown_active_branches": unknown_active,
+            "ambiguous_active_branches": ambiguous_active,
+            "active_branch_attribution_coverage_basis_points":
+                share_basis_points(attributed_active, active_total),
+            "protected_updates": protected.available.then_some(protected_total),
+            "attributed_protected_updates":
+                protected.available.then_some(attributed_protected),
+            "unattributed_protected_updates": protected
+                .available
+                .then_some(unknown_protected + ambiguous_protected),
+            "unknown_protected_updates": protected.available.then_some(unknown_protected),
+            "ambiguous_protected_updates":
+                protected.available.then_some(ambiguous_protected),
+            "protected_update_attribution_coverage_basis_points": protected
+                .available
+                .then(|| share_basis_points(attributed_protected, protected_total)),
+        },
+        "operators": operator_rows,
+        "tripwire_observed": any_tripwire,
+        "tripwire_status": tripwire_status,
+        "evaluation_complete": evaluation_complete,
+        "semantics": {
+            "active_branches": "current branch refs grouped by last attributable mover, not ownership",
+            "protected_updates": "admitted non-creation ref updates matching the current protected policy, not proof of Git publication or merge commits",
+        },
+    })
+}
+
 /// Nanosecond clock reading, as a nonzero xorshift seed.
 fn seed_from_clock() -> u64 {
     std::time::SystemTime::now()
@@ -269,26 +743,34 @@ impl LogWindow {
     }
 }
 
-/// Replays once while recovering the request order needed by retention.
-/// The ordinary, retention-disabled startup keeps using `View::materialize`
-/// and pays for no tracker or extra work.
-fn materialize_with_review_retention(
+/// Replays the platform's runtime projections in one pass. Concentration
+/// attribution needs the entry author as well as the typed payload, while
+/// review retention additionally needs request order. Neither belongs in
+/// the persisted `ViewOp` format, and neither justifies a second log scan.
+fn materialize_platform_state(
     log: &dyn OpLog,
-    config: ReviewRetention,
-) -> Result<(View, ReviewRetentionState), choir_view::ViewError> {
+    retention_config: Option<ReviewRetention>,
+) -> Result<
+    (View, Option<ReviewRetentionState>, ConcentrationState),
+    choir_view::ViewError,
+> {
     let mut view = View::default();
-    let mut retention = ReviewRetentionState::new(config);
+    let mut retention = retention_config.map(ReviewRetentionState::new);
+    let mut concentration = ConcentrationState::default();
     // Stored entries have no timestamp. Giving every pre-existing live
     // review `now` starts a fresh grace period after restart, which can
     // delay an incomplete-review lapse but can never trigger one early.
-    let observed_at = config.lapse_after.map(|_| Instant::now());
+    let observed_at = retention_config.and_then(|config| config.lapse_after.map(|_| Instant::now()));
     for seq in 0..log.len() {
         let entry = log.get(seq).expect("seq < len");
         let op = ViewOp::from_payload(&entry.payload)?;
         view.apply(&op)?;
-        retention.observe(&op, observed_at);
+        concentration.observe(&entry, &op, &view);
+        if let Some(retention) = &mut retention {
+            retention.observe(&op, observed_at);
+        }
     }
-    Ok((view, retention))
+    Ok((view, retention, concentration))
 }
 
 /// Verify author signature, then CAS against the shared view. Runs on
@@ -323,7 +805,10 @@ struct ChoirPolicy {
     /// Shared with [`Platform`], because a *tightening* must not wait for
     /// an unrelated event: the accept loop refreshes it on mtime change,
     /// while the failed-signature path below refreshes it too.
-    key_names: Arc<Mutex<std::collections::HashMap<ContentHash, String>>>,
+    key_names: Arc<Mutex<KeyBindings>>,
+    /// Entry-author-aware runtime projection for D24 T3. Updated on the
+    /// writer thread immediately after the ordinary view fold.
+    concentration: Arc<Mutex<ConcentrationState>>,
     /// Present only when the operator enabled review retention. Updated
     /// after the view fold on the same writer thread, so its FIFO order
     /// matches the sequencer order exactly.
@@ -352,14 +837,11 @@ impl ChoirPolicy {
         if let Ok(node_pub) = <[u8; 32]>::try_from(self.node_pub.as_slice()) {
             registry.register(&node_pub).ok();
         }
-        let mut key_names = std::collections::HashMap::new();
         for signer in &signers {
-            if let (Ok(actor_id), Some(name)) = (registry.register(&signer.key), &signer.name) {
-                key_names.insert(actor_id, name.clone());
-            }
+            registry.register(&signer.key).ok();
         }
         self.registry = registry;
-        *self.key_names.lock().expect("key names lock") = key_names;
+        *self.key_names.lock().expect("key names lock") = KeyBindings::from_signers(&signers);
         self.keys_mtime = mtime;
         true
     }
@@ -379,14 +861,14 @@ impl ChoirPolicy {
     /// node, and the operator opts in one line at a time.
     fn channel_is_owned(&self, actor_id: &ContentHash, channel: &str) -> Result<(), String> {
         let names = self.key_names.lock().expect("key names lock");
-        match names.get(actor_id) {
+        match names.bound_name(actor_id) {
             Some(bound) if bound != channel => Err(Rejection::new(
                 Code::ChannelNotOwned,
                 "this key is bound to a different channel",
                 "submit on the channel your key is bound to, or ask the operator to bind a \
                  key to the channel you want",
             )
-            .with_states(Some(bound.clone()), Some(channel.to_string()))
+            .with_states(Some(bound.to_string()), Some(channel.to_string()))
             .encode()),
             _ => Ok(()),
         }
@@ -647,11 +1129,14 @@ impl SubmitPolicy for ChoirPolicy {
 
     fn accepted(&mut self, entry: &OpEntry) {
         let op = ViewOp::from_payload(&entry.payload).expect("checked in check()");
-        self.view
-            .lock()
-            .expect("view lock")
-            .apply(&op)
-            .expect("checked in check()");
+        {
+            let mut view = self.view.lock().expect("view lock");
+            view.apply(&op).expect("checked in check()");
+            self.concentration
+                .lock()
+                .expect("concentration lock")
+                .observe(entry, &op, &view);
+        }
         if let Some(retention) = &self.review_retention {
             let mut retention = retention.lock().expect("review retention lock");
             let observed_at = retention.config.lapse_after.map(|_| Instant::now());
@@ -696,7 +1181,9 @@ pub struct Platform {
     /// commit an approved review already named.
     require_review: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the policy: actor id → bound channel name.
-    key_names: Arc<Mutex<std::collections::HashMap<ContentHash, String>>>,
+    key_names: Arc<Mutex<KeyBindings>>,
+    /// D24 T3 runtime projection, replayed from the signed log at startup.
+    concentration: Arc<Mutex<ConcentrationState>>,
     /// Sequence-ordered live reviews, allocated only under an explicit
     /// retention configuration.
     review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
@@ -786,18 +1273,12 @@ impl Platform {
         registry
             .register(&node_key.public_key_bytes())
             .map_err(|e| format!("register node key: {e:?}"))?;
-        let (view, review_retention) = match retention {
-            Some(config) => {
-                let (view, state) = materialize_with_review_retention(log.as_ref(), config)
-                    .map_err(|e| format!("replay: {e:?}"))?;
-                (view, Some(Arc::new(Mutex::new(state))))
-            }
-            None => (
-                View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?,
-                None,
-            ),
-        };
+        let (view, review_retention, concentration) =
+            materialize_platform_state(log.as_ref(), retention)
+                .map_err(|e| format!("replay: {e:?}"))?;
+        let review_retention = review_retention.map(|state| Arc::new(Mutex::new(state)));
         let view = Arc::new(Mutex::new(view));
+        let concentration = Arc::new(Mutex::new(concentration));
         // Fill the window from the tail only. Materialising the whole log
         // into a Vec and pushing each entry through the window cloned
         // every entry twice at startup and held a second full copy of the
@@ -825,21 +1306,13 @@ impl Platform {
         // Name bindings are read from the same file at startup; a
         // malformed file here is not fatal because `start_reloading`
         // already accepted the caller's registry.
-        let key_names = Arc::new(Mutex::new(
-            keys_file
-                .as_ref()
-                .and_then(|p| crate::parse_keys_file(p).ok())
-                .map(|signers| {
-                    signers
-                        .into_iter()
-                        .filter_map(|s| {
-                            s.name
-                                .map(|name| (ContentHash::blake3(&s.key), name))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ));
+        let key_names = Arc::new(Mutex::new(match keys_file.as_ref() {
+            Some(path) => crate::parse_keys_file(path).map_or_else(
+                |_| KeyBindings::unavailable(true),
+                |signers| KeyBindings::from_signers(&signers),
+            ),
+            None => KeyBindings::unavailable(false),
+        }));
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -857,6 +1330,7 @@ impl Platform {
                 node_pub: node_key.public_key_bytes().to_vec(),
                 node_id: node_key.actor_id(),
                 key_names: key_names.clone(),
+                concentration: concentration.clone(),
                 review_retention: review_retention.clone(),
             }),
         );
@@ -872,6 +1346,7 @@ impl Platform {
             protected_refs,
             require_review,
             key_names,
+            concentration,
             review_retention,
             review_prune_lock: Mutex::new(()),
             _sequencer: sequencer,
@@ -986,15 +1461,7 @@ impl Platform {
     /// That matters because a binding is a *tightening*: a gate that
     /// applies at an unpredictable future moment is not a gate.
     pub fn set_key_names(&self, signers: &[crate::TrustedKey]) {
-        let map = signers
-            .iter()
-            .filter_map(|s| {
-                s.name
-                    .clone()
-                    .map(|name| (ContentHash::blake3(&s.key), name))
-            })
-            .collect();
-        *self.key_names.lock().expect("key names lock") = map;
+        *self.key_names.lock().expect("key names lock") = KeyBindings::from_signers(signers);
     }
 
     /// Shrinks the in-memory `/api/log` window. Exists so tests can
@@ -1344,15 +1811,29 @@ impl Platform {
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {
             ("GET", "/api/view") => {
+                let protected_path = self
+                    .protected_refs
+                    .lock()
+                    .expect("protected refs lock")
+                    .clone();
+                let protected = ProtectedPolicySnapshot::read(protected_path.as_deref());
+                // Writer order is view -> concentration. Holding both
+                // while rendering prevents a response whose heads include
+                // op N while `as_of_seq` and attribution stop at N-1.
                 let view = self.view.lock().expect("view lock");
-                let ws: std::collections::BTreeMap<_, _> = view
+                let concentration = self.concentration.lock().expect("concentration lock");
+                let key_names = self.key_names.lock().expect("key names lock");
+                let ws: BTreeMap<_, _> = view
                     .workspaces
                     .iter()
                     .map(|(k, v)| (k.clone(), v.to_hex()))
                     .collect();
-                let refs: std::collections::BTreeMap<_, _> =
-                    view.refs.iter().map(|(k, v)| (k.clone(), v.to_hex())).collect();
-                let reviews: std::collections::BTreeMap<_, _> = view
+                let refs: BTreeMap<_, _> = view
+                    .refs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_hex()))
+                    .collect();
+                let reviews: BTreeMap<_, _> = view
                     .reviews
                     .iter()
                     .map(|(id, r)| (id.clone(), review_json(r)))
@@ -1362,6 +1843,11 @@ impl Platform {
                     "refs": refs,
                     "reviews": reviews,
                     "provenance": view.provenance,
+                    "concentration": concentration_json(
+                        &concentration,
+                        &key_names,
+                        &protected,
+                    ),
                 });
                 (200, body.to_string())
             }

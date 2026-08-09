@@ -18,7 +18,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance
+- `choir view <api>` — the materialized view: workspace heads, refs, reviews, provenance, T3 concentration
 
 ## Endpoints
 
@@ -26,7 +26,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
 | `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
-| `GET /api/view` | The materialized view: workspace heads, refs, reviews, provenance |
+| `GET /api/view` | The materialized view: workspace heads, refs, reviews, provenance, T3 concentration |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
 | `POST /api/workspace` | Provision a copy-on-write workspace and register it in the view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
