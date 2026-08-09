@@ -3,6 +3,7 @@
 //! Usage: `choir-node <repo-root> [port] [--create owner/name.git]...
 //! [--auth-file path] [--keys-file path] [--reviewers-file path]
 //! [--require-assignment] [--protected-refs path] [--require-review]
+//! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`
 //!
@@ -21,9 +22,14 @@
 //! them only for reviews landing on a matching ref.
 //! `--require-review` additionally refuses to move a protected ref to
 //! any commit no approved review named, and refuses to delete one at
-//! all — including for this daemon's own pushes. `--bind` with a
-//! non-loopback address is refused unless TLS is configured.
+//! all — including for this daemon's own pushes. `--review-retention`
+//! keeps at most that many live reviews when completed reviews can be
+//! archived. Incomplete reviews are never killed by default;
+//! `--review-lapse-after-secs` is the explicit operator policy that lets
+//! an over-limit incomplete review lapse. `--bind` with a non-loopback
+//! address is refused unless TLS is configured.
 
+use choir_node::platform::ReviewRetention;
 use choir_node::{AuthTable, Node, Platform};
 
 fn main() -> std::io::Result<()> {
@@ -65,7 +71,50 @@ fn main() -> std::io::Result<()> {
             .position(|a| a == name)
             .and_then(|i| rest.get(i + 1))
     };
-    let bind = flag_value("--bind").cloned().unwrap_or_else(|| "127.0.0.1".into());
+    let bind = flag_value("--bind")
+        .cloned()
+        .unwrap_or_else(|| "127.0.0.1".into());
+    for flag in ["--review-retention", "--review-lapse-after-secs"] {
+        if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{flag} needs a value"),
+            ));
+        }
+    }
+    let review_retention_count = flag_value("--review-retention")
+        .map(|value| {
+            value.parse::<usize>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--review-retention needs a non-negative integer",
+                )
+            })
+        })
+        .transpose()?;
+    let review_lapse_after = flag_value("--review-lapse-after-secs")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map(std::time::Duration::from_secs)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "--review-lapse-after-secs needs a non-negative integer",
+                    )
+                })
+        })
+        .transpose()?;
+    if review_lapse_after.is_some() && review_retention_count.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--review-lapse-after-secs needs --review-retention",
+        ));
+    }
+    let review_retention = review_retention_count.map(|count| {
+        let retention = ReviewRetention::keep(count);
+        review_lapse_after.map_or(retention, |age| retention.lapse_incomplete_after(age))
+    });
     let tls = match (flag_value("--tls-cert"), flag_value("--tls-key")) {
         (Some(cert), Some(key)) => Some((std::fs::read(cert)?, std::fs::read(key)?)),
         (None, None) => None,
@@ -125,10 +174,29 @@ fn main() -> std::io::Result<()> {
         node.watch_keys_file(path.into());
         // Same file the sequencer appends to: readers that fall behind
         // the in-memory /api/log window resync from it.
-        let mut platform =
-            Platform::start_reloading(registry, Box::new(log), node_key, Some(path.into()))
-                .map_err(std::io::Error::other)?
-                .with_log_path(log_path);
+        let mut platform = match review_retention {
+            Some(retention) => Platform::start_reloading_with_review_retention(
+                registry,
+                Box::new(log),
+                node_key,
+                Some(path.into()),
+                retention,
+            ),
+            None => Platform::start_reloading(registry, Box::new(log), node_key, Some(path.into())),
+        }
+        .map_err(std::io::Error::other)?
+        .with_log_path(log_path);
+        if let Some(count) = review_retention_count {
+            match review_lapse_after {
+                Some(age) => eprintln!(
+                    "review retention enabled ({count} live, incomplete lapse after {}s)",
+                    age.as_secs()
+                ),
+                None => eprintln!(
+                    "review retention enabled ({count} live, incomplete reviews never lapse)"
+                ),
+            }
+        }
         if let Some(pool) = flag_value("--reviewers-file") {
             platform = platform.with_reviewer_pool(pool.into());
             eprintln!("reviewer assignment enabled ({pool})");
@@ -168,6 +236,11 @@ fn main() -> std::io::Result<()> {
         }
         node.enable_platform(platform);
         eprintln!("platform API enabled ({count} actor keys)");
+    } else if review_retention.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--review-retention needs --keys-file",
+        ));
     }
     let mut create_next = false;
     for a in rest {

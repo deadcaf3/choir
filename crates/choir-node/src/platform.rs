@@ -16,15 +16,98 @@
 //! covers the exact bytes the author serialized; re-encoding through a
 //! JSON tree could legally reorder/respace them and break verification.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
-use choir_sequencer::{Sequencer, SequencerHandle, SubmitPolicy, Submission};
+use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
 use choir_view::{OpKind, View, ViewOp};
 
 use crate::reject::{Code, Rejection};
+
+/// Operator-selected bound for live review detail retained in memory.
+///
+/// Complete reviews older than `max_live` are archived immediately. An
+/// incomplete review is never archived unless `lapse_after` is explicitly
+/// set, because choosing when an unanswered review is abandoned is policy,
+/// not a harmless memory optimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewRetention {
+    max_live: usize,
+    lapse_after: Option<Duration>,
+}
+
+impl ReviewRetention {
+    /// Retains at most `max_live` live reviews when enough reviews are
+    /// complete and therefore safe to archive. Incomplete reviews never
+    /// lapse under this configuration.
+    #[must_use]
+    pub const fn keep(max_live: usize) -> Self {
+        Self {
+            max_live,
+            lapse_after: None,
+        }
+    }
+
+    /// Allows an over-limit incomplete review to lapse after `age` since
+    /// this node observed its request.
+    ///
+    /// The op log has no timestamp, so reviews replayed at startup begin a
+    /// fresh grace period. Restarting can delay a lapse, never make one
+    /// happen early. The emitted `ArchiveReview { lapsed: true }` op is
+    /// persisted, so replicas replay the decision rather than their clocks.
+    #[must_use]
+    pub const fn lapse_incomplete_after(mut self, age: Duration) -> Self {
+        self.lapse_after = Some(age);
+        self
+    }
+}
+
+/// One live review in request-sequence order. `observed_at` is consulted
+/// only for the explicitly configured incomplete-review lapse policy.
+struct TrackedReview {
+    id: String,
+    observed_at: Option<Instant>,
+}
+
+/// Runtime state that exists only when retention was explicitly enabled.
+/// Archived ids are removed, so the tracker grows with live review detail,
+/// not with the repository's lifetime.
+struct ReviewRetentionState {
+    config: ReviewRetention,
+    live: VecDeque<TrackedReview>,
+}
+
+impl ReviewRetentionState {
+    fn new(config: ReviewRetention) -> Self {
+        Self {
+            config,
+            live: VecDeque::new(),
+        }
+    }
+
+    fn observe(&mut self, op: &ViewOp, observed_at: Option<Instant>) {
+        match &op.kind {
+            OpKind::RequestReview { id, .. } => self.live.push_back(TrackedReview {
+                id: id.clone(),
+                observed_at,
+            }),
+            OpKind::ArchiveReview { id, .. } => self.live.retain(|review| review.id != *id),
+            _ => {}
+        }
+    }
+}
+
+/// Result of maintenance emitted after an already-successful user request.
+/// A retention failure cannot roll that request back, so it is reported as
+/// an additive response field rather than changing the request's status.
+#[derive(Default)]
+struct ReviewPruneOutcome {
+    archived: Vec<String>,
+    errors: Vec<serde_json::Value>,
+}
 
 /// Sliding window over recent admitted entries: `base` is the seq of
 /// the first held entry, so `/api/log?from=` keeps absolute semantics
@@ -146,6 +229,28 @@ impl LogWindow {
     }
 }
 
+/// Replays once while recovering the request order needed by retention.
+/// The ordinary, retention-disabled startup keeps using `View::materialize`
+/// and pays for no tracker or extra work.
+fn materialize_with_review_retention(
+    log: &dyn OpLog,
+    config: ReviewRetention,
+) -> Result<(View, ReviewRetentionState), choir_view::ViewError> {
+    let mut view = View::default();
+    let mut retention = ReviewRetentionState::new(config);
+    // Stored entries have no timestamp. Giving every pre-existing live
+    // review `now` starts a fresh grace period after restart, which can
+    // delay an incomplete-review lapse but can never trigger one early.
+    let observed_at = config.lapse_after.map(|_| Instant::now());
+    for seq in 0..log.len() {
+        let entry = log.get(seq).expect("seq < len");
+        let op = ViewOp::from_payload(&entry.payload)?;
+        view.apply(&op)?;
+        retention.observe(&op, observed_at);
+    }
+    Ok((view, retention))
+}
+
 /// Verify author signature, then CAS against the shared view. Runs on
 /// the sequencer's writer thread; API readers share the view mutex.
 struct ChoirPolicy {
@@ -180,6 +285,10 @@ struct ChoirPolicy {
     /// an unrelated event: the accept loop refreshes it on mtime change,
     /// while the failed-signature path below refreshes it too.
     key_names: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    /// Present only when the operator enabled review retention. Updated
+    /// after the view fold on the same writer thread, so its FIFO order
+    /// matches the sequencer order exactly.
+    review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
 }
 
 impl ChoirPolicy {
@@ -481,7 +590,15 @@ impl SubmitPolicy for ChoirPolicy {
             .expect("view lock")
             .apply(&op)
             .expect("checked in check()");
-        self.entries.lock().expect("entries lock").push(entry.clone());
+        if let Some(retention) = &self.review_retention {
+            let mut retention = retention.lock().expect("review retention lock");
+            let observed_at = retention.config.lapse_after.map(|_| Instant::now());
+            retention.observe(&op, observed_at);
+        }
+        self.entries
+            .lock()
+            .expect("entries lock")
+            .push(entry.clone());
     }
 }
 
@@ -514,6 +631,13 @@ pub struct Platform {
     require_review: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the policy: `key_id` → bound channel name.
     key_names: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    /// Sequence-ordered live reviews, allocated only under an explicit
+    /// retention configuration.
+    review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
+    /// Serializes concurrent maintenance passes. User submissions still
+    /// race normally through the sequencer; only duplicate pruning scans
+    /// and archive batches are coalesced.
+    review_prune_lock: Mutex<()>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -533,7 +657,25 @@ impl Platform {
         log: Box<dyn OpLog>,
         node_key: ActorKey,
     ) -> Result<Self, String> {
-        Self::start_reloading(registry, log, node_key, None)
+        Self::start_inner(registry, log, node_key, None, None)
+    }
+
+    /// [`Platform::start`] with explicit live-review retention.
+    ///
+    /// Retention is a startup choice because recovering FIFO request order
+    /// belongs in the same replay pass that builds the view. The ordinary
+    /// constructor allocates no tracker and performs no retention checks.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Platform::start`].
+    pub fn start_with_review_retention(
+        registry: Registry,
+        log: Box<dyn OpLog>,
+        node_key: ActorKey,
+        retention: ReviewRetention,
+    ) -> Result<Self, String> {
+        Self::start_inner(registry, log, node_key, None, Some(retention))
     }
 
     /// [`Platform::start`] with a trusted-keys file that is hot-reloaded
@@ -545,15 +687,50 @@ impl Platform {
     ///
     /// Same as [`Platform::start`].
     pub fn start_reloading(
-        mut registry: Registry,
+        registry: Registry,
         log: Box<dyn OpLog>,
         node_key: ActorKey,
         keys_file: Option<std::path::PathBuf>,
     ) -> Result<Self, String> {
+        Self::start_inner(registry, log, node_key, keys_file, None)
+    }
+
+    /// [`Platform::start_reloading`] with explicit live-review retention.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Platform::start`].
+    pub fn start_reloading_with_review_retention(
+        registry: Registry,
+        log: Box<dyn OpLog>,
+        node_key: ActorKey,
+        keys_file: Option<std::path::PathBuf>,
+        retention: ReviewRetention,
+    ) -> Result<Self, String> {
+        Self::start_inner(registry, log, node_key, keys_file, Some(retention))
+    }
+
+    fn start_inner(
+        mut registry: Registry,
+        log: Box<dyn OpLog>,
+        node_key: ActorKey,
+        keys_file: Option<std::path::PathBuf>,
+        retention: Option<ReviewRetention>,
+    ) -> Result<Self, String> {
         registry
             .register(&node_key.public_key_bytes())
             .map_err(|e| format!("register node key: {e:?}"))?;
-        let view = View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?;
+        let (view, review_retention) = match retention {
+            Some(config) => {
+                let (view, state) = materialize_with_review_retention(log.as_ref(), config)
+                    .map_err(|e| format!("replay: {e:?}"))?;
+                (view, Some(Arc::new(Mutex::new(state))))
+            }
+            None => (
+                View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?,
+                None,
+            ),
+        };
         let view = Arc::new(Mutex::new(view));
         // Fill the window from the tail only. Materialising the whole log
         // into a Vec and pushing each entry through the window cloned
@@ -611,9 +788,10 @@ impl Platform {
                 node_pub: node_key.public_key_bytes().to_vec(),
                 node_id: node_key.actor_id().to_hex(),
                 key_names: key_names.clone(),
+                review_retention: review_retention.clone(),
             }),
         );
-        Ok(Self {
+        let platform = Self {
             handle: sequencer.handle(),
             view,
             node_key,
@@ -624,8 +802,23 @@ impl Platform {
             protected_refs,
             require_review,
             key_names,
+            review_retention,
+            review_prune_lock: Mutex::new(()),
             _sequencer: sequencer,
-        })
+        };
+        // Enabling a bound applies it at startup, not only after some
+        // unrelated client happens to write. There are no external handles
+        // yet, so any refusal here is a real maintenance/startup failure.
+        if platform.review_retention.is_some() {
+            let outcome = platform.prune_reviews();
+            if !outcome.errors.is_empty() {
+                return Err(format!(
+                    "review retention failed during startup: {}",
+                    serde_json::Value::Array(outcome.errors)
+                ));
+            }
+        }
+        Ok(platform)
     }
 
     /// Refuses any `RequestReview` that names its own reviewers, so the
@@ -913,6 +1106,112 @@ impl Platform {
         Ok(pool)
     }
 
+    /// Emits enough FIFO `ArchiveReview` ops to bring live review detail
+    /// back to the configured count when eligible reviews exist.
+    ///
+    /// Complete reviews are eligible without a clock. Incomplete reviews
+    /// are eligible only after the operator-selected lapse age. Multiple
+    /// archives are offered together so they share durability barriers.
+    fn prune_reviews(&self) -> ReviewPruneOutcome {
+        let Some(retention) = &self.review_retention else {
+            return ReviewPruneOutcome::default();
+        };
+        let _pass = self.review_prune_lock.lock().expect("review prune lock");
+
+        let candidates: Vec<(String, bool)> = {
+            // Same lock order as `ChoirPolicy::accepted`: view first,
+            // tracker second. Holding both makes the count and eligibility
+            // one writer-consistent snapshot; they are released before any
+            // submission is sent back to the sequencer.
+            let view = self.view.lock().expect("view lock");
+            let retention = retention.lock().expect("review retention lock");
+            let live_count = retention
+                .live
+                .iter()
+                .filter(|tracked| {
+                    view.reviews.get(&tracked.id).is_some_and(|review| {
+                        matches!(review.status, choir_view::ReviewStatus::Live)
+                    })
+                })
+                .count();
+            let mut needed = live_count.saturating_sub(retention.config.max_live);
+            // Count-only retention never reads a clock. A timestamp is
+            // created and consulted only under the explicit lapse policy.
+            let now = retention.config.lapse_after.map(|_| Instant::now());
+            let mut candidates = Vec::with_capacity(needed);
+            for tracked in &retention.live {
+                if needed == 0 {
+                    break;
+                }
+                let Some(review) = view.reviews.get(&tracked.id) else {
+                    continue;
+                };
+                if !matches!(review.status, choir_view::ReviewStatus::Live) {
+                    continue;
+                }
+                let lapsed = if review.complete() {
+                    false
+                } else if retention.config.lapse_after.is_some_and(|age| {
+                    now.zip(tracked.observed_at)
+                        .is_some_and(|(now, observed_at)| {
+                            now.saturating_duration_since(observed_at) >= age
+                        })
+                }) {
+                    true
+                } else {
+                    continue;
+                };
+                candidates.push((tracked.id.clone(), lapsed));
+                needed -= 1;
+            }
+            candidates
+        };
+
+        if candidates.is_empty() {
+            return ReviewPruneOutcome::default();
+        }
+
+        let channel = "node/archive";
+        let submissions: Vec<Submission> = candidates
+            .iter()
+            .map(|(id, lapsed)| {
+                let payload = ViewOp::new(OpKind::ArchiveReview {
+                    id: id.clone(),
+                    lapsed: *lapsed,
+                })
+                .to_payload();
+                Submission {
+                    workspace: channel.to_string(),
+                    author_sig: Some(self.node_key.sign_submission(channel, &payload)),
+                    payload,
+                }
+            })
+            .collect();
+        let results = self.handle.try_submit_many(submissions);
+        let mut outcome = ReviewPruneOutcome::default();
+        for ((id, _), result) in candidates.into_iter().zip(results) {
+            match result {
+                Ok(_) => outcome.archived.push(id),
+                Err(reason) => {
+                    let mut error = Rejection::decode(&reason).to_json();
+                    error["review"] = serde_json::json!(id);
+                    outcome.errors.push(error);
+                }
+            }
+        }
+        outcome
+    }
+
+    fn add_retention_outcome(&self, response: &mut serde_json::Value) {
+        let outcome = self.prune_reviews();
+        if !outcome.archived.is_empty() {
+            response["archived_reviews"] = serde_json::json!(outcome.archived);
+        }
+        if !outcome.errors.is_empty() {
+            response["retention_errors"] = serde_json::json!(outcome.errors);
+        }
+    }
+
     /// Whether the sequencer has failed a durability barrier and stopped
     /// accepting.
     ///
@@ -1036,15 +1335,19 @@ impl Platform {
                     };
                     results.push(value);
                 }
-                (
-                    200,
-                    serde_json::json!({
-                        "accepted": accepted,
-                        "rejected": rejected,
-                        "results": results,
-                    })
-                    .to_string(),
-                )
+                let mut response = serde_json::json!({
+                    "accepted": accepted,
+                    "rejected": rejected,
+                    "results": results,
+                });
+                if accepted != 0 {
+                    // Once per request, after every assignment response
+                    // has been produced. Calling this from `batch_result`
+                    // would rescan and emit once per element, undoing the
+                    // durability-barrier win of the batch endpoint.
+                    self.add_retention_outcome(&mut response);
+                }
+                (200, response.to_string())
             }
             ("POST", "/api/git-update") => {
                 let req: serde_json::Value = match serde_json::from_slice(body) {
@@ -1164,7 +1467,11 @@ impl Platform {
             sub.payload.clone(),
             sub.author_sig.clone(),
         ) {
-            Ok(acc) => (200, self.batch_result(acc, &sub).to_string()),
+            Ok(acc) => {
+                let mut response = self.batch_result(acc, &sub);
+                self.add_retention_outcome(&mut response);
+                (200, response.to_string())
+            }
             Err(reason) => {
                 // A retry of an operation that already landed fails CAS
                 // in exactly the same way as a genuine conflict. They
