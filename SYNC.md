@@ -48,9 +48,10 @@ array means you are caught up, not that something went wrong.
 | `409`, `code: "log_evicted"` | `from` is below `window_base` and this node has no persisted log | Restart from `window_base` (the body carries it) and treat that entry as a new anchor — see the gap rule below |
 | `500`, `code: "unclassified"` | The node failed to read its own log | Retry; nothing about your request can fix it |
 
-Every rejection body carries `code`, `error` and `next`; `ERRORS.md`
-lists the codes. The 409 additionally carries `window_base` as a number
-so you do not have to parse it back out of prose.
+Every rejection body carries `code`, `error` and `next`; the
+[rejection-code catalog](ERRORS.md) lists the codes. The 409 additionally
+carries `window_base` as a number so you do not have to parse it back out
+of prose.
 
 **The gap rule.** If you resume at `window_base` after a 409, the chain
 you now hold is in two pieces with a hole between them. Continuity

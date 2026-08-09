@@ -1,7 +1,7 @@
 //! The agent-facing surface, as data, and the generators that render it.
 //!
-//! `choir --help`, the README's API and CLI tables, the three
-//! `templates/` snippets, the root `agents.md` and the node's `llms.txt`
+//! `choir --help`, the README's API and CLI sections, the three
+//! `templates/` snippets, the root `AGENT_GUIDE.md` and the node's `llms.txt`
 //! all describe one surface. Hand-maintained, they drift — and they had
 //! already started to: the README's API table carried a throughput
 //! figure that three later measurements had superseded.
@@ -344,6 +344,16 @@ pub fn api_table() -> String {
     out
 }
 
+/// The README's generated API and CLI reference.
+#[must_use]
+pub fn readme_surface() -> String {
+    format!(
+        "{}\n### The `choir` CLI\n\n```text\n{}```\n",
+        api_table(),
+        usage()
+    )
+}
+
 /// The command list the agent templates carry, as a markdown bullet list.
 #[must_use]
 pub fn command_bullets() -> String {
@@ -357,7 +367,7 @@ pub fn command_bullets() -> String {
     out
 }
 
-/// `agents.md`: the first thing a coding agent should read.
+/// `AGENT_GUIDE.md`: the generated choir reference for coding agents.
 #[must_use]
 pub fn agents_md() -> String {
     format!(
@@ -451,7 +461,7 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
         std::fs::read_to_string(root.join(rel)).map_err(|e| format!("{rel}: {e}"))
     };
     let mut out = vec![
-        (root.join("agents.md"), agents_md()),
+        (root.join("AGENT_GUIDE.md"), agents_md()),
         (root.join("crates/choir-node/src/llms.txt"), llms_txt()),
         // Owned by choir-node's reject module, generated here so one
         // staleness test covers every generated artifact rather than two
@@ -459,7 +469,8 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
         (root.join("ERRORS.md"), choir_node::reject::errors_md()),
         (
             root.join("README.md"),
-            splice(&read("README.md")?, &api_table()).map_err(|e| format!("README.md: {e}"))?,
+            splice(&read("README.md")?, &readme_surface())
+                .map_err(|e| format!("README.md: {e}"))?,
         ),
     ];
     for rel in [

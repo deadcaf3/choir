@@ -1,11 +1,12 @@
 //! choir-node daemon entry point.
 //!
-//! Usage: `choir-node <repo-root> [port] [--create owner/name.git]...
+//! Configured usage: `choir-node <repo-root> <port> [--create owner/name.git]...
 //! [--auth-file path] [--keys-file path] [--reviewers-file path]
 //! [--require-assignment] [--protected-refs path] [--require-review]
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--bind addr]
-//! [--tls-cert cert.pem --tls-key key.pem]`
+//! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
+//! to `./repos` on port 8417; configured invocations must fill the port slot.
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
 //! `user:token`-per-line file (0600; never in-repo) and turns on

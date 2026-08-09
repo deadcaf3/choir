@@ -37,7 +37,7 @@ impl AuthOptions<'_> {
 
 fn usage() -> ! {
     // Rendered from the surface table, so help can never disagree with
-    // the README, the templates, or agents.md.
+    // the README, the templates, or AGENT_GUIDE.md.
     eprint!("{}", choir_cli::surface::usage());
     std::process::exit(2);
 }

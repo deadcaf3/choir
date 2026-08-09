@@ -6,6 +6,8 @@ Git forges today assume human tempo: a handful of contributors, a handful of bra
 
 **Status: research prototype.** The Phase-0 feasibility gate passed on the Linux target; Phase 1 is in progress. Nothing here is production software, there is no CI, and the gate is run by hand.
 
+For reference material, see the [sync contract](SYNC.md), [rejection-code catalog](ERRORS.md), [agent templates](templates/README.md), and [bridge permission model](crates/choir-bridge/PERMISSIONS.md). The [design blueprint](plan.md) and [Phase-0 evidence log](PHASE0.md) preserve the reasoning and measurements behind the implementation.
+
 ## The four ideas
 
 1. **One writer, one order.** Every change to a repository, whether it arrives as a signed API operation or as a `git push`, is serialized by a single-writer sequencer thread into one total order. The result is a hash-chained, per-actor-signed operation log that any reader can replay and verify independently.
@@ -23,20 +25,27 @@ cargo run -p choir-spike --release   # the Phase-0 gate as a binary; exits nonze
 
 `choir-demo` is the fastest way to see what this is. It mints keys, submits signed operations, shows a rejection, commits a first-class conflict, undoes work by prefix replay, and pushes through the daemon over real git, narrating each step.
 
-Requirements: stable Rust (built with cargo 1.97.1, edition 2021), plus `git`, `curl`, `openssl` and `ssh-keygen` on PATH, which the integration tests drive as real subprocesses.
+Requirements: stable Rust and Cargo. The repository currently builds with Rust 1.97.1 and uses edition 2021, but does not declare a minimum supported Rust version. Keep `git`, `curl`, `openssl`, and `ssh-keygen` on `PATH`; integration tests drive them as real subprocesses.
 
 ## Running a node
 
 ```bash
-cargo run -p choir-node -- <repo-root> [port] [--create owner/name.git]... \
+cargo run -p choir-node -- <repo-root> <port> [--create owner/name.git]... \
   [--auth-file f] [--keys-file f] [--reviewers-file f] [--protected-refs f] \
-  [--require-assignment] [--require-review] [--bind addr] \
+  [--require-assignment] [--require-review] [--review-retention count] \
+  [--review-lapse-after-secs seconds] [--bind addr] \
   [--tls-cert c --tls-key k]
 ```
+
+With no arguments, the binary defaults to `./repos` on port 8417. Pass the port explicitly for any configured invocation; the current positional parser starts reading flags after that slot.
 
 The daemon serves git over smart-HTTP (via `git http-backend` as CGI) and a platform API on the same port. HTTP basic auth is mandatory when an auth file is given, and the node refuses a non-loopback bind without TLS: that is the privacy rule expressed as code, not as a note.
 
 Repositories created by the daemon get a `pre-receive` hook that calls back into the API, so a `git push` becomes a node-signed ref operation in the same total order as everything else. A repository created any other way is not sequenced.
+
+Operator files are line-oriented and should be mode 0600 outside the repository: `--auth-file` uses `user:token`; `--keys-file` uses `<public-key-hex>` or `<channel> <public-key-hex>`; `--reviewers-file` uses one channel per line; and `--protected-refs` uses one `<repo>:<refname>` pattern per line, with an optional trailing `*`. `--require-assignment` and `--protected-refs` need a reviewer file. `--require-review` also needs protected refs and requires approval weight from two distinct operators before a protected ref can move.
+
+Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
 ### API surface
 
@@ -53,22 +62,26 @@ Repositories created by the daemon get a `pre-receive` hook that calls back into
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
-<!-- /generated -->
 
 ### The `choir` CLI
 
 ```text
-choir key <key-file> [name]
-choir workspace <api> <owner/repo> <name>
-choir submit <api> <key-file> <channel> '<op-json>'
-choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
-choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
-choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
-choir reviews <api> <reviewer>
-choir view <api>
-```
+usage:
+  choir [--auth-file <path>] [--auth-user <name>] <command> ...
 
-Exit codes: 0 accepted, 1 rejected by the node with the error body printed, 2 usage error.
+commands:
+  choir key <key-file> [name]
+  choir workspace <api> <owner/repo> <name>
+  choir submit <api> <key-file> <channel> '<op-json>'
+  choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
+  choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+  choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
+  choir reviews <api> <reviewer>
+  choir view <api>
+
+Exit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), 2 usage error.
+```
+<!-- /generated -->
 
 `choir review` with no reviewer names is the preferred form: the node draws reviewers from an operator-curated pool and signs the assignment itself, so a requester cannot pick their own reviewers. `--require-assignment` makes that the only form node-wide; `--protected-refs` makes it the only form for reviews whose `--ref` names a protected ref, which is how "privilege-bearing" gets a definition the code can read.
 
@@ -76,20 +89,35 @@ A trusted-keys line may bind a key to a channel name — `<name> <hex>` instead 
 
 Adding `--require-review` turns that from a convention into a gate: a protected ref only moves to a commit some approved review with weight from at least two distinct operators already named as its destination, and cannot be deleted at all. Each operator contributes at most one approval unit even if it controls several agent channels; `/api/view` exposes the resulting `approval_weight`. There is no exemption for the daemon's own key, because every `git push` reaches the sequencer as a node-signed `SetRef` — so switching it on means this node's own repository can only be advanced through a review. Creating a protected ref is still allowed; nothing exists yet to hijack, and since deletion is refused, delete-then-recreate is not a way back in.
 
+### The MCP adapter
+
+`choir-mcp` exposes the six public platform operations as a synchronous stdio MCP server. It keeps no platform state; each tool call crosses the node's HTTP and authentication boundary.
+
+```text
+choir-mcp <api> [--auth-file <path>] [--auth-user <name>]
+```
+
+Register that command as a stdio server in the agent harness. The optional credential file uses the node's `user:token` format. If it contains more than one entry, select one with `--auth-user`. Discovery documents and the internal git hook are intentionally not exposed as tools.
+
 ### The bridge
 
 ```bash
 cargo run -p choir-bridge -- <upstream-url> <mirror-path> <api-base> <bridge-key-file> <label> [--once]
 cargo run -p choir-bridge -- queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]
+cargo run -p choir-bridge -- --pubkey <key-file>
+cargo run -p choir-bridge -- app-debug <app-id> <pem-path>
+cargo run -p choir-bridge -- post-status <app-id> <pem-path> <owner/repo> <sha> <state> <description>
 ```
 
 The bridge mirrors an existing forge and submits the ref delta as signed operations, so choir follows and upstream stays canonical. There is no dual-write. The `queue` mode runs speculative merge trains against a GitHub repository as a bot: build the train, push it so the host's CI runs on it, post a per-pull-request verdict, optionally fast-forward the base branch, and revert the whole train if the landed commit later fails.
+
+The utility modes mint or inspect bridge identity (`--pubkey`), show each GitHub App installation's granted permissions (`app-debug`), and exercise one commit-status write (`post-status`). Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
 
 The point of the bridge is that the queue sees things per-branch CI cannot. In the live run, a pull request whose own CI was green got a red verdict because it conflicted with the train.
 
 ## Architecture
 
-```
+```text
 choir-hash      content-address envelope (codec byte + digest); BLAKE3 and git-oid codecs
   choir-oplog   L1 wire format: hash-chained OpEntry, OpLog seam (MemLog | FileLog)
     choir-view       L1 typed ViewOp -> pure fold -> View (workspace heads + refs)
@@ -115,7 +143,7 @@ Note what the author does **not** sign: `seq` and `parent` are assigned after si
 
 ## Invariants
 
-These are the one-way doors. Breaking one is a data migration, not a refactor. `plan.md` carries the reasoning and the tripwire that would reverse each bet.
+These are the one-way doors. Breaking one is a data migration, not a refactor. The [design blueprint](plan.md) carries the reasoning and the tripwire that would reverse each bet.
 
 1. Every persisted struct carries a `format_version`, and new fields are additive, so old logs still decode and still hash identically.
 2. Hashes are self-describing. A hash always carries its codec byte, which is how git object ids live in the operation log without pretending to be BLAKE3.
@@ -135,9 +163,9 @@ Several deliberate choices look like omissions:
 - Synchronous and thread-based everywhere except `choir-actor`. No tokio in the rest of the workspace.
 - No HTTP client crate. Outbound HTTP shells out to `curl`.
 - No base64, ssh-format or JWT crates. Those are hand-rolled; RS256 signing shells out to `openssl` so a private key never becomes parsed key material in our address space.
-- No environment variables. Everything is CLI flags and files.
+- Rust binaries take configuration through CLI flags and named files. Agent templates and operator wrappers may use environment variables to assemble those explicit arguments.
 - Dependencies are added reluctantly. A test that needs randomness hand-rolls an xorshift rather than pulling in `rand`.
-- `missing_docs` is a warning and broken intra-doc links are denied, so every public item is documented and every crate's module doc carries a runnable example.
+- `missing_docs` is a warning, so omissions remain visible during compilation; broken intra-doc links are denied. Generated-surface tests keep the CLI, API, MCP catalog, and agent-facing command lists aligned.
 
 Testing follows two rules. A seam is only real when a shared conformance suite plus a second implementation both pass it, so `MemLog` and `FileLog`, `MemStore` and `FsStore`, and the in-process and Rivet sequencers each run the same assertions. Integration tests use the real thing rather than mocks: they bind a real node on port 0 and drive it with real `git`, `curl` and `openssl` subprocesses. Gate thresholds are assertions, not reports.
 
@@ -154,21 +182,21 @@ From the Linux target (GCP n2-standard-4, Debian 12, btrfs), continuous integrat
 
 On the daemon itself, measured with the ForgeMark harness on a laptop over loopback: roughly 46 pushes/s and 86 shallow clones/s at 32 concurrent clients, against Phase-1 targets of 5 commits/s/repo through the queue and 10,000 clones/hour.
 
-Full evidence, including the corrections and the failed approaches, is in `PHASE0.md`.
+Full evidence, including the corrections and the failed approaches, is in the [Phase-0 log](PHASE0.md).
 
 ## Repository map
 
-- `plan.md` is the design blueprint. Its decision register classifies every bet as a one-way or two-way door and records the tripwire that reverses it. Code comments cite these rows by number.
-- `PHASE0.md` is the running build log and gate tracker, and the source of truth for status.
+- [`plan.md`](plan.md) is the design blueprint. Its decision register classifies every bet as a one-way or two-way door and records the tripwire that reverses it. Code comments cite these rows by number.
+- [`PHASE0.md`](PHASE0.md) is the running build log and gate tracker, and the source of truth for status.
 - `crates/` holds the 14 workspace crates listed above.
-- `templates/` is a deliverable, not configuration: snippets that teach someone else's coding agent (Claude Code, Codex, Cursor) how to talk to a choir node.
-- `scripts/` holds the benchmarks and the operator tooling. `sh scripts/choirctl` with no arguments lists the node commands (`install`, `status`, `logs`, `stop`, `uninstall`, `sync`, `push`, `mirror`, `url`).
+- [`templates/`](templates/README.md) is a deliverable, not configuration: snippets that teach someone else's coding agent (Claude Code, Codex, Cursor) how to talk to a choir node.
+- [`scripts/`](scripts/flip/RUNBOOK.md) holds the benchmarks and operator tooling. `sh scripts/choirctl` with no arguments lists the node commands (`install`, `status`, `logs`, `stop`, `uninstall`, `sync`, `push`, `mirror`, `url`).
 
 ## Notes on running your own
 
 Keys, tokens and PEM files belong under `~/.choir/` at mode 0600, and the daemon's own key lives at `<root>/.choir/node.key`. Never in the repository, never in a commit message, never in a document. Host addresses and account names stay as placeholders in tracked files.
 
-The `choir-actor` conformance test is ignored by default because it spawns a local Rivet engine. Run it with `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored`. That download is broken upstream in rivetkit 2.3.10; `PHASE0.md` records the four workarounds, one of which is the `LIBSQLITE3_FLAGS` setting in `.cargo/config.toml`. Do not remove it, every build in the workspace needs it.
+The `choir-actor` conformance test is ignored by default because it spawns a local Rivet engine. Run it with `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored`. That download is broken upstream in rivetkit 2.3.10; the [Phase-0 log](PHASE0.md) records the four workarounds, one of which is the `LIBSQLITE3_FLAGS` setting in `.cargo/config.toml`. Do not remove it, every build in the workspace needs it.
 
 ## License
 

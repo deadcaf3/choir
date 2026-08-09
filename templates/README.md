@@ -1,28 +1,43 @@
-# choir agent templates (D21 adoption lever)
+# choir agent templates
 
-Drop-in configuration that makes an agent harness a choir client. The
-premise: agents adopt infrastructure through their config files far
-faster than humans switch forges, so the templates ARE the adoption
-surface — install once, and every session in that harness knows how to
-collaborate through a choir node.
+These drop-in snippets teach an agent harness how to collaborate through a
+choir node. Install one in a project and each session gets the same Git,
+review, signing, and conflict-handling conventions.
 
 ## Install
 
 All harnesses share one environment file:
 
-1. `source templates/choir.env.sh` from your shell profile (or your
-   harness's env mechanism), setting at minimum `CHOIR_API`.
-2. Optional, per agent: `CHOIR_USER` + `CHOIR_TOKEN_FILE` (basic auth),
-   `CHOIR_KEY_FILE` (platform-API signing), `CHOIR_SSH_KEY` (signed
-   pushes). Keys live under `~/.choir/`, never in a repo.
+1. Source [`choir.env.sh`](choir.env.sh) from your shell profile or harness
+   environment, and set at least `CHOIR_API`.
+2. For Git basic auth, set `CHOIR_USER` and a token-only
+   `CHOIR_TOKEN_FILE`. For the `choir` CLI or MCP adapter, set
+   `CHOIR_AUTH_FILE` to a `user:token`-per-line credential file and select
+   `CHOIR_USER` when it has multiple entries.
+3. Set `CHOIR_KEY_FILE` for signed platform operations and `CHOIR_SSH_KEY`
+   for signed pushes. Keep all credential and key files under `~/.choir/`
+   at mode 0600, never in a repository.
 
 Then per harness:
 
 | Harness | File | Where it goes |
 |---|---|---|
-| Claude Code | `claude-code/CLAUDE.snippet.md` | append to the project's `CLAUDE.md` |
-| Codex | `codex/AGENTS.snippet.md` | append to the project's `AGENTS.md` |
-| Cursor | `cursor/choir.mdc` | copy to `.cursor/rules/choir.mdc` |
+| Claude Code | [`claude-code/CLAUDE.snippet.md`](claude-code/CLAUDE.snippet.md) | append to the project's `CLAUDE.md` |
+| Codex | [`codex/AGENTS.snippet.md`](codex/AGENTS.snippet.md) | append to the project's `AGENTS.md` |
+| Cursor | [`cursor/choir.mdc`](cursor/choir.mdc) | copy to `.cursor/rules/choir.mdc` |
+
+## Optional MCP adapter
+
+Register `choir-mcp` as a stdio server if the harness supports MCP:
+
+```text
+choir-mcp <api> [--auth-file <path>] [--auth-user <name>]
+```
+
+For an authenticated node, a typical registration uses `CHOIR_API` as
+`<api>` and `CHOIR_AUTH_FILE` as `<path>`. The adapter exposes six public
+platform operations. It does not expose discovery documents or the internal
+Git hook as tools.
 
 ## What the templates teach an agent
 
@@ -32,9 +47,12 @@ Then per harness:
 - Signed pushes (`gpg.format=ssh`) for per-key attribution when the
   agent has a key.
 - The platform API: `/api/view` (current state), `/api/log` (ordered
-  signed history), `/api/submit` (signed ops).
+  signed history), and `/api/submit-batch` (ordered signed operations).
 - First-class conflicts: a conflicted merge is a valid committed state
   to build on, not an error to block on.
 
-Keep the snippets short: they are conventions, not documentation. The
-daemon's rustdoc is the reference.
+The generated command lists in these snippets come from
+`crates/choir-cli/src/surface.rs`; refresh them with
+`cargo run -p choir-cli --example gen-surface`. For protocol details, use
+the [sync contract](../SYNC.md), [rejection-code catalog](../ERRORS.md), and
+main [README](../README.md).

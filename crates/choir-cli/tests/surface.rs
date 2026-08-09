@@ -48,11 +48,11 @@ fn every_command_appears_in_the_agent_facing_docs() {
     for c in surface::COMMANDS {
         assert!(llms.contains(c.name), "llms.txt omits `{}`", c.name);
         if c.agent_facing {
-            assert!(agents.contains(c.name), "agents.md omits `{}`", c.name);
+            assert!(agents.contains(c.name), "AGENT_GUIDE.md omits `{}`", c.name);
         }
     }
     for e in surface::ENDPOINTS {
-        assert!(agents.contains(e.path), "agents.md omits `{}`", e.path);
+        assert!(agents.contains(e.path), "AGENT_GUIDE.md omits `{}`", e.path);
         assert!(llms.contains(e.path), "llms.txt omits `{}`", e.path);
     }
 }
