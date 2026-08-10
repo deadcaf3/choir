@@ -255,6 +255,12 @@ fn the_mirror_push_reuses_one_ssh_connection() {
         // Without this ssh offers the agent key first and the server
         // refuses it: one wasted round trip before the real key.
         "IdentitiesOnly=yes",
+        // The leg runs detached now. Without these, an ssh that meets a
+        // prompt or a black-holed route waits forever, no receipt is
+        // ever written, and that is indistinguishable from a run still
+        // in progress.
+        "BatchMode=yes",
+        "ConnectTimeout=",
     ] {
         assert!(
             script.contains(option),
@@ -265,8 +271,8 @@ fn the_mirror_push_reuses_one_ssh_connection() {
     // The stage timings are the point: this script was once tuned
     // against a model of where its time went, the model was wrong, and
     // nothing in the output could have revealed that. A run that
-    // reports connect/rsync/push separately settles it.
-    for stage in ["connect %.1fs", "rsync %.1fs", "box-local push %.1fs", "total %.1fs"] {
+    // reports connect/transfer/push separately settles it.
+    for stage in ["connect %.1fs", "git push %.1fs", "box-local push %.1fs", "total %.1fs"] {
         assert!(
             script.contains(stage),
             "mirror push stopped reporting {stage}; the next slowdown gets guessed at again"
@@ -322,18 +328,121 @@ fn the_mirror_push_reuses_one_ssh_connection() {
         "the box-local push split main and tags into two Forgejo round trips again"
     );
 
+    // rsync walked 707 files and 37.5 MB to move a delta git already
+    // knows how to compute — 1.74 s even with nothing changed, because
+    // almost every one of those files is an immutable content-addressed
+    // object. Going back to it also resurrects two workarounds it
+    // needed: recreating the mirror remote after .git/config was
+    // clobbered, and a .gitignore filter to keep local-only files off
+    // the VM, which git gives for free by only pushing commits.
+    // Non-comment lines only: the comments above explain why rsync went
+    // away and would otherwise match themselves.
+    for line in script.lines().filter(|l| !l.trim_start().starts_with('#')) {
+        assert!(
+            !line.contains("rsync "),
+            "the mirror transfer went back to rsync; git sends only the missing objects: {line}"
+        );
+    }
+
+    // Two syncs in quick succession would otherwise push into the same
+    // repo concurrently. flock is not stock on macOS, so mkdir is the
+    // atomic primitive; it must wait rather than skip, or the newest
+    // commit is the one that gets dropped.
+    assert!(
+        script.contains("mkdir \"$LOCK\""),
+        "mirror push lost its lock; concurrent syncs race on the receiving repo"
+    );
+
     // Both trips must go through the same option set, or the second one
     // opens its own connection and the multiplexing buys nothing.
     let rsync = script
         .lines()
-        .find(|line| line.trim_start().starts_with("rsync "))
-        .expect("mirror push runs rsync");
+        .find(|line| line.trim_start().starts_with("export GIT_SSH_COMMAND"))
+        .expect("mirror push sends objects over the shared ssh connection");
     let ssh = script
         .lines()
         .find(|line| line.trim_start().starts_with("ssh \""))
         .expect("mirror push runs the box-local push over ssh");
     assert!(
         rsync.contains("ssh_opts") && ssh.contains("ssh_opts"),
-        "rsync and the box-local push must share one option set:\n  {rsync}\n  {ssh}"
+        "the git transfer and the box-local push must share one option set:\n  {rsync}\n  {ssh}"
     );
+}
+
+/// The mirror leg runs detached, so nothing blocks on it — which means
+/// its failures are invisible unless the receipt is both written and
+/// read. Grepping for the reporting code would only prove it exists;
+/// this runs it, because the interesting failure is a receipt-reader
+/// that returns the wrong verdict rather than one that is missing.
+#[test]
+fn the_mirror_receipt_is_read_not_merely_written() {
+    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
+        .expect("choirctl source");
+
+    // Detached, and only after the canonical push returns: D21 ordering
+    // survives backgrounding precisely because `set -e` stops before
+    // this line when the canonical half fails.
+    assert!(
+        driver.contains("nohup sh \"$HERE/push_mirror.sh\""),
+        "choirctl sync no longer backgrounds the mirror leg"
+    );
+    let sync = driver
+        .find("sync)")
+        .and_then(|start| driver[start..].find("nohup").map(|n| start + n))
+        .expect("sync backgrounds the mirror");
+    let canonical = driver[..sync]
+        .rfind("push_canonical.sh")
+        .expect("sync pushes canonical first");
+    assert!(
+        canonical < sync,
+        "the mirror leg must start after the canonical push, or the follower can lead"
+    );
+    assert!(
+        driver.contains("mirror_line"),
+        "nothing surfaces the receipt; a detached failure would be invisible"
+    );
+
+    // Execute the verdict function itself, under the shell that runs it.
+    let body: String = driver
+        .lines()
+        .skip_while(|l| !l.starts_with("mirror_outcome()"))
+        .take_while(|l| *l != "}")
+        .chain(std::iter::once("}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.starts_with("mirror_outcome()"),
+        "choirctl no longer defines mirror_outcome"
+    );
+
+    let work = std::env::temp_dir().join(format!("choir-receipt-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let receipt = work.join("mirror.receipt");
+
+    let verdict = |case: &str| -> String {
+        let script = format!(
+            "STATE={state}; RECEIPT={receipt}; {body}; mirror_outcome",
+            state = work.display(),
+            receipt = receipt.display(),
+        );
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap_or_else(|e| panic!("{case}: {e}"));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    assert_eq!(verdict("absent"), "NONE");
+    std::fs::write(&receipt, "started 1 abc\nmirror: ...\nmirror updated\n").unwrap();
+    assert_eq!(verdict("complete"), "OK");
+    // A truncated receipt is the shape a killed or timed-out run leaves.
+    std::fs::write(&receipt, "started 1 abc\nssh: connect timed out\n").unwrap();
+    assert_eq!(verdict("truncated"), "FAILED");
+    // The lock, not the receipt, is what separates running from dead.
+    std::fs::create_dir_all(work.join("mirror.lock")).unwrap();
+    assert_eq!(verdict("in flight"), "RUNNING");
+
+    std::fs::remove_dir_all(work).ok();
 }

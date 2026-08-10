@@ -14,6 +14,30 @@ PORT=${CHOIR_PORT:-8417}
 auth_user() { head -1 "$STATE/auth" | cut -d: -f1; }
 auth_pass() { head -1 "$STATE/auth" | cut -d: -f2-; }
 
+# The mirror leg runs detached, so its result has to be written down and
+# then actually read somewhere an operator looks. A receipt nobody reads
+# is the same as no receipt: before this, a mirror push could fail and
+# the only evidence was that no error scrolled past during a sync.
+RECEIPT=$STATE/mirror.receipt
+
+# OK | FAILED | RUNNING | NONE. The lock, not the receipt, distinguishes
+# "still going" from "died halfway" — a run killed mid-flight leaves a
+# truncated receipt that is indistinguishable from a slow one otherwise.
+mirror_outcome() {
+  if [ ! -f "$RECEIPT" ]; then echo NONE; return; fi
+  if [ -d "$STATE/mirror.lock" ]; then echo RUNNING; return; fi
+  if tail -1 "$RECEIPT" | grep -q '^mirror updated$'; then echo OK; else echo FAILED; fi
+}
+
+mirror_line() {
+  case "$(mirror_outcome)" in
+    NONE)    echo "mirror: no receipt yet" ;;
+    RUNNING) echo "mirror: still running (started $(date -r "$(awk 'NR==1{print $2}' "$RECEIPT")" '+%H:%M:%S' 2>/dev/null))" ;;
+    OK)      echo "mirror: last run OK — $(grep '^mirror:' "$RECEIPT" | tail -1 | sed 's/^mirror: //')" ;;
+    FAILED)  echo "mirror: LAST RUN FAILED — $(tail -1 "$RECEIPT")" ;;
+  esac
+}
+
 case "${1:-}" in
 
 install)
@@ -38,6 +62,14 @@ status)
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/view" || true)
   echo "auth:   $code on an unauthenticated /api/view (401 = auth is on)"
   echo "view:   $(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")"
+  mirror_line
+  # Outcome is not currency: a run can succeed and still leave the mirror
+  # a commit behind if it was started before the last commit landed.
+  if [ -f "$RECEIPT" ]; then
+    mirrored=$(awk 'NR==1{print $3}' "$RECEIPT")
+    head=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
+    [ "$mirrored" = "$head" ] || echo "mirror: BEHIND — mirrored $mirrored, HEAD is $head"
+  fi
   ;;
 
 stop)
@@ -73,7 +105,18 @@ sync)
   # second. `set -e` stops here if the canonical push fails, so the
   # mirror can never get ahead of the node (D21 single-canonical).
   sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
-  sh "$HERE/push_mirror.sh"
+
+  # Whatever the previous run did, before starting another one over it.
+  mirror_line
+
+  # The follower runs detached. Ordering is preserved for free: this line
+  # is only reached after the canonical push returned, and `set -e` means
+  # a failed canonical push never gets here, so the mirror still cannot
+  # get ahead of the node (D21 single-canonical). What backgrounding
+  # changes is only who waits, and nothing waits on a follower.
+  printf 'started %s %s\n' "$(date +%s)" "$(git -C "$HERE/.." rev-parse HEAD)" > "$RECEIPT"
+  nohup sh "$HERE/push_mirror.sh" >> "$RECEIPT" 2>&1 &
+  echo "mirror: running in background -> $RECEIPT (see: sh scripts/choirctl status)"
   ;;
 
 logs)
