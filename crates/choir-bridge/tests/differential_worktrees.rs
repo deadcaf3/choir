@@ -240,6 +240,105 @@ fn calibrate_holds_one_worktree_triple_open_across_observations() {
     std::fs::remove_dir_all(work).ok();
 }
 
+/// On a corpus of consecutive first-parent merges, a merge's first parent is
+/// the previous observation's merge, and the session must hand that revision
+/// the tree that just ran it — same path, contents intact — so the command
+/// there has nothing to rebuild. Path equality alone would also hold for a
+/// remove-and-recreate, so the stub plants an untracked marker in each
+/// observation's merged tree and looks for it in the next parent-a tree.
+#[test]
+fn calibrate_hands_the_previous_merge_tree_to_the_next_parent_a() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-bridge-chained-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    git(&work, &["init", "-q", "."]);
+    std::fs::write(work.join("base.txt"), "base\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-q", "-m", "base"]);
+
+    // main advances only by merges, so merge two's first parent is merge one.
+    let mut merges = Vec::new();
+    for step in ["one", "two"] {
+        git(&work, &["checkout", "-q", "-b", &format!("topic-{step}")]);
+        std::fs::write(work.join(format!("{step}.txt")), step).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", step]);
+        git(&work, &["checkout", "-q", "main"]);
+        git(
+            &work,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                &format!("topic-{step}"),
+                "-m",
+                &format!("merge {step}"),
+            ],
+        );
+        merges.push(git(&work, &["rev-parse", "HEAD"]));
+    }
+
+    let runner = work.join("runner.sh");
+    std::fs::write(
+        &runner,
+        r#"#!/bin/sh
+set -eu
+mkdir -p "$3"
+printf '%s %s %s\n' "$5" "$7" "$9" >> "$3/dirs"
+if [ -f "$5/chain-marker" ]; then
+  printf 'present\n' >> "$3/carried-into-a"
+else
+  printf 'absent\n' >> "$3/carried-into-a"
+fi
+: > "$9/chain-marker"
+test "$(git -C "$5" rev-parse HEAD)" = "$4"
+test "$(git -C "$7" rev-parse HEAD)" = "$6"
+test "$(git -C "$9" rev-parse HEAD)" = "$8"
+printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":"clean"},"calibration":{"target":{"met":true},"pending_interactions":0,"confidence_claim":null,"confidence_policy":{"format_version":1,"method":"one_sided_exact_binomial_zero_spurious","confidence":{"numerator":95,"denominator":100},"target":{"numerator":1,"denominator":1000,"comparison":"strictly_less_than"},"minimum_evaluated_merges":2995,"requires_zero_spurious_failures":true,"assumptions":["independent_runs","representative_queue_command_and_merge_population"]},"landing_gate_enabled":false}}\n' "$8"
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let state = work.join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("calibrate")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&state)
+        .arg("1")
+        .arg(&merges[0])
+        .arg(&merges[1])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let dirs = std::fs::read_to_string(state.join("dirs")).unwrap();
+    let rows: Vec<Vec<&str>> = dirs
+        .lines()
+        .map(|line| line.split(' ').collect())
+        .collect();
+    assert_eq!(rows.len(), 2, "both observations must run");
+    assert_eq!(
+        rows[1][0], rows[0][2],
+        "the second observation's parent-a tree must be the first's merged tree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("carried-into-a")).unwrap(),
+        "absent\npresent\n",
+        "the reused tree must keep its contents, not just its path"
+    );
+    assert!(!work.join(".choir-differential").exists());
+    std::fs::remove_dir_all(work).ok();
+}
+
 #[test]
 fn calibrate_fresh_worktrees_gives_each_observation_a_pristine_tree() {
     let (work, first, second) = two_merge_calibration_fixture("fresh");
