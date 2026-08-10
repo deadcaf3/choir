@@ -738,6 +738,30 @@ struct RefAttribution {
     approved_requesters: Vec<ActorEvidence>,
 }
 
+/// Which source a binding snapshot was built from.
+///
+/// D24 T3 attribution and channel admission read *different* sources on
+/// purpose, so the snapshot has to say which one it is rather than leaving
+/// a reader to infer it from the call site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum BindingSource {
+    /// The operator-written trusted-keys file. Mutable, unsequenced, and
+    /// therefore usable for admission but not as attribution evidence.
+    #[default]
+    KeysFile,
+    /// [`View::bindings`]: sequenced `BindKey` ops, replayable from the log.
+    DurableLog,
+}
+
+impl BindingSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::KeysFile => "keys_file",
+            Self::DurableLog => "durable_log",
+        }
+    }
+}
+
 /// Current binding snapshot. The effective map preserves admission's
 /// existing one-name-per-actor behaviour; the deterministic records retain
 /// enough information to report duplicate cross-operator bindings as
@@ -750,6 +774,7 @@ struct KeyBindings {
     unbound_actors: BTreeSet<String>,
     configured: bool,
     available: bool,
+    source: BindingSource,
 }
 
 impl KeyBindings {
@@ -757,6 +782,73 @@ impl KeyBindings {
         Self {
             configured,
             ..Self::default()
+        }
+    }
+
+    /// Builds the attribution snapshot from the durable record instead of
+    /// the keys file.
+    ///
+    /// `population` supplies *who is trusted*, which the log cannot answer:
+    /// a `BindKey` names a key, but only the keys file says which keys the
+    /// node accepts at all. So the two compose rather than compete — the
+    /// file decides the denominator, the log decides attribution, and a
+    /// trusted key with no sequenced binding lands in `unbound_actors` and
+    /// holds `evaluation_complete` at false.
+    ///
+    /// Without a readable population there is no denominator, so the
+    /// snapshot is unavailable rather than reporting completeness over
+    /// whatever subset happens to be bound.
+    fn from_view(view: &View, population: &Self) -> Self {
+        if !population.available {
+            return Self {
+                source: BindingSource::DurableLog,
+                ..Self::unavailable(population.configured)
+            };
+        }
+        let trusted: BTreeSet<&String> = population
+            .names_by_actor
+            .keys()
+            .chain(population.unbound_actors.iter())
+            .collect();
+
+        let mut operators_by_actor: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut names_by_actor: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (key_id, binding) in &view.bindings {
+            if !trusted.contains(key_id) {
+                continue;
+            }
+            // Revoked keys keep their operator. Attribution must survive
+            // withdrawal, or an operator could shed a concentration count
+            // by revoking the key that earned it.
+            operators_by_actor
+                .entry(key_id.clone())
+                .or_default()
+                .insert(binding.operator.clone());
+            // Only a bound channel attributes activity, mirroring the keys
+            // file, where a key with no name attributes nothing. The
+            // operator is known; which channel it speaks as is not.
+            if let Some(channel) = &binding.channel {
+                names_by_actor
+                    .entry(key_id.clone())
+                    .or_default()
+                    .insert(channel.clone());
+            }
+        }
+        let unbound_actors = trusted
+            .into_iter()
+            .filter(|actor| !names_by_actor.contains_key(*actor))
+            .cloned()
+            .collect();
+        Self {
+            // Admission is not served from this snapshot; leaving the map
+            // empty keeps it structurally unable to answer `bound_name`.
+            effective: std::collections::HashMap::new(),
+            operators_by_actor,
+            names_by_actor,
+            unbound_actors,
+            configured: population.configured,
+            available: true,
+            source: BindingSource::DurableLog,
         }
     }
 
@@ -798,6 +890,7 @@ impl KeyBindings {
             unbound_actors,
             configured: true,
             available: true,
+            source: BindingSource::KeysFile,
         }
     }
 
@@ -1083,6 +1176,15 @@ fn concentration_json(
 ) -> serde_json::Value {
     let mut operators: BTreeMap<String, OperatorConcentration> = BTreeMap::new();
     let mut ambiguous_agent_keys = 0usize;
+    // Only `KeyBindings::from_view` feeds this function, and the fold lets
+    // one key name exactly one operator for its lifetime, so today every
+    // set here has exactly one member and `ambiguous_agent_keys` is always
+    // zero. The other arms are kept deliberately, not by oversight: the
+    // keys-file shape they answer is still constructible by
+    // `from_signers`, and if a snapshot from that source is ever routed
+    // here, refusing to pick a winner is the behaviour that belongs. Note
+    // this is only the *per-key* ambiguity; ambiguity across several
+    // requester keys is live and counted in `ambiguous_active_branches`.
     for operator_set in bindings.operators_by_actor.values() {
         match operator_set.len() {
             0 => {}
@@ -1196,6 +1298,16 @@ fn concentration_json(
             "configured": bindings.configured,
             "available": bindings.available,
             "snapshot_hash": bindings.snapshot_hash(),
+            // Two sources feed this block and one name for both would read
+            // as more precise than it is. Attribution is what has to be
+            // replayable: `durable_log` means every operator name below
+            // came from a sequenced `BindKey`, not from whatever the keys
+            // file happened to say at read time. The population — which
+            // keys the node trusts at all — is not in the log and stays
+            // with the file, which is why coverage can be incomplete even
+            // when attribution is sound.
+            "attribution_source": bindings.source.as_str(),
+            "population_source": "keys_file",
         },
         "protected_policy": {
             "configured": protected.configured,
@@ -2948,9 +3060,15 @@ impl Platform {
                 let provenance = serde_json::json!(&view.provenance);
                 let counts = view_growth_counts(&view);
                 let as_of_seq = concentration_state.as_of_seq;
+                // T3 attribution reads the durable record, not the keys
+                // file: a tripwire whose evidence the operator can edit in
+                // place measures the operator's honesty, not concentration.
+                // `key_names` still supplies the trusted population, which
+                // no op in the log can answer.
+                let durable_bindings = KeyBindings::from_view(&view, &key_names);
                 let concentration = concentration_json(
                     &concentration_state,
-                    &key_names,
+                    &durable_bindings,
                     &protected,
                 );
                 let new_actor_review_outcomes = new_actor_review_outcomes_json(

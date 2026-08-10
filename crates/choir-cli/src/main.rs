@@ -13,6 +13,8 @@
 //! choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
 //! choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
 //! choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
+//! choir bind <api> <node-key-file> <operator> <key-hex> [channel]
+//! choir revoke <api> <node-key-file> <key-hex> '<reason>'
 //! choir appeal <api> <attempt-id>
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 //! choir reviews <api> <reviewer>
@@ -46,6 +48,41 @@ fn usage() -> ! {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Refuses to sign an operator-only op with a key file that does not
+/// already exist.
+///
+/// [`load_key`] *creates* a key file when absent, which is right for an
+/// agent minting its own identity and wrong here: a typo'd path would
+/// silently mint a fresh key, and the node would reject the submission as
+/// an unknown signer rather than as the mistake it is.
+fn require_node_key_file(path: &str) {
+    if !std::path::Path::new(path).is_file() {
+        eprintln!("choir: <node-key-file> must name the node's existing key file");
+        std::process::exit(2);
+    }
+}
+
+/// Derives the actor id from a 64-character ed25519 public key hex.
+///
+/// This is the one derivation the node also performs, so binding a key
+/// never asks an operator to hand-compute a hash — they paste the same
+/// hex `choir key` printed and the trusted-keys file carries.
+fn actor_id_from_hex(key_hex: &str) -> choir_hash::ContentHash {
+    let bytes: Option<Vec<u8>> = (key_hex.len() == 64)
+        .then(|| {
+            (0..64)
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&key_hex[i..i + 2], 16).ok())
+                .collect()
+        })
+        .flatten();
+    let Some(bytes) = bytes else {
+        eprintln!("choir: <key-hex> must be a 64-character ed25519 public key hex");
+        std::process::exit(2);
+    };
+    choir_hash::ContentHash::blake3(&bytes)
 }
 
 /// Loads the 32-byte secret key file, creating it (0600) if absent.
@@ -217,10 +254,7 @@ fn main() {
             submit(api, key_file, reviewer, &op, auth);
         }
         ["slash", api, node_key_file, id, reviewer, reason] => {
-            if !std::path::Path::new(node_key_file).is_file() {
-                eprintln!("choir: <node-key-file> must name the node's existing key file");
-                std::process::exit(2);
-            }
+            require_node_key_file(node_key_file);
             let op = ViewOp::new(OpKind::SlashApproval {
                 id: (*id).into(),
                 reviewer: (*reviewer).into(),
@@ -230,6 +264,32 @@ fn main() {
             // as every other mutation. Admission checks the key identity,
             // not this attribution string.
             submit(api, node_key_file, "node/slash", &op, auth);
+        }
+        // The operator's path to the durable identity record. Without
+        // this, `BindKey` is node-only and the node has no CLI, so the
+        // record stays empty and D24 T3 attribution — which reads it —
+        // reports `indeterminate` with no way for an operator to fix it.
+        //
+        // `<key-hex>` is the *public key* hex that `choir key` prints and
+        // the trusted-keys file already carries, not a content hash. The
+        // actor id is derived here, the same way the node derives it, so
+        // an operator never hand-computes a hash to bind a key.
+        ["bind", api, node_key_file, operator, key_hex, rest @ ..] if rest.len() <= 1 => {
+            require_node_key_file(node_key_file);
+            let op = ViewOp::new(OpKind::BindKey {
+                operator: (*operator).into(),
+                key: actor_id_from_hex(key_hex),
+                channel: rest.first().map(|c| (*c).to_string()),
+            });
+            submit(api, node_key_file, "node/bind", &op, auth);
+        }
+        ["revoke", api, node_key_file, key_hex, reason] => {
+            require_node_key_file(node_key_file);
+            let op = ViewOp::new(OpKind::RevokeKey {
+                key: actor_id_from_hex(key_hex),
+                reason: (*reason).into(),
+            });
+            submit(api, node_key_file, "node/revoke", &op, auth);
         }
         ["appeal", api, attempt_id] => {
             let attempt_id = attempt_id.parse::<u64>().unwrap_or_else(|_| usage());

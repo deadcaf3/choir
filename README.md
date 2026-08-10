@@ -172,6 +172,8 @@ commands:
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
   choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
+  choir bind <api> <node-key-file> <operator> <key-hex> [channel]
+  choir revoke <api> <node-key-file> <key-hex> '<reason>'
   choir appeal <api> <attempt-id>
   choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
   choir reviews <api> <reviewer>
