@@ -273,6 +273,46 @@ fn the_mirror_push_reuses_one_ssh_connection() {
         );
     }
 
+    // choirctl runs this as `sh push_mirror.sh`, so the #!/bin/zsh line
+    // is never consulted and /bin/sh on macOS is bash 3.2. A zsh-only
+    // builtin therefore fails at runtime, and under `set -e` that means
+    // the mirror push is skipped while the canonical half still reports
+    // success — which is how a sync once landed on the node and silently
+    // never reached the mirror. `sh -n` cannot catch it: the syntax is
+    // fine, the command just does not exist.
+    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
+        .expect("choirctl source");
+    assert!(
+        driver.contains("sh \"$HERE/push_mirror.sh\""),
+        "choirctl no longer runs the mirror push with sh; revisit the shell assumptions below"
+    );
+    for line in script.lines().filter(|l| !l.trim_start().starts_with('#')) {
+        for zshism in ["zmodload", "EPOCHREALTIME", "setopt", "autoload"] {
+            assert!(
+                !line.contains(zshism),
+                "mirror push uses the zsh-only {zshism} but is run with sh: {line}"
+            );
+        }
+    }
+
+    // Proving it parses is not proving it runs. Execute the script's own
+    // clock under the shell that actually invokes it.
+    let now_def = script
+        .lines()
+        .find(|line| line.starts_with("now()"))
+        .expect("mirror push defines now()");
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{now_def}; now"))
+        .output()
+        .expect("run now() under sh");
+    let stamp = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        stamp.parse::<f64>().map(|t| t > 1.0e9).unwrap_or(false),
+        "now() did not produce a unix timestamp under sh, got {stamp:?} (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     // Both trips must go through the same option set, or the second one
     // opens its own connection and the multiplexing buys nothing.
     let rsync = script

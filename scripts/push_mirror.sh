@@ -35,8 +35,15 @@ ssh_opts=(-i "$KEY" -o IdentitiesOnly=yes -o ControlMaster=auto \
 # measurement, and the model was wrong; the fix helped and the sync was
 # still slow, because the estimate had never been checked end to end.
 # A run that reports its own three numbers cannot be argued with.
-zmodload zsh/datetime
-t_start=$EPOCHREALTIME
+#
+# The clock is perl and not zsh's $EPOCHREALTIME, despite the shebang:
+# choirctl runs this as `sh push_mirror.sh`, so the shebang is never
+# consulted and /bin/sh on macOS is bash 3.2, which has no
+# EPOCHREALTIME and no zmodload. The first version of this timing used
+# both, and `set -e` turned that into a sync that pushed nothing to the
+# mirror while the canonical half reported success.
+now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
+t_start=$(now)
 
 # Open the shared connection as its own step, so the handshake shows up
 # as a handshake instead of hiding inside rsync's number. `-O check`
@@ -45,14 +52,14 @@ t_start=$EPOCHREALTIME
 if ! ssh "${ssh_opts[@]}" -O check "choir@$IP" 2>/dev/null; then
   ssh "${ssh_opts[@]}" -N -f "choir@$IP"
 fi
-t_conn=$EPOCHREALTIME
+t_conn=$(now)
 
 # Note: rsync overwrites .git/config, so the mirror remote (whose URL embeds
 # the on-box token) is re-created on the VM on every push.
 # --filter=':- .gitignore' makes rsync skip everything git ignores
 # (CLAUDE.md, target/, ...), so local-only files never reach the VM.
 rsync -az -e "ssh ${ssh_opts[*]}" --filter=':- .gitignore' "$REPO_DIR/" "choir@$IP:~/choir-src/"
-t_rsync=$EPOCHREALTIME
+t_rsync=$(now)
 
 ssh "${ssh_opts[@]}" "choir@$IP" 'cd ~/choir-src \
   && git remote remove mirror 2>/dev/null || true \
@@ -60,8 +67,12 @@ ssh "${ssh_opts[@]}" "choir@$IP" 'cd ~/choir-src \
   && git push -q mirror main \
   && git push -q --tags mirror \
   && git log --oneline -1'
-t_push=$EPOCHREALTIME
+t_push=$(now)
 
-printf 'mirror: connect %.1fs | rsync %.1fs | box-local push %.1fs | total %.1fs\n' \
-  $((t_conn - t_start)) $((t_rsync - t_conn)) $((t_push - t_rsync)) $((t_push - t_start))
+# awk does the subtraction: $(( )) is integer-only in bash 3.2 and would
+# silently truncate every stage to whole seconds, or fail outright on a
+# decimal point.
+awk -v a="$t_start" -v b="$t_conn" -v c="$t_rsync" -v d="$t_push" 'BEGIN {
+  printf "mirror: connect %.1fs | rsync %.1fs | box-local push %.1fs | total %.1fs\n", b-a, c-b, d-c, d-a
+}'
 echo "mirror updated"
