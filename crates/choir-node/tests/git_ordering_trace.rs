@@ -76,8 +76,24 @@ fn is_ref(repo: &std::path::Path, name: &str, expected: &str) -> bool {
     out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == expected
 }
 
+/// Liveness budget for every barrier in this test.
+///
+/// Deliberately enormous relative to the ~300 ms this normally takes. None
+/// of this test's assertions are about *timing* — they are about order, and
+/// each barrier exists only so a hang fails instead of blocking forever. So
+/// the budget costs nothing when the code is right and must not be tight
+/// enough to fail when the code is right but the machine is slow.
+///
+/// Measured 2026-08-11 on this M1, idle, same commit throughout: the wait
+/// from spawning the push to the durability signal ranged from 291 ms to
+/// 16.7 s, and the signal arrived in 32 runs out of 32 when given 30 s.
+/// Against that spread a 5 s budget failed 5 times in 30 one hour and 0
+/// times in 30 the next, which made it look like a code regression and cost
+/// a bisect that pointed at an innocent commit. `PHASE0.md` has the story.
+const BARRIER_BUDGET: Duration = Duration::from_secs(60);
+
 fn wait_for(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + BARRIER_BUDGET;
     while Instant::now() < deadline {
         if path.exists() {
             return true;
@@ -156,15 +172,20 @@ fn durable_log_precedes_ref_publication_precedes_client_ack() {
         ));
     });
 
-    if synced_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+    if synced_rx.recv_timeout(BARRIER_BUDGET).is_err() {
         let _ = release_sync_tx.send(());
         std::fs::write(&release_publish, b"").ok();
         // The barrier timing out is the symptom; git's own complaint is the
         // cause, and it is already sitting unread in `push_rx`. Panicking
         // without it names the thing that did not happen and discards the
-        // reason, which is how this failure stayed a mystery: it reproduces
-        // roughly one run in five on an idle machine, and every report of it
-        // said only that a barrier was not reached.
+        // reason, which is how this failure stayed a mystery for so long.
+        //
+        // Read this carefully if it ever fires again: the push result below
+        // is collected *after* the barriers are released, so an exit status
+        // of 0 here means the push completed once unblocked. It is not
+        // evidence that the push completed before the timeout, and reading
+        // it that way is how this was once mistaken for a push being
+        // accepted with no op appended.
         let detail = match push_rx.recv_timeout(Duration::from_secs(30)) {
             Ok(out) => format!(
                 "git push exited {:?}; stdout {:?}; stderr {:?}",
@@ -217,7 +238,7 @@ fn durable_log_precedes_ref_publication_precedes_client_ack() {
 
     std::fs::write(&release_publish, b"").unwrap();
     let pushed = push_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(BARRIER_BUDGET)
         .expect("client receives final acknowledgement");
     assert!(
         pushed.status.success(),
