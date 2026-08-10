@@ -313,6 +313,15 @@ fn the_mirror_push_reuses_one_ssh_connection() {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // main and tags go to Forgejo in one push, not two. The repo has no
+    // tags at all, so the second push was a round trip to a shared-core
+    // VM to say nothing: 0.93s for the pair against 0.46s combined,
+    // measured on the mirror.
+    assert!(
+        script.contains("git push -q mirror main --tags"),
+        "the box-local push split main and tags into two Forgejo round trips again"
+    );
+
     // Both trips must go through the same option set, or the second one
     // opens its own connection and the multiplexing buys nothing.
     let rsync = script
