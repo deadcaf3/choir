@@ -113,7 +113,7 @@ pub enum LogError {
     Corrupt(String),
 }
 
-/// The log-backend seam (D16). Conformance suite: `tests/conformance.rs`,
+/// The log-backend seam (D16). Conformance suite: `tests/it/conformance.rs`,
 /// run against every implementation.
 ///
 /// Implementations must reject appends whose `parent` is not the current

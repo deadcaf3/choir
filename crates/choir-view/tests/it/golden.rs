@@ -442,7 +442,7 @@ fn manifest_is_frozen() {
 /// A stored log, verbatim, as the current code writes it: the decode side
 /// of the door. No optimization may change what these bytes mean, and a
 /// reader built after them must still replay this file.
-const STORED_LOG: &str = include_str!("fixtures/stored.log");
+const STORED_LOG: &str = include_str!("../fixtures/stored.log");
 
 #[test]
 fn a_stored_log_still_decodes_and_replays() {

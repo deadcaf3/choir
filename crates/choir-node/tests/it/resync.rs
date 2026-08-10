@@ -9,19 +9,7 @@ use choir_node::{Node, Platform};
 use choir_oplog::{FileLog, MemLog};
 use choir_view::{OpKind, ViewOp};
 
-fn curl(args: &[&str]) -> (u16, serde_json::Value) {
-    let out = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}"])
-        .args(args)
-        .output()
-        .expect("curl runs");
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.rsplit_once('\n').expect("status line");
-    (
-        code.trim().parse().expect("numeric status"),
-        serde_json::from_str(body).expect("json body"),
-    )
-}
+use crate::support::curl;
 
 /// Submits `n` provenance records (any op that always applies) as the
 /// signed channel `author`.

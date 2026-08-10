@@ -610,7 +610,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 
 /// The agent-facing surface as plain text, generated from
 /// `crates/choir-cli/src/surface.rs` and checked for staleness by
-/// `choir-cli/tests/surface.rs`. Included rather than depended on: the
+/// `choir-cli/tests/it/surface.rs`. Included rather than depended on: the
 /// node has no business linking the CLI, and a generated file with a
 /// staleness test is the cheaper coupling.
 const LLMS_TXT: &str = include_str!("llms.txt");

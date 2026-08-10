@@ -1,0 +1,12 @@
+//! Single integration-test harness for choir-queue; one binary instead
+//! of one per file, so an edit relinks once. Filter with e.g.
+//! `cargo test -p choir-queue --test it corpus::`. Modules share a
+//! process and run on parallel threads: no wall-clock assertions, process
+//! globals, or fixed ports in here.
+
+mod blast;
+mod corpus;
+mod differential;
+mod differential_runner;
+mod envelope;
+mod queue;
