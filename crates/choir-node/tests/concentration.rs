@@ -10,6 +10,19 @@ use choir_oplog::{ContentHash, FileLog, MemLog};
 use choir_view::{OpKind, Verdict, ViewOp};
 
 fn submit(platform: &Platform, key: &ActorKey, channel: &str, op: ViewOp) -> serde_json::Value {
+    let (status, body) = try_submit(platform, key, channel, op);
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+/// Submit without asserting acceptance, for the cases whose point is the
+/// refusal.
+fn try_submit(
+    platform: &Platform,
+    key: &ActorKey,
+    channel: &str,
+    op: ViewOp,
+) -> (u16, serde_json::Value) {
     let payload = op.to_payload();
     let sig = key.sign_submission(channel, &payload);
     let (status, body) = platform.handle_api(
@@ -24,8 +37,7 @@ fn submit(platform: &Platform, key: &ActorKey, channel: &str, op: ViewOp) -> ser
         .to_string()
         .as_bytes(),
     );
-    assert_eq!(status, 200, "{body}");
-    serde_json::from_str(&body).expect("submit response is json")
+    (status, serde_json::from_str(&body).expect("response is json"))
 }
 
 fn view(platform: &Platform) -> serde_json::Value {
@@ -39,6 +51,19 @@ fn set_ref(name: &str, commit: ContentHash, prev: Option<ContentHash>) -> ViewOp
         name: name.into(),
         commit,
         prev,
+    })
+}
+
+/// A durable binding for `key`, as the node would author it.
+///
+/// T3 attribution reads [`choir_view::View::bindings`], so a name in the
+/// keys file no longer attributes anything on its own. The file still
+/// decides which keys are trusted at all; these ops decide whose they are.
+fn bind(operator: &str, key: &ActorKey, channel: Option<&str>) -> ViewOp {
+    ViewOp::new(OpKind::BindKey {
+        operator: operator.into(),
+        key: ContentHash::blake3(&key.public_key_bytes()),
+        channel: channel.map(Into::into),
     })
 }
 
@@ -76,6 +101,24 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     )
     .unwrap();
 
+    // Every key that should be attributed needs a sequenced binding: the
+    // keys file supplies the trusted population, the log supplies who each
+    // key belongs to. 100 binds, so the ref ops below start at seq 100.
+    submit(
+        &platform,
+        &node_key,
+        "node/bind",
+        bind("alpha", &alpha, Some("alpha/agent")),
+    );
+    for (i, key) in extra_keys.iter().enumerate() {
+        submit(
+            &platform,
+            &node_key,
+            "node/bind",
+            bind("many", key, Some(&format!("many/agent-{i:03}"))),
+        );
+    }
+
     // One bound branch among 100 total is exactly 1%, which does not
     // cross T3's strict `>1%` tripwire. The other 99 are node-signed and
     // deliberately remain unattributed.
@@ -100,7 +143,11 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     }
     let before = view(&platform);
     let concentration = &before["concentration"];
-    assert_eq!(concentration["as_of_seq"], 99);
+    // Attribution is replayable evidence; the population is not, and the
+    // report says so rather than presenting one provenance for both.
+    assert_eq!(concentration["bindings"]["attribution_source"], "durable_log");
+    assert_eq!(concentration["bindings"]["population_source"], "keys_file");
+    assert_eq!(concentration["as_of_seq"], 199);
     assert_eq!(concentration["totals"]["active_branches"], 100);
     assert_eq!(concentration["totals"]["unattributed_active_branches"], 99);
     assert_eq!(concentration["operators"]["alpha"]["active_branches"], 1);
@@ -129,7 +176,7 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     );
     let after = view(&platform);
     let alpha_row = &after["concentration"]["operators"]["alpha"];
-    assert_eq!(after["concentration"]["as_of_seq"], 100);
+    assert_eq!(after["concentration"]["as_of_seq"], 200);
     assert_eq!(after["concentration"]["totals"]["active_branches"], 101);
     assert_eq!(alpha_row["active_branches"], 2);
     assert_eq!(alpha_row["active_branch_share_basis_points"], 198);
@@ -147,6 +194,30 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     ));
     std::fs::write(&keys_file, &lines).unwrap();
     platform.set_key_names(&parse_keys_file(&keys_file).unwrap());
+
+    // The point of the swap, asserted directly: trusting a key is not the
+    // same as attributing it. The file now grants trust and nothing else,
+    // so an operator who edits it cannot move a single T3 number. Before
+    // this change the count would already read 100 here.
+    let trusted_only = view(&platform);
+    let many = &trusted_only["concentration"]["operators"]["many"];
+    assert_eq!(
+        many["agent_keys"], 99,
+        "a keys-file edit must not change attribution: {}",
+        trusted_only["concentration"]
+    );
+    // It does change *coverage*, and that is reported rather than hidden:
+    // a trusted key with no sequenced binding holds evaluation incomplete.
+    assert_eq!(trusted_only["concentration"]["totals"]["unbound_agent_keys"], 1);
+    assert_eq!(trusted_only["concentration"]["evaluation_complete"], false);
+
+    // Only the sequenced binding moves the number.
+    submit(
+        &platform,
+        &node_key,
+        "node/bind",
+        bind("many", &hundredth, Some("many/agent-099")),
+    );
     let at_limit = view(&platform);
     let many = &at_limit["concentration"]["operators"]["many"];
     assert_eq!(many["agent_keys"], 100);
@@ -159,10 +230,32 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     ));
     std::fs::write(&keys_file, lines).unwrap();
     platform.set_key_names(&parse_keys_file(&keys_file).unwrap());
+    submit(
+        &platform,
+        &node_key,
+        "node/bind",
+        bind("many", &hundred_and_first, Some("many/agent-100")),
+    );
     let final_view = view(&platform);
     let many = &final_view["concentration"]["operators"]["many"];
     assert_eq!(many["agent_keys"], 101);
     assert_eq!(many["tripwires"]["agent_keys"], true);
+
+    // And a binding for a key the node does not trust is ignored, so the
+    // log cannot inflate a count past the population the operator admits.
+    let stranger = ActorKey::generate();
+    submit(
+        &platform,
+        &node_key,
+        "node/bind",
+        bind("many", &stranger, Some("many/agent-999")),
+    );
+    let with_stranger = view(&platform);
+    assert_eq!(
+        with_stranger["concentration"]["operators"]["many"]["agent_keys"], 101,
+        "an untrusted key must not count: {}",
+        with_stranger["concentration"]
+    );
 
     // Raw JSON order is part of the report contract: stable output keeps
     // diffs and downstream prompt caches useful, not merely pretty.
@@ -176,14 +269,25 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
         "operator rows must be lexicographically ordered: {first_body}"
     );
 
-    // Keep generated keys alive until after their public bytes have been
-    // consumed; their secrets never leave memory.
-    assert_eq!(extra_keys.len(), 99);
     std::fs::remove_dir_all(&work).ok();
 }
 
+/// The keys file can still *claim* one key for two operators. It no longer
+/// decides anything, and the record cannot be made to agree with it.
+///
+/// This replaces `a_cross_operator_key_binding_is_ambiguous_not_conveniently_assigned`,
+/// whose name would now lie. That test asserted T3 refuses to pick a winner
+/// when the file names one key twice. Under the durable record that state
+/// is not merely unresolved, it is **unreachable**: the fold refuses the
+/// second binding with `identity_state`, which is a strengthening, so the
+/// old name would describe a case the code can no longer enter.
+///
+/// Ambiguity itself is still live and still tested — across several
+/// requester keys, in `protected_updates_follow_the_exact_approved_requester_and_replay`.
+/// The per-key half is pinned in `tests/key_binding.rs`; the assertion here
+/// is that the T3 *projection* never sees it.
 #[test]
-fn a_cross_operator_key_binding_is_ambiguous_not_conveniently_assigned() {
+fn a_key_claimed_by_two_operators_in_the_file_is_decided_only_by_the_record() {
     let work = std::env::temp_dir().join(format!(
         "choir-concentration-ambiguous-{}",
         std::process::id()
@@ -192,6 +296,7 @@ fn a_cross_operator_key_binding_is_ambiguous_not_conveniently_assigned() {
     std::fs::create_dir_all(&work).unwrap();
     let keys_file = work.join("keys");
     let key = ActorKey::generate();
+    let node_key = ActorKey::generate();
     let public = hex_encode(&key.public_key_bytes());
     // The parser preserves this legacy shape. T3 must not let file order
     // choose which operator receives the key or its ref activity.
@@ -206,7 +311,7 @@ fn a_cross_operator_key_binding_is_ambiguous_not_conveniently_assigned() {
     let platform = Platform::start_reloading(
         registry,
         Box::new(MemLog::new()),
-        ActorKey::generate(),
+        ActorKey::from_secret_bytes(&node_key.secret_bytes()),
         Some(keys_file),
     )
     .unwrap();
@@ -220,15 +325,65 @@ fn a_cross_operator_key_binding_is_ambiguous_not_conveniently_assigned() {
             None,
         ),
     );
+
+    // With no sequenced binding the file's two claims attribute nothing.
+    // The branch is unknown, not ambiguous: T3 has no opinion to be
+    // confused about, which is the honest state and not a silent zero.
     let current = view(&platform);
     let concentration = &current["concentration"];
-    assert_eq!(concentration["totals"]["bound_agent_keys"], 1);
-    assert_eq!(concentration["totals"]["ambiguous_agent_keys"], 1);
+    assert_eq!(concentration["totals"]["bound_agent_keys"], 0);
+    assert_eq!(concentration["totals"]["unbound_agent_keys"], 1);
+    assert_eq!(concentration["totals"]["ambiguous_agent_keys"], 0);
     assert_eq!(concentration["totals"]["active_branches"], 1);
-    assert_eq!(concentration["totals"]["unknown_active_branches"], 0);
-    assert_eq!(concentration["totals"]["ambiguous_active_branches"], 1);
+    assert_eq!(concentration["totals"]["unknown_active_branches"], 1);
+    assert_eq!(concentration["totals"]["ambiguous_active_branches"], 0);
     assert!(concentration["operators"].as_object().unwrap().is_empty());
     assert_eq!(concentration["tripwire_status"], "indeterminate");
+
+    // One sequenced binding decides it, and the file's ordering is not
+    // consulted: `beta/agent` is listed second and still loses to the
+    // record, which names alpha.
+    submit(
+        &platform,
+        &node_key,
+        "node/bind",
+        bind("alpha", &key, Some("alpha/agent")),
+    );
+    submit(
+        &platform,
+        &key,
+        "alpha/agent",
+        set_ref(
+            "repo.git:refs/heads/alpha-work",
+            ContentHash::blake3(b"decided"),
+            None,
+        ),
+    );
+    let decided = view(&platform);
+    let concentration = &decided["concentration"];
+    assert_eq!(concentration["totals"]["bound_agent_keys"], 1);
+    assert_eq!(concentration["operators"]["alpha"]["agent_keys"], 1);
+    assert_eq!(concentration["operators"]["alpha"]["active_branches"], 1);
+    assert!(
+        concentration["operators"]["beta"].is_null(),
+        "the file's second claim must not produce an operator row: {concentration}"
+    );
+
+    // And the second claim cannot be made durable, so the ambiguous state
+    // the old test named is unreachable rather than merely unresolved.
+    let (status, refused) = try_submit(
+        &platform,
+        &node_key,
+        "node/bind",
+        bind("beta", &key, Some("beta/agent")),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], "identity_state", "{refused}");
+    assert_eq!(
+        view(&platform)["concentration"]["operators"]["alpha"]["agent_keys"],
+        1,
+        "a refused binding must not move a count"
+    );
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -292,6 +447,18 @@ fn protected_updates_follow_the_exact_approved_requester_and_replay() {
         .with_reviewer_pool(pool_file)
         .with_protected_refs(refs_file.clone())
         .with_required_review();
+
+        // The requester's operator comes from the log. `unbound_requester`
+        // is deliberately left unbound: a trusted key with no sequenced
+        // binding is exactly the case the ambiguity assertions below need,
+        // and it is now the *record* that leaves it unresolved rather than
+        // a missing name column in the file.
+        submit(
+            &platform,
+            &node_key,
+            "node/bind",
+            bind("alpha", &requester, Some("alpha/agent")),
+        );
 
         let base = ContentHash::blake3(b"base");
         submit(

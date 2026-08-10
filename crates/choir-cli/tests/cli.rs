@@ -155,6 +155,65 @@ fn cli_end_to_end() {
         "{view}"
     );
 
+    // `bind` is the operator's only path to the durable identity record,
+    // and D24 T3 attribution reads nothing else. Same node-only rule as
+    // `slash`: an agent key cannot mint a binding naming itself.
+    let out = choir(&["bind", &api, key_file, "cli-op", &pub_hex, "cli-op/agent"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(json(&out)["code"], "node_only", "{:?}", json(&out));
+    let node_key_arg = node_key_file.to_str().unwrap();
+    let out = choir(&["bind", &api, node_key_arg, "cli-op", &pub_hex, "cli-op/agent"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+
+    // The binding is observable through the fold rather than through a
+    // second success: moving the same key to another operator is refused,
+    // which can only happen if the first one actually landed. `/api/view`
+    // does not project `bindings`, so this is the available receipt.
+    let out = choir(&["bind", &api, node_key_arg, "other-op", &pub_hex]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(json(&out)["code"], "identity_state", "{:?}", json(&out));
+    // Correcting the channel stays allowed: a typo must not burn a key.
+    let out = choir(&["bind", &api, node_key_arg, "cli-op", &pub_hex, "cli-op/other"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+
+    // Revocation is node-only and terminal, and the second attempt must
+    // carry different bytes or the retry index answers `already_applied`.
+    assert_eq!(
+        choir(&["revoke", &api, key_file, &pub_hex, "not yours"]).status.code(),
+        Some(1)
+    );
+    let out = choir(&["revoke", &api, node_key_arg, &pub_hex, "key material rotated"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    let out = choir(&["revoke", &api, node_key_arg, &pub_hex, "a second attempt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(json(&out)["code"], "identity_state", "{:?}", json(&out));
+
+    // Usage errors are caught before any network traffic: a key file that
+    // does not exist must not be silently *created* (which `choir key`
+    // does by design), and a key hex that is not 64 chars is a typo.
+    assert_eq!(
+        choir(&[
+            "bind", &api,
+            work.join("missing.key").to_str().unwrap(),
+            "cli-op", &pub_hex,
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
+    assert!(
+        !work.join("missing.key").exists(),
+        "an operator-only command must not mint a key file from a typo"
+    );
+    assert_eq!(
+        choir(&["bind", &api, node_key_arg, "cli-op", "not-hex"]).status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        choir(&["revoke", &api, node_key_arg, "cafe", "reason"]).status.code(),
+        Some(2)
+    );
+
     // `review` with no reviewer names asks the node to draw them from
     // the operator's pool (D24 layer 5) — the requester never picks.
     // `--ref` records where the change wants to land, which is what

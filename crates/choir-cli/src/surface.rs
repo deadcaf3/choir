@@ -205,6 +205,18 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: false,
     },
     Command {
+        name: "bind",
+        args: "<api> <node-key-file> <operator> <key-hex> [channel]",
+        summary: "record in the log that a key belongs to an operator; operator-only and never moves a ref",
+        agent_facing: false,
+    },
+    Command {
+        name: "revoke",
+        args: "<api> <node-key-file> <key-hex> '<reason>'",
+        summary: "withdraw a key binding; terminal, and the attribution row survives",
+        agent_facing: false,
+    },
+    Command {
         name: "appeal",
         args: "<api> <attempt-id>",
         summary: "appeal a rejected newcomer attempt for operator adjudication; never grants privilege",
