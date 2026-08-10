@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
-use choir_view::{reviewer_operator, OpKind, ReviewStatus, View, ViewOp};
+use choir_view::{reviewer_operator, OpKind, ReviewStatus, Verdict, View, ViewOp};
 
 use crate::reject::{Code, Rejection};
 
@@ -220,6 +220,13 @@ const REQUIRED_APPROVAL_WEIGHT: usize = 2;
 /// basis points are presentation only and never drive the decision.
 const T3_MAX_AGENT_KEYS_PER_OPERATOR: usize = 100;
 const T3_MAX_SHARE_PERCENT: usize = 1;
+
+/// D24 T2's declared bounds, recorded so the projection can state exactly
+/// which question it is *not* answering. Nothing is ever compared against
+/// them: choir persists no validity classification, so the numerator of a
+/// slop rate does not exist. See [`new_actor_review_outcomes_json`].
+const T2_MAX_INVALID_OR_SLOP_PERCENT: usize = 20;
+const T2_MIN_VALID_PERCENT: usize = 5;
 
 /// Version of the append-only newcomer audit and operator adjudication rows.
 /// These files are not part of the signed op log, but they are persisted
@@ -1167,6 +1174,130 @@ fn concentration_json(
         "semantics": {
             "active_branches": "current branch refs grouped by last attributable mover, not ownership",
             "protected_updates": "admitted non-creation ref updates matching the current protected policy, not proof of Git publication or merge commits",
+        },
+    })
+}
+
+/// The T2 cohort: durable, post-activation, non-incumbent actor keys, read
+/// from the same T4 audit that defines "newcomer" everywhere else.
+///
+/// `None` means no cohort is defined — the audit is off, unreadable, or was
+/// never activated — which is deliberately different from an empty cohort.
+/// An empty cohort is the honest statement "no newcomers yet"; `None` is
+/// "this node cannot tell you who is new".
+fn new_actor_cohort(audit: Option<&Arc<Mutex<NewcomerAudit>>>) -> Option<BTreeSet<String>> {
+    let audit = audit?.lock().expect("newcomer audit lock");
+    (audit.available && audit.activated).then(|| audit.by_actor.keys().cloned().collect())
+}
+
+/// Raw review evidence for D24 T2's new-actor cohort — and an explicit
+/// statement that the tripwire itself is **not evaluable here**.
+///
+/// T2 asks for an invalid/slop rate. Choir persists no such judgement.
+/// [`choir_view::Verdict::Approve`] means "may land" and
+/// [`choir_view::Verdict::RequestChanges`] means "needs work", the latter is
+/// overwritable by the former, and neither proves a contribution valid,
+/// invalid, or slop. Relabelling one as "slop" would manufacture evidence the
+/// model does not contain, so this projection reports the review outcomes that
+/// do exist, names its excluded buckets, and holds `classifier` at null with
+/// `tripwire_status` at `indeterminate`.
+///
+/// Requester attribution is joined from the `RequestReview` log entry's author
+/// signature, never from the rendered review: archiving discards reviewer and
+/// verdict detail, so a rendered row cannot supply historical evidence.
+/// A `RequestReview` author is also not proven to have authored the commit
+/// under review; that limitation ships in the response.
+fn new_actor_review_outcomes_json(
+    state: &ConcentrationState,
+    view: &View,
+    cohort: Option<&BTreeSet<String>>,
+) -> serde_json::Value {
+    let mut unknown_requester = 0usize;
+    let mut unsigned_author = 0usize;
+    let mut signed = 0usize;
+    let mut attributed = 0usize;
+    let mut approved = 0usize;
+    let mut request_changes = 0usize;
+    let mut pending = 0usize;
+    let mut archived = 0usize;
+    let mut slashed = 0usize;
+    for (id, review) in &view.reviews {
+        let Some(evidence) = state.review_requesters.get(id) else {
+            unknown_requester += 1;
+            continue;
+        };
+        let Some(key_id) = evidence.key_id.as_deref() else {
+            unsigned_author += 1;
+            continue;
+        };
+        signed += 1;
+        let Some(cohort) = cohort else { continue };
+        if !cohort.contains(key_id) {
+            continue;
+        }
+        attributed += 1;
+        if review.re_review_required() {
+            slashed += 1;
+        }
+        if matches!(review.status, ReviewStatus::Archived { .. }) {
+            // An archived row kept its approved flag but lost the verdicts
+            // behind it, so "not approved" no longer separates an answered
+            // rejection from a lapse. One bucket, not two.
+            archived += 1;
+        } else if !review.complete() {
+            pending += 1;
+        } else if review
+            .verdicts
+            .values()
+            .any(|(verdict, _)| *verdict == Verdict::RequestChanges)
+        {
+            request_changes += 1;
+        } else {
+            approved += 1;
+        }
+    }
+    let available = cohort.is_some();
+    serde_json::json!({
+        "format_version": 1,
+        "as_of_seq": state.as_of_seq,
+        "cohort": {
+            "definition": "post_activation_non_incumbent_actor_keys",
+            "source": "newcomer_harm audit",
+            "available": available,
+            "actor_keys": cohort.map(BTreeSet::len),
+        },
+        "classifier": null,
+        "declared_tripwire": {
+            "max_invalid_or_slop_percent": T2_MAX_INVALID_OR_SLOP_PERCENT,
+            "min_valid_percent": T2_MIN_VALID_PERCENT,
+            "evaluable": false,
+            "blocked_on": "no adjudicated validity classifier exists; a verdict records landability, not validity",
+        },
+        "totals": {
+            "reviews": view.reviews.len(),
+            "attributed_to_cohort": available.then_some(attributed),
+            "excluded_outside_cohort": available.then(|| signed - attributed),
+            "excluded_unsigned_author": unsigned_author,
+            "excluded_unknown_requester": unknown_requester,
+        },
+        "outcomes": available.then(|| serde_json::json!({
+            "approved": approved,
+            "request_changes": request_changes,
+            "pending": pending,
+            "archived_detail_dropped": archived,
+            "re_review_required": slashed,
+        })),
+        "tripwire_observed": null,
+        "tripwire_status": "indeterminate",
+        "evaluation_complete": false,
+        "semantics": {
+            "approved": "live, every listed reviewer answered, and no verdict is RequestChanges — not a validity judgement",
+            "request_changes": "live, every listed reviewer answered, and at least one standing verdict is RequestChanges — 'needs work', overwritable, not slop",
+            "pending": "live and unassigned or not yet answered by every listed reviewer",
+            "archived_detail_dropped": "settled or lapsed; verdict detail is gone, so an answered rejection is indistinguishable from an unanswered lapse",
+            "re_review_required": "overlaps the buckets above; counts cohort reviews carrying a retroactive approval slash",
+            "attribution": "the RequestReview log entry's signing key; that author is not proven to have authored the commit under review",
+            "indeterminate": "structural, not sample-size: a validity classifier does not exist, so more evidence cannot settle this tripwire",
         },
     })
 }
@@ -2451,6 +2582,10 @@ impl Platform {
                     .expect("protected refs lock")
                     .clone();
                 let protected = ProtectedPolicySnapshot::read(protected_path.as_deref());
+                // Read before the view guard: the audit mutex is taken
+                // under the view lock nowhere else, and this keeps it
+                // that way.
+                let cohort = new_actor_cohort(self.newcomer_audit.as_ref());
                 // Writer order is view -> concentration. Holding both
                 // through snapshot construction prevents a response whose
                 // heads include op N while `as_of_seq` and attribution stop
@@ -2486,6 +2621,11 @@ impl Platform {
                     &key_names,
                     &protected,
                 );
+                let new_actor_review_outcomes = new_actor_review_outcomes_json(
+                    &concentration_state,
+                    &view,
+                    cohort.as_ref(),
+                );
                 drop(key_names);
                 drop(concentration_state);
                 drop(view);
@@ -2506,6 +2646,7 @@ impl Platform {
                     "concentration": concentration,
                     "view_growth": view_growth,
                     "newcomer_harm": newcomer_harm,
+                    "new_actor_review_outcomes": new_actor_review_outcomes,
                 });
                 (200, body.to_string())
             }
