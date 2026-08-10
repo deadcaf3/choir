@@ -74,6 +74,13 @@ strip = true
 # sampling profiler to name frames.
 debug = "line-tables-only"
 
+# Full DWARF isn't needed for a suite that asserts behaviour, not
+# breakpoints; backtraces still carry line numbers under line-tables-only.
+# Applies workspace-wide, including dependency builds below (they only
+# override opt-level, so this is inherited).
+[profile.dev]
+debug = "line-tables-only"
+
 # Dependencies are optimised even in dev builds: they are compiled once and
 # then cached, while the workspace crates are rebuilt constantly. This
 # keeps `cargo test` from running the whole suite through an unoptimised
