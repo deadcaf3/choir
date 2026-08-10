@@ -1,0 +1,165 @@
+//! Admission for the durable operator record: only the node may bind or
+//! revoke an operator key.
+//!
+//! `check` is a series of per-variant guards falling through to
+//! `View::validate`, i.e. admit-by-default. A binding is the record that
+//! T3 attribution and T1's ordering primitive read, so without a guard
+//! naming these variants any trusted key could mint attribution evidence
+//! about itself — a tripwire whose evidence is forgeable by its subjects,
+//! which reads as sequenced proof and is therefore worse than no record.
+//!
+//! The op and the rule about who may author it ship together for that
+//! reason: there is no commit in this history where the gap is live.
+
+use choir_identity::{ActorKey, Registry};
+use choir_node::platform::hex_encode;
+use choir_node::{Node, Platform};
+use choir_oplog::{ContentHash, MemLog};
+use choir_view::{OpKind, ViewOp};
+
+fn curl(args: &[&str]) -> (u16, serde_json::Value) {
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-w", "\n%{http_code}"])
+        .args(args)
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text.rsplit_once('\n').expect("status line");
+    (
+        code.trim().parse().expect("numeric status"),
+        serde_json::from_str(body).expect("json body"),
+    )
+}
+
+fn submit_body(key: &ActorKey, workspace: &str, op: &ViewOp) -> String {
+    let payload = op.to_payload();
+    let sig = key.sign_submission(workspace, &payload);
+    serde_json::json!({
+        "workspace": workspace,
+        "payload_hex": hex_encode(&payload),
+        "key_id": sig.key_id,
+        "signature_hex": hex_encode(&sig.signature),
+    })
+    .to_string()
+}
+
+fn bind(operator: &str, key: &ContentHash, channel: Option<&str>) -> ViewOp {
+    ViewOp::new(OpKind::BindKey {
+        operator: operator.into(),
+        key: key.clone(),
+        channel: channel.map(Into::into),
+    })
+}
+
+#[test]
+fn only_the_node_may_bind_or_revoke_operator_keys() {
+    let work = std::env::temp_dir().join(format!("choir-node-binding-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    // Both keys are trusted. The difference under test is *which* of them
+    // the node treats as its own, not whether the author is known.
+    let author = ActorKey::generate();
+    let node_key = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+    registry.register(&node_key.public_key_bytes()).unwrap();
+    let node_key_for_platform = ActorKey::from_secret_bytes(&node_key.secret_bytes());
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), node_key_for_platform).unwrap(),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    std::thread::spawn(move || node.serve_forever());
+    let api = format!("http://127.0.0.1:{port}/api");
+
+    let subject = ContentHash::blake3(b"some agent key");
+
+    // A trusted key that is not the node's may not mint a binding, and in
+    // particular may not bind a key to an operator name of its choosing.
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&author, "carol", &bind("carol", &subject, None)),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "node_only", "{resp}");
+    assert!(
+        resp["error"].as_str().expect("error text").contains("bind"),
+        "{resp}"
+    );
+
+    // Revocation is guarded by the same rule: otherwise a defecting key
+    // could revoke the binding that attributes its own past work.
+    let revoke = ViewOp::new(OpKind::RevokeKey {
+        key: subject.clone(),
+        reason: "not yours to withdraw".into(),
+    });
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&author, "carol", &revoke),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "node_only", "{resp}");
+
+    // The node's own key is the one path that works.
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&node_key, "node", &bind("carol", &subject, Some("carol/agent"))),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    // Channel correction stays open to the node, and is the reason strict
+    // assign-once was not adopted: a typo must not burn a key forever.
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&node_key, "node", &bind("carol", &subject, Some("carol/other"))),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    // Moving the key to a different operator is refused by the fold even
+    // for the node, and it surfaces as the identity code rather than as
+    // `unclassified` -- the mapping only exists because this path is now
+    // reachable at all.
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&node_key, "node", &bind("mallory", &subject, None)),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "identity_state", "{resp}");
+
+    // And revocation is terminal: the node may revoke once, never twice.
+    let node_revoke = ViewOp::new(OpKind::RevokeKey {
+        key: subject.clone(),
+        reason: "key material rotated".into(),
+    });
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&node_key, "node", &node_revoke),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    // Re-sending the *identical* signed bytes is a lost-response retry,
+    // not a second revocation, and the node answers 200 with
+    // `already_applied` from its retry index. Worth pinning: it means a
+    // replayed revocation cannot double-count, and it is why the genuine
+    // double-revoke below has to carry different bytes to be a new op.
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&node_key, "node", &node_revoke),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["already_applied"], true, "{resp}");
+
+    let second_revoke = ViewOp::new(OpKind::RevokeKey {
+        key: subject,
+        reason: "a genuinely different second attempt".into(),
+    });
+    let (code, resp) = curl(&[
+        "-X", "POST", "-d", &submit_body(&node_key, "node", &second_revoke),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "identity_state", "{resp}");
+}

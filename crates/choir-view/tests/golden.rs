@@ -278,6 +278,51 @@ fn view_op_variants_are_frozen() {
         r#"{"format_version":1,"kind":{"RecordProvenance":{"subject":"agent-1","kind":"task-spec","body":"make the thing"}}}"#,
         "1e-f64fa277e20b2169ae1787abd98159f5f446680be3ddb5eda8f48ffce7c9e1b9",
     );
+    assert_golden(
+        "BindKey",
+        &ViewOp::new(OpKind::BindKey {
+            operator: "alice".into(),
+            key: h(b"actor key"),
+            channel: Some("alice/agent".into()),
+        }),
+        r#"{"format_version":1,"kind":{"BindKey":{"operator":"alice","key":{"codec":30,"digest":[74,226,209,106,169,109,122,128,69,150,239,183,206,147,93,53,14,89,126,246,185,152,171,32,6,11,49,108,128,53,125,237]},"channel":"alice/agent"}}}"#,
+        "1e-6dbe521521bb82be5fd8b04ac8c84c86c59c4deb3d73244945f711a4bf408f1a",
+    );
+    assert_golden(
+        "RevokeKey",
+        &ViewOp::new(OpKind::RevokeKey {
+            key: h(b"actor key"),
+            reason: "key material leaked".into(),
+        }),
+        r#"{"format_version":1,"kind":{"RevokeKey":{"key":{"codec":30,"digest":[74,226,209,106,169,109,122,128,69,150,239,183,206,147,93,53,14,89,126,246,185,152,171,32,6,11,49,108,128,53,125,237]},"reason":"key material leaked"}}}"#,
+        "1e-a5e01e6bb86011c79abd03ceb3ba823cb1e1bbe3ccd860eb613ae0b352a0b5b8",
+    );
+}
+
+/// `channel` is the second worked example of an additive field on an enum
+/// variant, and it guards the newest one-way door in the model: a binding
+/// is the durable operator record, so a client that re-serializes "the
+/// same" binding into different bytes after a schema edit produces a
+/// different signature and a different entry hash.
+#[test]
+fn bind_key_additive_field_is_frozen() {
+    let channelless = ViewOp::new(OpKind::BindKey {
+        operator: "alice".into(),
+        key: h(b"actor key"),
+        channel: None,
+    });
+    assert!(
+        !serde_json::to_string(&channelless)
+            .expect("serializes")
+            .contains("channel"),
+        "a binding that asserts no channel must not emit the additive field"
+    );
+    assert_golden(
+        "BindKey without a channel",
+        &channelless,
+        r#"{"format_version":1,"kind":{"BindKey":{"operator":"alice","key":{"codec":30,"digest":[74,226,209,106,169,109,122,128,69,150,239,183,206,147,93,53,14,89,126,246,185,152,171,32,6,11,49,108,128,53,125,237]}}}}"#,
+        "1e-18ff7f42bc91a23cc6ddfcc06e60040680229a97394ee6f1a278fc0075f37da4",
+    );
 }
 
 /// `target_ref` is the worked example of an additive field on an enum
@@ -437,6 +482,16 @@ fn a_stored_log_still_decodes_and_replays() {
     );
 
     let view = View::materialize(&log).expect("stored log replays");
+    // `next_seq` is folded state, so a replay of an already-persisted log
+    // has to land on the same fold position a live node held when it
+    // wrote that log. If it did not, every `bound_at` recorded after a
+    // restart would be silently wrong, and the drift would surface much
+    // later in resync/window behaviour where it is painful to attribute.
+    assert_eq!(
+        view.next_seq,
+        log.len(),
+        "replaying a stored log must reproduce the writer's fold position"
+    );
     assert_frozen(
         "stored log replayed workspace head",
         &view

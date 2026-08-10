@@ -173,6 +173,45 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
     push("provenance empty kind", &populated, OpKind::RecordProvenance {
         subject: "ws".into(), kind: String::new(), body: "b".into() });
 
+    // Key bindings. `bound` holds one live binding and one revoked one,
+    // so every arm of both variants has a view that reaches it.
+    let bound = {
+        let mut v = populated.clone();
+        v.apply(&ViewOp::new(OpKind::BindKey {
+            operator: "ana".into(), key: h(b"k-live"), channel: Some("ana/agent".into()) })).expect("setup");
+        v.apply(&ViewOp::new(OpKind::BindKey {
+            operator: "bo".into(), key: h(b"k-dead"), channel: None })).expect("setup");
+        v.apply(&ViewOp::new(OpKind::RevokeKey {
+            key: h(b"k-dead"), reason: "rotated".into() })).expect("setup");
+        v
+    };
+    push("bind a fresh key", &populated, OpKind::BindKey {
+        operator: "ana".into(), key: h(b"k-live"), channel: None });
+    push("bind with a bare operator channel", &populated, OpKind::BindKey {
+        operator: "ana".into(), key: h(b"k-live"), channel: Some("ana".into()) });
+    push("rebind same operator, new channel", &bound, OpKind::BindKey {
+        operator: "ana".into(), key: h(b"k-live"), channel: Some("ana/other".into()) });
+    push("rebind to a different operator", &bound, OpKind::BindKey {
+        operator: "mal".into(), key: h(b"k-live"), channel: None });
+    push("bind a revoked key", &bound, OpKind::BindKey {
+        operator: "bo".into(), key: h(b"k-dead"), channel: None });
+    push("bind with an empty operator", &populated, OpKind::BindKey {
+        operator: String::new(), key: h(b"k-live"), channel: None });
+    push("bind with a slashed operator", &populated, OpKind::BindKey {
+        operator: "ana/agent".into(), key: h(b"k-live"), channel: None });
+    push("bind with a mismatched channel", &populated, OpKind::BindKey {
+        operator: "ana".into(), key: h(b"k-live"), channel: Some("mal/agent".into()) });
+    push("bind with an empty channel", &populated, OpKind::BindKey {
+        operator: "ana".into(), key: h(b"k-live"), channel: Some(String::new()) });
+    push("revoke a live binding", &bound, OpKind::RevokeKey {
+        key: h(b"k-live"), reason: "compromised".into() });
+    push("revoke twice", &bound, OpKind::RevokeKey {
+        key: h(b"k-dead"), reason: "again".into() });
+    push("revoke an unbound key", &bound, OpKind::RevokeKey {
+        key: h(b"k-stranger"), reason: "compromised".into() });
+    push("revoke without a reason", &bound, OpKind::RevokeKey {
+        key: h(b"k-live"), reason: String::new() });
+
     out
 }
 

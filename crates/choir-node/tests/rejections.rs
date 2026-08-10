@@ -147,3 +147,75 @@ fn decoding_never_drops_a_message_it_did_not_write() {
     assert_eq!(partial.code, "unclassified");
     assert!(partial.error.contains("stale_head"), "original text kept: {partial:?}");
 }
+
+/// `Code::all()` is the list every documentation gate iterates, and until
+/// now nothing tested that list against the enum.
+///
+/// `as_str`, `meaning` and `action` are exhaustive matches, so a new
+/// variant already breaks *their* compilation. `all()` is a plain array,
+/// so it silently stays short — and a variant missing from it is absent
+/// from `ERRORS.md` with nothing failing, which defeats the point of
+/// `every_rejection_code_the_node_can_emit_is_documented`: that gate
+/// iterates `all()`, so it cannot see what `all()` omits.
+///
+/// Not hypothetical. Adding `IdentityState` produced a clean generator run
+/// reporting `ERRORS.md` "unchanged", and it nearly shipped that way.
+///
+/// The fix is a compile error rather than a discipline. `index` has no
+/// wildcard arm, so a new variant stops this file compiling until it is
+/// named; naming it forces `COUNT` up, and `COUNT` is what refuses to
+/// match `all().len()` until the variant is listed there too.
+#[test]
+fn code_all_lists_every_variant() {
+    fn index(code: Code) -> usize {
+        match code {
+            Code::UnknownKey => 0,
+            Code::MalformedOp => 1,
+            Code::MalformedRequest => 2,
+            Code::ReviewerMismatch => 3,
+            Code::ChannelNotOwned => 4,
+            Code::NodeOnly => 5,
+            Code::AssignmentRequired => 6,
+            Code::ProtectedRef => 7,
+            Code::ReviewRequired => 8,
+            Code::RefUndeletable => 9,
+            Code::StaleHead => 10,
+            Code::ReviewState => 11,
+            Code::ProvenanceState => 12,
+            Code::IdentityState => 13,
+            Code::PolicyUnavailable => 14,
+            Code::LogEvicted => 15,
+            Code::Unclassified => 16,
+        }
+    }
+    const COUNT: usize = 17;
+
+    let all = Code::all();
+    assert_eq!(
+        all.len(),
+        COUNT,
+        "Code::all() has {} entries but the enum has {COUNT} variants: a variant was given an \
+         index above without being listed in all()",
+        all.len()
+    );
+
+    let mut seen = [false; COUNT];
+    for code in all {
+        let i = index(*code);
+        assert!(!seen[i], "Code::all() lists {} twice", code.as_str());
+        seen[i] = true;
+    }
+    assert!(
+        seen.iter().all(|listed| *listed),
+        "Code::all() does not cover every variant"
+    );
+
+    // The wire strings are the contract, so a duplicate there is as bad as
+    // a missing entry: two variants answering to one name make a client's
+    // branch ambiguous.
+    let mut names: Vec<&str> = all.iter().map(|code| code.as_str()).collect();
+    names.sort_unstable();
+    let before = names.len();
+    names.dedup();
+    assert_eq!(before, names.len(), "two Code variants share a wire string");
+}

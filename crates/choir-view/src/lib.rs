@@ -267,6 +267,118 @@ pub enum OpKind {
         /// visible "withdrawn" state, not a deletion).
         body: String,
     },
+    /// Bind actor key `key` to the durable operator identity `operator`
+    /// (additive variant, wire-format unchanged).
+    ///
+    /// Until now an operator existed only as a prefix convention on a
+    /// channel name ([`reviewer_operator`]) plus a line in a mutable,
+    /// operator-owned keys file. Both are rewritable without a trace, so
+    /// "these two keys are the same operator" was an assertion no replay
+    /// could reproduce. This op puts the assertion *in* the log, where it
+    /// is sequenced, append-only, and recoverable at any prefix via
+    /// [`View::at`].
+    ///
+    /// Two properties make it load-bearing, and both live in the fold:
+    ///
+    /// 1. **First binding wins the clock.** [`KeyBinding::bound_at`] is
+    ///    the sequence of the op that *first* bound the key, and never
+    ///    moves again — so re-binding to adjust a channel cannot reset
+    ///    accumulated standing.
+    /// 2. **One key, one operator, for the life of the key.** Re-binding
+    ///    a key to a different operator is refused, so whatever position
+    ///    a key accumulates cannot be handed to somebody else.
+    ///
+    /// **What this does not establish.** *Who* may author a binding is
+    /// admission policy (L2), exactly as for [`OpKind::AssignReviewers`]
+    /// and [`OpKind::SlashApproval`]. With no admission rule wired, any
+    /// key can bind any other key under any operator name, and `operator`
+    /// is a self-chosen label rather than a verified identity. The fold
+    /// proves *sequence and immutability*; it never proves authority.
+    BindKey {
+        /// The durable operator identity the key is bound to. Non-empty,
+        /// and free of `/` so it cannot alias a `operator/agent` channel
+        /// prefix and read as two different operators.
+        operator: String,
+        /// The actor key being bound: the content address of its public
+        /// key, as `choir_identity::ActorKey::actor_id` produces it.
+        key: ContentHash,
+        /// The channel name the operator asserts this key speaks as, when
+        /// it asserts one — the sequenced form of the keys file's
+        /// `<name> <hex>` line.
+        ///
+        /// Constrained so the two available operator answers cannot
+        /// disagree: [`reviewer_operator`] of this channel must equal
+        /// `operator`, i.e. the channel is `operator` itself or
+        /// `operator/<agent>`. Without that rule a durable record reading
+        /// "bob" and a channel prefix reading "alice" would both be live,
+        /// which is worse than a single wrong answer.
+        ///
+        /// Additive per invariant 1: a payload written before this field
+        /// existed decodes as `None` **and** re-serializes byte-identically,
+        /// so entry hashes do not move.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+    },
+    /// Withdraw `key`'s binding (additive variant, wire-format unchanged).
+    ///
+    /// Append-only and terminal. The binding row stays, so the operator
+    /// attribution for everything the key already did survives; the key
+    /// itself can never be bound again. Allowing a rebind would make
+    /// revocation a formality — revoke, rebind, carry on — so the remedy
+    /// is a fresh key, the same shape as [`OpKind::SlashApproval`]'s
+    /// "open a new review".
+    ///
+    /// This is the record a revocation cascade replays over, and the slot
+    /// a later vouch or bond withdrawal hangs off. It moves no ref and
+    /// undoes no landed change; like a slash, it constrains what comes
+    /// next rather than rewriting what came before.
+    ///
+    /// *Who* may revoke is admission policy (L2), as for
+    /// [`OpKind::BindKey`].
+    RevokeKey {
+        /// The bound key whose binding is withdrawn.
+        key: ContentHash,
+        /// Operator-visible reason for the withdrawal (non-empty).
+        reason: String,
+    },
+}
+
+/// One actor key's durable binding to an operator identity, as the fold
+/// sees it after replaying [`OpKind::BindKey`] and [`OpKind::RevokeKey`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBinding {
+    /// The operator identity this key belongs to. Fixed at first binding.
+    pub operator: String,
+    /// The channel the operator asserts this key speaks as, if any. The
+    /// only field a later re-binding may change.
+    pub channel: Option<String>,
+    /// Log sequence of the op that *first* bound this key.
+    ///
+    /// This is the age primitive: it is assigned once and never moves, so
+    /// it orders keys by standing in a way replay reproduces exactly. It
+    /// counts **sequenced ops, not elapsed time** — see
+    /// [`View::ops_since_binding`] for what that can and cannot answer.
+    pub bound_at: u64,
+    /// The withdrawal record, once revoked; never cleared.
+    pub revoked: Option<Revocation>,
+}
+
+impl KeyBinding {
+    /// Whether this binding has been withdrawn. Authorization must ask;
+    /// attribution must not (see [`View::operator_of`]).
+    #[must_use]
+    pub fn is_revoked(&self) -> bool {
+        self.revoked.is_some()
+    }
+}
+
+/// The append-only record that a binding was withdrawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revocation {
+    /// Log sequence of the [`OpKind::RevokeKey`] op that withdrew it.
+    pub at: u64,
+    /// Operator-visible reason for the withdrawal.
+    pub reason: String,
 }
 
 /// A reviewer's answer to a review request.
@@ -475,6 +587,10 @@ pub enum ViewError {
     Review(String),
     /// Provenance-record precondition failure (empty subject or kind).
     Provenance(String),
+    /// Key-binding precondition failure: an empty or `/`-bearing
+    /// operator, a channel that reads as a different operator, a key
+    /// already bound elsewhere, or a revoked/unbound key.
+    Identity(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -557,6 +673,25 @@ pub struct View {
     pub reviews: BTreeMap<String, ReviewState>,
     /// Subject → record kind → latest body (D22 provenance records).
     pub provenance: BTreeMap<String, BTreeMap<String, String>>,
+    /// Actor key id → its durable operator binding (D24 T1/T3 substrate).
+    ///
+    /// Keyed by [`ContentHash::to_hex`] rather than by the hash itself so
+    /// it joins directly against the `key_id` a [`choir_oplog::Witness`]
+    /// carries, which is how an entry names its author.
+    pub bindings: BTreeMap<String, KeyBinding>,
+    /// Number of ops folded so far, which is the log sequence the next
+    /// applied op will occupy.
+    ///
+    /// It is a fold counter rather than a value read off the log, because
+    /// [`View::apply`] is handed only the op — a signature this crate is
+    /// deliberately not changing. The counter is correct because every
+    /// path that builds a view applies exactly the log's ops, in order,
+    /// once: [`View::at`] replays a prefix, and a node's live view starts
+    /// from such a replay and then applies each entry the sequencer
+    /// admits. A caller holding both can assert `view.next_seq ==
+    /// entry.seq` before applying; nothing inside the fold can check it
+    /// on their behalf.
+    pub next_seq: u64,
 }
 
 impl View {
@@ -732,6 +867,73 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::BindKey {
+                operator,
+                key,
+                channel,
+            } => {
+                if operator.is_empty() {
+                    return Err(ViewError::Identity(
+                        "a binding must name an operator".to_string(),
+                    ));
+                }
+                if operator.contains('/') {
+                    // A `/` would let one operator identity read as a
+                    // different one through the channel-prefix rule.
+                    return Err(ViewError::Identity(format!(
+                        "operator {operator} must not contain '/'"
+                    )));
+                }
+                if let Some(channel) = channel {
+                    if channel.is_empty() {
+                        return Err(ViewError::Identity(
+                            "a bound channel must be non-empty; omit it instead".to_string(),
+                        ));
+                    }
+                    let reads_as = reviewer_operator(channel);
+                    if reads_as != operator {
+                        return Err(ViewError::Identity(format!(
+                            "channel {channel} reads as operator {reads_as}, not {operator}"
+                        )));
+                    }
+                }
+                match self.bindings.get(&key.to_hex()) {
+                    None => Ok(()),
+                    // Terminal by design: a rebindable revocation is no
+                    // revocation at all. The remedy is a fresh key.
+                    Some(bound) if bound.is_revoked() => Err(ViewError::Identity(format!(
+                        "key {} is revoked; bind a fresh key",
+                        key.to_hex()
+                    ))),
+                    // Re-binding to the *same* operator is how a channel
+                    // is corrected, and it keeps `bound_at`. Re-binding
+                    // elsewhere would transfer accumulated standing.
+                    Some(bound) if bound.operator != *operator => Err(ViewError::Identity(format!(
+                        "key {} is already bound to operator {}",
+                        key.to_hex(),
+                        bound.operator
+                    ))),
+                    Some(_) => Ok(()),
+                }
+            }
+            OpKind::RevokeKey { key, reason } => {
+                if reason.is_empty() {
+                    return Err(ViewError::Identity(
+                        "a revocation must carry a non-empty reason".to_string(),
+                    ));
+                }
+                let bound = self
+                    .bindings
+                    .get(&key.to_hex())
+                    .ok_or_else(|| ViewError::Identity(format!("key {} is not bound", key.to_hex())))?;
+                if bound.is_revoked() {
+                    return Err(ViewError::Identity(format!(
+                        "key {} is already revoked",
+                        key.to_hex()
+                    )));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -842,8 +1044,92 @@ impl View {
             OpKind::DeleteRef { name, .. } => {
                 self.refs.remove(name);
             }
+            OpKind::BindKey {
+                operator,
+                key,
+                channel,
+            } => {
+                let bound_at = self.next_seq;
+                self.bindings
+                    .entry(key.to_hex())
+                    // A re-binding may correct the channel and nothing
+                    // else. `bound_at` is deliberately untouched here:
+                    // that omission is the age clock.
+                    .and_modify(|bound| bound.channel = channel.clone())
+                    .or_insert_with(|| KeyBinding {
+                        operator: operator.clone(),
+                        channel: channel.clone(),
+                        bound_at,
+                        revoked: None,
+                    });
+            }
+            OpKind::RevokeKey { key, reason } => {
+                let at = self.next_seq;
+                self.bindings
+                    .get_mut(&key.to_hex())
+                    .expect("validate proved the key is bound and not yet revoked")
+                    .revoked = Some(Revocation {
+                    at,
+                    reason: reason.clone(),
+                });
+            }
         }
+        // Only a successful apply advances the fold position, so the
+        // counter counts ops that are actually in the log. `validate`
+        // returned above on every rejection, leaving it untouched.
+        self.next_seq += 1;
         Ok(())
+    }
+
+    /// The operator `key` is bound to, if the log ever bound it.
+    ///
+    /// Deliberately still answers for a **revoked** key. Revocation
+    /// withdraws authority going forward; it does not un-attribute what
+    /// the key already did, and an audit that lost the operator the
+    /// moment a key was revoked would go blind exactly when it matters.
+    /// Authorization must therefore also consult
+    /// [`KeyBinding::is_revoked`]; attribution must not.
+    #[must_use]
+    pub fn operator_of(&self, key: &ContentHash) -> Option<&str> {
+        self.bindings
+            .get(&key.to_hex())
+            .map(|bound| bound.operator.as_str())
+    }
+
+    /// Ops sequenced since `key` was **first** bound, measured at this
+    /// view's fold position.
+    ///
+    /// Named for what it counts. This is an ordering and activity
+    /// primitive: it says a key has been bound across N sequenced ops,
+    /// and it is monotonic, replayable and unresettable. It is **not** a
+    /// wall clock, and it must not be relabelled as one — ops are not
+    /// uniformly spaced in time, so a question phrased in days or weeks
+    /// (D24 T1's `<2 weeks` branch) still needs a durable timestamp this
+    /// crate does not have. A pure fold has no clock, the same reason
+    /// [`OpKind::ArchiveReview`]'s lapse decision is made node-side and
+    /// merely recorded here.
+    #[must_use]
+    pub fn ops_since_binding(&self, key: &ContentHash) -> Option<u64> {
+        self.bindings
+            .get(&key.to_hex())
+            .map(|bound| self.next_seq.saturating_sub(bound.bound_at))
+    }
+
+    /// Every key currently bound to `operator`, revoked ones included, in
+    /// key-id order.
+    ///
+    /// Revoked keys stay in the count because the question T3 asks — how
+    /// concentrated is control — is not answered by a number an operator
+    /// can lower by revoking keys it no longer needs. Callers wanting
+    /// only live keys filter on [`KeyBinding::is_revoked`].
+    pub fn operator_keys<'a>(
+        &'a self,
+        operator: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a KeyBinding)> + 'a {
+        self.bindings
+            .iter()
+            .filter(move |(_, bound)| bound.operator == operator)
+            .map(|(key_id, bound)| (key_id.as_str(), bound))
     }
 
     /// Folds the whole log into a view.

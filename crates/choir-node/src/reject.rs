@@ -62,6 +62,10 @@ pub enum Code {
     ReviewState,
     /// A provenance record was missing a subject or kind.
     ProvenanceState,
+    /// A key-binding precondition failed (a key already bound to another
+    /// operator, a revoked or unbound key, a channel naming a different
+    /// operator).
+    IdentityState,
     /// The operator's protected-ref list could not be read, so the gate
     /// failed closed.
     PolicyUnavailable,
@@ -91,6 +95,7 @@ impl Code {
             Self::StaleHead => "stale_head",
             Self::ReviewState => "review_state",
             Self::ProvenanceState => "provenance_state",
+            Self::IdentityState => "identity_state",
             Self::PolicyUnavailable => "policy_unavailable",
             Self::LogEvicted => "log_evicted",
             Self::Unclassified => "unclassified",
@@ -114,6 +119,7 @@ impl Code {
             Self::StaleHead,
             Self::ReviewState,
             Self::ProvenanceState,
+            Self::IdentityState,
             Self::PolicyUnavailable,
             Self::LogEvicted,
             Self::Unclassified,
@@ -262,6 +268,12 @@ pub fn from_view_error(e: &choir_view::ViewError) -> Rejection {
             msg.clone(),
             "resubmit with a non-empty subject and kind",
         ),
+        ViewError::Identity(msg) => Rejection::new(
+            Code::IdentityState,
+            msg.clone(),
+            "not a retry: a key belongs to one operator for its lifetime and a revoked key is \
+             never rebindable, so bind a fresh key instead",
+        ),
         ViewError::Decode(msg) => Rejection::new(
             Code::MalformedOp,
             format!("decode failed: {msg}"),
@@ -293,6 +305,7 @@ impl Code {
             Self::StaleHead => "Compare-and-swap failed: the state moved under the submission",
             Self::ReviewState => "A review-op precondition failed (duplicate id, unknown review, already assigned, archived)",
             Self::ProvenanceState => "A provenance record was missing a subject or kind",
+            Self::IdentityState => "A key-binding precondition failed (key already bound to another operator, revoked or unbound key, channel naming a different operator)",
             Self::PolicyUnavailable => "The operator's protected-ref list could not be read, so the gate failed closed",
             Self::LogEvicted => "Requested log entries are older than anything this node can serve",
             Self::Unclassified => "A rejection that did not originate as a structured one",
@@ -316,6 +329,7 @@ impl Code {
             Self::StaleHead => "Re-read `GET /api/view`, rebase your intent on the value in                 `actual`, and resubmit with that as `prev`. If you are retrying a submission                 whose response you lost, check for `already_applied` first — a completed retry                 answers 200, not this.",
             Self::ReviewState => "Read `reviews` in `GET /api/view` for this id. A review that                 is already assigned, complete, or archived does not accept the op you sent.",
             Self::ProvenanceState => "Resubmit with a non-empty subject and kind.",
+            Self::IdentityState => "Not a retry: a key belongs to one operator for the life of                 the key, and a revoked key is never rebindable. Bind a fresh key                 instead. `error` names which of the two applies.",
             Self::PolicyUnavailable => "Operator problem, not a client one: the gate fails                 closed rather than guessing. Retry once the file is restored.",
             Self::LogEvicted => "Resync from the sequence in `window_base`; entries before it                 are gone from this node.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",

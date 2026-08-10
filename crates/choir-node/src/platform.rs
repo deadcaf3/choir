@@ -1957,6 +1957,30 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode());
         }
+        // Key bindings are the durable operator record that T3 attribution
+        // and T1's ordering primitive read, so a binding any trusted key
+        // could author is evidence forgeable by the actors it is meant to
+        // weigh -- worse than no record, because it reads as sequenced
+        // proof. `check` is a series of per-variant guards with a
+        // fall-through to `validate`, i.e. admit-by-default, so these
+        // variants have to name themselves here to be refused.
+        //
+        // This also supplies the second condition on re-binding: the fold
+        // lets a binding correct its channel (keeping `bound_at` pinned),
+        // and that correction is only safe while the node is the one
+        // making it.
+        if matches!(
+            op.kind,
+            OpKind::BindKey { .. } | OpKind::RevokeKey { .. }
+        ) && actor_id != self.node_id
+        {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may bind or revoke operator keys",
+                "ask the operator to record this binding with the node key",
+            )
+            .encode());
+        }
         // Required-assignment closes the other half of the same loop:
         // naming your own reviewers is refused, so the node's draw is the
         // only way a review gets reviewers. Two ways to switch it on —
