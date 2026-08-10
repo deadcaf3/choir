@@ -569,16 +569,26 @@ fn main() {
     // three-worktree adapter used by queue mode. It never contacts a forge or
     // consumes a landing decision.
     if args.first().map(String::as_str) == Some("calibrate") {
-        let [repo, runner, command_file, state_dir, rounds, merges @ ..] = &args[1..] else {
-            eprintln!(
-                "usage: choir-bridge calibrate <repo> <runner> <command-file> <state-dir> <rounds> <merge>..."
-            );
+        const CALIBRATE_USAGE: &str = "usage: choir-bridge calibrate [--fresh-worktrees] <repo> <runner> <command-file> <state-dir> <rounds> <merge>...";
+        // One flag, recognised anywhere among the arguments: the positionals
+        // are paths, a round count and hex merge ids, so none of them can
+        // collide with it.
+        let mut fresh_worktrees = false;
+        let mut positional: Vec<&String> = Vec::new();
+        for arg in &args[1..] {
+            if arg == "--fresh-worktrees" {
+                fresh_worktrees = true;
+            } else {
+                positional.push(arg);
+            }
+        }
+        let [repo, runner, command_file, state_dir, rounds, merges @ ..] = positional.as_slice()
+        else {
+            eprintln!("{CALIBRATE_USAGE}");
             std::process::exit(2);
         };
         if merges.is_empty() {
-            eprintln!(
-                "usage: choir-bridge calibrate <repo> <runner> <command-file> <state-dir> <rounds> <merge>..."
-            );
+            eprintln!("{CALIBRATE_USAGE}");
             std::process::exit(2);
         }
         let rounds = rounds.parse::<u64>().unwrap_or_else(|_| {
@@ -589,25 +599,55 @@ fn main() {
             eprintln!("calibration rounds must be a positive integer");
             std::process::exit(2);
         }
-        for round in 1..=rounds {
+        let repo = Path::new(repo.as_str());
+        // One session for the whole run, so the build directories inside the
+        // three worktrees survive from one observation to the next.
+        // `--fresh-worktrees` opts back into a worktree pair-up per
+        // observation, which is what an operator wants when re-checking a
+        // flagged interaction against a pristine tree.
+        let mut session =
+            (!fresh_worktrees).then(|| choir_bridge::queue::DifferentialSession::open(repo));
+        let mut failure = None;
+        'rounds: for round in 1..=rounds {
             for merge in merges {
-                match choir_bridge::queue::run_differential(
-                    Path::new(repo),
-                    merge,
-                    Path::new(runner),
-                    Path::new(command_file),
-                    Path::new(state_dir),
-                ) {
+                let result = match session.as_mut() {
+                    Some(session) => choir_bridge::queue::run_differential_in(
+                        session,
+                        merge.as_str(),
+                        Path::new(runner.as_str()),
+                        Path::new(command_file.as_str()),
+                        Path::new(state_dir.as_str()),
+                    ),
+                    None => choir_bridge::queue::run_differential(
+                        repo,
+                        merge.as_str(),
+                        Path::new(runner.as_str()),
+                        Path::new(command_file.as_str()),
+                        Path::new(state_dir.as_str()),
+                    ),
+                };
+                match result {
                     Ok(outcome) => println!(
                         "calibration: round {round}: {merge}: {:?} (observation {}, pending {})",
                         outcome.verdict, outcome.observation_id, outcome.pending_interactions
                     ),
                     Err(error) => {
-                        eprintln!("calibration failed for {merge}: {error}");
-                        std::process::exit(1);
+                        failure = Some(format!("calibration failed for {merge}: {error}"));
+                        break 'rounds;
                     }
                 }
             }
+        }
+        // Close before exiting: `std::process::exit` skips `Drop`, so exiting
+        // straight from the error arm would leave the worktrees behind.
+        let cleanup = session.map_or(Ok(()), choir_bridge::queue::DifferentialSession::close);
+        if let Some(error) = failure {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        if let Err(error) = cleanup {
+            eprintln!("calibration cleanup failed: {error}");
+            std::process::exit(1);
         }
         return;
     }
