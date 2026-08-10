@@ -248,7 +248,10 @@ fn the_mirror_push_reuses_one_ssh_connection() {
     for option in [
         "ControlMaster=auto",
         "ControlPath=",
-        "ControlPersist=",
+        // 60s was too short to ever hit: syncs are minutes apart, so
+        // the master had always expired and every sync paid a full
+        // handshake anyway. The window has to span a working session.
+        "ControlPersist=600",
         // Without this ssh offers the agent key first and the server
         // refuses it: one wasted round trip before the real key.
         "IdentitiesOnly=yes",
@@ -256,6 +259,17 @@ fn the_mirror_push_reuses_one_ssh_connection() {
         assert!(
             script.contains(option),
             "mirror push dropped {option}; every VM round trip pays a full handshake again"
+        );
+    }
+
+    // The stage timings are the point: this script was once tuned
+    // against a model of where its time went, the model was wrong, and
+    // nothing in the output could have revealed that. A run that
+    // reports connect/rsync/push separately settles it.
+    for stage in ["connect %.1fs", "rsync %.1fs", "box-local push %.1fs", "total %.1fs"] {
+        assert!(
+            script.contains(stage),
+            "mirror push stopped reporting {stage}; the next slowdown gets guessed at again"
         );
     }
 
