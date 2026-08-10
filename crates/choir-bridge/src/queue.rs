@@ -200,20 +200,31 @@ fn cleanup_worktrees(repo: &Path, root: &Path, paths: &[PathBuf]) -> Result<(), 
 ///   operator's repository is left as it was found.
 ///
 /// What it does change, stated rather than buried: an observation now starts in
-/// a tree that holds the *previous* observation's untracked build output.
+/// a tree that holds an *earlier* observation's untracked build output.
 /// Tracked content is exact — the checkout is forced, so the tree matches the
 /// revision — but a command that writes untracked files into its tree will see
 /// them again. Callers that need a pristine tree per observation still have
 /// one: [`run_differential`] opens and closes a session around a single
 /// observation, and `choir-bridge calibrate --fresh-worktrees` selects that
 /// path for a whole run.
+///
+/// Which tree plays which role is decided per observation: a revision is
+/// assigned to a tree that is already sitting on it, when one is. Replaying
+/// consecutive first-parent merges — the shape of a calibration corpus — makes
+/// this pay every observation, because a merge's first parent *is* the
+/// previous observation's merge: the tree that just ran that merge becomes the
+/// parent-a tree with a no-op checkout, so its command rebuilds nothing at
+/// all. Measured on `rust-lang/log`, one warm tree, solo: **8.9 s** for a
+/// no-op revision against **15.0 s** for a one-merge move.
 pub struct DifferentialSession {
     repo: PathBuf,
     root: PathBuf,
     /// `None` until the first observation names the revisions to check out.
     /// Worktree creation needs a revision, so there is nothing useful to
-    /// create at open time.
-    trees: Option<[PathBuf; 3]>,
+    /// create at open time. Each entry pairs a worktree path with the
+    /// revision the tree currently holds, which is what role assignment
+    /// matches against.
+    trees: Option<[(PathBuf, String); 3]>,
 }
 
 impl DifferentialSession {
@@ -241,25 +252,61 @@ impl DifferentialSession {
         merged: &str,
     ) -> Result<[PathBuf; 3], String> {
         let revisions = [parent_a, parent_b, merged];
-        if let Some(trees) = &self.trees {
-            for (tree, revision) in trees.iter().zip(revisions) {
-                // `--force` because the tree is the harness's own scratch
-                // checkout and an observation must start from exactly this
-                // revision's tracked content: a command that dirties a tracked
-                // file (a lockfile, say) must not be able to fail the next
-                // observation's checkout. It leaves untracked build output
-                // alone, which is the point of holding the tree at all.
-                git(tree, &["checkout", "-q", "--detach", "--force", revision])?;
+        if let Some(trees) = &mut self.trees {
+            // A tree already holding a requested revision keeps it, so the
+            // checkout below is a no-op there and the command that follows
+            // rebuilds nothing. Roles are not pinned to trees: on a corpus of
+            // consecutive first-parent merges, parent a of this observation is
+            // the previous observation's merge, and this hands that revision
+            // its still-built tree. Unmatched roles take the leftover trees in
+            // order, which keeps the assignment stable when nothing matches.
+            let mut assigned = [usize::MAX; 3];
+            let mut used = [false; 3];
+            for (role, revision) in revisions.iter().enumerate() {
+                if let Some(index) = (0..trees.len())
+                    .find(|&index| !used[index] && trees[index].1 == *revision)
+                {
+                    assigned[role] = index;
+                    used[index] = true;
+                }
             }
-            return Ok(trees.clone());
+            for slot in &mut assigned {
+                if *slot == usize::MAX {
+                    let index = used
+                        .iter()
+                        .position(|taken| !taken)
+                        .expect("three roles cannot exhaust three trees");
+                    *slot = index;
+                    used[index] = true;
+                }
+            }
+            let mut paths = Vec::with_capacity(revisions.len());
+            for (role, revision) in revisions.iter().enumerate() {
+                let (path, head) = &mut trees[assigned[role]];
+                // `--force` even when the tree already holds the revision: the
+                // tree is the harness's own scratch checkout and an
+                // observation must start from exactly this revision's tracked
+                // content, so a command that dirtied a tracked file (a
+                // lockfile, say) must not be able to leak it into the next
+                // observation. It leaves untracked build output alone, which
+                // is the point of holding the tree at all.
+                git(path, &["checkout", "-q", "--detach", "--force", revision])?;
+                *head = (*revision).to_string();
+                paths.push(path.clone());
+            }
+            return Ok(paths
+                .try_into()
+                .expect("three roles produce three tree paths"));
         }
         std::fs::create_dir_all(&self.root)
             .map_err(|error| format!("create differential checkout root: {error}"))?;
-        let mut paths = Vec::with_capacity(revisions.len());
+        let mut created: Vec<(PathBuf, String)> = Vec::with_capacity(revisions.len());
+        // Neutral names: role assignment above may hand any tree to any role
+        // from the second observation on, so role-named directories would lie.
         for (name, revision) in [
-            ("parent-a", parent_a),
-            ("parent-b", parent_b),
-            ("merged", merged),
+            ("tree-0", parent_a),
+            ("tree-1", parent_b),
+            ("tree-2", merged),
         ] {
             let path = self.root.join(name);
             let path_text = path.to_string_lossy().into_owned();
@@ -267,20 +314,33 @@ impl DifferentialSession {
                 &self.repo,
                 &["worktree", "add", "-q", "--detach", &path_text, revision],
             ) {
+                let paths: Vec<PathBuf> =
+                    created.into_iter().map(|(path, _)| path).collect();
                 cleanup_worktrees(&self.repo, &self.root, &paths).ok();
                 return Err(error);
             }
-            paths.push(path);
+            created.push((path, revision.to_string()));
         }
-        let trees: [PathBuf; 3] = paths
+        let trees: [(PathBuf, String); 3] = created
             .try_into()
             .map_err(|_| "differential session needs exactly three worktrees".to_string())?;
-        self.trees = Some(trees.clone());
-        Ok(trees)
+        let paths = [
+            trees[0].0.clone(),
+            trees[1].0.clone(),
+            trees[2].0.clone(),
+        ];
+        self.trees = Some(trees);
+        Ok(paths)
     }
 
     fn cleanup(&mut self) -> Result<(), String> {
-        let paths = self.trees.take().unwrap_or_default();
+        let paths: Vec<PathBuf> = self
+            .trees
+            .take()
+            .into_iter()
+            .flatten()
+            .map(|(path, _)| path)
+            .collect();
         cleanup_worktrees(&self.repo, &self.root, &paths)
     }
 
