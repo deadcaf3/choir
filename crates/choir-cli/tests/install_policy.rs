@@ -79,6 +79,117 @@ fn explicit_policy_renders_all_three_review_gates_or_none() {
     }
 }
 
+/// The Linux sibling of [`render`], fed byte-identical arguments.
+fn render_unit(protected: Option<&str>) -> String {
+    let script = repo_root().join("scripts/flip/render_node_service.sh");
+    let mut command = std::process::Command::new("sh");
+    command.arg(script).args([
+        "com.example.node",
+        "/opt/choir-node",
+        "/srv/repos",
+        "8417",
+        "/state/auth",
+        "/state/keys",
+        "/state/reviewers",
+        "/state/node.log",
+        "owner/repo.git",
+        "/state/newcomer-audit.jsonl",
+        "/state/newcomer-adjudications.jsonl",
+    ]);
+    if let Some(path) = protected {
+        command.arg(path);
+    }
+    let output = command.output().expect("render unit");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).expect("UTF-8 unit")
+}
+
+/// The `ProgramArguments` array only — `StandardOutPath` and `Label` are
+/// `<string>` elements too, and counting them would compare the plist's
+/// supervision settings against the unit's argument list.
+fn plist_argv(plist: &str) -> Vec<String> {
+    let array = plist
+        .split_once("<array>")
+        .and_then(|(_, rest)| rest.split_once("</array>"))
+        .map(|(inner, _)| inner)
+        .expect("ProgramArguments array");
+    let mut argv = Vec::new();
+    let mut rest = array;
+    while let Some(start) = rest.find("<string>") {
+        let after = &rest[start + "<string>".len()..];
+        let (value, tail) = after.split_once("</string>").expect("closed <string>");
+        argv.push(value.to_string());
+        rest = tail;
+    }
+    argv
+}
+
+/// Split on a single space deliberately: a double space yields an empty
+/// element, which is how the empty-policy splice is caught below.
+fn unit_argv(unit: &str) -> Vec<String> {
+    let line = unit
+        .lines()
+        .find(|line| line.starts_with("ExecStart="))
+        .expect("unit defines ExecStart");
+    line["ExecStart=".len()..]
+        .split(' ')
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn both_supervisors_launch_the_node_with_the_same_arguments() {
+    for protected in [None, Some("/state/protected-refs")] {
+        let plist = plist_argv(&render(protected));
+        let unit = unit_argv(&render_unit(protected));
+
+        // Without this the whole test passes vacuously when a renderer
+        // rejects its arguments and prints usage to stderr — which is
+        // exactly how the first version of this check reported success
+        // while comparing nothing to nothing.
+        assert!(
+            plist.len() >= 10,
+            "extracted {} arguments; the renderer did not run",
+            plist.len()
+        );
+        assert!(
+            !unit.iter().any(String::is_empty),
+            "unit ExecStart carries an empty argument (a spliced-in empty \
+             policy leaves a double space): {unit:?}"
+        );
+        assert_eq!(
+            plist, unit,
+            "launchd and systemd must start the node with identical \
+             arguments; a flag added to one supervisor and not the other \
+             is a node running without the gate its operator configured"
+        );
+    }
+}
+
+#[test]
+fn the_linux_installer_carries_the_same_policy_wiring() {
+    let installer = std::fs::read_to_string(repo_root().join("scripts/flip/install_node_linux.sh"))
+        .expect("linux installer source");
+    assert!(installer.contains("review-gates.enabled"));
+    assert!(installer.contains("render_node_service.sh"));
+    assert!(installer.contains("validate_review_policy.sh"));
+    let here = installer
+        .find("HERE=")
+        .expect("installer defines helper directory");
+    for helper in ["validate_review_policy.sh", "render_node_service.sh"] {
+        assert!(
+            here < installer.find(helper).expect("installer invokes helper"),
+            "installer must define HERE before invoking {helper}"
+        );
+    }
+    // The macOS installer builds in place; this one must not, because the
+    // host it targets cannot compile the workspace.
+    assert!(
+        !installer.contains("cargo build"),
+        "the Linux installer must not build on the node host"
+    );
+}
+
 fn validate(keys: &str, reviewers: &str, protected: &str) -> std::process::ExitStatus {
     let work = std::env::temp_dir().join(format!("choir-policy-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
