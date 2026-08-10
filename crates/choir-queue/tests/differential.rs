@@ -169,9 +169,32 @@ fn shipped_calibration_command_is_the_complete_workspace_test_gate() {
             "test",
             "--workspace",
             "--target-dir",
-            "../../target/d23-calibration",
+            "target/d23-calibration",
         ]
     );
+}
+
+#[test]
+fn cargo_calibration_refuses_a_target_directory_shared_across_worktrees() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-differential-shared-target-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let command_file = work.join("command.json");
+    std::fs::write(
+        &command_file,
+        r#"{"format_version":1,"program":"cargo","args":["test","--workspace","--target-dir","../../target/d23-calibration"]}"#,
+    )
+    .unwrap();
+
+    let error = load_command(&command_file).unwrap_err();
+    assert!(
+        error.contains("target directory must stay inside"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(work).ok();
 }
 
 #[test]

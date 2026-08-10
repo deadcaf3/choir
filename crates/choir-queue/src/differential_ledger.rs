@@ -41,6 +41,38 @@ pub struct Revisions {
     pub merged: String,
 }
 
+fn target_dir_stays_inside_worktree(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
+fn cargo_target_dirs_are_isolated(program: &str, args: &[String]) -> bool {
+    if Path::new(program)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        != Some("cargo")
+    {
+        return true;
+    }
+    args.iter().enumerate().all(|(index, arg)| {
+        if arg == "--target-dir" {
+            args.get(index + 1)
+                .is_some_and(|value| target_dir_stays_inside_worktree(value))
+        } else if let Some(value) = arg.strip_prefix("--target-dir=") {
+            target_dir_stays_inside_worktree(value)
+        } else {
+            true
+        }
+    })
+}
+
 /// Result of durably appending one observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedObservation {
@@ -60,8 +92,9 @@ pub struct RecordedObservation {
 ///
 /// # Errors
 ///
-/// The file is unreadable, malformed, has the wrong version, or has an empty
-/// program/non-string argument.
+/// The file is unreadable, malformed, has the wrong version, has an empty
+/// program/non-string argument, or gives Cargo a target directory outside the
+/// current revision worktree.
 pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
     let bytes = fs::read(path).map_err(|error| format!("read differential command: {error}"))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -84,6 +117,9 @@ pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
                 .ok_or("differential command arguments must be strings".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if !cargo_target_dirs_are_isolated(&program, &args) {
+        return Err("cargo target directory must stay inside each revision worktree".to_string());
+    }
     Ok(CommandSpec {
         program,
         args,
