@@ -157,9 +157,33 @@ fn run_one(program: &str, args: &[String], dir: &Path) -> Result<Observation, St
 
 /// Runs one explicit command in both parent trees and the merged tree.
 ///
+/// The three runs happen **concurrently**, one thread each. They are
+/// independent by construction — three separate checkouts, and the caller
+/// owns their isolation — so this is a straight 3x on the dominant cost
+/// without touching what is measured: every run is still really run, which
+/// is what the calibration's declared `independent_runs` assumption needs.
+/// A result cache would be faster still and would quietly void that
+/// assumption, since determinism is the property under test.
+///
+/// The one thing to know before pointing a command at this: if the command
+/// writes to a location the three trees *share* — an absolute
+/// `--target-dir`, say — they will serialize on that tool's own lock
+/// rather than run in parallel. Correctness is unaffected either way; the
+/// speedup is not. Keeping such state per-tree is what makes this pay.
+///
 /// # Errors
 ///
-/// The program could not be spawned in one of the three directories.
+/// The program could not be spawned in one of the three directories. All
+/// three are attempted before reporting: unlike the previous sequential
+/// form, a spawn failure in `parent_a` no longer prevents the other two
+/// from running. The reported error is still the earliest in
+/// `parent_a`, `parent_b`, `merged` order, so the message a caller sees
+/// for a given failure is unchanged.
+///
+/// # Panics
+///
+/// If one of the three worker threads panics, this propagates that panic
+/// rather than reporting a verdict computed from two runs.
 pub fn run_merged_vs_parents(
     program: &str,
     args: &[String],
@@ -170,9 +194,20 @@ pub fn run_merged_vs_parents(
     if program.is_empty() {
         return Err("differential program must not be empty".to_string());
     }
-    let parent_a = run_one(program, args, parent_a)?;
-    let parent_b = run_one(program, args, parent_b)?;
-    let merged = run_one(program, args, merged)?;
+    // `scope` rather than `spawn`: the borrows of `program`, `args` and the
+    // three paths outlive the threads without cloning anything, and the
+    // scope will not return until all three have been joined.
+    let (parent_a, parent_b, merged) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| run_one(program, args, parent_a));
+        let b = scope.spawn(|| run_one(program, args, parent_b));
+        let m = scope.spawn(|| run_one(program, args, merged));
+        (
+            a.join().expect("parent-a differential thread panicked"),
+            b.join().expect("parent-b differential thread panicked"),
+            m.join().expect("merged differential thread panicked"),
+        )
+    });
+    let (parent_a, parent_b, merged) = (parent_a?, parent_b?, merged?);
     let verdict = if !parent_a.success || !parent_b.success {
         Verdict::InconclusiveParentFailure
     } else if !merged.success {

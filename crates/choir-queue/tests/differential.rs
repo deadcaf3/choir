@@ -303,3 +303,79 @@ fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
     assert!(refresh(&state, &changed.snapshot_hash).is_err());
     std::fs::remove_dir_all(work).ok();
 }
+
+/// The three runs must actually overlap in time, not merely produce the
+/// same verdict as a sequential pass would.
+///
+/// Verdict equality cannot show this: a sequential and a concurrent
+/// implementation agree on every ordinary command, which is exactly why
+/// the speedup could regress to sequential without a single existing test
+/// noticing. So the command itself is made to require concurrency — each
+/// tree announces itself and then waits for all three announcements. Run
+/// one at a time, the first invocation waits for two peers that will not
+/// start until it returns, times out, and fails; the report then reads
+/// `InconclusiveParentFailure` rather than `Clean`.
+///
+/// This is also the guard on the calibration's `independent_runs`
+/// assumption: it pins that three runs happen, which a result cache would
+/// quietly stop being true.
+#[test]
+fn the_three_revisions_are_measured_concurrently() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-differential-parallel-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    let barrier = work.join("barrier");
+    std::fs::create_dir_all(&barrier).unwrap();
+    let trees: Vec<std::path::PathBuf> = ["parent-a", "parent-b", "merged"]
+        .iter()
+        .map(|name| {
+            let dir = work.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        })
+        .collect();
+
+    let script = work.join("barrier.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+touch "$1/$(basename "$PWD")"
+i=0
+while [ "$(ls "$1" | wc -l)" -lt 3 ]; do
+  i=$((i + 1))
+  if [ "$i" -gt 5 ]; then exit 1; fi
+  sleep 1
+done
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let report = run_merged_vs_parents(
+        &script.to_string_lossy(),
+        &[barrier.to_string_lossy().into_owned()],
+        &trees[0],
+        &trees[1],
+        &trees[2],
+    )
+    .expect("the barrier command spawns in all three trees");
+    assert_eq!(
+        report.verdict,
+        Verdict::Clean,
+        "all three runs must overlap; a sequential pass times out at the barrier"
+    );
+    assert_eq!(
+        std::fs::read_dir(&barrier).unwrap().count(),
+        3,
+        "each tree must have been visited exactly once"
+    );
+    std::fs::remove_dir_all(work).ok();
+}
