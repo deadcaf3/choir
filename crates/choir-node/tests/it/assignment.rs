@@ -6,36 +6,13 @@
 //! to land on a protected ref must go through the draw.
 
 use choir_identity::{ActorKey, Registry};
-use choir_node::platform::hex_encode;
 use choir_node::{Node, Platform};
 use choir_oplog::MemLog;
 use choir_view::{OpKind, ViewOp};
 
-fn curl(args: &[&str]) -> (u16, serde_json::Value) {
-    let out = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}"])
-        .args(args)
-        .output()
-        .expect("curl runs");
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.rsplit_once('\n').expect("status line");
-    (
-        code.trim().parse().expect("numeric status"),
-        serde_json::from_str(body).expect("json body"),
-    )
-}
+use crate::support::curl;
 
-fn submit_body(key: &ActorKey, workspace: &str, op: &ViewOp) -> String {
-    let payload = op.to_payload();
-    let sig = key.sign_submission(workspace, &payload);
-    serde_json::json!({
-        "workspace": workspace,
-        "payload_hex": hex_encode(&payload),
-        "key_id": sig.key_id,
-        "signature_hex": hex_encode(&sig.signature),
-    })
-    .to_string()
-}
+use crate::support::submit_body_legacy as submit_body;
 
 fn request(id: &str, seed: &[u8]) -> ViewOp {
     ViewOp::new(OpKind::RequestReview {
