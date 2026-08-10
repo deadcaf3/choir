@@ -234,3 +234,43 @@ fn review_policy_validation_fails_closed() {
     .success());
     assert!(!validate(keys, "review-a/agent\nreview-b/agent\n", "").success());
 }
+
+/// The mirror push makes two round trips to a VM ~275 ms away, and a
+/// fresh SSH handshake to it measured 3.78 s against 0.55 s on a reused
+/// connection. Losing the multiplexing options silently triples the
+/// cost of `choirctl sync` — nothing fails, it just gets slow again,
+/// which is exactly the kind of regression no other check would catch.
+#[test]
+fn the_mirror_push_reuses_one_ssh_connection() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/push_mirror.sh"))
+        .expect("mirror push source");
+
+    for option in [
+        "ControlMaster=auto",
+        "ControlPath=",
+        "ControlPersist=",
+        // Without this ssh offers the agent key first and the server
+        // refuses it: one wasted round trip before the real key.
+        "IdentitiesOnly=yes",
+    ] {
+        assert!(
+            script.contains(option),
+            "mirror push dropped {option}; every VM round trip pays a full handshake again"
+        );
+    }
+
+    // Both trips must go through the same option set, or the second one
+    // opens its own connection and the multiplexing buys nothing.
+    let rsync = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("rsync "))
+        .expect("mirror push runs rsync");
+    let ssh = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("ssh \""))
+        .expect("mirror push runs the box-local push over ssh");
+    assert!(
+        rsync.contains("ssh_opts") && ssh.contains("ssh_opts"),
+        "rsync and the box-local push must share one option set:\n  {rsync}\n  {ssh}"
+    );
+}
