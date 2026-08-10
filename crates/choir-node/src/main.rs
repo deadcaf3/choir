@@ -225,6 +225,47 @@ fn main() -> std::io::Result<()> {
             }
             key
         };
+        // The node's identity is pinned to the log it writes into. The
+        // branch above mints a fresh key whenever the key file is absent,
+        // which is correct on a first start and catastrophic on a
+        // migration: copy `ops.jsonl` without the key and the daemon comes
+        // up happily, signing every subsequent git-derived op as a
+        // different actor than the entries already in the log. Nothing
+        // downstream notices, because both identities are individually
+        // valid — the log simply changes author mid-stream.
+        //
+        // So the fingerprint (the actor id, a hash of the public key —
+        // public, never the secret) is recorded beside the log on first
+        // start and compared on every start after. A mismatch is refused
+        // rather than warned about: a node that has already lost its
+        // identity should not be allowed to append under a new one.
+        // Borrowed from radicle-node's fingerprint.rs, which exists for
+        // the same reason. See internal/heartwood-inspiration.md.
+        let fingerprint_path = state_dir.join("node.fingerprint");
+        let fingerprint = node_key.actor_id().to_hex();
+        match std::fs::read_to_string(&fingerprint_path) {
+            Ok(pinned) if pinned.trim() != fingerprint => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "node identity changed: {} pins {}, but the loaded key is {}. \
+                         The op log was almost certainly moved without its key. \
+                         Restore the original key, or if the change is intended, \
+                         delete {} and accept that the log changes author here.",
+                        fingerprint_path.display(),
+                        pinned.trim(),
+                        fingerprint,
+                        fingerprint_path.display(),
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::write(&fingerprint_path, format!("{fingerprint}\n"))?;
+            }
+            Err(e) => return Err(e),
+        }
+
         let log_path = state_dir.join("ops.jsonl");
         let log = choir_oplog::FileLog::open(&log_path)
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
