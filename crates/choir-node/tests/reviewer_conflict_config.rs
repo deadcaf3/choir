@@ -65,8 +65,13 @@ fn daemon_flags_enforce_the_reviewer_conflict_distance() {
     let mut child = ChildGuard(child);
 
     let api = format!("http://127.0.0.1:{port}/api");
-    for _ in 0..100 {
+    // Same silent fall-through as `newcomer_config.rs`: an unready daemon
+    // surfaced downstream as a confusing request failure rather than as a
+    // slow spawn. Assert readiness instead of assuming it.
+    let mut ready = false;
+    for _ in 0..500 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            ready = true;
             break;
         }
         if let Some(status) = child.0.try_wait().unwrap() {
@@ -74,6 +79,7 @@ fn daemon_flags_enforce_the_reviewer_conflict_distance() {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert!(ready, "choir-node did not bind port {port} within 10s");
 
     let op = ViewOp::new(OpKind::RequestReview {
         id: "configured-graph".into(),

@@ -12,10 +12,10 @@
 //! reason: there is no commit in this history where the gap is live.
 
 use choir_identity::{ActorKey, Registry};
-use choir_node::platform::hex_encode;
+use choir_node::platform::{hex_decode, hex_encode};
 use choir_node::{Node, Platform};
 use choir_oplog::{ContentHash, MemLog};
-use choir_view::{OpKind, ViewOp};
+use choir_view::{OpKind, View, ViewOp};
 
 fn curl(args: &[&str]) -> (u16, serde_json::Value) {
     let out = std::process::Command::new("curl")
@@ -49,6 +49,110 @@ fn bind(operator: &str, key: &ContentHash, channel: Option<&str>) -> ViewOp {
         key: key.clone(),
         channel: channel.map(Into::into),
     })
+}
+
+/// `bound_at` is a fold counter, and the view tests prove the counter
+/// tracks the log. Neither fact is the claim the field's name makes to a
+/// *client*: that the number equals the sequence the node reported when
+/// it accepted the binding. Those are two different layers, and only the
+/// second is the contract anyone outside this process can use.
+///
+/// This is a contract test, not a novel-defect detector, and the mutation
+/// receipt says so. Skewing the sequencer's assigned seq leaves the whole
+/// view layer green (the fold stays self-consistent) and does break other
+/// node tests — but on a CAS rejection, which names nothing about
+/// `bound_at`. This is the assertion that names the invariant that broke,
+/// so the next person reads a sentence instead of a 400.
+///
+/// It asserts the round trip a reader actually performs: submit through
+/// the API, keep the seq the node reports, then rebuild the view from the
+/// node's own `/api/log` bytes and require the recomputed `bound_at` to
+/// be that same number.
+#[test]
+fn a_replayed_binding_carries_the_seq_the_node_reported() {
+    let node_key = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&node_key.public_key_bytes()).unwrap();
+    let platform = Platform::start(
+        registry,
+        Box::new(MemLog::new()),
+        ActorKey::from_secret_bytes(&node_key.secret_bytes()),
+    )
+    .unwrap();
+
+    let submit = |op: &ViewOp| -> u64 {
+        let (code, body) = platform.handle_api(
+            "POST",
+            "/api/submit",
+            submit_body(&node_key, "node", op).as_bytes(),
+        );
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(code, 200, "{resp}");
+        resp["seq"].as_u64().expect("accepted ops report a seq")
+    };
+
+    // Interleave bindings with unrelated ops so a `bound_at` that counted
+    // bindings rather than log positions would diverge here. Binding the
+    // *last* key well past zero is the point: an off-by-any-amount bug
+    // survives a log whose first op is the binding under test.
+    let keys: Vec<ContentHash> = (0..3)
+        .map(|i| ContentHash::blake3(format!("agent key {i}").as_bytes()))
+        .collect();
+    let mut reported = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        submit(&ViewOp::new(OpKind::RecordProvenance {
+            subject: "ws".into(),
+            kind: format!("note-{i}"),
+            body: String::new(),
+        }));
+        reported.push(submit(&bind(&format!("op{i}"), key, None)));
+    }
+    let revoked_at = submit(&ViewOp::new(OpKind::RevokeKey {
+        key: keys[0].clone(),
+        reason: "key material rotated".into(),
+    }));
+    assert_eq!(
+        reported,
+        vec![1, 3, 5],
+        "the node's own seqs moved; the rest of this test reads them, so pin them"
+    );
+
+    // Rebuild from the transport bytes, not from the node's in-process
+    // view: a client only ever has these.
+    let (code, body) = platform.handle_api("GET", "/api/log?from=0", b"");
+    assert_eq!(code, 200, "{body}");
+    let page: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    let entries = page["entries"].as_array().expect("entries array");
+    let mut replayed = View::default();
+    for (offset, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry["seq"].as_u64(),
+            Some(offset as u64),
+            "the page must be gapless and zero-based for the replay below to mean anything"
+        );
+        let payload = hex_decode(entry["payload_hex"].as_str().expect("payload_hex")).expect("hex");
+        replayed
+            .apply(&ViewOp::from_payload(&payload).expect("decodes"))
+            .expect("the node admitted it, so a replay must too");
+    }
+
+    for (key, seq) in keys.iter().zip(&reported) {
+        let bound = &replayed.bindings[&key.to_hex()];
+        assert_eq!(
+            bound.bound_at, *seq,
+            "replayed bound_at must equal the seq the node reported for that binding"
+        );
+    }
+    assert_eq!(
+        replayed.bindings[&keys[0].to_hex()]
+            .revoked
+            .as_ref()
+            .expect("revoked")
+            .at,
+        revoked_at,
+        "a revocation's recorded position must survive the same round trip"
+    );
+    assert_eq!(replayed.next_seq, entries.len() as u64);
 }
 
 #[test]

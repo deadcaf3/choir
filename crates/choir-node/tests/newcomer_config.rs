@@ -50,8 +50,17 @@ fn daemon_flags_persist_the_activation_boundary() {
         .expect("start choir-node");
     let mut child = ChildGuard(child);
 
-    for _ in 0..100 {
+    // Falling out of this loop unready used to be silent: the curl below
+    // then hit a closed port and failed on `output.status.success()`,
+    // which names neither the port nor the daemon. Observed for real on
+    // 2026-08-10 during a loaded gate run. The budget is raised because
+    // a freshly built binary competes with whatever else the machine is
+    // doing, but the assertion is the actual fix — a slow spawn should
+    // say so rather than impersonate a broken endpoint.
+    let mut ready = false;
+    for _ in 0..500 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            ready = true;
             break;
         }
         if let Some(status) = child.0.try_wait().unwrap() {
@@ -59,6 +68,7 @@ fn daemon_flags_persist_the_activation_boundary() {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert!(ready, "choir-node did not bind port {port} within 10s");
     let output = std::process::Command::new("curl")
         .args(["-s", &format!("http://127.0.0.1:{port}/api/view")])
         .output()
