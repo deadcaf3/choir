@@ -6,6 +6,7 @@
 //! [--reviewer-conflict-graph path --reviewer-conflict-distance hops]
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--newcomer-audit path --newcomer-adjudications path]
+//! [--review-adjudications path]
 //! [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
@@ -88,6 +89,7 @@ fn main() -> std::io::Result<()> {
         "--reviewer-conflict-distance",
         "--newcomer-audit",
         "--newcomer-adjudications",
+        "--review-adjudications",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -156,6 +158,7 @@ fn main() -> std::io::Result<()> {
             ));
         }
     };
+    let review_adjudications = flag_value("--review-adjudications").map(std::path::PathBuf::from);
     if review_lapse_after.is_some() && review_retention_count.is_none() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -250,6 +253,12 @@ fn main() -> std::io::Result<()> {
                 .with_newcomer_audit(audit, adjudications, incumbents)
                 .map_err(std::io::Error::other)?;
             eprintln!("newcomer harm audit enabled");
+        }
+        if let Some(path) = review_adjudications {
+            platform = platform
+                .with_review_adjudications(path)
+                .map_err(std::io::Error::other)?;
+            eprintln!("review adjudications enabled (T2 stays indeterminate)");
         }
         if let Some(count) = review_retention_count {
             match review_lapse_after {

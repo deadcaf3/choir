@@ -123,15 +123,26 @@ fn new_actor_review_outcomes_report_raw_evidence_and_stay_indeterminate() {
     assert_eq!(report["totals"]["excluded_outside_cohort"], 1, "{report}");
     assert_eq!(report["totals"]["excluded_unsigned_author"], 0, "{report}");
     assert_eq!(report["totals"]["excluded_unknown_requester"], 0, "{report}");
-    assert_eq!(report["outcomes"]["approved"], 1, "{report}");
-    assert_eq!(report["outcomes"]["request_changes"], 1, "{report}");
-    assert_eq!(report["outcomes"]["pending"], 1, "{report}");
-    assert_eq!(report["outcomes"]["archived_detail_dropped"], 1, "{report}");
-    assert_eq!(report["outcomes"]["re_review_required"], 0, "{report}");
+    assert_eq!(report["review_outcomes"]["approved"], 1, "{report}");
+    assert_eq!(report["review_outcomes"]["request_changes"], 1, "{report}");
+    assert_eq!(report["review_outcomes"]["pending"], 1, "{report}");
+    assert_eq!(report["review_outcomes"]["archived_evidence_lost"], 1, "{report}");
+    assert_eq!(report["review_outcomes"]["archived_classified"], 0, "{report}");
+    assert_eq!(report["review_outcomes"]["re_review_required"], 0, "{report}");
+
+    // Load needs no adjudication at all, which is why it survives a flood.
+    assert_eq!(report["unit"], "contribution_offered", "{report}");
+    assert_eq!(report["load"]["reviews_requested"], 4, "{report}");
+    assert_eq!(report["load"]["review_rounds"], 3, "{report}");
+    assert_eq!(report["load"]["reviews_landed"], 0, "{report}");
+    assert_eq!(report["load"]["reviews_never_landed"], 4, "{report}");
+    assert_eq!(report["load"]["review_rounds_on_unlanded"], 3, "{report}");
 
     // The point of the whole projection: complete, fully attributed
     // evidence still does not answer T2.
-    assert_eq!(report["classifier"], serde_json::Value::Null, "{report}");
+    assert_eq!(report["policy"]["graduation"], serde_json::Value::Null, "{report}");
+    assert_eq!(report["policy"]["trailing_window"], serde_json::Value::Null, "{report}");
+    assert_eq!(report["policy"]["tripwire_subject"], serde_json::Value::Null, "{report}");
     assert_eq!(report["declared_tripwire"]["evaluable"], false, "{report}");
     assert_eq!(
         report["tripwire_observed"],
@@ -167,13 +178,13 @@ fn an_overwritten_request_changes_verdict_moves_to_the_approved_bucket() {
     submit(&platform, &author, "newcomer/agent", request("r", &["rev"]));
     submit(&platform, &author, "rev", verdict("r", Verdict::RequestChanges));
     let before = outcomes(&platform);
-    assert_eq!(before["outcomes"]["request_changes"], 1, "{before}");
+    assert_eq!(before["review_outcomes"]["request_changes"], 1, "{before}");
 
     submit(&platform, &author, "rev", verdict("r", Verdict::Approve));
     let after = outcomes(&platform);
-    assert_eq!(after["outcomes"]["request_changes"], 0, "{after}");
+    assert_eq!(after["review_outcomes"]["request_changes"], 0, "{after}");
     assert_eq!(
-        after["outcomes"]["approved"], 1,
+        after["review_outcomes"]["approved"], 1,
         "a re-review overwrites the earlier verdict, which is exactly why \
          `RequestChanges` cannot be counted as slop: {after}"
     );
@@ -206,7 +217,7 @@ fn without_the_newcomer_audit_no_cohort_is_invented() {
         "no audit means no way to tell who is new, which is not the same as \
          a cohort of zero: {report}"
     );
-    assert_eq!(report["outcomes"], serde_json::Value::Null, "{report}");
+    assert_eq!(report["review_outcomes"], serde_json::Value::Null, "{report}");
     assert_eq!(report["tripwire_status"], "indeterminate", "{report}");
 }
 
@@ -237,6 +248,161 @@ fn the_projection_is_a_read_and_never_appends_to_the_log() {
     let second = outcomes(&platform);
     assert_eq!(first["totals"]["attributed_to_cohort"], 1, "{first}");
     assert_eq!(first, second, "the projection must be a pure read");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_lapsed_archive_cannot_launder_an_unanswered_review_into_the_rate() {
+    let dir = workdir("lapse");
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+    // Zero is an explicit deterministic boundary, not a sleep: the oldest
+    // incomplete review is archived as `Archived { approved: false }` even
+    // though no reviewer ever answered it.
+    let platform = Platform::start_reloading_with_review_retention(
+        registry,
+        Box::new(MemLog::new()),
+        ActorKey::generate(),
+        None,
+        ReviewRetention::keep(1).lapse_incomplete_after(std::time::Duration::ZERO),
+    )
+    .expect("platform starts")
+    .with_newcomer_audit(
+        dir.join("newcomer-audit.jsonl"),
+        dir.join("newcomer-adjudications.jsonl"),
+        Vec::new(),
+    )
+    .expect("audit opens");
+
+    submit(&platform, &author, "newcomer/agent", request("old", &["rev"]));
+    let response = submit(&platform, &author, "newcomer/agent", request("new", &["rev"]));
+    assert_eq!(
+        response["archived_reviews"],
+        serde_json::json!(["old"]),
+        "{response}"
+    );
+
+    let report = outcomes(&platform);
+    assert_eq!(
+        report["review_outcomes"]["archived_evidence_lost"], 1,
+        "a review nobody answered must not gain evidence by being archived: {report}"
+    );
+    assert_eq!(
+        report["adjudication"]["eligible"], 0,
+        "a wall-clock lapse must not put an unanswered review in the denominator: {report}"
+    );
+    assert_eq!(report["review_outcomes"]["pending"], 1, "{report}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_classification_survives_archiving_and_drives_coverage() {
+    let dir = workdir("classify");
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+    let adjudications = dir.join("review-adjudications.jsonl");
+    let platform = Platform::start_reloading_with_review_retention(
+        registry,
+        Box::new(MemLog::new()),
+        ActorKey::generate(),
+        None,
+        ReviewRetention::keep(1),
+    )
+    .expect("platform starts")
+    .with_newcomer_audit(
+        dir.join("newcomer-audit.jsonl"),
+        dir.join("newcomer-adjudications.jsonl"),
+        Vec::new(),
+    )
+    .expect("audit opens")
+    .with_review_adjudications(adjudications.clone())
+    .expect("adjudications open");
+
+    submit(&platform, &author, "newcomer/agent", request("settled", &["rev"]));
+    submit(&platform, &author, "rev", verdict("settled", Verdict::Approve));
+    let response = submit(&platform, &author, "newcomer/agent", request("later", &["rev"]));
+    assert_eq!(
+        response["archived_reviews"],
+        serde_json::json!(["settled"]),
+        "{response}"
+    );
+    submit(&platform, &author, "rev", verdict("later", Verdict::Approve));
+
+    let before = outcomes(&platform);
+    assert_eq!(before["review_outcomes"]["archived_evidence_lost"], 1, "{before}");
+    assert_eq!(before["adjudication"]["adjudicated"], 0, "{before}");
+
+    // The classification is keyed by review id and lives outside the log, so
+    // it attaches to a row whose verdict bulk was already discarded.
+    std::fs::write(
+        &adjudications,
+        "{\"format_version\":1,\"review_id\":\"settled\",\"classification\":\"slop\"}\n",
+    )
+    .unwrap();
+
+    let after = outcomes(&platform);
+    assert_eq!(after["adjudication"]["available"], true, "{after}");
+    assert_eq!(after["review_outcomes"]["archived_classified"], 1, "{after}");
+    assert_eq!(after["review_outcomes"]["archived_evidence_lost"], 0, "{after}");
+    assert_eq!(after["adjudication"]["classified"]["slop"], 1, "{after}");
+    assert_eq!(after["adjudication"]["eligible"], 2, "{after}");
+    assert_eq!(after["adjudication"]["coverage_basis_points"], 5_000, "{after}");
+    assert_eq!(
+        after["adjudication"]["independent"], false,
+        "one operator classifying its own reviewers' approvals is not independent: {after}"
+    );
+    assert_eq!(after["tripwire_status"], "indeterminate", "{after}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn accepted_operations_count_even_when_no_review_is_requested() {
+    let dir = workdir("unit");
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+    let platform = Platform::start_reloading(
+        registry,
+        Box::new(MemLog::new()),
+        ActorKey::generate(),
+        None,
+    )
+    .expect("platform starts")
+    .with_newcomer_audit(
+        dir.join("newcomer-audit.jsonl"),
+        dir.join("newcomer-adjudications.jsonl"),
+        Vec::new(),
+    )
+    .expect("audit opens");
+
+    // The whole reason the unit is not a completed review: a contributor
+    // opens their own review, so work they never submit for review would be
+    // invisible to a review-shaped denominator.
+    for n in 0..3 {
+        submit(
+            &platform,
+            &author,
+            "newcomer/agent",
+            ViewOp::new(OpKind::RecordProvenance {
+                subject: format!("task/{n}"),
+                kind: "plan".into(),
+                body: "unreviewed work".into(),
+            }),
+        );
+    }
+
+    let report = outcomes(&platform);
+    assert_eq!(report["load"]["accepted_operations"], 3, "{report}");
+    assert_eq!(
+        report["load"]["reviews_requested"], 0,
+        "declining to request review must not hide the work: {report}"
+    );
+    assert_eq!(report["totals"]["attributed_to_cohort"], 0, "{report}");
 
     std::fs::remove_dir_all(&dir).ok();
 }

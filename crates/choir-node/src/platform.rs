@@ -840,17 +840,77 @@ impl KeyBindings {
     }
 }
 
+/// D24 T2 load evidence: objective counts folded straight from the log.
+///
+/// These answer "how much reviewer work did this cohort create, and how much
+/// of it landed" without any human calling anything slop. That matters
+/// because a classifier-based slop rate goes blind exactly when it is needed:
+/// a flood collapses adjudication coverage, and incomplete coverage must
+/// report `indeterminate`. These counts keep working during the flood, and
+/// no contributor can suppress them by declining to request a review.
+#[derive(Default)]
+struct NewActorLoadState {
+    /// Accepted entries per signing key. The unit is a *contribution
+    /// offered*, not a review: `RequestReview` is authored by the
+    /// contributor, so a review-based denominator lets an actor choose
+    /// whether to be measured.
+    submissions: BTreeMap<String, usize>,
+    /// `PostVerdict` ops per review id: reviewer rounds actually consumed.
+    /// Re-review after changes is the cost signal, so it is counted rather
+    /// than collapsed into a final verdict.
+    verdict_rounds: BTreeMap<String, usize>,
+    /// Reviews whose exact `(target_ref, target)` was observed live in
+    /// [`View::refs`]. Landing is *observed*; approval is not landing.
+    landed: BTreeSet<String>,
+}
+
+impl NewActorLoadState {
+    fn observe(&mut self, entry: &OpEntry, op: &ViewOp, view: &View) {
+        if let Some(signature) = &entry.author_sig {
+            // Only clone the key the first time it is seen. `entry()` would
+            // allocate on every accepted op, and a repeat submitter is the
+            // common case: the allocation budget caught exactly that.
+            if let Some(count) = self.submissions.get_mut(&signature.key_id) {
+                *count += 1;
+            } else {
+                self.submissions.insert(signature.key_id.clone(), 1);
+            }
+        }
+        match &op.kind {
+            OpKind::PostVerdict { id, .. } => {
+                *self.verdict_rounds.entry(id.clone()).or_default() += 1;
+            }
+            OpKind::SetRef { name, commit, .. } => {
+                for (id, review) in &view.reviews {
+                    if review.target_ref.as_deref() == Some(name)
+                        && review.target.as_ref() == Some(commit)
+                    {
+                        self.landed.insert(id.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Default)]
 struct ConcentrationState {
     review_requesters: BTreeMap<String, ActorEvidence>,
     active_branches: BTreeMap<String, RefAttribution>,
     ref_updates: BTreeMap<String, BTreeMap<RefAttribution, usize>>,
+    /// T2's load evidence, folded here rather than behind a second mutex:
+    /// it needs the same `(entry, op, view)` triple at the same point of the
+    /// same single-writer fold, and a parallel tracker would add plumbing
+    /// plus a second chance for the two to disagree about `as_of_seq`.
+    new_actor_load: NewActorLoadState,
     as_of_seq: Option<u64>,
 }
 
 impl ConcentrationState {
     fn observe(&mut self, entry: &OpEntry, op: &ViewOp, view: &View) {
         self.as_of_seq = Some(entry.seq);
+        self.new_actor_load.observe(entry, op, view);
         match &op.kind {
             OpKind::RequestReview { id, .. } => {
                 self.review_requesters
@@ -1178,6 +1238,92 @@ fn concentration_json(
     })
 }
 
+/// Version of the operator-written review adjudication rows. Like the
+/// newcomer adjudications, this file is not part of the signed op log but is
+/// a persisted measurement input, so it carries the same explicit version.
+const REVIEW_ADJUDICATION_FORMAT_VERSION: u64 = 1;
+
+/// One operator judgement about a cohort contribution.
+///
+/// `Invalid` and `Slop` are deliberately distinct. Invalid is good-faith and
+/// wrong, which is what newcomers do constantly and must not by itself trip a
+/// Sybil wire. Slop is unresponsive work that burns reviewer time, which is
+/// what the cited curl bands are actually about. Collapsing them is how a
+/// competent newcomer having a bad week reads as an attack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Classification {
+    Valid,
+    Invalid,
+    Slop,
+    Unclear,
+}
+
+impl Classification {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "valid" => Some(Self::Valid),
+            "invalid" => Some(Self::Invalid),
+            "slop" => Some(Self::Slop),
+            "unclear" => Some(Self::Unclear),
+            _ => None,
+        }
+    }
+}
+
+/// Reads the operator's review classifications. Keyed by review id, so a
+/// classification survives archiving even though the verdict bulk does not.
+///
+/// A row naming an unknown review is an error rather than a skipped line: a
+/// typo that silently vanished would quietly shrink measured coverage.
+fn read_review_adjudications(
+    path: &std::path::Path,
+    reviews: &BTreeMap<String, choir_view::ReviewState>,
+) -> Result<(BTreeMap<String, Classification>, String), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read review adjudications: {e}"))?;
+    let snapshot_hash = ContentHash::blake3(&bytes).to_hex();
+    let text =
+        String::from_utf8(bytes).map_err(|_| "review adjudications are not UTF-8".to_string())?;
+    let mut rows = BTreeMap::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("review adjudication line {}: {e}", index + 1))?;
+        if value["format_version"].as_u64() != Some(REVIEW_ADJUDICATION_FORMAT_VERSION) {
+            return Err(format!(
+                "review adjudication line {} has unsupported format_version",
+                index + 1
+            ));
+        }
+        let review_id = value["review_id"]
+            .as_str()
+            .ok_or_else(|| format!("review adjudication line {} needs review_id", index + 1))?;
+        let classification = value["classification"]
+            .as_str()
+            .and_then(Classification::parse)
+            .ok_or_else(|| {
+                format!(
+                    "review adjudication line {} needs classification valid|invalid|slop|unclear",
+                    index + 1
+                )
+            })?;
+        if !reviews.contains_key(review_id) {
+            return Err(format!(
+                "review adjudication line {} references an unknown review",
+                index + 1
+            ));
+        }
+        if rows.insert(review_id.to_string(), classification).is_some() {
+            return Err(format!(
+                "review adjudication line {} duplicates a review",
+                index + 1
+            ));
+        }
+    }
+    Ok((rows, snapshot_hash))
+}
+
 /// The T2 cohort: durable, post-activation, non-incumbent actor keys, read
 /// from the same T4 audit that defines "newcomer" everywhere else.
 ///
@@ -1190,17 +1336,29 @@ fn new_actor_cohort(audit: Option<&Arc<Mutex<NewcomerAudit>>>) -> Option<BTreeSe
     (audit.available && audit.activated).then(|| audit.by_actor.keys().cloned().collect())
 }
 
-/// Raw review evidence for D24 T2's new-actor cohort — and an explicit
-/// statement that the tripwire itself is **not evaluable here**.
+/// D24 T2 evidence for the new-actor cohort, and an explicit statement that
+/// the tripwire itself is **not evaluable here**.
 ///
 /// T2 asks for an invalid/slop rate. Choir persists no such judgement.
 /// [`choir_view::Verdict::Approve`] means "may land" and
 /// [`choir_view::Verdict::RequestChanges`] means "needs work", the latter is
 /// overwritable by the former, and neither proves a contribution valid,
 /// invalid, or slop. Relabelling one as "slop" would manufacture evidence the
-/// model does not contain, so this projection reports the review outcomes that
-/// do exist, names its excluded buckets, and holds `classifier` at null with
-/// `tripwire_status` at `indeterminate`.
+/// model does not contain.
+///
+/// The unit is a **contribution offered**, not a completed review. A review is
+/// opened by its own contributor, so a review-shaped denominator lets an actor
+/// choose whether to be measured: submit a hundred slop changes, request
+/// review on the three good ones, and a review-based rate reads zero. Reviews
+/// remain a reported sub-metric.
+///
+/// Three counting rules exist to close laundering paths rather than to be
+/// tidy. An archived review with no classification can never enter the
+/// numerator or the denominator, because `--review-lapse-after-secs` turns an
+/// unanswered review into `Archived { approved: false }` on a wall clock and
+/// that must not become evidence. Pending reviews are reported, never counted.
+/// And `load` needs no adjudication at all, so it keeps measuring during the
+/// flood in which a classifier's coverage would collapse to `indeterminate`.
 ///
 /// Requester attribution is joined from the `RequestReview` log entry's author
 /// signature, never from the rendered review: archiving discards reviewer and
@@ -1211,7 +1369,16 @@ fn new_actor_review_outcomes_json(
     state: &ConcentrationState,
     view: &View,
     cohort: Option<&BTreeSet<String>>,
+    adjudications_path: Option<&std::path::Path>,
 ) -> serde_json::Value {
+    let adjudications = adjudications_path.map(|path| read_review_adjudications(path, &view.reviews));
+    let (classifications, snapshot_hash, adjudications_available, adjudications_error) =
+        match &adjudications {
+            None => (BTreeMap::new(), None, false, None),
+            Some(Ok((rows, hash))) => (rows.clone(), Some(hash.clone()), true, None),
+            Some(Err(error)) => (BTreeMap::new(), None, false, Some(error.clone())),
+        };
+
     let mut unknown_requester = 0usize;
     let mut unsigned_author = 0usize;
     let mut signed = 0usize;
@@ -1219,8 +1386,14 @@ fn new_actor_review_outcomes_json(
     let mut approved = 0usize;
     let mut request_changes = 0usize;
     let mut pending = 0usize;
-    let mut archived = 0usize;
+    let mut archived_classified = 0usize;
+    let mut archived_evidence_lost = 0usize;
     let mut slashed = 0usize;
+    let mut eligible = 0usize;
+    let mut classified: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut review_rounds = 0usize;
+    let mut review_rounds_unlanded = 0usize;
+    let mut landed = 0usize;
     for (id, review) in &view.reviews {
         let Some(evidence) = state.review_requesters.get(id) else {
             unknown_requester += 1;
@@ -1239,39 +1412,108 @@ fn new_actor_review_outcomes_json(
         if review.re_review_required() {
             slashed += 1;
         }
-        if matches!(review.status, ReviewStatus::Archived { .. }) {
-            // An archived row kept its approved flag but lost the verdicts
-            // behind it, so "not approved" no longer separates an answered
-            // rejection from a lapse. One bucket, not two.
-            archived += 1;
+        let rounds = state
+            .new_actor_load
+            .verdict_rounds
+            .get(id)
+            .copied()
+            .unwrap_or_default();
+        review_rounds += rounds;
+        if state.new_actor_load.landed.contains(id) {
+            landed += 1;
+        } else {
+            review_rounds_unlanded += rounds;
+        }
+        let classification = classifications.get(id).copied();
+        let counts_toward_rate = if matches!(review.status, ReviewStatus::Archived { .. }) {
+            // Archiving destroys the verdicts an adjudicator needs, and a
+            // lapse archives a review nobody ever answered. Without a
+            // standing classification such a row is evidence of nothing.
+            if classification.is_some() {
+                archived_classified += 1;
+                true
+            } else {
+                archived_evidence_lost += 1;
+                false
+            }
         } else if !review.complete() {
             pending += 1;
+            false
         } else if review
             .verdicts
             .values()
             .any(|(verdict, _)| *verdict == Verdict::RequestChanges)
         {
             request_changes += 1;
+            true
         } else {
             approved += 1;
+            true
+        };
+        if counts_toward_rate {
+            eligible += 1;
+            if let Some(classification) = classification {
+                *classified
+                    .entry(match classification {
+                        Classification::Valid => "valid",
+                        Classification::Invalid => "invalid",
+                        Classification::Slop => "slop",
+                        Classification::Unclear => "unclear",
+                    })
+                    .or_default() += 1;
+            }
         }
     }
+
     let available = cohort.is_some();
+    let submissions: usize = cohort
+        .map(|cohort| {
+            cohort
+                .iter()
+                .filter_map(|key| state.new_actor_load.submissions.get(key))
+                .sum()
+        })
+        .unwrap_or_default();
+    let adjudicated: usize = classified.values().sum();
+    let classified_rows: BTreeMap<String, usize> = ["valid", "invalid", "slop", "unclear"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                classified.get(name).copied().unwrap_or_default(),
+            )
+        })
+        .collect();
     serde_json::json!({
-        "format_version": 1,
+        "format_version": 2,
         "as_of_seq": state.as_of_seq,
+        "unit": "contribution_offered",
         "cohort": {
             "definition": "post_activation_non_incumbent_actor_keys",
             "source": "newcomer_harm audit",
             "available": available,
             "actor_keys": cohort.map(BTreeSet::len),
         },
-        "classifier": null,
+        "policy": {
+            "graduation": null,
+            "trailing_window": null,
+            "tripwire_subject": null,
+            "sampling": "census",
+            "status": "unset_pending_operator_decision",
+        },
+        "load": available.then(|| serde_json::json!({
+            "accepted_operations": submissions,
+            "reviews_requested": attributed,
+            "review_rounds": review_rounds,
+            "review_rounds_on_unlanded": review_rounds_unlanded,
+            "reviews_landed": landed,
+            "reviews_never_landed": attributed - landed,
+        })),
         "declared_tripwire": {
             "max_invalid_or_slop_percent": T2_MAX_INVALID_OR_SLOP_PERCENT,
             "min_valid_percent": T2_MIN_VALID_PERCENT,
             "evaluable": false,
-            "blocked_on": "no adjudicated validity classifier exists; a verdict records landability, not validity",
+            "blocked_on": "cohort exit, observation window and tripwire subject are unset, and census adjudication cannot survive a flood",
         },
         "totals": {
             "reviews": view.reviews.len(),
@@ -1280,24 +1522,40 @@ fn new_actor_review_outcomes_json(
             "excluded_unsigned_author": unsigned_author,
             "excluded_unknown_requester": unknown_requester,
         },
-        "outcomes": available.then(|| serde_json::json!({
+        "review_outcomes": available.then(|| serde_json::json!({
             "approved": approved,
             "request_changes": request_changes,
             "pending": pending,
-            "archived_detail_dropped": archived,
+            "archived_classified": archived_classified,
+            "archived_evidence_lost": archived_evidence_lost,
             "re_review_required": slashed,
         })),
+        "adjudication": {
+            "configured": adjudications_path.is_some(),
+            "available": adjudications_available,
+            "snapshot_hash": snapshot_hash,
+            "error": adjudications_error,
+            "eligible": available.then_some(eligible),
+            "adjudicated": available.then_some(adjudicated),
+            "coverage_basis_points": available.then(|| share_basis_points(adjudicated, eligible)),
+            "classified": available.then_some(classified_rows),
+            "independent": false,
+        },
         "tripwire_observed": null,
         "tripwire_status": "indeterminate",
         "evaluation_complete": false,
         "semantics": {
+            "unit": "a contribution offered by a cohort key; reviews are a sub-metric because the contributor opens their own review and can decline to",
+            "accepted_operations": "every accepted signed operation authored by a cohort key, review participation included; counted because work that never reaches review is invisible to a review-shaped denominator",
+            "load": "objective and adjudication-free, so it keeps measuring when a classifier's coverage collapses; a rate alone cannot see a flood",
             "approved": "live, every listed reviewer answered, and no verdict is RequestChanges — not a validity judgement",
             "request_changes": "live, every listed reviewer answered, and at least one standing verdict is RequestChanges — 'needs work', overwritable, not slop",
-            "pending": "live and unassigned or not yet answered by every listed reviewer",
-            "archived_detail_dropped": "settled or lapsed; verdict detail is gone, so an answered rejection is indistinguishable from an unanswered lapse",
+            "pending": "live and unassigned or not yet answered by every listed reviewer; reported, never counted",
+            "archived_evidence_lost": "archived with no standing classification; a lapse archives an unanswered review on a wall clock, so it is excluded from both numerator and denominator",
             "re_review_required": "overlaps the buckets above; counts cohort reviews carrying a retroactive approval slash",
             "attribution": "the RequestReview log entry's signing key; that author is not proven to have authored the commit under review",
-            "indeterminate": "structural, not sample-size: a validity classifier does not exist, so more evidence cannot settle this tripwire",
+            "independent": "a single-operator node classifies contributions its own reviewers approved; this is self-adjudication, not an independent judgement",
+            "indeterminate": "structural: the cohort has no exit, the window and tripwire subject are unset, and census adjudication goes blind in the flood it should detect",
         },
     })
 }
@@ -1867,6 +2125,10 @@ pub struct Platform {
     /// Opt-in D24 T4 audit. Sparse and separate from the signed op log:
     /// rejected requests never enter that log, while this evidence must.
     newcomer_audit: Option<Arc<Mutex<NewcomerAudit>>>,
+    /// Opt-in D24 T2 operator classifications, re-read on every report so a
+    /// fresh judgement lands without a restart. Absent means uncounted, not
+    /// unclassified: coverage simply stays zero.
+    review_adjudications: Option<std::path::PathBuf>,
     /// Serializes concurrent maintenance passes. User submissions still
     /// race normally through the sequencer; only duplicate pruning scans
     /// and archive batches are coalesced.
@@ -2029,6 +2291,7 @@ impl Platform {
             concentration,
             review_retention,
             newcomer_audit: None,
+            review_adjudications: None,
             review_prune_lock: Mutex::new(()),
             _sequencer: sequencer,
         };
@@ -2097,6 +2360,51 @@ impl Platform {
             incumbent_actor_keys.into_iter().collect(),
         )?;
         self.newcomer_audit = Some(Arc::new(Mutex::new(audit)));
+        Ok(self)
+    }
+
+    /// Enables the D24 T2 operator classification file: versioned 0600 JSONL
+    /// rows of `{"format_version":1,"review_id":…,"classification":…}` where
+    /// classification is `valid`, `invalid`, `slop` or `unclear`.
+    ///
+    /// Separate from the signed op log on purpose, exactly like the T4
+    /// adjudications: a judgement about a contribution is the operator's
+    /// opinion, not a sequenced claim any actor can make. Keying it by review
+    /// id rather than by verdict is what lets a classification outlive
+    /// archiving, which discards the verdict bulk.
+    ///
+    /// Enabling it does not make T2 evaluable. The cohort still has no exit
+    /// rule, the observation window and tripwire subject are unset, and census
+    /// adjudication cannot survive the flood it would need to detect.
+    ///
+    /// # Errors
+    ///
+    /// The file or its directory cannot be created.
+    pub fn with_review_adjudications(
+        mut self,
+        path: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create review adjudications directory: {e}"))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&path)
+            .map_err(|e| format!("open review adjudications: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("chmod review adjudications: {e}"))?;
+        }
+        self.review_adjudications = Some(path);
         Ok(self)
     }
 
@@ -2625,6 +2933,7 @@ impl Platform {
                     &concentration_state,
                     &view,
                     cohort.as_ref(),
+                    self.review_adjudications.as_deref(),
                 );
                 drop(key_names);
                 drop(concentration_state);
