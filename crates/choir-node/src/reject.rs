@@ -329,7 +329,7 @@ impl Code {
             Self::StaleHead => "Re-read `GET /api/view`, rebase your intent on the value in                 `actual`, and resubmit with that as `prev`. If you are retrying a submission                 whose response you lost, check for `already_applied` first — a completed retry                 answers 200, not this.",
             Self::ReviewState => "Read `reviews` in `GET /api/view` for this id. A review that                 is already assigned, complete, or archived does not accept the op you sent.",
             Self::ProvenanceState => "Resubmit with a non-empty subject and kind.",
-            Self::IdentityState => "Not a retry: a key belongs to one operator for the life of                 the key, and a revoked key is never rebindable. Bind a fresh key                 instead. `error` names which of the two applies.",
+            Self::IdentityState => "Read `bindings` in `GET /api/view` for this key. Not a retry:                 a key belongs to one operator for the life of the key, and a revoked key is                 never rebindable. Bind a fresh key instead. `error` names which of the two                 applies.",
             Self::PolicyUnavailable => "Operator problem, not a client one: the gate fails                 closed rather than guessing. Retry once the file is restored.",
             Self::LogEvicted => "Resync from the sequence in `window_base`; entries before it                 are gone from this node.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",

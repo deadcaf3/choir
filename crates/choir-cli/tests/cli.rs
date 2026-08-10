@@ -28,6 +28,14 @@ fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         .expect("git runs")
 }
 
+/// The only binding's actor id. Asserts there is exactly one, so a stray
+/// second binding surfaces here instead of being silently indexed past.
+fn row_key(view: &serde_json::Value) -> String {
+    let map = view["bindings"].as_object().expect("binding map");
+    assert_eq!(map.len(), 1, "expected exactly one binding: {map:?}");
+    map.keys().next().expect("one binding").clone()
+}
+
 fn json(out: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
         panic!("json stdout, got {:?}", String::from_utf8_lossy(&out.stdout))
@@ -172,9 +180,35 @@ fn cli_end_to_end() {
     let out = choir(&["bind", &api, node_key_arg, "other-op", &pub_hex]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(json(&out)["code"], "identity_state", "{:?}", json(&out));
-    // Correcting the channel stays allowed: a typo must not burn a key.
+    // The binding is readable, which is what makes the rest of this
+    // checkable without replaying the log.
+    let view = json(&choir(&["view", &api]));
+    let row = &view["bindings"][row_key(&view)];
+    assert_eq!(row["operator"], "cli-op", "{}", view["bindings"]);
+    assert_eq!(row["channel"], "cli-op/agent");
+    assert!(row["revoked"].is_null());
+
+    // Re-binding to exactly the same operator and channel changes nothing,
+    // so the CLI reports it and submits no op. The fold still permits it;
+    // this is a client-side courtesy, not a new persisted rule.
+    let out = choir(&["bind", &api, node_key_arg, "cli-op", &pub_hex, "cli-op/agent"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    let body = json(&out);
+    assert_eq!(body["already_bound"], true, "{body}");
+    assert_eq!(body["bound_at"], row["bound_at"], "{body}");
+
+    // Correcting the channel stays allowed: a typo must not burn a key,
+    // and it is a real change so it is submitted rather than short-circuited.
     let out = choir(&["bind", &api, node_key_arg, "cli-op", &pub_hex, "cli-op/other"]);
     assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    assert!(json(&out)["already_bound"].is_null(), "{:?}", json(&out));
+    let view = json(&choir(&["view", &api]));
+    let row = &view["bindings"][row_key(&view)];
+    assert_eq!(row["channel"], "cli-op/other", "{}", view["bindings"]);
+    assert_eq!(
+        row["bound_at"], body["bound_at"],
+        "correcting a channel must not move the first-binding position"
+    );
 
     // Revocation is node-only and terminal, and the second attempt must
     // carry different bytes or the retry index answers `already_applied`.

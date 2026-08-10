@@ -32,7 +32,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir appeal <api> <attempt-id>` — appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view plus T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, and complete-view growth
+- `choir view <api>` — the materialized view plus durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, and complete-view growth
 <!-- /generated -->
 
 Signatures above are generated; these conventions are not, and they are

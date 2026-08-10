@@ -1684,6 +1684,7 @@ fn view_growth_json(
     refs: &serde_json::Value,
     reviews: &serde_json::Value,
     provenance: &serde_json::Value,
+    bindings: &serde_json::Value,
     as_of_seq: Option<u64>,
 ) -> serde_json::Value {
     let serialized_bytes = |value: &serde_json::Value| {
@@ -1691,6 +1692,12 @@ fn view_growth_json(
             .expect("materialized view JSON is always serializable")
             .len()
     };
+    // `bindings` is deliberately absent here. The four sections below are
+    // the authoritative view and `total_authoritative_view` is a tracked
+    // series; folding a fifth section in would move every past reading and
+    // destroy comparability. It is still *measured* — see the sibling byte
+    // count — because an append-only map nobody counts is how a view grows
+    // without anyone noticing.
     let authoritative = serde_json::json!({
         "workspaces": workspaces,
         "refs": refs,
@@ -1707,6 +1714,7 @@ fn view_growth_json(
             "reviews": serialized_bytes(reviews),
             "provenance": serialized_bytes(provenance),
             "total_authoritative_view": serialized_bytes(&authoritative),
+            "bindings": serialized_bytes(bindings),
         },
     })
 }
@@ -1718,6 +1726,14 @@ fn view_growth_counts(view: &View) -> serde_json::Value {
         .filter(|review| matches!(review.status, ReviewStatus::Live))
         .count();
     let provenance_records = view.provenance.values().map(BTreeMap::len).sum::<usize>();
+    // Revoked bindings are counted, never subtracted: the row survives
+    // revocation, so a `bindings` count that dropped on revoke would
+    // understate the map it is meant to size.
+    let revoked_bindings = view
+        .bindings
+        .values()
+        .filter(|binding| binding.is_revoked())
+        .count();
     serde_json::json!({
         "workspaces": view.workspaces.len(),
         "refs": view.refs.len(),
@@ -1726,6 +1742,8 @@ fn view_growth_counts(view: &View) -> serde_json::Value {
         "archived_reviews": view.reviews.len() - live_reviews,
         "provenance_subjects": view.provenance.len(),
         "provenance_records": provenance_records,
+        "bindings": view.bindings.len(),
+        "revoked_bindings": revoked_bindings,
     })
 }
 
@@ -3054,10 +3072,16 @@ impl Platform {
                     .iter()
                     .map(|(id, r)| (id.clone(), review_json(r)))
                     .collect();
+                let bindings: BTreeMap<_, _> = view
+                    .bindings
+                    .iter()
+                    .map(|(key_id, binding)| (key_id.clone(), binding_json(binding)))
+                    .collect();
                 let ws = serde_json::json!(ws);
                 let refs = serde_json::json!(refs);
                 let reviews = serde_json::json!(reviews);
                 let provenance = serde_json::json!(&view.provenance);
+                let bindings = serde_json::json!(bindings);
                 let counts = view_growth_counts(&view);
                 let as_of_seq = concentration_state.as_of_seq;
                 // T3 attribution reads the durable record, not the keys
@@ -3086,6 +3110,7 @@ impl Platform {
                     &refs,
                     &reviews,
                     &provenance,
+                    &bindings,
                     as_of_seq,
                 );
                 let newcomer_harm = newcomer_harm_json(self.newcomer_audit.as_ref());
@@ -3094,6 +3119,7 @@ impl Platform {
                     "refs": refs,
                     "reviews": reviews,
                     "provenance": provenance,
+                    "bindings": bindings,
                     "concentration": concentration,
                     "view_growth": view_growth,
                     "newcomer_harm": newcomer_harm,
@@ -3683,6 +3709,27 @@ fn trim_newline(line: &[u8]) -> &[u8] {
 
 /// JSON shape of one review's state (shared by /api/view and
 /// /api/reviews).
+/// One durable key binding, as `/api/view` reports it.
+///
+/// Keyed by actor id, so a client joins this against `author_sig.key_id`
+/// and the `key_id` a witness carries without deriving anything.
+///
+/// `bound_at` is the seq of the op that *first* bound the key and never
+/// moves, which is what makes it orderable; a later re-bind changes only
+/// `channel`. `revoked` is present and non-null once withdrawn, and the
+/// row survives revocation on purpose — attribution for past work must
+/// not disappear at the moment revocation makes it interesting.
+fn binding_json(binding: &choir_view::KeyBinding) -> serde_json::Value {
+    serde_json::json!({
+        "operator": binding.operator,
+        "channel": binding.channel,
+        "bound_at": binding.bound_at,
+        "revoked": binding.revoked.as_ref().map(|revocation| {
+            serde_json::json!({ "at": revocation.at, "reason": revocation.reason })
+        }),
+    })
+}
+
 fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
     let verdicts: std::collections::BTreeMap<_, _> = r
         .verdicts

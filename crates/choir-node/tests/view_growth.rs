@@ -24,6 +24,95 @@ fn serialized_len(value: &serde_json::Value) -> usize {
         .len()
 }
 
+/// Bindings are projected and measured, and must never move the tracked
+/// total.
+///
+/// `total_authoritative_view` is a series compared across readings, so
+/// folding a fifth section into it would silently rewrite the meaning of
+/// every past number. The opposite failure is just as real: an append-only
+/// map that nothing counts is how a view grows without anyone noticing.
+/// Both are asserted here, because the safe-looking fix for either one
+/// breaks the other.
+#[test]
+fn bindings_are_measured_but_stay_out_of_the_authoritative_total() {
+    let node_key = ActorKey::generate();
+    let platform = Platform::start(
+        Registry::new(),
+        Box::new(MemLog::new()),
+        ActorKey::from_secret_bytes(&node_key.secret_bytes()),
+    )
+    .expect("platform starts");
+
+    let (_, before) = current_view(&platform);
+    let total_before = before["view_growth"]["serialized_bytes"]["total_authoritative_view"]
+        .as_u64()
+        .expect("total is a number");
+    assert_eq!(before["bindings"], serde_json::json!({}));
+    assert_eq!(before["view_growth"]["serialized_bytes"]["bindings"], 2);
+
+    let subject = ContentHash::blake3(b"an agent key");
+    let submit = |op: ViewOp| {
+        let payload = op.to_payload();
+        let sig = node_key.sign_submission("node/bind", &payload);
+        let (status, body) = platform.handle_api(
+            "POST",
+            "/api/submit",
+            serde_json::json!({
+                "channel": "node/bind",
+                "payload_hex": hex_encode(&payload),
+                "key_id": sig.key_id,
+                "signature_hex": hex_encode(&sig.signature),
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(status, 200, "{body}");
+    };
+    submit(ViewOp::new(OpKind::BindKey {
+        operator: "alpha".into(),
+        key: subject.clone(),
+        channel: Some("alpha/agent".into()),
+    }));
+
+    let (_, bound) = current_view(&platform);
+    let row = &bound["bindings"][subject.to_hex()];
+    assert_eq!(row["operator"], "alpha", "{}", bound["bindings"]);
+    assert_eq!(row["channel"], "alpha/agent");
+    assert_eq!(row["bound_at"], 0, "the first binding pins the log position");
+    assert!(row["revoked"].is_null(), "an unrevoked row reports null");
+    assert_eq!(bound["view_growth"]["counts"]["bindings"], 1);
+    assert_eq!(bound["view_growth"]["counts"]["revoked_bindings"], 0);
+    assert_eq!(
+        bound["view_growth"]["serialized_bytes"]["bindings"],
+        serialized_len(&bound["bindings"]),
+        "the binding map must be measured, not merely projected"
+    );
+    assert_eq!(
+        bound["view_growth"]["serialized_bytes"]["total_authoritative_view"],
+        total_before,
+        "a binding must not move the tracked authoritative total"
+    );
+
+    // Revocation keeps the row, so the count must not fall back.
+    submit(ViewOp::new(OpKind::RevokeKey {
+        key: subject.clone(),
+        reason: "key material rotated".into(),
+    }));
+    let (_, revoked) = current_view(&platform);
+    let row = &revoked["bindings"][subject.to_hex()];
+    assert_eq!(row["operator"], "alpha", "attribution survives revocation");
+    assert_eq!(row["bound_at"], 0, "revoking must not move the first binding");
+    assert_eq!(row["revoked"]["at"], 1);
+    assert_eq!(row["revoked"]["reason"], "key material rotated");
+    assert_eq!(revoked["view_growth"]["counts"]["bindings"], 1);
+    assert_eq!(revoked["view_growth"]["counts"]["revoked_bindings"], 1);
+    assert_eq!(
+        revoked["view_growth"]["serialized_bytes"]["total_authoritative_view"],
+        total_before,
+        "a revocation must not move the tracked authoritative total either"
+    );
+}
+
 fn authoritative_view(value: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "workspaces": value["workspaces"],
@@ -55,9 +144,16 @@ fn assert_growth_matches_sections(view: &serde_json::Value) {
             "archived_reviews": archived_reviews,
             "provenance_subjects": provenance.len(),
             "provenance_records": provenance_records,
+            "bindings": view["bindings"].as_object().expect("binding map").len(),
+            "revoked_bindings": view["bindings"]
+                .as_object()
+                .expect("binding map")
+                .values()
+                .filter(|binding| !binding["revoked"].is_null())
+                .count(),
         })
     );
-    for section in ["workspaces", "refs", "reviews", "provenance"] {
+    for section in ["workspaces", "refs", "reviews", "provenance", "bindings"] {
         assert_eq!(
             growth["serialized_bytes"][section],
             serialized_len(&view[section]),
@@ -93,9 +189,11 @@ fn empty_view_reports_exact_non_self_referential_sizes() {
             "archived_reviews": 0,
             "provenance_subjects": 0,
             "provenance_records": 0,
+            "bindings": 0,
+            "revoked_bindings": 0,
         })
     );
-    for section in ["workspaces", "refs", "reviews", "provenance"] {
+    for section in ["workspaces", "refs", "reviews", "provenance", "bindings"] {
         assert_eq!(
             growth["serialized_bytes"][section],
             serialized_len(&view[section]),
@@ -210,9 +308,11 @@ fn counts_live_archived_and_latest_provenance_records_deterministically() {
             // Three provenance ops become two visible records because
             // latest-wins is part of the complete view's meaning.
             "provenance_records": 2,
+            "bindings": 0,
+            "revoked_bindings": 0,
         })
     );
-    for section in ["workspaces", "refs", "reviews", "provenance"] {
+    for section in ["workspaces", "refs", "reviews", "provenance", "bindings"] {
         assert_eq!(
             growth["serialized_bytes"][section],
             serialized_len(&view[section]),
