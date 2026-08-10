@@ -28,6 +28,13 @@ status)
     echo "agent:  not loaded — run: sh scripts/choirctl install"
     exit 1
   fi
+  # Which binary is actually serving, not merely whether something is.
+  # `launchctl kickstart -k` restarts the job from launchd's cached job
+  # definition, so a plist whose ProgramArguments changed can lint clean,
+  # restart cleanly, and still run the old binary. An API-shaped check
+  # cannot catch that when both binaries have the feature you are testing
+  # for; only the path can. Reloading properly is bootout then bootstrap.
+  echo "binary: $(ps -eo args | grep "[c]hoir-node" | head -1 | awk '{print $1}')"
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/view" || true)
   echo "auth:   $code on an unauthenticated /api/view (401 = auth is on)"
   echo "view:   $(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")"

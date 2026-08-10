@@ -159,7 +159,22 @@ fn durable_log_precedes_ref_publication_precedes_client_ack() {
     if synced_rx.recv_timeout(Duration::from_secs(5)).is_err() {
         let _ = release_sync_tx.send(());
         std::fs::write(&release_publish, b"").ok();
-        panic!("push never reached the durable log barrier");
+        // The barrier timing out is the symptom; git's own complaint is the
+        // cause, and it is already sitting unread in `push_rx`. Panicking
+        // without it names the thing that did not happen and discards the
+        // reason, which is how this failure stayed a mystery: it reproduces
+        // roughly one run in five on an idle machine, and every report of it
+        // said only that a barrier was not reached.
+        let detail = match push_rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(out) => format!(
+                "git push exited {:?}; stdout {:?}; stderr {:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(error) => format!("git push had not returned either ({error})"),
+        };
+        panic!("push never reached the durable log barrier: {detail}");
     }
 
     // Stage 1: independently visible durable bytes, but Git has not moved
