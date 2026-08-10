@@ -99,15 +99,35 @@ fn time_unrelated_writes(platform: &Platform, key: &ActorKey, n: usize) -> std::
     start.elapsed()
 }
 
+/// Best of three, per side.
+///
+/// The question here is whether an enabled retention bound adds per-op cost,
+/// and the cleanest estimate of that is the *fastest* observation: a run can
+/// be slowed by the machine but never speeded up by it, so noise only ever
+/// inflates a sample. Taking a single sample instead let contention answer
+/// the question — this assertion failed once at 2.87x inside a parallel
+/// `cargo test --workspace`, while ten isolated runs measured 0.97x to
+/// 1.03x. The ceiling was never the problem; the estimator was.
+fn best_of_three(
+    platform: &choir_node::Platform,
+    key: &choir_identity::ActorKey,
+    n: usize,
+) -> std::time::Duration {
+    (0..3)
+        .map(|_| time_unrelated_writes(platform, key, n))
+        .min()
+        .expect("three samples")
+}
+
 #[test]
 fn an_unprunable_backlog_does_not_slow_unrelated_writes() {
     let (key, off) = build(None);
     fill_incomplete(&off, &key, STUCK);
-    let baseline = time_unrelated_writes(&off, &key, OPS);
+    let baseline = best_of_three(&off, &key, OPS);
 
     let (key, on) = build(Some(ReviewRetention::keep(10)));
     fill_incomplete(&on, &key, STUCK);
-    let enabled = time_unrelated_writes(&on, &key, OPS);
+    let enabled = best_of_three(&on, &key, OPS);
 
     let ratio = enabled.as_secs_f64() / baseline.as_secs_f64();
     println!(
