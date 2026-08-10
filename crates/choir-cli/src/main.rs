@@ -137,6 +137,27 @@ fn finish(status: u16, body: &str) -> ! {
     std::process::exit(if (200..300).contains(&status) { 0 } else { 1 });
 }
 
+/// The binding `/api/view` currently reports for `actor_id`, if any.
+///
+/// Best-effort by design: any failure to read returns `None` so the bind
+/// still goes out. Refusing to submit because a *read* failed would turn
+/// a reporting problem into an availability problem, and the node is the
+/// authority on whether a binding is admissible regardless of what this
+/// saw.
+fn current_binding(
+    api: &str,
+    auth: AuthOptions<'_>,
+    actor_id: &str,
+) -> Option<serde_json::Value> {
+    let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let view: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let binding = view.get("bindings")?.get(actor_id)?;
+    (!binding.is_null()).then(|| binding.clone())
+}
+
 /// Signs `op` on attribution channel `channel` and posts it.
 fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptions<'_>) -> ! {
     let key = load_key(key_file);
@@ -276,10 +297,40 @@ fn main() {
         // an operator never hand-computes a hash to bind a key.
         ["bind", api, node_key_file, operator, key_hex, rest @ ..] if rest.len() <= 1 => {
             require_node_key_file(node_key_file);
+            let key = actor_id_from_hex(key_hex);
+            let channel = rest.first().map(|c| (*c).to_string());
+            // A re-bind that changes nothing is admissible -- the fold
+            // allows re-binding so a channel typo can be corrected -- so
+            // it costs a log entry and moves no state. That is a poor
+            // reason to add a fold rule: refusing A->A inside `validate`
+            // means distinguishing it from A->B in persisted semantics.
+            // Catching it here keeps the record's rules unchanged.
+            //
+            // Deliberately narrow: only an exact match on operator and
+            // channel, and only while unrevoked. Anything else is the
+            // node's call, and the fold already refuses a cross-operator
+            // move and a re-bind of a revoked key with `identity_state`.
+            if let Some(existing) = current_binding(api, auth, &key.to_hex()) {
+                if existing["operator"] == serde_json::json!(operator)
+                    && existing["channel"] == serde_json::json!(channel)
+                    && existing["revoked"].is_null()
+                {
+                    finish(
+                        200,
+                        &serde_json::json!({
+                            "already_bound": true,
+                            "operator": operator,
+                            "channel": channel,
+                            "bound_at": existing["bound_at"],
+                        })
+                        .to_string(),
+                    );
+                }
+            }
             let op = ViewOp::new(OpKind::BindKey {
                 operator: (*operator).into(),
-                key: actor_id_from_hex(key_hex),
-                channel: rest.first().map(|c| (*c).to_string()),
+                key,
+                channel,
             });
             submit(api, node_key_file, "node/bind", &op, auth);
         }

@@ -237,7 +237,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "view",
         args: "<api>",
-        summary: "the materialized view plus T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, and complete-view growth",
+        summary: "the materialized view plus durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, and complete-view growth",
         agent_facing: true,
     },
 ];
@@ -268,7 +268,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "GET",
         path: "/api/view",
-        purpose: "The materialized view plus T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, and complete-view growth",
+        purpose: "The materialized view plus durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, and complete-view growth",
         mcp: Some(McpTool {
             name: "choir_view",
             input_schema: EMPTY_MCP_SCHEMA,
