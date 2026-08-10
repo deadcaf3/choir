@@ -2664,7 +2664,7 @@ impl Platform {
     /// Candidates are the pool minus everyone sharing the requester's
     /// **operator** and, when configured, every operator within the chosen
     /// conflict-graph distance. The draw takes at most one reviewer per
-    /// operator so [`REQUIRED_APPROVAL_WEIGHT`] reviewers means that many
+    /// operator so `REQUIRED_APPROVAL_WEIGHT` reviewers means that many
     /// *independent* ones under the configured policy.
     ///
     /// Excluding only the requester's own name was the original rule and
@@ -2675,7 +2675,7 @@ impl Platform {
     /// says must be blocked at the operator level, so the exclusion has
     /// to be at that level too.
     ///
-    /// A pool that cannot supply [`REQUIRED_APPROVAL_WEIGHT`] distinct operators
+    /// A pool that cannot supply `REQUIRED_APPROVAL_WEIGHT` distinct operators
     /// draws fewer rather than doubling up — a visibly under-assigned
     /// review beats one that looks independent and is not.
     ///

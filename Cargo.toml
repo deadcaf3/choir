@@ -108,3 +108,12 @@ large_enum_variant = "warn"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
+# The neighbouring lint, and the reason it is spelled out rather than left
+# at its default warn. `broken_intra_doc_links` catches a link to an item
+# that does not exist; a link to an item that exists but is *private*
+# is a different lint entirely, and it sat at warn while CLAUDE.md told
+# readers doc-link integrity was enforced. Two such links lived in
+# `assign_reviewers` for two days without anything failing, because no
+# gate step ran `cargo doc` at all. Denying it is half the fix; running
+# `cargo doc --workspace --no-deps` in the ship gate is the other half.
+private_intra_doc_links = "deny"
