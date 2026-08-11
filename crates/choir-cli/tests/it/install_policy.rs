@@ -495,6 +495,33 @@ fn the_oplog_backup_carries_the_log_and_the_pin_but_never_the_key() {
         "the backup stopped writing .part then renaming; an interrupted run truncates the backup"
     );
 
+    // Rehearsing the restore showed the log alone is not enough: a node
+    // rebuilt from ops.jsonl refused to boot without --reviewers-file,
+    // so the policy files have to travel or the backup restores a
+    // ledger onto a node that will not start.
+    let list = code
+        .lines()
+        .find(|l| l.contains("for f in") && l.contains("reviewers"))
+        .expect("the policy-file backup list");
+    for needed in ["keys", "reviewers", "protected-refs", "newcomer-audit.jsonl"] {
+        assert!(
+            list.contains(needed),
+            "the policy backup dropped {needed}; a restore stops booting again"
+        );
+    }
+    // Same rule as the key: a token or a private key in the backup turns
+    // an availability measure into a credential-distribution channel.
+    for forbidden in ["auth", ".pem", ".key"] {
+        assert!(
+            !list.contains(forbidden),
+            "the policy backup list names {forbidden}; secrets must not travel with it"
+        );
+    }
+    assert!(
+        code.contains("policy.part"),
+        "the policy backup stopped staging into .part; a failed extract leaves a partial policy set"
+    );
+
     // The script is run as `sh`, never as the zsh in its shebang, and a
     // runtime-only failure here would skip the backup while the receipt
     // still ended in success. `sh -n` catches at least the syntax half.

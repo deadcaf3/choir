@@ -126,12 +126,45 @@ if [ -f "$NODE_STATE/ops.jsonl" ]; then
   fi
   oplog_lines=$(wc -l < "$NODE_STATE/ops.jsonl" | tr -d ' ')
 fi
+
+# Rehearsing the restore proved the log is not the whole node. A node
+# rebuilt from ops.jsonl alone refused to boot — "review assignment
+# policy needs --reviewers-file" — and once booted its D23/D24 metrics
+# read `configured: false` until the audit files were present too.
+# These are policy rather than sequenced facts, so they live outside the
+# log by design, and they were single-copy in exactly the way the log
+# had been. A backup that restores a ledger onto a node that will not
+# start is not a backup.
+#
+# The exclusions carry the same weight as in the leg above: `auth` holds
+# a bearer token, and the *.key and *.pem files hold private keys.
+# Neither travels. What ships is public keys and policy — what a restore
+# needs, and what an attacker gains nothing from holding.
+#
+# One tar over the existing connection rather than a round trip per
+# file, extracted into .part and swapped in only once it is complete.
+CHOIR_HOME=${CHOIR_HOME:-$HOME/.choir}
+policy_files=""
+for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl; do
+  if [ -f "$CHOIR_HOME/$f" ]; then policy_files="$policy_files $f"; fi
+done
+policy_count=0
+if [ -n "$policy_files" ]; then
+  # shellcheck disable=SC2086 — the list is built above from fixed names.
+  tar -cf - -C "$CHOIR_HOME" $policy_files | ssh "${ssh_opts[@]}" "choir@$IP" \
+    'rm -rf ~/choir-oplog/policy.part \
+     && mkdir -p ~/choir-oplog/policy.part \
+     && tar -xf - -C ~/choir-oplog/policy.part \
+     && rm -rf ~/choir-oplog/policy \
+     && mv ~/choir-oplog/policy.part ~/choir-oplog/policy'
+  policy_count=$(echo $policy_files | wc -w | tr -d ' ')
+fi
 t_oplog=$(now)
 
 # awk does the subtraction: $(( )) is integer-only in bash 3.2 and would
 # silently truncate every stage to whole seconds, or fail outright on a
 # decimal point.
-awk -v a="$t_start" -v b="$t_conn" -v c="$t_xfer" -v d="$t_push" -v e="$t_oplog" -v n="$oplog_lines" 'BEGIN {
-  printf "mirror: connect %.1fs | git push %.1fs | box-local push %.1fs | oplog %.1fs (%d ops) | total %.1fs\n", b-a, c-b, d-c, e-d, n, e-a
+awk -v a="$t_start" -v b="$t_conn" -v c="$t_xfer" -v d="$t_push" -v e="$t_oplog" -v n="$oplog_lines" -v p="$policy_count" 'BEGIN {
+  printf "mirror: connect %.1fs | git push %.1fs | box-local push %.1fs | oplog %.1fs (%d ops, %d policy) | total %.1fs\n", b-a, c-b, d-c, e-d, n, p, e-a
 }'
 echo "mirror updated"
