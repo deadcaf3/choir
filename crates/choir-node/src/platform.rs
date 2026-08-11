@@ -467,7 +467,17 @@ impl NewcomerAudit {
         accepted: bool,
         rejection_code: Option<&str>,
     ) -> Result<Option<u64>, String> {
-        if self.incumbents.contains(actor_key) || rejection_code == Some("unknown_key") {
+        // `actor_key` is the *claimed* key id, straight off an
+        // unverified signature, so nothing may be recorded under it
+        // until a signature check has vouched for it. Both signature
+        // failures have to be listed: this read `== Some("unknown_key")`
+        // while that code covered every verification failure, and
+        // splitting `bad_signature` out of it would otherwise have let
+        // anyone who knows a trusted key id append audit rows in that
+        // actor's name by sending deliberate garbage.
+        if self.incumbents.contains(actor_key)
+            || matches!(rejection_code, Some("unknown_key" | "bad_signature"))
+        {
             return Ok(None);
         }
         let completed_at_unix_ms = unix_ms();
@@ -2171,11 +2181,32 @@ impl SubmitPolicy for ChoirPolicy {
             verified_actor = self.registry.verify_signing_hash(&signing, sig);
         }
         let actor_id = verified_actor.map_err(|e| {
-            Rejection::new(
-                Code::UnknownKey,
-                format!("signature check failed: {e:?}"),
-                "ask the operator to add your public key to the node's trusted-keys file                  (`choir key <file> <you>` prints the line); it takes effect on the next request",
-            )
+            // Two failures with opposite repairs, and one of them is an
+            // attack signal, so they cannot share a code. A key id the
+            // node has no record of is a trust gap the operator closes.
+            // A signature that does not verify under a key the node
+            // already trusts is either corruption or a lifted signature
+            // replayed onto other bytes -- and answering that with "ask
+            // the operator to register your public key" hands the party
+            // being impersonated the one repair that helps the attacker.
+            // Anything else is reported as the bad signature too: of the
+            // two directions to be wrong in, refusing is the safe one.
+            let detail = format!("signature check failed: {e:?}");
+            match &e {
+                choir_identity::IdentityError::UnknownKey(_) => Rejection::new(
+                    Code::UnknownKey,
+                    detail,
+                    "ask the operator to add your public key to the node's trusted-keys file                  (`choir key <file> <you>` prints the line); it takes effect on the next request",
+                ),
+                _ => Rejection::new(
+                    Code::BadSignature,
+                    detail,
+                    "re-sign the exact bytes you are submitting; a signature covers one \
+                     (channel, payload) pair and does not carry to another. Registering a key \
+                     does not help here, the key this names is already trusted -- if you did not \
+                     send this, a signature of yours was replayed onto bytes you never signed",
+                ),
+            }
             .encode()
         })?;
         let op = ViewOp::from_payload(&sub.payload).map_err(|e| {

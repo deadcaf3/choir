@@ -253,6 +253,7 @@ source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key
 | `/api/view` → 401 | Auth enabled (expected) | Pass `-u user:token` or `--auth-file` / `--auth-user` |
 | Push not in `/api/view` | Repo created without `--create` | Recreate via node/`choirctl` so `pre-receive` exists |
 | `unknown_key` | Key not in `--keys-file` | `choir key … [channel] >> keys-file` (hot-reloaded) |
+| `bad_signature` | Signature does not cover the bytes sent; key **is** trusted | Re-sign the exact `(channel, payload)`. Registering a key does not help. Unexpected → someone replayed a signature |
 | `stale_head` | CAS lost the race | Re-read `/api/view`, rebase on `actual`, resubmit |
 | `assignment_error` / empty reviewers | Empty `--reviewers-file` | Add at least two `operator/…` channels for meaningful review |
 | `review_required` | Protected ref, insufficient weight | Node-drawn review + two operators approve, then push |

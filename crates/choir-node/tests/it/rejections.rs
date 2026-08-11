@@ -166,10 +166,11 @@ fn code_all_lists_every_variant() {
             Code::ScopeRequired => 17,
             Code::ForeignScope => 18,
             Code::StaleScope => 19,
-            Code::Unclassified => 20,
+            Code::BadSignature => 20,
+            Code::Unclassified => 21,
         }
     }
-    const COUNT: usize = 21;
+    const COUNT: usize = 22;
 
     let all = Code::all();
     assert_eq!(

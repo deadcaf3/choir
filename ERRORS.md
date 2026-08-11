@@ -8,7 +8,7 @@ Every rejection body carries `code`, `error` and `next`. `expected` and `actual`
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `unknown_key` | The submission was not signed by a key this node trusts | Ask the operator to register your public key. `choir key <file> <you>` prints the line; it takes effect on the next request. |
+| `unknown_key` | The signature names a key id this node has no record of | Ask the operator to register your public key. `choir key <file> <you>` prints the line; it takes effect on the next request. |
 | `malformed_op` | The payload did not decode as a `ViewOp` | Serialize a `ViewOp` and sign its bytes. `choir submit` does this correctly; `GET /llms.txt` lists the operations. |
 | `malformed_request` | The request body was missing fields or badly encoded | Send a JSON object with the fields the endpoint wants. `GET /llms.txt` lists them. |
 | `reviewer_mismatch` | A verdict claimed a reviewer other than the signed channel | Resubmit on your own channel. `choir verdict` signs on the reviewer name by construction, so use it rather than hand-rolling. |
@@ -28,6 +28,7 @@ Every rejection body carries `code`, `error` and `next`. `expected` and `actual`
 | `scope_required` | This node admits only ops signed for its own log and a recent head, and this op carried no scope | Read `log.node` and `log.head` from `GET /api/view`, put them in the op's `scope`, and sign that. `choir submit` does this automatically. An unscoped op cannot be admitted here because nothing in it says which log it was meant for or that it has not run before. |
 | `foreign_scope` | The op was signed for another node's log | Nothing to retry against this node: the op names another node's id in `expected`. Sign a scope naming this node, whose id is in `actual` and in `log.node` of `GET /api/view`. |
 | `stale_scope` | The head the op was signed against is no longer in the node's recent window | Re-read `log.head` from `GET /api/view` and sign a fresh op against it. A signature is only admissible while the head it names is still in the node's window, which is what stops a captured op from being replayed later. |
+| `bad_signature` | The signature does not verify over these bytes, under a key this node does trust | Re-sign the exact bytes you are submitting: a signature covers one `(channel, payload)` pair and does not carry to another. Registering a key does not help here, the key this names is already trusted. If you did not send this, a signature of yours was replayed onto bytes you never signed, and the operator wants to know. |
 | `unclassified` | A rejection that did not originate as a structured one | Read `error`. This path does not name a repair yet — that is a gap, and worth reporting. |
 
 ## Retrying a submission whose response you lost

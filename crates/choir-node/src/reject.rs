@@ -35,7 +35,9 @@
 /// `ERRORS.md` with the action a client should take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Code {
-    /// The submission was not signed by a key this node trusts.
+    /// The signature names a key id this node has no record of. Says
+    /// nothing about the signature itself, which is not checked once the
+    /// key is missing.
     UnknownKey,
     /// The payload did not decode as a `ViewOp`.
     MalformedOp,
@@ -79,6 +81,11 @@ pub enum Code {
     ForeignScope,
     /// The scoped head is no longer recent enough to admit.
     StaleScope,
+    /// The signature does not verify under the key it names, which this
+    /// node does trust. Distinct from [`Code::UnknownKey`] because the
+    /// repairs are opposites: that one widens the trusted set, this one
+    /// must not.
+    BadSignature,
     /// Anything that did not originate as a structured rejection.
     Unclassified,
 }
@@ -110,6 +117,7 @@ impl Code {
             Self::ScopeRequired => "scope_required",
             Self::ForeignScope => "foreign_scope",
             Self::StaleScope => "stale_scope",
+            Self::BadSignature => "bad_signature",
             Self::Unclassified => "unclassified",
         }
     }
@@ -138,6 +146,7 @@ impl Code {
             Self::ScopeRequired,
             Self::ForeignScope,
             Self::StaleScope,
+            Self::BadSignature,
             Self::Unclassified,
         ]
     }
@@ -308,7 +317,7 @@ impl Code {
     #[must_use]
     pub fn meaning(self) -> &'static str {
         match self {
-            Self::UnknownKey => "The submission was not signed by a key this node trusts",
+            Self::UnknownKey => "The signature names a key id this node has no record of",
             Self::MalformedOp => "The payload did not decode as a `ViewOp`",
             Self::MalformedRequest => "The request body was missing fields or badly encoded",
             Self::ReviewerMismatch => "A verdict claimed a reviewer other than the signed channel",
@@ -328,6 +337,7 @@ impl Code {
             Self::ScopeRequired => "This node admits only ops signed for its own log and a recent head, and this op carried no scope",
             Self::ForeignScope => "The op was signed for another node's log",
             Self::StaleScope => "The head the op was signed against is no longer in the node's recent window",
+            Self::BadSignature => "The signature does not verify over these bytes, under a key this node does trust",
             Self::Unclassified => "A rejection that did not originate as a structured one",
         }
     }
@@ -356,6 +366,7 @@ impl Code {
             Self::ScopeRequired => "Read `log.node` and `log.head` from `GET /api/view`,                 put them in the op's `scope`, and sign that. `choir submit` does this                 automatically. An unscoped op cannot be admitted here because nothing in it                 says which log it was meant for or that it has not run before.",
             Self::ForeignScope => "Nothing to retry against this node: the op names another                 node's id in `expected`. Sign a scope naming this node, whose id is in                 `actual` and in `log.node` of `GET /api/view`.",
             Self::StaleScope => "Re-read `log.head` from `GET /api/view` and sign a fresh op                 against it. A signature is only admissible while the head it names is still                 in the node's window, which is what stops a captured op from being replayed                 later.",
+            Self::BadSignature => "Re-sign the exact bytes you are submitting: a signature covers                 one `(channel, payload)` pair and does not carry to another. Registering a key                 does not help here, the key this names is already trusted. If you did not send                 this, a signature of yours was replayed onto bytes you never signed, and the                 operator wants to know.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",
         }
     }

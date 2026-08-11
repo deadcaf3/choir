@@ -126,13 +126,22 @@ fn a_genuine_signature_does_not_transplant_across_channel_or_payload() {
     let (code, resp) = post(&grafted_body("ana", &payload, &sig));
     assert_eq!(code, 200, "{resp}");
 
+    // Every graft below is refused as `bad_signature`, and that code is
+    // load-bearing rather than cosmetic. These three assertions read
+    // `unknown_key` until the commit that added `bad_signature`, which
+    // was the defect: ana's key is registered here — it is the only key
+    // this node trusts — so "unknown key, ask the operator to register
+    // your public key" was false about the cause and actively wrong
+    // about the repair. It told the actor being impersonated that the
+    // fix was to go widen the node's trusted set.
+
     // Graft 1 — same bytes, another channel. The channel is inside the
     // signed tuple, so this is the attack invariant 4 exists to stop:
     // one signed op cannot become an op attributed to another actor's
     // collaboration channel.
     let (code, resp) = post(&grafted_body("bob", &payload, &sig));
     assert_eq!(code, 400, "{resp}");
-    assert_eq!(resp["code"], "unknown_key", "{resp}");
+    assert_eq!(resp["code"], "bad_signature", "{resp}");
 
     // Graft 2 — same channel and same signature, a payload ana never
     // signed. The workspace she moves and the commit she moves it to are
@@ -140,10 +149,24 @@ fn a_genuine_signature_does_not_transplant_across_channel_or_payload() {
     let elsewhere = head("bob/w", "c1", None);
     let (code, resp) = post(&grafted_body("ana", &elsewhere, &sig));
     assert_eq!(code, 400, "{resp}");
-    assert_eq!(resp["code"], "unknown_key", "{resp}");
+    assert_eq!(resp["code"], "bad_signature", "{resp}");
 
     let retarget = head("ana/w", "attacker-commit", None);
     let (code, resp) = post(&grafted_body("ana", &retarget, &sig));
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "bad_signature", "{resp}");
+
+    // And the code still discriminates, which is the whole point of
+    // splitting it: a key this node genuinely has no record of is the
+    // one case where registering a key IS the repair, and it keeps
+    // `unknown_key`. Without this case the split would be a rename.
+    let mallory = ActorKey::generate();
+    let mallorys = head("mallory/w", "c1", None);
+    let (code, resp) = post(&grafted_body(
+        "mallory",
+        &mallorys,
+        &mallory.sign_submission("mallory", &mallorys),
+    ));
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "unknown_key", "{resp}");
 
