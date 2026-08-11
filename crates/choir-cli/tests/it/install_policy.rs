@@ -190,6 +190,60 @@ fn the_linux_installer_carries_the_same_policy_wiring() {
     );
 }
 
+/// Both installers stop the running node before installing the new one,
+/// so both must prove a binary exists first. The Linux one always has.
+/// The macOS one did not, and because cargo resolves `target-dir` from
+/// the working directory rather than from `--manifest-path`, running it
+/// from a worktree built into `shared-target` and pointed launchd at a
+/// path that was never written — taking the canonical node down with no
+/// binary for KeepAlive to restart.
+#[test]
+fn both_installers_refuse_before_stopping_a_running_node() {
+    for (name, stop_verb) in [
+        ("scripts/flip/install_node.sh", "launchctl bootout"),
+        ("scripts/flip/install_node_linux.sh", "systemctl --user restart"),
+    ] {
+        let raw = std::fs::read_to_string(repo_root().join(name)).expect(name);
+        // Comments mention both the guard and the stop verb, and a
+        // comment above the guard explaining what it protects would
+        // otherwise read as the stop happening first.
+        let src: String = raw
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let guard = src
+            .find("-x \"$BIN\"")
+            .or_else(|| src.find("-x \"$f\""))
+            .unwrap_or_else(|| panic!("{name} must test the binary is executable"));
+        let stop = src
+            .find(stop_verb)
+            .unwrap_or_else(|| panic!("{name} must stop the service"));
+        assert!(
+            guard < stop,
+            "{name} runs `{stop_verb}` before proving a binary exists; \
+             that is a node stopped with nothing to restart it with"
+        );
+    }
+
+    // The macOS installer additionally must not assume the target dir.
+    let mac = std::fs::read_to_string(repo_root().join("scripts/flip/install_node.sh"))
+        .expect("macos installer");
+    assert!(
+        mac.contains("cargo metadata") && mac.contains("target_directory"),
+        "the macOS installer must ask cargo where it built, not assume $REPO_DIR/target"
+    );
+    let code: String = mac
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !code.contains("$REPO_DIR/target/release"),
+        "the macOS installer still hardcodes $REPO_DIR/target/release somewhere"
+    );
+}
+
 fn validate(keys: &str, reviewers: &str, protected: &str) -> std::process::ExitStatus {
     let work = std::env::temp_dir().join(format!("choir-policy-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
