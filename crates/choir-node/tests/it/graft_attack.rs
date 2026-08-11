@@ -19,6 +19,11 @@
 //!   so that a future change to what is signed shows up as a test that
 //!   starts failing rather than as a design discussion nobody has.
 //!
+//! The third test asks where an attacker gets the bytes, and the answer
+//! is `GET /api/log`: the sync contract serves `author_key` and
+//! `author_sig_hex` so any client can verify what it replays, which is
+//! also everything `POST /api/submit` asks for. No wiretap, no key.
+//!
 //! `key_names.rs` is the neighbouring module and a different attack: it
 //! re-signs honestly on a channel the key does not own. Here the
 //! signature is always genuine and always the author's.
@@ -220,6 +225,149 @@ fn cas_state_is_the_whole_replay_bound_so_aba_and_a_second_node_admit_the_bytes(
     assert_eq!(other_view["workspaces"]["ana/w"], at("c1"), "{other_view}");
 
     other.unblock();
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// `git`, configured the way every module here configures it: no
+/// signing, deterministic identity, never prompting.
+fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git runs")
+}
+
+#[test]
+fn the_public_log_is_a_complete_graft_kit_for_a_node_signed_ref_move() {
+    // The two tests above hand the attacker a signature. This one does
+    // not: it gives them a URL. `/api/log` publishes `author_key` and
+    // `author_sig_hex` on purpose — a follower has to be able to verify
+    // what it replicates (SYNC.md) — and those are the same two fields
+    // `/api/submit` wants. So the capture channel for a graft is an
+    // unauthenticated GET, and the strongest bytes on offer are the
+    // node's own: a `git push` reaches the sequencer as a *node-signed*
+    // SetRef, which is authority no external key has.
+    let work = std::env::temp_dir().join(format!("choir-graft-log-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    // An empty registry: nobody outside is trusted at all, which is the
+    // point. The attack never needs a trusted key.
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+    );
+    let port = node.port();
+    node.create_repo("agents/demo.git").unwrap();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let url = format!("http://127.0.0.1:{port}/agents/demo.git");
+    let ref_name = "agents/demo.git:refs/heads/main";
+
+    // Two honest pushes: create `main`, then advance it.
+    let clone = work.join("clone");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    let commit = |body: &str, message: &str| {
+        std::fs::write(clone.join("f.txt"), body).unwrap();
+        git(&clone, &["add", "."]);
+        git(&clone, &["commit", "-q", "-m", message]);
+        assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success());
+        String::from_utf8(git(&clone, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let c1 = commit("one\n", "first");
+    let c2 = commit("two\n", "second");
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(view["refs"][ref_name], serde_json::json!(format!("11-{c2}")));
+
+    // The whole capture: one GET, no credentials. Take the entry that
+    // moved main to c2 and rebuild the submit body from the served
+    // fields alone.
+    let (code, page) = curl(&[&format!("{api}/log?from=0")]);
+    assert_eq!(code, 200, "{page}");
+    let entries = page["entries"].as_array().unwrap();
+    let advanced = ContentHash::from_git_oid(&c2).expect("git oid");
+    let captured = entries
+        .iter()
+        .find(|e| {
+            let payload =
+                choir_node::platform::hex_decode(e["payload_hex"].as_str().unwrap()).unwrap();
+            matches!(
+                ViewOp::from_payload(&payload).unwrap().kind,
+                OpKind::SetRef { ref commit, .. } if *commit == advanced
+            )
+        })
+        .expect("the ref move is in the public log");
+    let stolen = serde_json::json!({
+        "channel": captured["workspace"],
+        "payload_hex": captured["payload_hex"],
+        "key_id": captured["author_key"],
+        "signature_hex": captured["author_sig_hex"],
+    })
+    .to_string();
+    // It really is the daemon's signature being reused, not a client's.
+    assert!(captured["author_key"].is_string(), "{captured}");
+
+    // Someone with push rights reverts main to c1. Ordinary work, and
+    // the state the captured op expected is now back.
+    assert!(git(&clone, &["push", "-qf", "origin", "HEAD~1:main"])
+        .status
+        .success());
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(view["refs"][ref_name], serde_json::json!(format!("11-{c1}")));
+
+    // Replay. Admitted, because nothing the node signed said "once", and
+    // nothing said "here".
+    let (code, resp) = curl(&["-X", "POST", "-d", &stolen, &format!("{api}/submit")]);
+    assert_eq!(
+        code, 200,
+        "a log-sourced replay of a node-signed ref move is currently admitted: {resp}"
+    );
+    assert_ne!(resp["already_applied"], true, "{resp}");
+
+    // And the damage is not just an extra log entry. The view — what the
+    // landing gate, `approval_weight` and every reader consult — now says
+    // main is at c2, while git's own ref, which no replay can touch,
+    // still says c1. The two halves of "one history" disagree, and the
+    // op that split them carries the daemon's signature.
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(
+        view["refs"][ref_name],
+        serde_json::json!(format!("11-{c2}")),
+        "{view}"
+    );
+    let remote = String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout)
+        .unwrap();
+    assert!(
+        remote.starts_with(&c1),
+        "git still holds the reverted ref, so view and git have diverged: {remote}"
+    );
+
     node.unblock();
     std::fs::remove_dir_all(&work).ok();
 }
