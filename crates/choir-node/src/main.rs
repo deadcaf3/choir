@@ -388,6 +388,22 @@ fn main() -> std::io::Result<()> {
             create_next = true;
         }
     }
+    // Before the first request, so nothing races the repair. Silent when
+    // the log and the repos already agree, which is every ordinary start.
+    let repair = node.reconcile_refs();
+    for name in &repair.applied {
+        eprintln!("choir: reconciled {name} — git was behind the log and has been moved to it");
+    }
+    for name in &repair.retracted {
+        eprintln!(
+            "choir: retracted {name} — the log named a commit this repo does not have, so the \
+             log now agrees with git"
+        );
+    }
+    for note in &repair.unreconciled {
+        eprintln!("choir: UNRECONCILED {note} — the log and this repo disagree and only an \
+             operator can say which is right");
+    }
     eprintln!(
         "choir-node serving {} on {}://{}:{}",
         root.display(),

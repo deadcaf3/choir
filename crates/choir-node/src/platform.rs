@@ -2792,6 +2792,115 @@ impl Platform {
         self.submit_ref_op(kind, user, cert)
     }
 
+    /// Brings every bare repo under `root` back into agreement with the
+    /// view, which is the source of truth. Run at startup, before the
+    /// node serves anything, so nothing races the repair.
+    ///
+    /// The hook's retraction path handles a push that is refused while
+    /// the daemon is alive. This handles the rest, and it does so without
+    /// needing to know which of them happened: power loss between the
+    /// hook's 200 and git writing the ref, a per-ref failure *after*
+    /// `pre-receive` passed (`receive.deny*`, an `update` hook, a write
+    /// error), or a retraction that could not be delivered. All of them
+    /// leave the same state, and it is the state this reads.
+    ///
+    /// Two repairs, chosen by whether git can honour the view:
+    ///
+    /// - the commit exists in the repo, so git is simply behind: the ref
+    ///   is written. Git is the follower (D21 single-canonical), so
+    ///   moving it is the defined direction.
+    /// - the commit is absent — a refused push has its objects discarded
+    ///   from the quarantine — so the view names something git can never
+    ///   have: a compensating op puts the view back to git's value.
+    ///
+    /// A ref git holds and the view does not is **reported, never
+    /// adopted**. Appending an op for it would launder an out-of-band
+    /// `update-ref` into the signed log as though it had been submitted.
+    pub fn reconcile_git_refs(&self, root: &std::path::Path) -> RefReconciliation {
+        let mut report = RefReconciliation::default();
+        let view_refs: Vec<(String, ContentHash)> = self
+            .view
+            .lock()
+            .expect("view lock")
+            .refs
+            .iter()
+            .map(|(name, hash)| (name.clone(), hash.clone()))
+            .collect();
+
+        // One `for-each-ref` per repo rather than one `rev-parse` per
+        // ref: a view with thousands of refs would otherwise start the
+        // daemon with thousands of subprocesses.
+        let mut repos: BTreeMap<String, Vec<(String, ContentHash)>> = BTreeMap::new();
+        for (name, hash) in view_refs {
+            match name.split_once(':') {
+                Some((repo, refname)) => repos
+                    .entry(repo.to_string())
+                    .or_default()
+                    .push((refname.to_string(), hash)),
+                // Not a git-derived ref (the API can set any name), so
+                // there is no repo to compare it against.
+                None => continue,
+            }
+        }
+
+        for (repo, refs) in repos {
+            // Ref names come out of the log, which anyone admitted can
+            // write to, so they get the same traversal guard as a repo
+            // name off the wire.
+            if repo.split('/').any(|c| c == ".." || c.is_empty()) || repo.starts_with('/') {
+                report
+                    .unreconciled
+                    .push(format!("{repo}: refused as a repo path"));
+                continue;
+            }
+            let path = root.join(&repo);
+            let Some(in_git) = read_git_refs(&path) else {
+                report.unreconciled.push(format!(
+                    "{repo}: the view holds {} ref(s) for a repo that cannot be read here",
+                    refs.len()
+                ));
+                continue;
+            };
+            let wanted: BTreeSet<String> = refs.iter().map(|(name, _)| name.clone()).collect();
+            for (refname, want) in refs {
+                let full = format!("{repo}:{refname}");
+                let Some(want_oid) = want.git_oid() else {
+                    report
+                        .unreconciled
+                        .push(format!("{full}: view value is not a git oid"));
+                    continue;
+                };
+                let have = in_git.get(&refname);
+                if have.map(String::as_str) == Some(want_oid.as_str()) {
+                    continue;
+                }
+                if object_exists(&path, &want_oid) {
+                    match write_git_ref(&path, &refname, &want_oid, have.map(String::as_str)) {
+                        Ok(()) => report.applied.push(full),
+                        Err(e) => report.unreconciled.push(format!("{full}: {e}")),
+                    }
+                    continue;
+                }
+                // Git cannot ever hold this value, so the view has to
+                // give it up. `git_abort` builds exactly this inverse:
+                // back to git's value, or gone if git has none.
+                let old = have.map_or_else(|| "0".repeat(want_oid.len()), String::clone);
+                match self.git_abort(&repo, &refname, &old, &want_oid, "node", None) {
+                    Ok(()) => report.retracted.push(full),
+                    Err(e) => report.unreconciled.push(format!("{full}: {e}")),
+                }
+            }
+            for refname in in_git.keys() {
+                if !wanted.contains(refname) {
+                    report
+                        .unreconciled
+                        .push(format!("{repo}:{refname}: in git, not in the log"));
+                }
+            }
+        }
+        report
+    }
+
     /// Signs a git-derived ref op as the node and submits it, attributing
     /// it to the pusher's own key when the push certificate verified.
     fn submit_ref_op(
@@ -3575,6 +3684,82 @@ impl Platform {
         }
         resp
     }
+}
+
+/// What [`Platform::reconcile_git_refs`] did, so a caller can report it.
+/// An all-empty report is the normal case and the only silent one.
+#[derive(Debug, Default)]
+pub struct RefReconciliation {
+    /// Refs written into git because the view held a commit git already
+    /// had but had not pointed at.
+    pub applied: Vec<String>,
+    /// Refs the view gave up, because git can never hold the commit they
+    /// named. Each one is a compensating op in the log.
+    pub retracted: Vec<String>,
+    /// Disagreements left standing, each with its reason. These need an
+    /// operator: repairing them automatically would either lose history
+    /// or launder an out-of-band ref into the signed log.
+    pub unreconciled: Vec<String>,
+}
+
+impl RefReconciliation {
+    /// Whether anything at all was out of agreement.
+    pub fn is_empty(&self) -> bool {
+        self.applied.is_empty() && self.retracted.is_empty() && self.unreconciled.is_empty()
+    }
+}
+
+/// Every ref in the bare repo at `path`, or `None` if it cannot be read
+/// (no such repo, or not a repo).
+fn read_git_refs(path: &std::path::Path) -> Option<BTreeMap<String, String>> {
+    let out = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (refname, oid) = line.split_once(' ')?;
+                Some((refname.to_string(), oid.to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// Whether `oid` names an object the repo actually has. A refused push
+/// leaves its objects in a discarded quarantine, so the view can name a
+/// commit that was never admitted to the repo.
+fn object_exists(path: &std::path::Path, oid: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{oid}^{{object}}")])
+        .current_dir(path)
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Points `refname` at `oid`, CAS'd on `have` so a concurrent writer
+/// loses rather than gets clobbered.
+fn write_git_ref(
+    path: &std::path::Path,
+    refname: &str,
+    oid: &str,
+    have: Option<&str>,
+) -> Result<(), String> {
+    let old = have.map_or_else(|| "0".repeat(oid.len()), str::to_string);
+    let out = std::process::Command::new("git")
+        .args(["update-ref", refname, oid, &old])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
 /// Git's "this ref does not exist" oid: all zeros, at whatever width the

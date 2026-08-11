@@ -31,6 +31,7 @@ mod landing;
 mod newcomer_config;
 mod newcomer_harm;
 mod policy_hardening;
+mod reconcile_refs;
 mod rejections;
 mod resync;
 mod review;

@@ -141,6 +141,21 @@ impl Node {
         self.platform = Some(std::sync::Arc::new(platform));
     }
 
+    /// Brings the bare repos back into agreement with the view before the
+    /// node serves anything. See [`Platform::reconcile_git_refs`] for what
+    /// it repairs and what it refuses to.
+    ///
+    /// Separate from [`Node::enable_platform`] and from
+    /// [`Node::serve_forever`] so it is called deliberately: it writes git
+    /// refs and can append compensating ops, which is not something a
+    /// constructor should do behind a caller's back.
+    pub fn reconcile_refs(&self) -> crate::platform::RefReconciliation {
+        self.platform
+            .as_ref()
+            .map(|p| p.reconcile_git_refs(&self.root))
+            .unwrap_or_default()
+    }
+
     /// Watches the trusted-keys file and regenerates
     /// `<root>/.choir/allowed_signers` whenever its mtime moves, so
     /// registering a *signing* key is "append a line" — the same
