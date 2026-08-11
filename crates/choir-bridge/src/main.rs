@@ -113,6 +113,42 @@ fn view_refs(api_base: &str, label: &str) -> BTreeMap<String, ContentHash> {
         .unwrap_or_default()
 }
 
+/// A `<codec>-<digest>` content hash as the node serves it.
+fn parse_hash(hex: &str) -> Option<ContentHash> {
+    let (codec, digest) = hex.split_once('-')?;
+    Some(ContentHash {
+        codec: u8::from_str_radix(codec, 16).ok()?,
+        digest: (0..digest.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(digest.get(i..i + 2)?, 16).ok())
+            .collect::<Option<Vec<u8>>>()?,
+    })
+}
+
+/// The log identity every op of this round is signed for: `(node, head)`.
+///
+/// A whole batch may share one head — a scope is admissible while the
+/// head it names is still in the node's window, not only while it is the
+/// tip — so this is one read per sync round, not one per op.
+///
+/// # Panics
+///
+/// Panics when the node serves no `log.node`, which means it predates op
+/// scopes. Mirroring into a log that cannot bind a signature to itself is
+/// the situation this exists to prevent, so it fails loudly rather than
+/// signing unscoped ops.
+fn view_scope(api_base: &str) -> (ContentHash, Option<ContentHash>) {
+    let (status, body) = api("GET", &format!("{api_base}/api/view"), None);
+    assert_eq!(status, 200, "view: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("view json");
+    let node = v["log"]["node"]
+        .as_str()
+        .and_then(parse_hash)
+        .expect("node serves log.node; one that does not predates op scopes");
+    let head = v["log"]["head"].as_str().and_then(parse_hash);
+    (node, head)
+}
+
 /// Ops per `/api/submit-batch` request; keeps request bodies well under
 /// a megabyte.
 const BATCH: usize = 500;
@@ -186,6 +222,7 @@ fn sync_once(
 
     let upstream_refs = mirror_refs(mirror)?;
     let choir_refs = view_refs(api_base, label);
+    let (node, head) = view_scope(api_base);
     let workspace = format!("bridge/{label}");
 
     let mut sets = Vec::new();
@@ -204,7 +241,8 @@ fn sync_once(
             name: format!("{label}:{name}"),
             commit,
             prev: prev.cloned(),
-        });
+        })
+        .in_scope(node.clone(), head.clone());
         sets.push(signed_op(key, &workspace, op));
     }
     let mut deletes = Vec::new();
@@ -213,7 +251,8 @@ fn sync_once(
             let op = ViewOp::new(OpKind::DeleteRef {
                 name: format!("{label}:{name}"),
                 prev: Some(prev.clone()),
-            });
+            })
+            .in_scope(node.clone(), head.clone());
             deletes.push(signed_op(key, &workspace, op));
         }
     }
