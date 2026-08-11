@@ -341,6 +341,12 @@ pub const ENDPOINTS: &[Endpoint] = &[
         purpose: "Internal: the pre-receive hook callback",
         mcp: None,
     },
+    Endpoint {
+        method: "POST",
+        path: "/api/git-abort",
+        purpose: "Internal: retracts a refused push's already-accepted refs",
+        mcp: None,
+    },
 ];
 
 /// MCP tools in deterministic endpoint-table order.

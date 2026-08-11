@@ -265,6 +265,15 @@ impl Node {
         // pre-/post-receive see GIT_PUSH_CERT_* for signed pushes, and
         // one invocation covers the whole push). Outside the daemon (no
         // CHOIR_API) it is a no-op.
+        //
+        // Git applies no ref until this hook exits zero, so a refusal on
+        // the third ref of a push has already left two ops in the durable
+        // log for refs git will never create. Those refs are then stuck:
+        // the pusher's `old` is git's absent value while the view holds
+        // the stranded one, so every retry loses the CAS. Hence the
+        // retraction pass over what this push already had accepted, which
+        // is a compensating op rather than an erasure -- the log is
+        // append-only, and an aborted push belongs in the history.
         let hook = path.join("hooks").join("pre-receive");
         std::fs::write(
             &hook,
@@ -272,15 +281,33 @@ impl Node {
                 "#!/bin/sh\n",
                 "# choir: route this push's ref updates through the platform sequencer.\n",
                 "if [ -z \"$CHOIR_API\" ]; then cat >/dev/null; exit 0; fi\n",
-                "while read old new ref; do\n",
+                "post() {\n",
                 "  payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\",\"cert_status\":\"%s\",\"signer\":\"%s\"}' \\\n",
-                "    \"$CHOIR_REPO\" \"$ref\" \"$old\" \"$new\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
-                "  if ! curl -skf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
-                "      -d \"$payload\" \"$CHOIR_API\" >/dev/null; then\n",
+                "    \"$CHOIR_REPO\" \"$3\" \"$1\" \"$2\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
+                "  curl -skf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
+                "    -d \"$payload\" \"$4\" >/dev/null\n",
+                "}\n",
+                // A file, not a shell variable: this has to survive being
+                // read back line by line, and the accepted list is the
+                // only record of what needs undoing.
+                "done_refs=$(mktemp) || exit 1\n",
+                "abort() {\n",
+                "  while read -r a_old a_new a_ref; do\n",
+                "    post \"$a_old\" \"$a_new\" \"$a_ref\" \"$CHOIR_ABORT\" ||\n",
+                "      echo \"choir: could not retract $a_ref; the node's log now holds a ref \\\n",
+                "this push did not create\" >&2\n",
+                "  done < \"$done_refs\"\n",
+                "}\n",
+                "while read old new ref; do\n",
+                "  if ! post \"$old\" \"$new\" \"$ref\" \"$CHOIR_API\"; then\n",
                 "    echo \"choir: ref update rejected by sequencer: $ref\" >&2\n",
+                "    abort\n",
+                "    rm -f \"$done_refs\"\n",
                 "    exit 1\n",
                 "  fi\n",
+                "  printf '%s %s %s\\n' \"$old\" \"$new\" \"$ref\" >> \"$done_refs\"\n",
                 "done\n",
+                "rm -f \"$done_refs\"\n",
                 "exit 0\n",
             ),
         )?;
@@ -338,7 +365,8 @@ impl Node {
             std::thread::spawn(move || {
                 // Hook callbacks authenticate with the loopback secret
                 // instead of user credentials.
-                let internal_ok = request.url().starts_with("/api/git-update")
+                let internal_ok = (request.url().starts_with("/api/git-update")
+                    || request.url().starts_with("/api/git-abort"))
                     && header(&request, "X-Choir-Internal").as_deref() == Some(&internal_token);
                 let mut user = "anon".to_string();
                 if let Some(table) = auth.as_ref() {
@@ -396,6 +424,10 @@ impl Node {
                         extra_env.push((
                             "CHOIR_API".to_string(),
                             format!("{scheme}://127.0.0.1:{port}/api/git-update"),
+                        ));
+                        extra_env.push((
+                            "CHOIR_ABORT".to_string(),
+                            format!("{scheme}://127.0.0.1:{port}/api/git-abort"),
                         ));
                         extra_env.push(("CHOIR_REPO".to_string(), repo));
                         extra_env.push(("CHOIR_USER".to_string(), user));

@@ -21,6 +21,7 @@ mod auth;
 mod batch_barriers;
 mod concentration;
 mod git_ordering_trace;
+mod git_partial_push;
 mod git_sequenced;
 mod git_signed;
 mod identity_pinning;

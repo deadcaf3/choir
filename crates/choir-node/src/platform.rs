@@ -2726,15 +2726,13 @@ impl Platform {
         user: &str,
         cert: Option<(&str, &str)>,
     ) -> Result<(), String> {
-        const ZERO: [char; 2] = ['0', '0'];
-        let is_zero = |h: &str| !h.is_empty() && h.chars().all(|c| c == ZERO[0]);
         let name = format!("{repo}:{refname}");
-        let prev = if is_zero(old_hex) {
+        let prev = if is_zero_oid(old_hex) {
             None
         } else {
             Some(ContentHash::from_git_oid(old_hex).ok_or("bad old oid")?)
         };
-        let kind = if is_zero(new_hex) {
+        let kind = if is_zero_oid(new_hex) {
             OpKind::DeleteRef { name, prev }
         } else {
             OpKind::SetRef {
@@ -2743,6 +2741,65 @@ impl Platform {
                 prev,
             }
         };
+        self.submit_ref_op(kind, user, cert)
+    }
+
+    /// Retracts a ref op this push already had accepted, because the push
+    /// as a whole is being refused and git will apply none of it.
+    ///
+    /// `pre-receive` submits one op per ref but git applies no ref until
+    /// the hook exits zero, so a push whose third ref is refused has
+    /// already put two ops in the durable log. Without this the view keeps
+    /// refs git never created — and they cannot be pushed afterwards
+    /// either, because the pusher's `old` is git's (absent) value while
+    /// the view holds the stranded one, so every retry loses the CAS. The
+    /// ref becomes permanently unpushable.
+    ///
+    /// The log is append-only, so the repair is a compensating op, not an
+    /// erasure: the abort is part of the history rather than hidden from
+    /// it. `old`/`new` are the same values the accepted op carried, so the
+    /// inverse restores exactly what git still has.
+    ///
+    /// # Errors
+    ///
+    /// The policy's rejection reason — most likely a lost CAS, meaning
+    /// something else moved the ref between the accept and this retraction
+    /// and the stranded value is no longer what would be undone.
+    pub fn git_abort(
+        &self,
+        repo: &str,
+        refname: &str,
+        old_hex: &str,
+        new_hex: &str,
+        user: &str,
+        cert: Option<(&str, &str)>,
+    ) -> Result<(), String> {
+        let name = format!("{repo}:{refname}");
+        // CAS on what the accepted op set, so a retraction that races a
+        // real update loses instead of clobbering it.
+        let prev = Some(ContentHash::from_git_oid(new_hex).ok_or("bad new oid")?);
+        let kind = if is_zero_oid(old_hex) {
+            // The push was creating the ref, so undoing it removes it.
+            OpKind::DeleteRef { name, prev }
+        } else {
+            // It existed before: put it back where git still has it.
+            OpKind::SetRef {
+                name,
+                commit: ContentHash::from_git_oid(old_hex).ok_or("bad old oid")?,
+                prev,
+            }
+        };
+        self.submit_ref_op(kind, user, cert)
+    }
+
+    /// Signs a git-derived ref op as the node and submits it, attributing
+    /// it to the pusher's own key when the push certificate verified.
+    fn submit_ref_op(
+        &self,
+        kind: OpKind,
+        user: &str,
+        cert: Option<(&str, &str)>,
+    ) -> Result<(), String> {
         let payload = ViewOp::new(kind).to_payload();
         // Verified push certificate ("G" = good signature) attributes
         // the op to the pusher's own key; otherwise the transport user.
@@ -3325,6 +3382,32 @@ impl Platform {
                     Err(reason) => (400, Rejection::decode(&reason).body()),
                 }
             }
+            // The other half of the same hook: the push is being refused,
+            // so every ref already accepted for it has to be put back.
+            ("POST", "/api/git-abort") => {
+                let req: serde_json::Value = match serde_json::from_slice(body) {
+                    Ok(v) => v,
+                    Err(e) => return (400, Rejection::new(
+                            Code::MalformedRequest,
+                            format!("request body is not valid JSON: {e}"),
+                            "send a JSON object; GET /llms.txt lists the fields each endpoint wants",
+                        )
+                        .body()),
+                };
+                let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let (status, signer) = (f("cert_status"), f("signer"));
+                match self.git_abort(
+                    &f("repo"),
+                    &f("refname"),
+                    &f("old"),
+                    &f("new"),
+                    &f("user"),
+                    Some((status.as_str(), signer.as_str())),
+                ) {
+                    Ok(()) => (200, r#"{"ok":true}"#.to_string()),
+                    Err(reason) => (400, Rejection::decode(&reason).body()),
+                }
+            }
             ("GET", path) if path.starts_with("/api/log") => {
                 let from: usize = path
                     .split_once("from=")
@@ -3492,6 +3575,12 @@ impl Platform {
         }
         resp
     }
+}
+
+/// Git's "this ref does not exist" oid: all zeros, at whatever width the
+/// repo's hash function uses.
+fn is_zero_oid(hex: &str) -> bool {
+    !hex.is_empty() && hex.chars().all(|c| c == '0')
 }
 
 /// Parses an undirected operator graph and returns every operator within
