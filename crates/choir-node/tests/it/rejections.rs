@@ -162,10 +162,14 @@ fn code_all_lists_every_variant() {
             Code::IdentityState => 13,
             Code::PolicyUnavailable => 14,
             Code::LogEvicted => 15,
-            Code::Unclassified => 16,
+            Code::DuplicateSubmission => 16,
+            Code::ScopeRequired => 17,
+            Code::ForeignScope => 18,
+            Code::StaleScope => 19,
+            Code::Unclassified => 20,
         }
     }
-    const COUNT: usize = 17;
+    const COUNT: usize = 21;
 
     let all = Code::all();
     assert_eq!(

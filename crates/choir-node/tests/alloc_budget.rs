@@ -83,7 +83,18 @@ const WARMUP: usize = 200;
 /// inside dependencies does not fail the build, while a real regression
 /// still does. Lower it whenever a change removes an allocation — that is
 /// the entire point of the number.
-const MAX_ALLOCS_PER_OP: usize = 172;
+///
+/// Raised to 174 for the replay defence: the window now also indexes
+/// admitted entries by hash, so a submission can be refused for naming a
+/// head that has aged out and a re-sent signature can be refused outright.
+/// That is one hash-keyed insert per admitted op and it measured at 173.
+/// Two allocations of the increase were bought back in the same change by
+/// computing each submission's signing hash once instead of twice
+/// (`Registry::verify_signing_hash`), which is why bytes per op *fell*
+/// from 21,194 to 19,050 while this number rose. The alternative to the
+/// index is a replay that lands, so it is a trade the number should
+/// record rather than block.
+const MAX_ALLOCS_PER_OP: usize = 174;
 
 #[test]
 fn submit_path_allocation_budget() {

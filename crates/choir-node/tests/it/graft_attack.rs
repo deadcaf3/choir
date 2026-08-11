@@ -19,10 +19,18 @@
 //!   so that a future change to what is signed shows up as a test that
 //!   starts failing rather than as a design discussion nobody has.
 //!
-//! The third test asks where an attacker gets the bytes, and the answer
-//! is `GET /api/log`: the sync contract serves `author_key` and
-//! `author_sig_hex` so any client can verify what it replays, which is
-//! also everything `POST /api/submit` asks for. No wiretap, no key.
+//! Where the bytes come from is `GET /api/log`: the sync contract serves
+//! `author_key` and `author_sig_hex` so a follower can verify what it
+//! replicates, and those are everything `POST /api/submit` asks for. What
+//! that costs an attacker depends on the deployment, and the honest
+//! statement is narrower than "no key". A node started without
+//! `--auth-file` requires no credentials at all, so the capture is a bare
+//! GET. A node started with one answers 401 to every endpoint, so the
+//! capture needs a transport token — but that table is `user:token` per
+//! *person*, not per signing key, so any token holder can lift and replay
+//! any actor's ops. The escalation is from one transport credential to
+//! every key the node has ever trusted, which is precisely the per-actor
+//! attribution the signatures exist to provide.
 //!
 //! `key_names.rs` is the neighbouring module and a different attack: it
 //! re-signs honestly on a channel the key does not own. Here the
@@ -57,6 +65,29 @@ fn head(workspace: &str, commit: &str, prev: Option<&str>) -> Vec<u8> {
         prev: prev.map(|p| ContentHash::blake3(p.as_bytes())),
     })
     .to_payload()
+}
+
+/// A `<codec>-<digest>` content hash, as `/api/view` serves one.
+fn parse_hash(hex: &str) -> ContentHash {
+    let (codec, digest) = hex.split_once('-').expect("codec-prefixed hash");
+    ContentHash {
+        codec: u8::from_str_radix(codec, 16).expect("hex codec"),
+        digest: (0..digest.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&digest[i..i + 2], 16).expect("hex digest"))
+            .collect(),
+    }
+}
+
+/// What the node says a client should sign a scope against: its own id
+/// and the current head (`None` on an empty log).
+fn log_scope(api: &str) -> (ContentHash, Option<ContentHash>) {
+    let (code, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(code, 200, "{view}");
+    (
+        parse_hash(view["log"]["node"].as_str().expect("log.node")),
+        view["log"]["head"].as_str().map(parse_hash),
+    )
 }
 
 /// A serving node that trusts exactly `trusted`. Returns its API base
@@ -139,7 +170,7 @@ fn a_genuine_signature_does_not_transplant_across_channel_or_payload() {
 }
 
 #[test]
-fn cas_state_is_the_whole_replay_bound_so_aba_and_a_second_node_admit_the_bytes() {
+fn an_aba_replay_is_refused_and_a_scope_is_what_closes_the_second_node() {
     let work = std::env::temp_dir().join(format!("choir-graft-replay-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
@@ -162,12 +193,9 @@ fn cas_state_is_the_whole_replay_bound_so_aba_and_a_second_node_admit_the_bytes(
     let (code, resp) = post(&grafted_body("ana", &advance, &advance_sig));
     assert_eq!(code, 200, "{resp}");
 
-    // Replayed now, the captured op does not re-apply — the workspace is
-    // at c2 and the op expects c1 — and the CAS refusal is answered as
-    // the retry it looks like: same seq, `already_applied`. Note what
-    // that dedup is keyed on, because the next step turns on it: the
-    // signing hash of these exact bytes, consulted *only* on the CAS
-    // error path.
+    // Replayed while the state has moved on, the captured op is answered
+    // as the retry it is indistinguishable from: original seq,
+    // `already_applied`, nothing appended.
     let (code, resp) = post(&grafted_body("ana", &advance, &advance_sig));
     assert_eq!(code, 200, "{resp}");
     assert_eq!(resp["already_applied"], true, "{resp}");
@@ -180,51 +208,168 @@ fn cas_state_is_the_whole_replay_bound_so_aba_and_a_second_node_admit_the_bytes(
     let (code, resp) = post(&grafted_body("mallory", &revert, &revert_sig));
     assert_eq!(code, 200, "{resp}");
 
-    // ABA. The captured bytes admit again, because a CAS `prev` asks
-    // "is the state what I expect" and not "have I run before" — and the
-    // retry index cannot stand in for the missing nonce, since it is
-    // reached only when CAS fails. Once CAS passes, the same signing
-    // hash that was answered `already_applied` a moment ago appends a
-    // second, distinct entry instead. The
-    // resulting entry is signed by ana and attributed to ana's channel,
-    // at a sequence ana never submitted, moving her workspace at a
-    // moment she did not choose. Nothing in what she signed could have
-    // prevented it: a signature over (channel, payload) is by
-    // construction position-independent and log-independent.
+    // The ABA moment: the state the captured op expected is back, so its
+    // CAS `prev` matches again and `prev` alone would re-apply it. It does
+    // not, because a signature is admissible once — the duplicate check
+    // reads the same signing-hash index whether CAS passes or fails, so
+    // "have these bytes run before" is asked before "is the state right".
+    // The answer is the seq ana really submitted, and the workspace stays
+    // where the revert left it.
     let (code, resp) = post(&grafted_body("ana", &advance, &advance_sig));
-    assert_eq!(
-        code, 200,
-        "replay after ABA is currently admitted; if this now fails, the signed \
-         tuple or the CAS rule changed and invariant 4 needs rewriting: {resp}"
-    );
-    assert_ne!(resp["already_applied"], true, "{resp}");
-    assert_eq!(resp["seq"], 3, "{resp}");
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["already_applied"], true, "{resp}");
+    assert_eq!(resp["seq"], 1, "an ABA replay must not become a new entry: {resp}");
     let (_, view) = curl(&[&format!("{api}/view")]);
-    assert_eq!(view["workspaces"]["ana/w"], at("c2"), "{view}");
+    assert_eq!(view["workspaces"]["ana/w"], at("c1"), "{view}");
 
-    // A second node that trusts the same key is the other half of the
-    // same gap: the signed tuple names no log, no node and no genesis,
-    // so ana's op is equally valid everywhere her key is trusted. The
-    // captured create replays onto a node ana never spoke to.
+    // A second node that trusts the same key is the other half, and it is
+    // the half a duplicate index cannot see: another node's window holds
+    // none of these bytes. An *unscoped* signature still lands there,
+    // which is exactly what `--require-scope` refuses and why the flag
+    // exists rather than being implied.
     let (other_api, other) = serving_node(&work.join("repos-2"), &[&ana]);
-    let (code, resp) = curl(&[
-        "-X",
-        "POST",
-        "-d",
-        &grafted_body("ana", &create, &create_sig),
-        &format!("{other_api}/submit"),
-    ]);
+    let other_post = |body: &str| {
+        curl(&["-X", "POST", "-d", body, &format!("{other_api}/submit")])
+    };
+    let (code, resp) = other_post(&grafted_body("ana", &create, &create_sig));
     assert_eq!(
         code, 200,
-        "an op signed for one node currently admits on any node that trusts \
-         the key; binding a log id into the signed tuple is what would change \
-         this: {resp}"
+        "an unscoped signature still admits on any node that trusts the key: {resp}"
     );
-    assert_eq!(resp["seq"], 0, "{resp}");
+
+    // Scoped, it does not. The scope names the log ana meant, and it is
+    // inside the payload she signed, so the relayer cannot rewrite it —
+    // and no flag is needed for the refusal: a scope that *is* present is
+    // always enforced.
+    let (ana_node, ana_head) = log_scope(&api);
+    let scoped = ViewOp::new(OpKind::SetWorkspaceHead {
+        workspace: "ana/scoped".into(),
+        commit: ContentHash::blake3(b"c9"),
+        prev: None,
+    })
+    .in_scope(ana_node.clone(), ana_head)
+    .to_payload();
+    let scoped_sig = ana.sign_submission("ana", &scoped);
+    let (code, resp) = post(&grafted_body("ana", &scoped, &scoped_sig));
+    assert_eq!(code, 200, "{resp}");
+
+    let (code, resp) = other_post(&grafted_body("ana", &scoped, &scoped_sig));
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "foreign_scope", "{resp}");
+    assert_eq!(resp["expected"], serde_json::json!(ana_node.to_hex()), "{resp}");
     let (_, other_view) = curl(&[&format!("{other_api}/view")]);
-    assert_eq!(other_view["workspaces"]["ana/w"], at("c1"), "{other_view}");
+    assert!(
+        other_view["workspaces"]["ana/scoped"].is_null(),
+        "{other_view}"
+    );
 
     other.unblock();
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}
+
+#[test]
+fn a_scope_required_node_refuses_unscoped_foreign_and_aged_out_signatures() {
+    // The flag, and the three ways a signature can fail to be bound to
+    // this log at this moment. Each refusal names what to do next,
+    // because "your signature is fine but not here" is not a diagnosis a
+    // client can act on by itself.
+    let work = std::env::temp_dir().join(format!("choir-graft-scoped-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let ana = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&ana.public_key_bytes()).unwrap();
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .unwrap()
+            // Two entries of history, so the third op ages the first head
+            // out and a scope naming it stops being admissible.
+            .with_log_window_cap(2)
+            .with_required_scope(),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let post = |body: &str| curl(&["-X", "POST", "-d", body, &format!("{api}/submit")]);
+    let scoped = |name: &str, node: ContentHash, head: Option<ContentHash>| {
+        ViewOp::new(OpKind::SetWorkspaceHead {
+            workspace: name.into(),
+            commit: ContentHash::blake3(name.as_bytes()),
+            prev: None,
+        })
+        .in_scope(node, head)
+        .to_payload()
+    };
+
+    // The node advertises what to sign against, and that it is enforcing.
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert_eq!(view["log"]["scope_required"], true, "{view}");
+    let (node_id, genesis_head) = log_scope(&api);
+    assert!(view["log"]["head"].is_null(), "empty log has no head: {view}");
+
+    // Unscoped: refused, with the node's identity in the response so the
+    // client can build the scope it was missing.
+    let bare = head("ana/bare", "c1", None);
+    let (code, resp) = post(&grafted_body("ana", &bare, &ana.sign_submission("ana", &bare)));
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "scope_required", "{resp}");
+
+    // Scoped to another node's log: refused even though the signature is
+    // genuine and the key is trusted here.
+    let elsewhere = scoped("ana/elsewhere", ContentHash::blake3(b"some other node"), None);
+    let (code, resp) = post(&grafted_body(
+        "ana",
+        &elsewhere,
+        &ana.sign_submission("ana", &elsewhere),
+    ));
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "foreign_scope", "{resp}");
+    assert_eq!(resp["actual"], serde_json::json!(node_id.to_hex()), "{resp}");
+
+    // Correctly scoped: lands. `head` is null on an empty log, and a
+    // headless scope is what a client signs then — including every op of
+    // a batch it signed in one read, since only the first of those meets
+    // an empty log.
+    let genesis = scoped("ana/one", node_id.clone(), genesis_head);
+    let (code, resp) = post(&grafted_body(
+        "ana",
+        &genesis,
+        &ana.sign_submission("ana", &genesis),
+    ));
+    assert_eq!(code, 200, "{resp}");
+
+    // Capture a head, then let two more ops push it out of the window.
+    let (_, aged_head) = log_scope(&api);
+    assert!(aged_head.is_some());
+    for name in ["ana/two", "ana/three"] {
+        let op = scoped(name, node_id.clone(), log_scope(&api).1);
+        let (code, resp) = post(&grafted_body("ana", &op, &ana.sign_submission("ana", &op)));
+        assert_eq!(code, 200, "{resp}");
+    }
+
+    // A signature against that aged-out head is no longer admissible.
+    // This is the half that makes the duplicate index enough: bytes old
+    // enough to have left the index are also old enough that the head
+    // they name has left the window.
+    let stale = scoped("ana/stale", node_id, aged_head.clone());
+    let (code, resp) = post(&grafted_body("ana", &stale, &ana.sign_submission("ana", &stale)));
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "stale_scope", "{resp}");
+    assert_eq!(
+        resp["expected"],
+        serde_json::json!(aged_head.unwrap().to_hex()),
+        "{resp}"
+    );
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert!(view["workspaces"]["ana/stale"].is_null(), "{view}");
+
     node.unblock();
     std::fs::remove_dir_all(&work).ok();
 }
@@ -253,7 +398,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn the_public_log_is_a_complete_graft_kit_for_a_node_signed_ref_move() {
+fn a_log_sourced_replay_of_a_node_signed_ref_move_no_longer_lands() {
     // The two tests above hand the attacker a signature. This one does
     // not: it gives them a URL. `/api/log` publishes `author_key` and
     // `author_sig_hex` on purpose — a follower has to be able to verify
@@ -267,10 +412,18 @@ fn the_public_log_is_a_complete_graft_kit_for_a_node_signed_ref_move() {
     std::fs::create_dir_all(&work).unwrap();
 
     // An empty registry: nobody outside is trusted at all, which is the
-    // point. The attack never needs a trusted key.
+    // point. The attack never needs a trusted key. The node's own key is
+    // held here only so the second node further down can trust it — an
+    // untrusted key would be refused for the wrong reason.
+    let node_key = ActorKey::generate();
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::from_secret_bytes(&node_key.secret_bytes()),
+        )
+        .unwrap(),
     );
     let port = node.port();
     node.create_repo("agents/demo.git").unwrap();
@@ -341,39 +494,54 @@ fn the_public_log_is_a_complete_graft_kit_for_a_node_signed_ref_move() {
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(view["refs"][ref_name], serde_json::json!(format!("11-{c1}")));
 
-    // Replay. Admitted, because nothing the node signed said "once", and
-    // nothing said "here".
+    // Replay, with the state the captured op expected restored. Refused
+    // as the duplicate it is, and answered with the sequence the real
+    // push landed at rather than a new one.
     let (code, resp) = curl(&["-X", "POST", "-d", &stolen, &format!("{api}/submit")]);
-    assert_eq!(
-        code, 200,
-        "a log-sourced replay of a node-signed ref move is currently admitted: {resp}"
-    );
-    assert_ne!(resp["already_applied"], true, "{resp}");
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["already_applied"], true, "{resp}");
 
-    // And the damage is not just an extra log entry. The view — what the
-    // landing gate, `approval_weight` and every reader consult — now says
-    // main is at c2, while git's own ref, which no replay can touch,
-    // still says c1. The two halves of "one history" disagree, and the
-    // op that split them carries the daemon's signature.
+    // Which is the whole point: the view and git still agree. Before the
+    // duplicate check, this replay moved the view to c2 while git kept
+    // c1 — and the view is what the landing gate, `approval_weight` and
+    // every reader consult, so the half that was wrong was the
+    // authoritative one.
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(
         view["refs"][ref_name],
-        serde_json::json!(format!("11-{c2}")),
+        serde_json::json!(format!("11-{c1}")),
         "{view}"
     );
     let remote = String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout)
         .unwrap();
-    assert!(
-        remote.starts_with(&c1),
-        "git still holds the reverted ref, so view and git have diverged: {remote}"
-    );
+    assert!(remote.starts_with(&c1), "git holds the reverted ref: {remote}");
 
+    // The other node is closed too, and without the operator turning
+    // anything on: the daemon scopes the ops it signs itself, so a
+    // git-derived ref move names the log it was pushed to. This second
+    // node trusts the first node's key — so the signature verifies here,
+    // and the refusal is about the log, not the signer.
+    let node_id = log_scope(&api).0;
+    let (other_api, other) = serving_node(&work.join("repos-2"), &[&node_key]);
+    assert_ne!(
+        log_scope(&other_api).0.to_hex(),
+        node_id.to_hex(),
+        "the second node must be a different log for this to prove anything"
+    );
+    let (code, resp) = curl(&["-X", "POST", "-d", &stolen, &format!("{other_api}/submit")]);
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "foreign_scope", "{resp}");
+    assert_eq!(resp["expected"], serde_json::json!(node_id.to_hex()), "{resp}");
+    let (_, other_view) = curl(&[&format!("{other_api}/view")]);
+    assert!(other_view["refs"][ref_name].is_null(), "{other_view}");
+
+    other.unblock();
     node.unblock();
     std::fs::remove_dir_all(&work).ok();
 }
 
 #[test]
-fn the_landing_gate_does_not_stop_the_replay_and_the_divergence_wedges_the_ref() {
+fn the_landing_gate_cannot_refuse_the_replay_but_the_duplicate_check_does() {
     // The gate is the thing worth attacking, so: `--protected-refs` plus
     // `--require-review`, the full configuration from `landing.rs`.
     //
@@ -502,37 +670,140 @@ fn the_landing_gate_does_not_stop_the_replay_and_the_divergence_wedges_the_ref()
     );
     assert_eq!(refs()[ref_name], serde_json::json!(format!("11-{c1}")));
 
-    // Replay. The approval for (main, c2) is still in the view, still
-    // approved, so the gate says yes to the same landing a second time —
-    // for an attacker who reviewed nothing, pushed nothing and holds no
-    // key. Review is not the missing control here; a nonce is.
+    // Replay. The gate itself cannot refuse this: the approval for
+    // (main, c2) is still in the view and still approved, deliberately,
+    // because an approval that expired on a timer would make retention an
+    // authorization policy. So the gate says yes to the same landing a
+    // second time, and what refuses it is the duplicate check — the
+    // signature, not the approval, is what has already been spent.
     let (code, resp) = post(&stolen);
-    assert_eq!(
-        code, 200,
-        "the landing gate re-authorises a replayed landing from a standing approval: {resp}"
-    );
-    assert_eq!(refs()[ref_name], serde_json::json!(format!("11-{c2}")));
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["already_applied"], true, "{resp}");
+    assert_eq!(refs()[ref_name], serde_json::json!(format!("11-{c1}")));
 
-    // Second consequence, and the practical one: the ref is now wedged.
-    // The next honest push CASes against git's old oid (c1) while the
-    // view holds c2, so a fully reviewed, fully approved landing is
-    // refused with no way for the pusher to fix it from their side.
+    // And so the ref is not wedged. Before the duplicate check, the view
+    // held c2 while git held c1, and the next honest push CASed git's oid
+    // against a view that disagreed — a fully reviewed, fully approved
+    // landing refused with nothing the pusher could fix from their side.
+    // It lands.
     let c3 = commit("three\n", "third");
     approve("land-c3", &c3);
     let out = git(&clone, &["push", "-q", "origin", "HEAD:main"]);
     assert!(
-        !out.status.success(),
-        "an approved push onto a diverged ref should be refused: {}",
+        out.status.success(),
+        "an approved push must still land after a replay attempt: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let remote = String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout)
         .unwrap();
-    assert!(remote.starts_with(&c1), "git is stuck at the revert: {remote}");
+    assert!(remote.starts_with(&c3), "git advanced to the approved commit: {remote}");
     assert_eq!(
         refs()[ref_name],
-        serde_json::json!(format!("11-{c2}")),
-        "and the view is stuck at the replay"
+        serde_json::json!(format!("11-{c3}")),
+        "and the view agrees with git"
     );
+
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}
+
+#[test]
+fn behind_an_auth_file_the_capture_needs_a_token_and_a_token_is_enough() {
+    // The deployment shape the module doc now distinguishes. With
+    // `--auth-file` the whole API is 401 without credentials, so a graft
+    // is not remote-anonymous. It is also not much harder: the auth table
+    // is one token per person, while a signature is per actor key, so a
+    // token holder reads the log and replays anyone's ops. This test is
+    // what keeps that claim from drifting back to either extreme.
+    let work = std::env::temp_dir().join(format!("choir-graft-auth-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let ana = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&ana.public_key_bytes()).unwrap();
+    let mut table = choir_node::AuthTable::new();
+    // Not ana. A different person entirely, with no signing key here.
+    table.insert("reader".into(), "sekrit-token".into());
+
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let creds = "reader:sekrit-token";
+
+    // ana submits one op, with credentials like everyone else.
+    let payload = head("ana/w", "c1", None);
+    let sig = ana.sign_submission("ana", &payload);
+    let (code, resp) = curl(&[
+        "-u", creds, "-X", "POST", "-d",
+        &grafted_body("ana", &payload, &sig),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    // No credentials: the log is not readable, so the capture channel is
+    // shut. `curl` gets a plain-text 401 body, not JSON.
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", &format!("{api}/log?from=0")])
+        .output()
+        .expect("curl runs");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "401");
+
+    // With the token — held by someone who has no key here at all — the
+    // author's signature comes back out of the log, ready to replay.
+    let (code, page) = curl(&["-u", creds, &format!("{api}/log?from=0")]);
+    assert_eq!(code, 200, "{page}");
+    let entry = &page["entries"][0];
+    assert!(entry["author_sig_hex"].is_string(), "{page}");
+    assert_eq!(
+        entry["author_key"],
+        serde_json::json!(ana.actor_id().to_hex()),
+        "the token holder is reading a signature that is not theirs: {page}"
+    );
+
+    // And the replay is refused by the duplicate check rather than by
+    // anything about the token. Transport auth is not the control that
+    // stops this; it only decides who can try.
+    let stolen = serde_json::json!({
+        "channel": entry["workspace"],
+        "payload_hex": entry["payload_hex"],
+        "key_id": entry["author_key"],
+        "signature_hex": entry["author_sig_hex"],
+    })
+    .to_string();
+    let (code, resp) = curl(&[
+        "-u", creds, "-X", "POST", "-d", &stolen, &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+    assert_eq!(resp["already_applied"], true, "{resp}");
+    assert_eq!(resp["seq"], 0, "{resp}");
+
+    // A corrupted signature over those same already-applied bytes is a
+    // rejection, not a 200. The duplicate answer is only reachable once
+    // the signature has verified — otherwise "already applied" would be
+    // the reply to a failed signature check.
+    let mut forged = sig.signature;
+    forged[0] ^= 0xff;
+    let tampered = serde_json::json!({
+        "channel": "ana",
+        "payload_hex": entry["payload_hex"],
+        "key_id": entry["author_key"],
+        "signature_hex": choir_node::platform::hex_encode(&forged),
+    })
+    .to_string();
+    let (code, resp) = curl(&[
+        "-u", creds, "-X", "POST", "-d", &tampered, &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 400, "a bad signature must not be answered as success: {resp}");
+    assert_ne!(resp["already_applied"], true, "{resp}");
 
     node.unblock();
     std::fs::remove_dir_all(&work).ok();

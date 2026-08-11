@@ -201,6 +201,13 @@ pub struct LogWindow {
     /// it here would re-serialize every entry on the write path — the
     /// allocation budget caught exactly that.
     by_signing: std::collections::HashMap<ContentHash, u64>,
+    /// Entry hash → seq, for the heads a scoped op may name.
+    ///
+    /// Same bound, same reason, and it costs no hashing at all: the
+    /// sequencer hands `push` the hash it already computed, and eviction
+    /// reads the dropped entry's hash out of the next entry's `parent`
+    /// rather than re-deriving it.
+    by_hash: std::collections::HashMap<ContentHash, u64>,
 }
 
 /// Entries retained in memory for `/api/log`; older reads are served from
@@ -1763,12 +1770,38 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 impl LogWindow {
-    fn push(&mut self, entry: OpEntry) {
+    fn push(&mut self, entry: OpEntry, hash: ContentHash) {
         // `signing_hash` covers only (channel, payload); `content_hash`
-        // would serialize the whole entry, and this runs per admitted op.
+        // would serialize the whole entry, and this runs per admitted op
+        // -- which is why `hash` is passed in by the sequencer that
+        // already computed it rather than derived here.
         self.by_signing.insert(entry.signing_hash(), entry.seq);
+        self.by_hash.insert(hash, entry.seq);
         self.entries.push_back(entry);
         self.trim();
+    }
+
+    /// Whether `head` is an entry still inside the window, which is what
+    /// makes an op signed against it admissible.
+    fn holds_head(&self, head: &ContentHash) -> bool {
+        self.by_hash.contains_key(head)
+    }
+
+    /// The head a client should sign its next scope against.
+    ///
+    /// Derived rather than stored: keeping it would mean cloning a hash
+    /// on every admitted op to serve a value only read by `/api/view`
+    /// and by the ops the daemon signs itself. `None` for an empty
+    /// window, which is also a window that would admit no head.
+    fn head_hash(&self) -> Option<ContentHash> {
+        self.entries.back().map(OpEntry::content_hash)
+    }
+
+    /// The seq an identical submission already landed as, if any. The
+    /// caller has usually just computed the signing hash for the
+    /// signature check, so it is taken rather than recomputed.
+    fn seq_for_signing(&self, signing: &ContentHash) -> Option<u64> {
+        self.by_signing.get(signing).copied()
     }
 
     /// The `(seq, hash)` an identical submission already landed as.
@@ -1797,6 +1830,16 @@ impl LogWindow {
                 // Evict from the index with the entry, or the map becomes
                 // the unbounded thing the window exists to avoid.
                 self.by_signing.remove(&dropped.signing_hash());
+                // The dropped entry's own hash is the new front's
+                // `parent`, so its eviction costs a lookup instead of a
+                // re-serialization. An emptied window holds no heads at
+                // all, which is the only case with no successor to ask.
+                match self.entries.front().and_then(|e| e.parent.as_ref()) {
+                    Some(parent) => {
+                        self.by_hash.remove(parent);
+                    }
+                    None => self.by_hash.clear(),
+                }
             }
             self.base += 1;
         }
@@ -1856,6 +1899,10 @@ struct ChoirPolicy {
     /// When set, a protected ref only moves to a commit some approved
     /// review already named — the landing half of the gate.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// When set, every submission must carry a [`choir_view::OpScope`]
+    /// naming this node and a head still in the window. Shared with
+    /// [`Platform`], like the other gates.
+    require_scope: Arc<std::sync::atomic::AtomicBool>,
     /// Actor id → the channel name that key is bound to,
     /// for keys whose trusted-keys line carries a name. Keys absent from
     /// this map are unconstrained, which is what every key was before the
@@ -1993,6 +2040,119 @@ impl ChoirPolicy {
             .max()
             .unwrap_or(0)
     }
+
+    /// Refuses a submission that has already been admitted, and one whose
+    /// author never bound it to this log at all.
+    ///
+    /// Together these are the replay defence, and they compose into
+    /// at-most-once permanently even though both indexes are bounded by
+    /// the window. The argument is short enough to check: a scoped op is
+    /// admissible only while the head it names is still in the window;
+    /// its own signing hash entered the window at a *later* sequence
+    /// than that head, so whenever the head is still there the signing
+    /// hash is too and the duplicate check refuses it. Once the head is
+    /// gone the scope check refuses it. There is no sequence at which
+    /// neither fires.
+    ///
+    /// Without a scope only the duplicate half applies, which bounds a
+    /// replay to the window instead of refusing it outright — the reason
+    /// `--require-scope` exists.
+    fn admit_once(&self, signing: &ContentHash, op: &ViewOp) -> Result<(), String> {
+        // Nothing is cloned out of the window here. Every admitted op runs
+        // this, while only a refused one needs the head to explain itself,
+        // so the head is read again on the rejection path instead of
+        // copied on the hot one -- one allocation per op, which the
+        // allocation budget notices.
+        let (already, holds_head, nothing_evicted) = {
+            let window = self.entries.lock().expect("entries lock");
+            (
+                window.seq_for_signing(signing),
+                op.scope
+                    .as_ref()
+                    .and_then(|s| s.head.as_ref())
+                    .is_some_and(|h| window.holds_head(h)),
+                window.base == 0,
+            )
+        };
+        let window_head = || {
+            self.entries
+                .lock()
+                .expect("entries lock")
+                .head_hash()
+                .as_ref()
+                .map(ContentHash::to_hex)
+        };
+        // A signature is admissible once. `prev` cannot enforce that: it
+        // compares state, and state recurs — land a commit, revert it,
+        // and the reverted-away op's CAS matches again. The HTTP layer
+        // answers any rejection whose submission already landed as 200
+        // `already_applied` with the original seq, so a lost-response
+        // retry still reads as success while a replay becomes a no-op.
+        if let Some(seq) = already {
+            return Err(Rejection::new(
+                Code::DuplicateSubmission,
+                format!("these exact signed bytes already landed at seq {seq}"),
+                "if you are retrying, read `seq` from this response — it names the op you \
+                 already have. If you meant a second, distinct change, sign a new op: two \
+                 otherwise byte-identical ops are told apart by their scope.",
+            )
+            .with_states(Some(seq.to_string()), None)
+            .encode());
+        }
+        let Some(scope) = &op.scope else {
+            if self.require_scope.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Rejection::new(
+                    Code::ScopeRequired,
+                    "this node admits only ops signed for its own log and a recent head",
+                    "read `log.node` and `log.head` from GET /api/view, put them in the \
+                     op's `scope`, and sign that; `choir submit` does it for you",
+                )
+                .with_states(None, window_head())
+                .encode());
+            }
+            return Ok(());
+        };
+        if scope.node != self.node_id {
+            return Err(Rejection::new(
+                Code::ForeignScope,
+                "this op was signed for another node's log",
+                "sign a scope naming this node; its id is in `actual` and in `log.node` \
+                 of GET /api/view",
+            )
+            .with_states(Some(scope.node.to_hex()), Some(self.node_id.to_hex()))
+            .encode());
+        }
+        match &scope.head {
+            Some(_) if holds_head => Ok(()),
+            // The op names no head, which is what a client signs when it
+            // read an empty log — including every op of a batch it signed
+            // in one go, since only the first of those lands against a
+            // log that is still empty.
+            //
+            // Admissible while this window has evicted nothing, because
+            // that is exactly the span the duplicate index above covers
+            // in full: an unevicted window holds every entry, so a replay
+            // of a headless op cannot slip past it. The moment the first
+            // entry is evicted the guarantee would thin out, and the op
+            // stops being admissible instead.
+            None if nothing_evicted => Ok(()),
+            None => Err(Rejection::new(
+                Code::StaleScope,
+                "the op names no head, and this log has evicted entries since",
+                "re-read `log.head` from GET /api/view and sign a fresh op against it",
+            )
+            .with_states(Some("a log with nothing evicted".to_string()), window_head())
+            .encode()),
+            Some(head) => Err(Rejection::new(
+                Code::StaleScope,
+                "the head this op was signed against is no longer in the window",
+                "re-read `log.head` from GET /api/view and sign a fresh op against it; a \
+                 signature stays admissible only as long as the head it names does",
+            )
+            .with_states(Some(head.to_hex()), window_head())
+            .encode()),
+        }
+    }
 }
 
 impl SubmitPolicy for ChoirPolicy {
@@ -2003,15 +2163,12 @@ impl SubmitPolicy for ChoirPolicy {
         // cannot trigger this tightening: a removed key is still present
         // in the stale registry and would verify successfully.
         self.reload_keys();
-        let mut verified_actor = self
-            .registry
-            .verify_submission(&sub.channel, &sub.payload, sig);
+        let signing = choir_oplog::signing_hash(&sub.channel, &sub.payload);
+        let mut verified_actor = self.registry.verify_signing_hash(&signing, sig);
         // Retry a failed signature in case the file changed between the
         // pre-verification metadata check and this verification.
         if verified_actor.is_err() && self.reload_keys() {
-            verified_actor = self
-                .registry
-                .verify_submission(&sub.channel, &sub.payload, sig);
+            verified_actor = self.registry.verify_signing_hash(&signing, sig);
         }
         let actor_id = verified_actor.map_err(|e| {
             Rejection::new(
@@ -2029,6 +2186,10 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode()
         })?;
+        // Before any policy that asks what the op *does*: has this
+        // signature already been spent, and was it ever meant for this
+        // log at all.
+        self.admit_once(&signing, &op)?;
         // A verdict's claimed reviewer must be the signature-covered
         // submission channel: the log's author attribution and the
         // view's verdict attribution can never diverge.
@@ -2216,7 +2377,7 @@ impl SubmitPolicy for ChoirPolicy {
             .map_err(|e| crate::reject::from_view_error(&e).encode())
     }
 
-    fn accepted(&mut self, entry: &OpEntry) {
+    fn accepted(&mut self, entry: &OpEntry, hash: &ContentHash) {
         let op = ViewOp::from_payload(&entry.payload).expect("checked in check()");
         {
             let mut view = self.view.lock().expect("view lock");
@@ -2234,7 +2395,7 @@ impl SubmitPolicy for ChoirPolicy {
         self.entries
             .lock()
             .expect("entries lock")
-            .push(entry.clone());
+            .push(entry.clone(), hash.clone());
     }
 }
 
@@ -2269,6 +2430,8 @@ pub struct Platform {
     /// Shared with the policy: when set, a protected ref only moves to a
     /// commit an approved review already named.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with the policy: when set, only scoped ops are admitted.
+    require_scope: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the policy: actor id → bound channel name.
     key_names: Arc<Mutex<KeyBindings>>,
     /// D24 T3 runtime projection, replayed from the signed log at startup.
@@ -2389,11 +2552,28 @@ impl Platform {
             ),
             cap: LOG_WINDOW_CAP,
             by_signing: std::collections::HashMap::new(),
+            by_hash: std::collections::HashMap::new(),
         };
+        // Seeding needs each entry's hash, and the log stores it already:
+        // every entry's `parent` is its predecessor's hash, and the last
+        // one's is the log head. So a restart re-indexes the window
+        // without hashing anything, and a scope signed just before the
+        // restart is still admissible just after it.
+        let mut pending: Option<OpEntry> = None;
         for i in start..len {
-            if let Some(e) = log.get(i) {
-                window.push(e);
+            let current = log.get(i);
+            if let (Some(previous), Some(current)) = (pending.take(), current.as_ref()) {
+                let hash = current
+                    .parent
+                    .clone()
+                    .unwrap_or_else(|| previous.content_hash());
+                window.push(previous, hash);
             }
+            pending = current;
+        }
+        if let Some(last) = pending {
+            let hash = log.head().unwrap_or_else(|| last.content_hash());
+            window.push(last, hash);
         }
         let entries = Arc::new(Mutex::new(window));
         let keys_mtime = keys_file
@@ -2412,12 +2592,14 @@ impl Platform {
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let require_scope = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
                 require_assignment: require_assignment.clone(),
                 protected_refs: protected_refs.clone(),
                 require_review: require_review.clone(),
+                require_scope: require_scope.clone(),
                 registry,
                 view: view.clone(),
                 entries: entries.clone(),
@@ -2441,6 +2623,7 @@ impl Platform {
             require_assignment,
             protected_refs,
             require_review,
+            require_scope,
             key_names,
             concentration,
             review_retention,
@@ -2634,6 +2817,31 @@ impl Platform {
         self
     }
 
+    /// Admits only ops whose author bound them to this log and a head
+    /// still in the window — the replay defence, turned on.
+    ///
+    /// Off by default because it is a wire-compatibility break, not
+    /// because unscoped is safe: an unscoped signature is admissible on
+    /// any node that trusts the key, and admissible again on the node it
+    /// came from as soon as CAS state returns to what it expected. Every
+    /// client in this repository always sends a scope, so turning this
+    /// on costs them nothing; a client that predates scopes stops
+    /// working, which is the whole reason for the flag.
+    #[must_use]
+    pub fn with_required_scope(self) -> Self {
+        self.require_scope
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// The log identity a client signs a scope against: this node's
+    /// actor id and the head it should name.
+    #[must_use]
+    pub fn scope_now(&self) -> (ContentHash, Option<ContentHash>) {
+        let head = self.entries.lock().expect("entries lock").head_hash();
+        (self.node_key.actor_id(), head)
+    }
+
     /// Points the platform at the JSON-lines file its op log persists to,
     /// so `/api/log?from=` can serve entries that have already been
     /// evicted from the in-memory window. Without it, a reader that has
@@ -2743,7 +2951,8 @@ impl Platform {
                 prev,
             }
         };
-        let payload = ViewOp::new(kind).to_payload();
+        let (node, head) = self.scope_now();
+        let payload = ViewOp::new(kind).in_scope(node, head).to_payload();
         // Verified push certificate ("G" = good signature) attributes
         // the op to the pusher's own key; otherwise the transport user.
         let workspace = match cert {
@@ -2778,11 +2987,13 @@ impl Platform {
             .workspaces
             .get(workspace)
             .cloned();
+        let (node, head) = self.scope_now();
         let payload = ViewOp::new(OpKind::SetWorkspaceHead {
             workspace: workspace.to_string(),
             commit,
             prev,
         })
+        .in_scope(node, head)
         .to_payload();
         let sig = self.node_key.sign_submission(attribution, &payload);
         self.handle.try_submit(attribution, payload, Some(sig)).map(|_| ())
@@ -2866,10 +3077,12 @@ impl Platform {
         let mut pool = drawn;
         pool.sort();
 
+        let (node, head) = self.scope_now();
         let payload = ViewOp::new(OpKind::AssignReviewers {
             id: id.to_string(),
             reviewers: pool.clone(),
         })
+        .in_scope(node, head)
         .to_payload();
         let channel = "node/assign";
         let sig = self.node_key.sign_submission(channel, &payload);
@@ -2950,6 +3163,7 @@ impl Platform {
         }
 
         let channel = "node/archive";
+        let (node, head) = self.scope_now();
         let submissions: Vec<Submission> = candidates
             .iter()
             .map(|(id, lapsed)| {
@@ -2957,6 +3171,7 @@ impl Platform {
                     id: id.clone(),
                     lapsed: *lapsed,
                 })
+                .in_scope(node.clone(), head.clone())
                 .to_payload();
                 Submission {
                     channel: channel.to_string(),
@@ -3114,7 +3329,22 @@ impl Platform {
                     as_of_seq,
                 );
                 let newcomer_harm = newcomer_harm_json(self.newcomer_audit.as_ref());
+                // What a client needs to bind its next signature to this
+                // log: which node, which head, and whether that head is
+                // being enforced. Read here rather than under the view
+                // guard above — an op that lands in between only makes
+                // `head` one entry stale, and a scope naming any head
+                // still in the window is admissible.
+                let (node, head) = self.scope_now();
+                let log = serde_json::json!({
+                    "node": node.to_hex(),
+                    "head": head.as_ref().map(ContentHash::to_hex),
+                    "scope_required": self
+                        .require_scope
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                });
                 let body = serde_json::json!({
+                    "log": log,
                     "workspaces": ws,
                     "refs": refs,
                     "reviews": reviews,
@@ -3439,25 +3669,37 @@ impl Platform {
                 // versus re-read and rebase -- so an agent that cannot
                 // tell them apart either retries a completed write or
                 // abandons a successful one.
-                if let Some((seq, hash)) = self
-                    .entries
-                    .lock()
-                    .expect("entries lock")
-                    .already_applied(&sub.channel, &sub.payload)
-                {
-                    let mut response = serde_json::json!({
-                        "seq": seq,
-                        "hash": hash.to_hex(),
-                        "already_applied": true,
-                    });
-                    self.add_newcomer_outcome(
-                        &mut response,
-                        &sub,
-                        started_at_unix_ms,
-                        true,
-                        None,
-                    );
-                    return (200, response.to_string());
+                //
+                // Only the policy's own duplicate refusal is converted,
+                // and that is load-bearing. This lookup used to run for
+                // *any* rejection, which meant a submission carrying a
+                // corrupted signature over an already-applied payload was
+                // answered 200 `already_applied`: the signature check had
+                // failed, and the response said success. It changed no
+                // state, but a check whose failure is reported as a
+                // success is not a check. `duplicate_submission` is
+                // raised only after the signature verifies.
+                if Rejection::decode(&reason).code == Code::DuplicateSubmission.as_str() {
+                    if let Some((seq, hash)) = self
+                        .entries
+                        .lock()
+                        .expect("entries lock")
+                        .already_applied(&sub.channel, &sub.payload)
+                    {
+                        let mut response = serde_json::json!({
+                            "seq": seq,
+                            "hash": hash.to_hex(),
+                            "already_applied": true,
+                        });
+                        self.add_newcomer_outcome(
+                            &mut response,
+                            &sub,
+                            started_at_unix_ms,
+                            true,
+                            None,
+                        );
+                        return (200, response.to_string());
+                    }
                 }
                 let mut response = Rejection::decode(&reason).to_json();
                 let code = response["code"].as_str().map(str::to_string);

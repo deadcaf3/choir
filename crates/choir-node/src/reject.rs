@@ -71,6 +71,14 @@ pub enum Code {
     PolicyUnavailable,
     /// Requested log entries are older than anything this node can serve.
     LogEvicted,
+    /// These exact signed bytes have already been admitted.
+    DuplicateSubmission,
+    /// This node requires a signed scope and the op carried none.
+    ScopeRequired,
+    /// The op was signed for a different node's log.
+    ForeignScope,
+    /// The scoped head is no longer recent enough to admit.
+    StaleScope,
     /// Anything that did not originate as a structured rejection.
     Unclassified,
 }
@@ -98,6 +106,10 @@ impl Code {
             Self::IdentityState => "identity_state",
             Self::PolicyUnavailable => "policy_unavailable",
             Self::LogEvicted => "log_evicted",
+            Self::DuplicateSubmission => "duplicate_submission",
+            Self::ScopeRequired => "scope_required",
+            Self::ForeignScope => "foreign_scope",
+            Self::StaleScope => "stale_scope",
             Self::Unclassified => "unclassified",
         }
     }
@@ -122,6 +134,10 @@ impl Code {
             Self::IdentityState,
             Self::PolicyUnavailable,
             Self::LogEvicted,
+            Self::DuplicateSubmission,
+            Self::ScopeRequired,
+            Self::ForeignScope,
+            Self::StaleScope,
             Self::Unclassified,
         ]
     }
@@ -308,6 +324,10 @@ impl Code {
             Self::IdentityState => "A key-binding precondition failed (key already bound to another operator, revoked or unbound key, channel naming a different operator)",
             Self::PolicyUnavailable => "The operator's protected-ref list could not be read, so the gate failed closed",
             Self::LogEvicted => "Requested log entries are older than anything this node can serve",
+            Self::DuplicateSubmission => "These exact signed bytes already landed; a signature is admissible once",
+            Self::ScopeRequired => "This node admits only ops signed for its own log and a recent head, and this op carried no scope",
+            Self::ForeignScope => "The op was signed for another node's log",
+            Self::StaleScope => "The head the op was signed against is no longer in the node's recent window",
             Self::Unclassified => "A rejection that did not originate as a structured one",
         }
     }
@@ -332,6 +352,10 @@ impl Code {
             Self::IdentityState => "Read `bindings` in `GET /api/view` for this key. Not a retry:                 a key belongs to one operator for the life of the key, and a revoked key is                 never rebindable. Bind a fresh key instead. `error` names which of the two                 applies.",
             Self::PolicyUnavailable => "Operator problem, not a client one: the gate fails                 closed rather than guessing. Retry once the file is restored.",
             Self::LogEvicted => "Resync from the sequence in `window_base`; entries before it                 are gone from this node.",
+            Self::DuplicateSubmission => "If you are retrying, this is your op: read `seq`.                 A submission that already landed answers 200 with `already_applied`, and                 only reaches you as a rejection if the window moved underneath the retry.                 If you meant a second, distinct change, sign a new op — two otherwise                 byte-identical ops are told apart by their scope.",
+            Self::ScopeRequired => "Read `log.node` and `log.head` from `GET /api/view`,                 put them in the op's `scope`, and sign that. `choir submit` does this                 automatically. An unscoped op cannot be admitted here because nothing in it                 says which log it was meant for or that it has not run before.",
+            Self::ForeignScope => "Nothing to retry against this node: the op names another                 node's id in `expected`. Sign a scope naming this node, whose id is in                 `actual` and in `log.node` of `GET /api/view`.",
+            Self::StaleScope => "Re-read `log.head` from `GET /api/view` and sign a fresh op                 against it. A signature is only admissible while the head it names is still                 in the node's window, which is what stops a captured op from being replayed                 later.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",
         }
     }

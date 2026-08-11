@@ -32,7 +32,7 @@ impl SubmitPolicy for ChoirPolicy {
         trial.apply(&op).map_err(|e| format!("stale head: {e:?}"))
     }
 
-    fn accepted(&mut self, entry: &OpEntry) {
+    fn accepted(&mut self, entry: &OpEntry, _hash: &choir_hash::ContentHash) {
         let op = ViewOp::from_payload(&entry.payload).expect("checked");
         self.view.apply(&op).expect("checked");
     }
