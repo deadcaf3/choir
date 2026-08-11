@@ -50,8 +50,37 @@ impl Rng {
         (self.next_u64() % n as u64) as usize
     }
 
+    /// A content address under any of the three codecs the envelope
+    /// carries, with the digest width that codec really has: 20 bytes for
+    /// git SHA-1, 32 for git SHA-256 and BLAKE3.
+    ///
+    /// Varying the codec matters because git oids genuinely appear inside
+    /// persisted shapes — `SetRef` carries whatever git reported, via
+    /// [`ContentHash::from_git_oid`] — so a hashed struct holding a
+    /// non-BLAKE3 address is the normal case, not an exotic one. A
+    /// generator that only ever embeds BLAKE3 would never serialize a
+    /// 20-byte digest, which is the case that rules out narrowing the
+    /// field to `[u8; 32]`.
     fn hash(&mut self) -> ContentHash {
-        ContentHash::blake3(&self.next_u64().to_le_bytes())
+        let codec = [0x1e_u8, 0x11, 0x12][self.below(3)];
+        let width = if codec == 0x11 { 20 } else { 32 };
+        let mut digest = Vec::with_capacity(width);
+        while digest.len() < width {
+            digest.extend_from_slice(&self.next_u64().to_le_bytes());
+        }
+        digest.truncate(width);
+        ContentHash { codec, digest }
+    }
+
+    /// Fisher-Yates. Insertion-order tests need real permutations: a
+    /// reversal and a rotation are two of the 16! orders, and both preserve
+    /// adjacency, so they are the orders least likely to expose a map that
+    /// keys off neighbouring inserts.
+    fn shuffle<T>(&mut self, items: &mut [T]) {
+        for i in (1..items.len()).rev() {
+            let j = self.below(i + 1);
+            items.swap(i, j);
+        }
     }
 
     /// A repo-shaped path. Shared directory prefixes matter: they make
@@ -110,10 +139,17 @@ impl Rng {
     }
 }
 
-fn commit_from(pairs: &[(String, TreeEntry)]) -> Commit {
+/// Builds a commit around `pairs`, with `parents` parent ids.
+///
+/// The arity is a parameter because `Commit::parents` documents "0 = root,
+/// 2+ = merge", and a generator that always supplies exactly one covers
+/// neither. An empty `Vec` and a multi-entry one serialize differently
+/// (`[]` versus a populated array), and a root commit is the first thing
+/// any history contains.
+fn commit_from(pairs: &[(String, TreeEntry)], parents: Vec<ContentHash>) -> Commit {
     Commit {
         format_version: FORMAT_VERSION,
-        parents: vec![ContentHash::blake3(b"parent")],
+        parents,
         // The map type is inferred from the field, never named here: a
         // test that guards the choice of map must not restate it, or
         // swapping the field breaks compilation instead of failing.
@@ -123,8 +159,77 @@ fn commit_from(pairs: &[(String, TreeEntry)]) -> Commit {
     }
 }
 
+/// Parent lists spanning every arity the field's own documentation names:
+/// root, linear, and a merge.
+fn parent_arities(rng: &mut Rng) -> Vec<Vec<ContentHash>> {
+    vec![
+        Vec::new(),
+        vec![rng.hash()],
+        vec![rng.hash(), rng.hash()],
+        vec![rng.hash(), rng.hash(), rng.hash()],
+    ]
+}
+
 fn canonical<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("hashed shapes always serialize")
+}
+
+/// The generator earns its keep, same discipline as the sibling suites:
+/// a property is only as strong as the corpus it runs over, and both of
+/// these are shapes the rest of the workspace never builds.
+///
+/// Merge commits especially. Every other call site in the suite passes
+/// zero or one parent, so a two-element `parents` array had never been
+/// serialized anywhere before this file — despite the field documenting
+/// `2+ = merge`. Root commits, by contrast, were already covered in
+/// `view.rs`; this keeps them here so the arity loop is not silently
+/// reduced to the linear case later.
+#[test]
+fn the_generator_produces_merge_commits_and_every_codec() {
+    let mut codecs = std::collections::BTreeSet::new();
+    let mut widths = std::collections::BTreeSet::new();
+    let mut arities = std::collections::BTreeSet::new();
+    for seed in SEEDS {
+        let mut rng = Rng::new(seed);
+        for _ in 0..8 {
+            for (path, entry) in rng.tree_pairs() {
+                assert!(!path.is_empty(), "a tree key must not be empty");
+                for h in hashes_in(&entry) {
+                    codecs.insert(h.codec);
+                    widths.insert(h.digest.len());
+                }
+            }
+            for parents in parent_arities(&mut rng) {
+                arities.insert(parents.len());
+            }
+        }
+    }
+    assert_eq!(
+        codecs,
+        [0x11, 0x12, 0x1e].into_iter().collect(),
+        "the corpus must embed git SHA-1, git SHA-256 and BLAKE3 addresses"
+    );
+    assert_eq!(
+        widths,
+        [20, 32].into_iter().collect(),
+        "a 20-byte digest is the case that rules out narrowing the field to [u8; 32]"
+    );
+    assert!(
+        arities.contains(&0) && arities.contains(&2),
+        "expected root and merge commits, got arities {arities:?}"
+    );
+}
+
+/// Every content address inside one tree entry.
+fn hashes_in(entry: &TreeEntry) -> Vec<&ContentHash> {
+    match entry {
+        TreeEntry::File { blob } => vec![blob],
+        TreeEntry::Conflict { base, left, right } => {
+            let mut v = vec![left, right];
+            v.extend(base.as_ref());
+            v
+        }
+    }
 }
 
 /// The property that invariant 3 actually asserts: a commit's bytes depend
@@ -141,30 +246,40 @@ fn tree_serialization_is_independent_of_insertion_order() {
         for case in 0..8 {
             let at = format!("seed {seed:#x} case {case}");
             let pairs = rng.tree_pairs();
+            let parents = vec![rng.hash()];
+            let forward = commit_from(&pairs, parents.clone());
+
+            // Reversal and rotation are structured orders; the shuffles are
+            // arbitrary ones. Both are kept: the structured pair states the
+            // property in a form a reader can check by eye, and the shuffles
+            // search orders neither of them reaches.
             let mut reversed = pairs.clone();
             reversed.reverse();
             let mut rotated = pairs.clone();
             rotated.rotate_left(1 + rng.below(TREE_SIZE - 1));
 
-            let forward = commit_from(&pairs);
-            let backward = commit_from(&reversed);
-            let rotated = commit_from(&rotated);
+            let mut others = vec![
+                ("reversing", commit_from(&reversed, parents.clone())),
+                ("rotating", commit_from(&rotated, parents.clone())),
+            ];
+            for _ in 0..4 {
+                let mut shuffled = pairs.clone();
+                rng.shuffle(&mut shuffled);
+                others.push(("shuffling", commit_from(&shuffled, parents.clone())));
+            }
 
-            assert_eq!(
-                canonical(&forward),
-                canonical(&backward),
-                "{at}: reversing insertion order changed the canonical bytes"
-            );
-            assert_eq!(
-                canonical(&forward),
-                canonical(&rotated),
-                "{at}: rotating insertion order changed the canonical bytes"
-            );
-            assert_eq!(
-                ContentHash::blake3(canonical(&forward).as_bytes()),
-                ContentHash::blake3(canonical(&backward).as_bytes()),
-                "{at}: the commit address depends on how its tree was built"
-            );
+            for (how, other) in &others {
+                assert_eq!(
+                    canonical(&forward),
+                    canonical(other),
+                    "{at}: {how} the insertion order changed the canonical bytes"
+                );
+                assert_eq!(
+                    ContentHash::blake3(canonical(&forward).as_bytes()),
+                    ContentHash::blake3(canonical(other).as_bytes()),
+                    "{at}: the commit address depends on how its tree was built"
+                );
+            }
         }
     }
 }
@@ -185,7 +300,7 @@ fn tree_keys_are_emitted_in_sorted_order() {
         for case in 0..8 {
             let at = format!("seed {seed:#x} case {case}");
             let pairs = rng.tree_pairs();
-            let bytes = canonical(&commit_from(&pairs));
+            let bytes = canonical(&commit_from(&pairs, vec![rng.hash()]));
 
             let mut sorted: Vec<&String> = pairs.iter().map(|(p, _)| p).collect();
             sorted.sort();
@@ -221,23 +336,36 @@ fn tree_keys_are_emitted_in_sorted_order() {
 /// A commit must survive the store round-trip byte-for-byte, since its
 /// address is those bytes. `Commit::get` re-decodes what `Commit::put`
 /// wrote, and every later re-encode has to reproduce it.
+///
+/// Run across every parent arity, so root and merge commits are covered
+/// rather than only the linear case.
 #[test]
 fn commits_round_trip_byte_for_byte() {
+    let mut arities_seen = 0;
     for seed in SEEDS {
         let mut rng = Rng::new(seed);
         for case in 0..8 {
-            let at = format!("seed {seed:#x} case {case}");
-            let commit = commit_from(&rng.tree_pairs());
-            let bytes = canonical(&commit);
-            let decoded: Commit = serde_json::from_str(&bytes).expect("canonical bytes decode");
-            assert_eq!(decoded, commit, "{at}: commit did not round-trip");
-            assert_eq!(
-                canonical(&decoded),
-                bytes,
-                "{at}: re-serialization drifted from the stored bytes"
-            );
+            let pairs = rng.tree_pairs();
+            for parents in parent_arities(&mut rng) {
+                let at = format!("seed {seed:#x} case {case} parents {}", parents.len());
+                arities_seen |= 1 << parents.len();
+                let commit = commit_from(&pairs, parents);
+                let bytes = canonical(&commit);
+                let decoded: Commit =
+                    serde_json::from_str(&bytes).expect("canonical bytes decode");
+                assert_eq!(decoded, commit, "{at}: commit did not round-trip");
+                assert_eq!(
+                    canonical(&decoded),
+                    bytes,
+                    "{at}: re-serialization drifted from the stored bytes"
+                );
+            }
         }
     }
+    assert_eq!(
+        arities_seen, 0b1111,
+        "expected commits with 0, 1, 2 and 3 parents; a root or a merge was never built"
+    );
 }
 
 /// `ViewOp` is what a client signs, so a client that rebuilds "the same"
