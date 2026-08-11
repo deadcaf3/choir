@@ -10,11 +10,26 @@ fn state(work: &std::path::Path) -> std::path::PathBuf {
     work.join("repos").join(".choir")
 }
 
-/// Start the daemon and find out whether it stayed up. The daemon serves
-/// forever, so "started" can only be evidenced by *not* exiting — an
-/// earlier version of this used "the fingerprint file exists", which the
-/// third case below already satisfies before the process has had time to
-/// fail, and it reported a refusal as a success.
+/// Start the daemon and find out whether it stayed up.
+///
+/// Success is read from the daemon's own words: it prints `choir-node
+/// serving …` once, after the fingerprint check, and a refusal exits
+/// before reaching it. So this waits for that line or for the process to
+/// die, and never for a duration.
+///
+/// Two earlier signals were wrong in opposite directions, and both are
+/// worth keeping written down. "The fingerprint file exists" is satisfied
+/// by the refusing case before it has had time to fail, so it reported a
+/// refusal as a success. "The process has not exited after 1500 ms" is
+/// not a fact about the daemon at all — it is a fact about how loaded the
+/// machine is, and it duly broke when a sibling module added six tests to
+/// this shared harness: a correctly booting daemon missed the window in
+/// two runs of three. Raising the number would have bought time until the
+/// next module lands. The marker cannot drift that way.
+///
+/// The remaining timeout is a deadlock guard, deliberately far larger
+/// than any plausible boot, and reaching it is a failure rather than a
+/// verdict.
 fn boot(work: &std::path::Path, auth: &std::path::Path) -> (bool, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_choir-node"))
         .arg(work.join("repos"))
@@ -32,31 +47,48 @@ fn boot(work: &std::path::Path, auth: &std::path::Path) -> (bool, String) {
         .spawn()
         .expect("spawn choir-node");
 
-    let settle = std::time::Instant::now() + std::time::Duration::from_millis(1500);
-    while std::time::Instant::now() < settle {
-        if child.try_wait().expect("wait").is_some() {
-            let out = child.wait_with_output().expect("output");
-            return (
-                false,
-                format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                ),
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+    // stderr is read on its own thread: the daemon writes the marker and
+    // then blocks serving forever, so a read on this thread would too.
+    let stderr = child.stderr.take().expect("piped stderr");
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    {
+        let (seen, text) = (seen.clone(), text.clone());
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                let serving = line.contains("choir-node serving");
+                text.lock().expect("stderr text").push_str(&line);
+                text.lock().expect("stderr text").push('\n');
+                if serving {
+                    seen.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        });
     }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let outcome = loop {
+        if seen.load(std::sync::atomic::Ordering::Acquire) {
+            break Some(true);
+        }
+        if child.try_wait().expect("wait").is_some() {
+            // Let the reader drain the rest of the pipe before we read it.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            break Some(false);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     child.kill().ok();
-    let out = child.wait_with_output().expect("output");
-    (
-        true,
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        ),
-    )
+    child.wait().ok();
+    let text = text.lock().expect("stderr text").clone();
+    match outcome {
+        Some(started) => (started, text),
+        None => panic!("choir-node neither served nor exited within 60s, stderr:\n{text}"),
+    }
 }
 
 #[test]
