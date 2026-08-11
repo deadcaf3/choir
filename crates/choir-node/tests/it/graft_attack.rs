@@ -32,7 +32,7 @@ use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_encode;
 use choir_node::{Node, Platform};
 use choir_oplog::{ContentHash, MemLog, Witness};
-use choir_view::{OpKind, ViewOp};
+use choir_view::{OpKind, Verdict, ViewOp};
 
 use crate::support::curl;
 
@@ -366,6 +366,172 @@ fn the_public_log_is_a_complete_graft_kit_for_a_node_signed_ref_move() {
     assert!(
         remote.starts_with(&c1),
         "git still holds the reverted ref, so view and git have diverged: {remote}"
+    );
+
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}
+
+#[test]
+fn the_landing_gate_does_not_stop_the_replay_and_the_divergence_wedges_the_ref() {
+    // The gate is the thing worth attacking, so: `--protected-refs` plus
+    // `--require-review`, the full configuration from `landing.rs`.
+    //
+    // The gate is not bypassed here, and that is the finding. It asks
+    // whether an approved review named this (ref, commit) pair, and an
+    // approval never expires — deliberately, so retention cannot become
+    // an expiry policy. A replayed landing therefore satisfies the gate
+    // by re-using the approval that authorised it the first time. What
+    // review cannot express is "and not again, after it was taken back".
+    let work = std::env::temp_dir().join(format!("choir-graft-gate-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let pool_file = work.join("reviewers");
+    let refs_file = work.join("protected");
+    let ref_name = "agents/demo.git:refs/heads/main";
+    std::fs::write(&pool_file, "ana\nbot\n").unwrap();
+    std::fs::write(&refs_file, format!("{ref_name}\n")).unwrap();
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .unwrap()
+            .with_reviewer_pool(pool_file)
+            .with_protected_refs(refs_file)
+            .with_required_review(),
+    );
+    let port = node.port();
+    node.create_repo("agents/demo.git").unwrap();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+    let url = format!("http://127.0.0.1:{port}/agents/demo.git");
+    let refs = || curl(&[&format!("{api}/view")]).1["refs"].clone();
+    let post = |body: &str| curl(&["-X", "POST", "-d", body, &format!("{api}/submit")]);
+
+    // Open a review naming (ref, oid) and drive it to approved.
+    let approve = |id: &str, oid: &str| {
+        let review = ViewOp::new(OpKind::RequestReview {
+            id: id.into(),
+            target: ContentHash::from_git_oid(oid).expect("git oid"),
+            reviewers: Vec::new(),
+            target_ref: Some(ref_name.into()),
+        });
+        let (code, resp) = post(&crate::support::submit_body(&author, "carol", &review));
+        assert_eq!(code, 200, "{resp}");
+        let drawn: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).unwrap();
+        for who in &drawn {
+            let verdict = ViewOp::new(OpKind::PostVerdict {
+                id: id.into(),
+                reviewer: who.clone(),
+                verdict: Verdict::Approve,
+                note: "lgtm".into(),
+            });
+            let (code, resp) = post(&crate::support::submit_body(&author, who, &verdict));
+            assert_eq!(code, 200, "{resp}");
+        }
+    };
+
+    let clone = work.join("clone");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    let commit = |body: &str, message: &str| {
+        std::fs::write(clone.join("f.txt"), body).unwrap();
+        git(&clone, &["add", "."]);
+        git(&clone, &["commit", "-q", "-m", message]);
+        String::from_utf8(git(&clone, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+
+    // Create main, then land c2 the legitimate way: reviewed, approved,
+    // pushed. Call c2 the change someone later decides was a mistake.
+    let c1 = commit("one\n", "first");
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+    let c2 = commit("two\n", "second");
+    approve("land-c2", &c2);
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+    assert_eq!(refs()[ref_name], serde_json::json!(format!("11-{c2}")));
+
+    // Capture the node-signed landing off the public log.
+    let landed = ContentHash::from_git_oid(&c2).expect("git oid");
+    let (_, page) = curl(&[&format!("{api}/log?from=0")]);
+    let captured = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            let payload =
+                choir_node::platform::hex_decode(e["payload_hex"].as_str().unwrap()).unwrap();
+            matches!(
+                ViewOp::from_payload(&payload).unwrap().kind,
+                OpKind::SetRef { ref commit, .. } if *commit == landed
+            )
+        })
+        .expect("the landing is in the public log")
+        .clone();
+    let stolen = serde_json::json!({
+        "channel": captured["workspace"],
+        "payload_hex": captured["payload_hex"],
+        "key_id": captured["author_key"],
+        "signature_hex": captured["author_sig_hex"],
+    })
+    .to_string();
+
+    // The revert is itself reviewed and approved — the most careful
+    // version of taking a change back that this system offers.
+    approve("land-revert", &c1);
+    let out = git(&clone, &["push", "-qf", "origin", "HEAD~1:main"]);
+    assert!(
+        out.status.success(),
+        "an approved revert should land: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(refs()[ref_name], serde_json::json!(format!("11-{c1}")));
+
+    // Replay. The approval for (main, c2) is still in the view, still
+    // approved, so the gate says yes to the same landing a second time —
+    // for an attacker who reviewed nothing, pushed nothing and holds no
+    // key. Review is not the missing control here; a nonce is.
+    let (code, resp) = post(&stolen);
+    assert_eq!(
+        code, 200,
+        "the landing gate re-authorises a replayed landing from a standing approval: {resp}"
+    );
+    assert_eq!(refs()[ref_name], serde_json::json!(format!("11-{c2}")));
+
+    // Second consequence, and the practical one: the ref is now wedged.
+    // The next honest push CASes against git's old oid (c1) while the
+    // view holds c2, so a fully reviewed, fully approved landing is
+    // refused with no way for the pusher to fix it from their side.
+    let c3 = commit("three\n", "third");
+    approve("land-c3", &c3);
+    let out = git(&clone, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        !out.status.success(),
+        "an approved push onto a diverged ref should be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let remote = String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout)
+        .unwrap();
+    assert!(remote.starts_with(&c1), "git is stuck at the revert: {remote}");
+    assert_eq!(
+        refs()[ref_name],
+        serde_json::json!(format!("11-{c2}")),
+        "and the view is stuck at the replay"
     );
 
     node.unblock();
