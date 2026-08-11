@@ -272,7 +272,13 @@ fn the_mirror_push_reuses_one_ssh_connection() {
     // against a model of where its time went, the model was wrong, and
     // nothing in the output could have revealed that. A run that
     // reports connect/transfer/push separately settles it.
-    for stage in ["connect %.1fs", "git push %.1fs", "box-local push %.1fs", "total %.1fs"] {
+    for stage in [
+        "connect %.1fs",
+        "git push %.1fs",
+        "box-local push %.1fs",
+        "oplog %.1fs",
+        "total %.1fs",
+    ] {
         assert!(
             script.contains(stage),
             "mirror push stopped reporting {stage}; the next slowdown gets guessed at again"
@@ -445,4 +451,61 @@ fn the_mirror_receipt_is_read_not_merely_written() {
     assert_eq!(verdict("in flight"), "RUNNING");
 
     std::fs::remove_dir_all(work).ok();
+}
+
+/// The op log is the only state in the system with exactly one copy:
+/// git bundles carry commits, and `ops.jsonl` has never been a git
+/// object. This asserts the backup leg exists, that it verifies rather
+/// than assumes, and — the property that actually matters — that it
+/// never carries the signing key off the node that owns it.
+#[test]
+fn the_oplog_backup_carries_the_log_and_the_pin_but_never_the_key() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/push_mirror.sh"))
+        .expect("scripts/push_mirror.sh");
+    let code: String = script
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        code.contains("ops.jsonl"),
+        "the mirror stopped backing up the op log; it exists in exactly one place again"
+    );
+    assert!(
+        code.contains("node.fingerprint"),
+        "the pin must travel with the log, or a restore silently appends under a new identity"
+    );
+    // The whole point of splitting key from log. A backup holding the
+    // key lets whoever holds the backup keep signing as this node.
+    assert!(
+        !code.contains("node.key"),
+        "the op-log backup must never carry node.key off the node that owns it"
+    );
+    // Verified, not hoped: a silent truncation reads exactly like a
+    // successful backup until the day it is restored.
+    assert!(
+        code.contains("OP LOG BACKUP MISMATCH"),
+        "the backup stopped comparing checksums; a truncated copy now looks like a good one"
+    );
+    // Atomic publish: an interrupted transfer must leave the previous
+    // good backup, not a half-written log that still parses.
+    assert!(
+        code.contains("ops.jsonl.part") && code.contains("mv "),
+        "the backup stopped writing .part then renaming; an interrupted run truncates the backup"
+    );
+
+    // The script is run as `sh`, never as the zsh in its shebang, and a
+    // runtime-only failure here would skip the backup while the receipt
+    // still ended in success. `sh -n` catches at least the syntax half.
+    let syntax = std::process::Command::new("sh")
+        .arg("-n")
+        .arg(repo_root().join("scripts/push_mirror.sh"))
+        .output()
+        .expect("run sh -n");
+    assert!(
+        syntax.status.success(),
+        "push_mirror.sh is not valid sh: {}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
 }

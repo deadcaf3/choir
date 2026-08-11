@@ -92,10 +92,46 @@ ssh "${ssh_opts[@]}" "choir@$IP" 'cd ~/choir-src \
   && git log --oneline -1'
 t_push=$(now)
 
+# The op log is the one piece of state that exists in exactly one place.
+# Bundles carry commits; ops.jsonl is not a git object and no bundle has
+# ever contained it. It is append-only and hash-chained, so a byte-
+# identical copy is a verifiable backup rather than a hopeful one.
+#
+# What gets backed up is (ops.jsonl, node.fingerprint) and deliberately
+# not the node's signing key. That key stays on the node that owns it: a
+# backup carrying it would let whoever holds the backup keep signing as
+# this node. Shipping the fingerprint alongside the log is what makes a
+# restore onto a fresh host refuse to start rather than silently append
+# under a new identity — see the pin check in choir-node/src/main.rs.
+#
+# Written to .part and renamed, so an interrupted transfer leaves the
+# previous good backup in place instead of a truncated log that still
+# looks like a log.
+NODE_STATE=${CHOIR_NODE_STATE:-$HOME/.choir/repos/.choir}
+oplog_lines=0
+if [ -f "$NODE_STATE/ops.jsonl" ]; then
+  local_sum=$(shasum -a 256 < "$NODE_STATE/ops.jsonl" | awk '{print $1}')
+  remote_sum=$(ssh "${ssh_opts[@]}" "choir@$IP" \
+    'mkdir -p ~/choir-oplog && cat > ~/choir-oplog/ops.jsonl.part \
+     && mv ~/choir-oplog/ops.jsonl.part ~/choir-oplog/ops.jsonl \
+     && sha256sum < ~/choir-oplog/ops.jsonl | cut -d" " -f1' \
+    < "$NODE_STATE/ops.jsonl")
+  if [ "$local_sum" != "$remote_sum" ]; then
+    echo "mirror: OP LOG BACKUP MISMATCH local=$local_sum remote=$remote_sum" >&2
+    exit 1
+  fi
+  if [ -f "$NODE_STATE/node.fingerprint" ]; then
+    ssh "${ssh_opts[@]}" "choir@$IP" 'cat > ~/choir-oplog/node.fingerprint' \
+      < "$NODE_STATE/node.fingerprint"
+  fi
+  oplog_lines=$(wc -l < "$NODE_STATE/ops.jsonl" | tr -d ' ')
+fi
+t_oplog=$(now)
+
 # awk does the subtraction: $(( )) is integer-only in bash 3.2 and would
 # silently truncate every stage to whole seconds, or fail outright on a
 # decimal point.
-awk -v a="$t_start" -v b="$t_conn" -v c="$t_xfer" -v d="$t_push" 'BEGIN {
-  printf "mirror: connect %.1fs | git push %.1fs | box-local push %.1fs | total %.1fs\n", b-a, c-b, d-c, d-a
+awk -v a="$t_start" -v b="$t_conn" -v c="$t_xfer" -v d="$t_push" -v e="$t_oplog" -v n="$oplog_lines" 'BEGIN {
+  printf "mirror: connect %.1fs | git push %.1fs | box-local push %.1fs | oplog %.1fs (%d ops) | total %.1fs\n", b-a, c-b, d-c, e-d, n, e-a
 }'
 echo "mirror updated"

@@ -115,6 +115,36 @@ Nothing is lost by stopping: `~/.choir/repos` and the op log at
 `~/.choir/repos/.choir/ops.jsonl` persist, and the daemon replays the
 log on restart (rehearsed: refs and workspaces survived a kill).
 
+## Restoring the op log
+
+Stopping is safe; losing the disk was not. The bundle cron copies refs
+and objects, and `ops.jsonl` is neither — it is not a git object, so no
+bundle has ever contained it. `sh scripts/choirctl sync` now copies it
+to `~/choir-oplog/ops.jsonl` on the mirror VM and refuses the run if the
+far checksum disagrees, so a truncated copy fails loudly instead of
+sitting there looking like a backup.
+
+Two things travel: the log and `node.fingerprint`. The signing key does
+not, and must not — a backup carrying it would let whoever holds the
+backup keep signing as this node. That split is what makes a restore
+safe rather than convenient:
+
+```sh
+scp choir@<SERVER_IP>:choir-oplog/ops.jsonl         ~/.choir/repos/.choir/ops.jsonl
+scp choir@<SERVER_IP>:choir-oplog/node.fingerprint  ~/.choir/repos/.choir/node.fingerprint
+sh scripts/choirctl install
+```
+
+On a host that still holds the original key this starts and replays. On
+any other host it **refuses to start**, naming the pinned id, because the
+restored fingerprint will not match a freshly generated key. That refusal
+is the intended outcome, not a failure: continuing would append to a
+signed chain under a new identity. Deleting `node.fingerprint` overrides
+it, and means accepting that the log changes author at that point.
+
+Restoring refs is separate and unchanged: the Forgejo mirror holds every
+ref, and the daily bundle holds a copy.
+
 ## Still open
 
 - This dogfood installation has no TLS, so its bind stays loopback
