@@ -23,6 +23,7 @@ mod concentration;
 mod git_ordering_trace;
 mod git_sequenced;
 mod git_signed;
+mod graft_attack;
 mod identity_pinning;
 mod key_binding;
 mod key_names;
