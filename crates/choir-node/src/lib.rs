@@ -19,6 +19,49 @@ pub mod reject;
 
 pub use platform::Platform;
 
+/// The commit this binary was built from, or the literal `unknown` when
+/// the build had no way to find out. See `build.rs`.
+///
+/// `choirctl status` could already name the file that is serving; it
+/// could not say what that file was built from, and "the rebuild never
+/// reached the running process" is indistinguishable from "it did" until
+/// something the process itself reports says otherwise.
+pub const BUILD_COMMIT: &str = env!("CHOIR_BUILD_COMMIT");
+
+/// Where [`BUILD_COMMIT`] came from: `env` (the installer passed
+/// `CHOIR_GIT_HEAD`, the sound path), `git` (best-effort at build time),
+/// or `unavailable` (no commit could be determined).
+pub const BUILD_SOURCE: &str = env!("CHOIR_BUILD_SOURCE");
+
+/// Whether the build tree had uncommitted changes. Only meaningful under
+/// `BUILD_SOURCE == "git"`, and even then best-effort: cargo cannot rerun
+/// the build script on every source edit, so this can be stale where
+/// [`BUILD_COMMIT`] cannot.
+pub const BUILD_DIRTY: &str = env!("CHOIR_BUILD_DIRTY");
+
+/// The build stamp as served under `/api/view.build`.
+#[must_use]
+pub fn build_json() -> serde_json::Value {
+    serde_json::json!({
+        "format_version": 1,
+        "commit": BUILD_COMMIT,
+        "source": BUILD_SOURCE,
+        "dirty": BUILD_DIRTY == "true",
+        "dirty_trusted": BUILD_SOURCE == "git",
+    })
+}
+
+/// One line naming the running binary's provenance, for the startup log.
+#[must_use]
+pub fn build_line() -> String {
+    let commit = match BUILD_COMMIT.len() {
+        40 => &BUILD_COMMIT[..12],
+        _ => BUILD_COMMIT,
+    };
+    let dirty = if BUILD_DIRTY == "true" { " +dirty" } else { "" };
+    format!("build {commit}{dirty} (stamp source: {BUILD_SOURCE})")
+}
+
 /// Per-actor credentials: username → token, checked as HTTP basic auth
 /// (the standard git-over-HTTP shape; every forge client speaks it).
 ///
@@ -328,6 +371,13 @@ impl Node {
                 );
                 // EX_TEMPFAIL: the condition may well clear on restart.
                 std::process::exit(75);
+            }
+            // Same reasoning, quieter failure: the writer thread can only
+            // record that an op missed the latency gate, never decide what
+            // to do about it. Draining here puts the breach in the
+            // operator's lag log while the node keeps serving.
+            if let Some(platform) = self.platform.as_ref() {
+                platform.drain_lag_log();
             }
             let root = self.root.clone();
             let auth = self.auth.clone();

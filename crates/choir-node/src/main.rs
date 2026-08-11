@@ -287,7 +287,13 @@ fn main() -> std::io::Result<()> {
             None => Platform::start_reloading(registry, Box::new(log), node_key, Some(path.into())),
         }
         .map_err(std::io::Error::other)?
-        .with_log_path(log_path);
+        .with_log_path(log_path)
+        // On by default, not behind a flag: the point of measuring the
+        // latency gate in production is that nobody has to remember to
+        // turn it on before the node is slow. Separate from ops.jsonl
+        // because a breach is an observation about this node, not part of
+        // the ordered history anyone else replays.
+        .with_lag_log(state_dir.join("lag.jsonl"));
         if let Some((audit, adjudications)) = newcomer_policy {
             let incumbents = signers.iter().map(|signer| signer.actor_id.clone()).collect();
             platform = platform
@@ -375,6 +381,9 @@ fn main() -> std::io::Result<()> {
             create_next = true;
         }
     }
+    // First line of every start, so the log says which build produced
+    // everything below it.
+    eprintln!("choir-node {}", choir_node::build_line());
     eprintln!(
         "choir-node serving {} on {}://{}:{}",
         root.display(),

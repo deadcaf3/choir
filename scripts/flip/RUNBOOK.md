@@ -67,6 +67,21 @@ tail ~/.choir/node.log
 The unauthenticated request must return 401. A 200 means the real node was
 started without the required auth file.
 
+`choirctl status` also answers two questions the process table cannot:
+
+- `build:` is the commit the running binary was built from, stamped in by
+  the installer. It is compared against the checkout's HEAD, so a rebuild
+  that never reached the running process reads `STALE` instead of reading
+  like success. `UNSTAMPED` means the binary was built outside the
+  installer; rebuild through it rather than trusting the path.
+- `lag:` is what the sequencer measured on the traffic this node actually
+  served: `durable` percentiles include the durability barrier and are
+  what a submitter waits out, `decision` is the append alone (the Phase-0
+  gate as originally written). Both are since process start and are not
+  replayed, so a restart resets them. Any op at or past the gate is
+  appended to `~/.choir/repos/.choir/lag.jsonl` as one JSON object naming
+  the `seq` it happened to, and `status` says how many there were.
+
 ## Flip day
 
 1. The canonical repo already exists: the installer put `--create` in

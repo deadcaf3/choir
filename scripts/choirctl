@@ -61,7 +61,42 @@ status)
   echo "binary: $(ps -eo args | grep "[c]hoir-node" | head -1 | awk '{print $1}')"
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/view" || true)
   echo "auth:   $code on an unauthenticated /api/view (401 = auth is on)"
-  echo "view:   $(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")"
+  view=$(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")
+  # The path above says which file is serving. This says what that file
+  # was built from, which is the question "did my rebuild reach the
+  # running process" actually asks. A stamp of `unknown` means the binary
+  # was built without one, not that the commit is unknowable.
+  built=$(printf '%s' "$view" | python3 -c 'import json,sys; b=json.load(sys.stdin).get("build",{}); print(b.get("commit","unknown"), b.get("source","?"), "dirty" if b.get("dirty") else "clean")' 2>/dev/null || echo "unknown ? ?")
+  head_now=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
+  build_commit=${built%% *}
+  build_tail=${built#* }
+  echo "build:  $build_commit (stamp ${build_tail%% *}, tree ${built##* })"
+  if [ "$build_commit" = unknown ]; then
+    echo "build:  UNSTAMPED — rebuild with sh scripts/choirctl install to make this checkable"
+  elif [ "$build_commit" != "$head_now" ]; then
+    echo "build:  STALE — serving $(printf '%.12s' "$build_commit"), checkout is $(printf '%.12s' "$head_now")"
+  fi
+  # Is the sequencer meeting the Phase-0 gate on real traffic, not in the
+  # test suite. Percentiles are microseconds.
+  printf '%s' "$view" | python3 -c '
+import json, sys
+lag = json.load(sys.stdin).get("sequencer_lag")
+if not lag:
+    print("lag:    not reported by this node")
+    sys.exit()
+ops = lag["observed_ops"]
+if not ops:
+    print("lag:    no ops measured since start (nothing to say yet)")
+    sys.exit()
+d, k = lag["durable"], lag["decision"]
+print("lag:    %d ops, durable p50 %.1f ms p99 %.1f ms max %.1f ms; decision p99 %.1f ms; gate %.0f ms"
+      % (ops, d["p50_us"]/1000, d["p99_us"]/1000, d["max_us"]/1000, k["p99_us"]/1000, lag["gate_us"]/1000))
+if d["breaches"]:
+    print("lag:    %d BREACHES over the gate — see ~/.choir/repos/.choir/lag.jsonl" % d["breaches"])
+if lag["log_write_failures"]:
+    print("lag:    lag log unwritable (%s)" % lag["log_error"])
+' 2>/dev/null || echo "lag:    unreadable"
+  echo "view:   $view"
   mirror_line
   # Outcome is not currency: a run can succeed and still leave the mirror
   # a commit behind if it was started before the last commit landed.
