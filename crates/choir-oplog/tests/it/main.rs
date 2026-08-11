@@ -4,5 +4,6 @@
 //! process and run on parallel threads: no wall-clock assertions, process
 //! globals, or fixed ports in here.
 
+mod canonical;
 mod conformance;
 mod durability;
