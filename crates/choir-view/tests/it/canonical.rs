@@ -57,9 +57,17 @@ impl Rng {
     /// A repo-shaped path. Shared directory prefixes matter: they make
     /// sorted order and any other order differ in more places than a set of
     /// unrelated names would.
+    ///
+    /// Some names carry characters JSON has to escape. A tree key is a file
+    /// path, and a path may legally contain a quote or a backslash, so the
+    /// escaped form is part of the canonical form and belongs in the
+    /// corpus. This is only safe because
+    /// [`tree_keys_are_emitted_in_sorted_order`] looks keys up by their
+    /// *encoded* spelling; searching for the raw key would report a hostile
+    /// key as missing from output that in fact contains it.
     fn path(&mut self) -> String {
         const DIRS: [&str; 6] = ["src", "src/bin", "tests", "docs", "crates/a", ""];
-        const NAMES: [&str; 6] = ["lib.rs", "main.rs", "README.md", "a.rs", "Zed.toml", ".hidden"];
+        const NAMES: [&str; 6] = ["lib.rs", "ma\"in.rs", "back\\slash.rs", "a.rs", "Zed.toml", ".hidden"];
         let dir = DIRS[self.below(DIRS.len())];
         let name = NAMES[self.below(NAMES.len())];
         let tag = self.next_u64() % 1_000;
@@ -167,6 +175,11 @@ fn tree_serialization_is_independent_of_insertion_order() {
 /// this format, which is what "canonical" has to mean across replicas.
 #[test]
 fn tree_keys_are_emitted_in_sorted_order() {
+    // Set when some key's encoded spelling differs from its raw one, i.e.
+    // JSON had to escape it. Asserted at the end: if the path alphabet is
+    // ever tamed, this test silently stops covering escaped keys, and the
+    // escaping-aware lookup below stops being exercised at all.
+    let mut saw_escaped_key = false;
     for seed in SEEDS {
         let mut rng = Rng::new(seed);
         for case in 0..8 {
@@ -178,10 +191,18 @@ fn tree_keys_are_emitted_in_sorted_order() {
             sorted.sort();
             let mut previous = 0usize;
             for key in sorted {
-                let needle = format!("\"{key}\":");
-                let found = bytes
-                    .find(&needle)
-                    .unwrap_or_else(|| panic!("{at}: key {key} missing from the canonical form"));
+                // Look the key up by its *encoded* spelling. A key holding a
+                // quote or backslash appears escaped in the output, so a
+                // needle built from the raw key would not match and this test
+                // would report a present key as missing — a false failure
+                // whose obvious "fix" is to make the generator tamer, which
+                // would quietly delete the coverage. serde_json emits the
+                // quotes, so only the colon is appended.
+                let needle = format!("{}:", serde_json::to_string(key).expect("a key encodes"));
+                saw_escaped_key |= needle != format!("\"{key}\":");
+                let found = bytes.find(&needle).unwrap_or_else(|| {
+                    panic!("{at}: key {key} (encoded {needle}) missing from the canonical form")
+                });
                 assert!(
                     found > previous,
                     "{at}: key {key} is emitted out of sorted order"
@@ -190,6 +211,11 @@ fn tree_keys_are_emitted_in_sorted_order() {
             }
         }
     }
+    assert!(
+        saw_escaped_key,
+        "no generated tree key needed escaping, so the escaping-aware lookup \
+         is untested; restore a quote or backslash to the path alphabet"
+    );
 }
 
 /// A commit must survive the store round-trip byte-for-byte, since its
