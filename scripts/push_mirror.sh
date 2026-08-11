@@ -151,7 +151,11 @@ done
 policy_count=0
 if [ -n "$policy_files" ]; then
   # shellcheck disable=SC2086 — the list is built above from fixed names.
-  tar -cf - -C "$CHOIR_HOME" $policy_files | ssh "${ssh_opts[@]}" "choir@$IP" \
+  # --no-xattrs: bsdtar writes LIBARCHIVE.xattr.com.apple.provenance
+  # headers that GNU tar on the VM warns about once per file. The
+  # warnings are harmless and that is the problem — five lines of noise
+  # per sync in the receipt is where a real tar error would hide.
+  tar --no-xattrs -cf - -C "$CHOIR_HOME" $policy_files | ssh "${ssh_opts[@]}" "choir@$IP" \
     'rm -rf ~/choir-oplog/policy.part \
      && mkdir -p ~/choir-oplog/policy.part \
      && tar -xf - -C ~/choir-oplog/policy.part \

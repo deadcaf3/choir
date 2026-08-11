@@ -124,23 +124,43 @@ to `~/choir-oplog/ops.jsonl` on the mirror VM and refuses the run if the
 far checksum disagrees, so a truncated copy fails loudly instead of
 sitting there looking like a backup.
 
-Two things travel: the log and `node.fingerprint`. The signing key does
-not, and must not — a backup carrying it would let whoever holds the
-backup keep signing as this node. That split is what makes a restore
-safe rather than convenient:
+The log alone is not enough, and finding that out is what the rehearsal
+was for. A node rebuilt from `ops.jsonl` only **refuses to boot** —
+`review assignment policy needs --reviewers-file` — because the node's
+policy is configuration, not sequenced fact, and so lives outside the
+log. `sync` therefore also ships five policy files to
+`~/choir-oplog/policy/` as one tar.
+
+What travels: the log, `node.fingerprint`, and `keys`, `reviewers`,
+`protected-refs`, `newcomer-audit.jsonl`, `newcomer-adjudications.jsonl`.
+
+What does not, and must not: the signing key, `auth`, and any
+`*.key`/`*.pem`. A backup carrying the key would let whoever holds the
+backup keep signing as this node, and one carrying `auth` would ship a
+bearer token. **`auth` is re-issued on restore, not recovered** — pick a
+fresh token, it is not derived from anything.
 
 ```sh
-scp choir@<SERVER_IP>:choir-oplog/ops.jsonl         ~/.choir/repos/.choir/ops.jsonl
-scp choir@<SERVER_IP>:choir-oplog/node.fingerprint  ~/.choir/repos/.choir/node.fingerprint
-sh scripts/choirctl install
+scp choir@<SERVER_IP>:choir-oplog/ops.jsonl        ~/.choir/repos/.choir/ops.jsonl
+scp choir@<SERVER_IP>:choir-oplog/node.fingerprint ~/.choir/repos/.choir/node.fingerprint
+scp -r choir@<SERVER_IP>:choir-oplog/policy        ~/.choir/restored-policy
+# then write a fresh ~/.choir/auth as user:token before starting
 ```
+
+Rehearsed 2026-08-11: a node started on that set with `--keys-file`,
+`--reviewers-file`, `--protected-refs`, `--newcomer-audit` and
+`--newcomer-adjudications` served a view **byte-identical to the live
+node**, including all 44 reviews, 3 bindings, 2 refs and both the D23
+and D24 metric blocks. Omitting the two newcomer flags is not an error
+but leaves those blocks reading `configured: false`.
 
 On a host that still holds the original key this starts and replays. On
 any other host it **refuses to start**, naming the pinned id, because the
-restored fingerprint will not match a freshly generated key. That refusal
-is the intended outcome, not a failure: continuing would append to a
-signed chain under a new identity. Deleting `node.fingerprint` overrides
-it, and means accepting that the log changes author at that point.
+restored fingerprint will not match a freshly generated key (verified:
+exit 1). That refusal is the intended outcome, not a failure: continuing
+would append to a signed chain under a new identity. Deleting
+`node.fingerprint` overrides it, and means accepting that the log changes
+author at that point.
 
 Restoring refs is separate and unchanged: the Forgejo mirror holds every
 ref, and the daily bundle holds a copy.
