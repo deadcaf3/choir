@@ -23,7 +23,20 @@ ROOT="$STATE/repos"
 LABEL=com.choir.node
 PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
 REPO_DIR="$(cd "$HERE/../.." && pwd)"
-BIN="$REPO_DIR/target/release/choir-node"
+
+# Ask cargo where it puts things rather than assuming `$REPO_DIR/target`.
+# Cargo resolves `target-dir` from the *working directory*, not from
+# --manifest-path, and the worktrees under .claude/worktrees redirect it
+# to a shared-target. Run from there, the build below succeeds and lands
+# somewhere else entirely while BIN still points here -- and step 7
+# boots the running node out before anything notices the binary is
+# missing, leaving a plist aimed at a path that does not exist and a
+# canonical node that KeepAlive cannot bring back.
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps \
+  --manifest-path "$REPO_DIR/Cargo.toml" 2>/dev/null \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+TARGET_DIR="${TARGET_DIR:-$REPO_DIR/target}"
+BIN="$TARGET_DIR/release/choir-node"
 POLICY_MARKER="$STATE/review-gates.enabled"
 PROTECTED_REFS="$STATE/protected-refs"
 NEWCOMER_AUDIT="$STATE/newcomer-audit.jsonl"
@@ -43,6 +56,16 @@ chmod 700 "$STATE"
 CHOIR_GIT_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)" \
   cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p choir-node -p choir-cli
 
+# Refuse before step 7 rather than after. `launchctl bootout` stops the
+# node that is currently serving; everything after this line assumes a
+# binary exists to replace it with.
+if [[ ! -x "$BIN" || ! -x "$TARGET_DIR/release/choir" ]]; then
+  echo "install: no built binaries at $TARGET_DIR/release" >&2
+  echo "  cargo resolves target-dir from the working directory; run this" >&2
+  echo "  from the main checkout, not from a worktree. Nothing was changed." >&2
+  exit 1
+fi
+
 # 2. Auth token (item 1: --auth-file is mandatory on the real node).
 if [[ ! -f $STATE/auth ]]; then
   printf 'choir:%s\n' "$(openssl rand -hex 32)" > "$STATE/auth"
@@ -55,7 +78,7 @@ fi
 if [[ ! -f $STATE/keys ]]; then
   : > "$STATE/keys"
   chmod 600 "$STATE/keys"
-  "$REPO_DIR/target/release/choir" key "$STATE/agent.key" >> "$STATE/keys"
+  "$TARGET_DIR/release/choir" key "$STATE/agent.key" >> "$STATE/keys"
   echo "minted $STATE/agent.key and registered it in $STATE/keys"
 fi
 
