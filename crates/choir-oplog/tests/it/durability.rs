@@ -215,3 +215,143 @@ fn get_handles_entries_of_differing_lengths() {
     }
     assert_eq!(reopened.head(), head, "head survives the rebuild");
 }
+
+/// Writes `bytes` onto the end of the log file, standing in for what a
+/// power cut leaves behind: the sequencer had handed them to the OS, and
+/// only part of them reached the platter.
+fn append_raw(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open for raw append");
+    f.write_all(bytes).expect("raw append");
+}
+
+/// The crash-recovery case the whole fsync story rests on. A node that
+/// cannot reopen its log after a power cut never comes back at all, and
+/// under supervision it restart-loops instead.
+#[test]
+fn a_partly_written_trailing_record_is_truncated_not_fatal() {
+    let scratch = Scratch::new("torn");
+    let mut log = FileLog::open(&scratch.path()).expect("open");
+    let mut head = None;
+    for seq in 0..3 {
+        head = Some(log.append(entry(seq, head)).expect("append"));
+    }
+    log.sync().expect("sync");
+    drop(log);
+
+    // Half of a fourth record: serialized, then cut mid-way with no
+    // newline, exactly as an interrupted flush would leave it.
+    let line = serde_json::to_vec(&entry(3, head.clone())).expect("serialize");
+    let torn_len = (line.len() / 2) as u64;
+    append_raw(&scratch.path(), &line[..line.len() / 2]);
+
+    let reopened = FileLog::open(&scratch.path()).expect("a torn tail must not be fatal");
+    assert_eq!(reopened.len(), 3, "the three synced entries survive");
+    assert_eq!(reopened.head(), head, "head is the last complete entry");
+    assert_eq!(
+        reopened.torn_tail_bytes(),
+        torn_len,
+        "the recovery has to be reportable, not silent"
+    );
+
+    // And the file is now a whole number of records again, so appending
+    // behind it produces a log that still reopens.
+    let mut reopened = reopened;
+    let next = reopened.append(entry(3, head)).expect("append after recovery");
+    reopened.sync().expect("sync");
+    drop(reopened);
+    let again = FileLog::open(&scratch.path()).expect("reopen after recovery");
+    assert_eq!(again.len(), 4);
+    assert_eq!(again.head(), Some(next));
+}
+
+/// The case that would be silent corruption rather than a failed open: a
+/// record whose bytes all landed but whose terminating newline did not.
+/// It decodes, so a decode-driven check would keep it — and the next
+/// append would run in behind it, welding two records into one line that
+/// never parses again.
+#[test]
+fn a_complete_record_missing_its_newline_is_still_a_torn_tail() {
+    let scratch = Scratch::new("nonewline");
+    let mut log = FileLog::open(&scratch.path()).expect("open");
+    let head = Some(log.append(entry(0, None)).expect("append"));
+    log.sync().expect("sync");
+    drop(log);
+
+    let line = serde_json::to_vec(&entry(1, head.clone())).expect("serialize");
+    append_raw(&scratch.path(), &line);
+
+    let mut reopened = FileLog::open(&scratch.path()).expect("open");
+    assert_eq!(reopened.len(), 1, "the unterminated record is not adopted");
+    assert_eq!(reopened.torn_tail_bytes(), line.len() as u64);
+
+    reopened.append(entry(1, head)).expect("append");
+    reopened.sync().expect("sync");
+    drop(reopened);
+    let again = FileLog::open(&scratch.path()).expect("no welded line to trip over");
+    assert_eq!(again.len(), 2);
+}
+
+/// Delayed allocation can leave the tail as a run of NUL bytes rather
+/// than as a prefix of the record. Same class, same handling.
+#[test]
+fn a_nul_padded_tail_is_recovered_too() {
+    let scratch = Scratch::new("nulpad");
+    let mut log = FileLog::open(&scratch.path()).expect("open");
+    let head = Some(log.append(entry(0, None)).expect("append"));
+    log.sync().expect("sync");
+    drop(log);
+
+    append_raw(&scratch.path(), &[0u8; 64]);
+
+    let reopened = FileLog::open(&scratch.path()).expect("a NUL tail must not be fatal");
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened.head(), head);
+    assert_eq!(reopened.torn_tail_bytes(), 64);
+}
+
+/// The limit of the recovery, asserted so it cannot widen by accident. A
+/// terminated record that fails to decode is damage to something once
+/// written whole, not an interrupted write, and dropping it would take
+/// every record after it too. Refusing to open is the loud answer;
+/// silently losing ops from the middle is not.
+#[test]
+fn damage_before_the_end_still_refuses_to_open() {
+    let scratch = Scratch::new("middamage");
+    let mut log = FileLog::open(&scratch.path()).expect("open");
+    let mut head = None;
+    for seq in 0..2 {
+        head = Some(log.append(entry(seq, head)).expect("append"));
+    }
+    log.sync().expect("sync");
+    drop(log);
+
+    // A terminated line that is not an entry, with a good record after it.
+    append_raw(&scratch.path(), b"{\"format_version\":1}\n");
+    let mut line = serde_json::to_vec(&entry(2, head)).expect("serialize");
+    line.push(b'\n');
+    append_raw(&scratch.path(), &line);
+
+    match FileLog::open(&scratch.path()).err() {
+        Some(choir_oplog::LogError::Corrupt(_)) => {}
+        other => panic!("expected Corrupt for mid-log damage, got {other:?}"),
+    }
+}
+
+/// A log closed cleanly reports no recovery, so the startup message that
+/// names an unclean stop only fires on one.
+#[test]
+fn a_clean_log_reports_no_torn_tail() {
+    let scratch = Scratch::new("clean");
+    let mut log = FileLog::open(&scratch.path()).expect("open");
+    assert_eq!(log.torn_tail_bytes(), 0, "a fresh log is clean");
+    log.append(entry(0, None)).expect("append");
+    log.sync().expect("sync");
+    drop(log);
+
+    let reopened = FileLog::open(&scratch.path()).expect("reopen");
+    assert_eq!(reopened.torn_tail_bytes(), 0);
+}

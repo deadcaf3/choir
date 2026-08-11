@@ -269,6 +269,19 @@ fn main() -> std::io::Result<()> {
         let log_path = state_dir.join("ops.jsonl");
         let log = choir_oplog::FileLog::open(&log_path)
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        // An unclean stop is a fact the operator has to be told, even
+        // though recovery already succeeded: these bytes were never
+        // acknowledged to a submitter, so nothing downstream is missing,
+        // but a power cut that leaves no trace reads as a clean restart.
+        if log.torn_tail_bytes() > 0 {
+            eprintln!(
+                "choir: recovered {} from an unclean stop: {} byte(s) of a partly written \
+                 trailing op were discarded. They were never acknowledged to a submitter, \
+                 so no accepted operation was lost.",
+                log_path.display(),
+                log.torn_tail_bytes(),
+            );
+        }
         // Hot-reload, all three halves: appending or removing a key line
         // takes effect before the next submission signature check, and on
         // the next request for push-certificate verification and channel
