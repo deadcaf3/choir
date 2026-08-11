@@ -336,6 +336,12 @@ pub const ENDPOINTS: &[Endpoint] = &[
         mcp: None,
     },
     Endpoint {
+        method: "GET",
+        path: "/api/ref-agreement",
+        purpose: "Where the op log and the bare repos disagree about a ref, read-only",
+        mcp: None,
+    },
+    Endpoint {
         method: "POST",
         path: "/api/git-update",
         purpose: "Internal: the pre-receive hook callback",

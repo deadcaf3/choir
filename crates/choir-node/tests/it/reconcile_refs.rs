@@ -192,6 +192,48 @@ fn a_ref_only_git_has_is_reported_never_adopted() {
     assert_eq!(f.git_ref("refs/heads/smuggled").as_deref(), Some(head.as_str()));
 }
 
+/// The reason the survey exists apart from the repair: a divergence that
+/// appears while the daemon is up has to be visible without restarting
+/// it. Reading must also change nothing — a monitor that repairs what it
+/// observes would write git refs underneath live pushes.
+#[test]
+fn a_live_node_reports_a_divergence_without_a_restart() {
+    let f = Fixture::new("live");
+    let head = f.head();
+    let url = format!("http://127.0.0.1:{}/api/ref-agreement", f.port);
+
+    let (code, agreeing) = curl(&[&url]);
+    assert_eq!(code, 200, "{agreeing}");
+    assert_eq!(agreeing["agree"], serde_json::json!(true), "{agreeing}");
+    assert_eq!(agreeing["findings"].as_array().unwrap().len(), 0);
+
+    // Diverge behind the node's back, with it still serving.
+    assert!(git(&f.bare, &["update-ref", "-d", "refs/heads/main"]).status.success());
+
+    let (_, seen) = curl(&[&url]);
+    assert_eq!(seen["agree"], serde_json::json!(false), "{seen}");
+    let findings = seen["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{seen}");
+    assert_eq!(findings[0]["ref"], "agents/demo.git:refs/heads/main");
+    assert_eq!(findings[0]["state"], "git_behind");
+    assert_eq!(findings[0]["log_oid"], head);
+    assert!(findings[0]["git_oid"].is_null(), "{seen}");
+
+    // Reading is not repairing: the ref is still gone from git and the
+    // log has not moved.
+    assert_eq!(f.git_ref("refs/heads/main"), None);
+    assert_eq!(
+        f.view()["refs"]["agents/demo.git:refs/heads/main"].as_str(),
+        Some(format!("11-{head}").as_str())
+    );
+
+    // And the repair the survey feeds still agrees with what it reported.
+    let report = f.node.reconcile_refs();
+    assert_eq!(report.applied, vec!["agents/demo.git:refs/heads/main".to_string()]);
+    let (_, after) = curl(&[&url]);
+    assert_eq!(after["agree"], serde_json::json!(true), "{after}");
+}
+
 /// The ordinary start. Agreement must be silent, and must append nothing:
 /// a reconciliation that writes an op every boot would grow the log with
 /// uptime and make the repair itself the thing to audit.

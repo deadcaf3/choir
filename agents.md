@@ -34,6 +34,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
+| `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
 | `POST /api/git-abort` | Internal: retracts a refused push's already-accepted refs |
 

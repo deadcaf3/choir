@@ -683,6 +683,18 @@ fn handle_api(
             let path = request.url().to_string();
             if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
                 provision::create_workspace(root, p, base_url, &format!("git/{user}"), &req_body)
+            } else if (method.as_str(), path.as_str()) == ("GET", "/api/ref-agreement") {
+                // Routed here rather than inside the platform for the
+                // same reason as `/api/workspace`: it needs the repo
+                // root, which the platform does not hold.
+                let findings = p.survey_git_refs(root);
+                let body = serde_json::json!({
+                    "format_version": 1,
+                    "agree": findings.is_empty(),
+                    "findings": findings.iter().map(platform::RefFinding::to_json)
+                        .collect::<Vec<_>>(),
+                });
+                (200, body.to_string())
             } else {
                 p.handle_api(&method, &path, &req_body)
             }

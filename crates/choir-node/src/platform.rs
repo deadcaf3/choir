@@ -2818,6 +2818,63 @@ impl Platform {
     /// `update-ref` into the signed log as though it had been submitted.
     pub fn reconcile_git_refs(&self, root: &std::path::Path) -> RefReconciliation {
         let mut report = RefReconciliation::default();
+        for finding in self.survey_git_refs(root) {
+            let full = finding.name();
+            match finding.state {
+                // Git is behind on a commit it already has, so move it.
+                RefState::GitBehind => {
+                    let Some(want) = &finding.log_oid else { continue };
+                    let path = root.join(&finding.repo);
+                    match write_git_ref(&path, &finding.refname, want, finding.git_oid.as_deref()) {
+                        Ok(()) => report.applied.push(full),
+                        Err(e) => report.unreconciled.push(format!("{full}: {e}")),
+                    }
+                }
+                // Git can never hold this value, so the log gives way.
+                // `git_abort` builds exactly this inverse: back to git's
+                // value, or gone if git has none.
+                RefState::LogUnbackable => {
+                    let Some(want) = &finding.log_oid else { continue };
+                    let old = finding
+                        .git_oid
+                        .clone()
+                        .unwrap_or_else(|| "0".repeat(want.len()));
+                    match self.git_abort(&finding.repo, &finding.refname, &old, want, "node", None)
+                    {
+                        Ok(()) => report.retracted.push(full),
+                        Err(e) => report.unreconciled.push(format!("{full}: {e}")),
+                    }
+                }
+                RefState::GitOnly | RefState::Unreadable => report
+                    .unreconciled
+                    .push(format!("{full}: {}", finding.reason)),
+            }
+        }
+        report
+    }
+
+    /// Every way the repos under `root` and the view currently disagree,
+    /// with nothing written and no op appended.
+    ///
+    /// This is the half of [`Platform::reconcile_git_refs`] that can be
+    /// run against a live node. The repair deliberately cannot: it writes
+    /// refs, so it belongs before the first request, where nothing races
+    /// it. Reading is safe at any time, and without it a divergence that
+    /// appears while the daemon is up is invisible until the next
+    /// restart — which is the difference between a monitor and an
+    /// autopsy.
+    ///
+    /// Served by `GET /api/ref-agreement`, which is deliberately its own
+    /// endpoint rather than a field on `/api/view`: this shells out to
+    /// git once per repo, and `/api/view` is on the hot path.
+    ///
+    /// Scope, stated because [`RefState::GitOnly`] reads like a stronger
+    /// claim than it is: only repos the log already names are compared.
+    /// A repo with refs and no log entry at all is not surveyed, so this
+    /// finds an out-of-band ref beside logged ones, not an entire
+    /// smuggled repo.
+    pub fn survey_git_refs(&self, root: &std::path::Path) -> Vec<RefFinding> {
+        let mut findings = Vec::new();
         let view_refs: Vec<(String, ContentHash)> = self
             .view
             .lock()
@@ -2848,57 +2905,69 @@ impl Platform {
             // write to, so they get the same traversal guard as a repo
             // name off the wire.
             if repo.split('/').any(|c| c == ".." || c.is_empty()) || repo.starts_with('/') {
-                report
-                    .unreconciled
-                    .push(format!("{repo}: refused as a repo path"));
+                findings.push(RefFinding::unreadable(&repo, "", "refused as a repo path"));
                 continue;
             }
             let path = root.join(&repo);
             let Some(in_git) = read_git_refs(&path) else {
-                report.unreconciled.push(format!(
-                    "{repo}: the view holds {} ref(s) for a repo that cannot be read here",
-                    refs.len()
+                findings.push(RefFinding::unreadable(
+                    &repo,
+                    "",
+                    &format!(
+                        "the log holds {} ref(s) for a repo that cannot be read here",
+                        refs.len()
+                    ),
                 ));
                 continue;
             };
             let wanted: BTreeSet<String> = refs.iter().map(|(name, _)| name.clone()).collect();
             for (refname, want) in refs {
-                let full = format!("{repo}:{refname}");
                 let Some(want_oid) = want.git_oid() else {
-                    report
-                        .unreconciled
-                        .push(format!("{full}: view value is not a git oid"));
+                    findings.push(RefFinding::unreadable(
+                        &repo,
+                        &refname,
+                        "log value is not a git oid",
+                    ));
                     continue;
                 };
-                let have = in_git.get(&refname);
-                if have.map(String::as_str) == Some(want_oid.as_str()) {
+                let have = in_git.get(&refname).cloned();
+                if have.as_deref() == Some(want_oid.as_str()) {
                     continue;
                 }
-                if object_exists(&path, &want_oid) {
-                    match write_git_ref(&path, &refname, &want_oid, have.map(String::as_str)) {
-                        Ok(()) => report.applied.push(full),
-                        Err(e) => report.unreconciled.push(format!("{full}: {e}")),
-                    }
-                    continue;
-                }
-                // Git cannot ever hold this value, so the view has to
-                // give it up. `git_abort` builds exactly this inverse:
-                // back to git's value, or gone if git has none.
-                let old = have.map_or_else(|| "0".repeat(want_oid.len()), String::clone);
-                match self.git_abort(&repo, &refname, &old, &want_oid, "node", None) {
-                    Ok(()) => report.retracted.push(full),
-                    Err(e) => report.unreconciled.push(format!("{full}: {e}")),
-                }
+                // Whether git *can* be moved to the log is the whole
+                // difference between the two repairs, so it is decided
+                // here, while reading, and not again while writing.
+                let state = if object_exists(&path, &want_oid) {
+                    RefState::GitBehind
+                } else {
+                    RefState::LogUnbackable
+                };
+                findings.push(RefFinding {
+                    repo: repo.clone(),
+                    refname,
+                    log_oid: Some(want_oid),
+                    git_oid: have,
+                    reason: match state {
+                        RefState::GitBehind => "git is behind a commit it already has".into(),
+                        _ => "the log names a commit this repo does not have".into(),
+                    },
+                    state,
+                });
             }
-            for refname in in_git.keys() {
+            for (refname, oid) in &in_git {
                 if !wanted.contains(refname) {
-                    report
-                        .unreconciled
-                        .push(format!("{repo}:{refname}: in git, not in the log"));
+                    findings.push(RefFinding {
+                        repo: repo.clone(),
+                        refname: refname.clone(),
+                        log_oid: None,
+                        git_oid: Some(oid.clone()),
+                        state: RefState::GitOnly,
+                        reason: "in git, not in the log".into(),
+                    });
                 }
             }
         }
-        report
+        findings
     }
 
     /// Signs a git-derived ref op as the node and submits it, attributing
@@ -3683,6 +3752,86 @@ impl Platform {
             }
         }
         resp
+    }
+}
+
+/// How one ref disagrees between the log and a bare repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefState {
+    /// The log names a commit the repo has but is not pointing at. Git is
+    /// the follower, so this is repaired by moving git.
+    GitBehind,
+    /// The log names a commit the repo does not have and cannot get — a
+    /// refused push's objects go out with the quarantine. Repaired by the
+    /// log giving way, through a compensating op.
+    LogUnbackable,
+    /// Git holds a ref the log has never seen. Reported only: adopting it
+    /// would launder an out-of-band `update-ref` into the signed log.
+    GitOnly,
+    /// The comparison could not be made at all.
+    Unreadable,
+}
+
+impl RefState {
+    /// Stable wire name, so a monitor can match on it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefState::GitBehind => "git_behind",
+            RefState::LogUnbackable => "log_unbackable",
+            RefState::GitOnly => "git_only",
+            RefState::Unreadable => "unreadable",
+        }
+    }
+}
+
+/// One disagreement found by [`Platform::survey_git_refs`].
+#[derive(Debug, Clone)]
+pub struct RefFinding {
+    /// Repo the ref lives in, as it appears in the namespaced log name.
+    pub repo: String,
+    /// Ref name inside that repo; empty when the whole repo is the
+    /// problem.
+    pub refname: String,
+    /// What the log says, as a git oid.
+    pub log_oid: Option<String>,
+    /// What the repo says.
+    pub git_oid: Option<String>,
+    /// Which disagreement this is.
+    pub state: RefState,
+    /// Human-readable cause, for the startup log and the endpoint.
+    pub reason: String,
+}
+
+impl RefFinding {
+    fn unreadable(repo: &str, refname: &str, reason: &str) -> Self {
+        Self {
+            repo: repo.to_string(),
+            refname: refname.to_string(),
+            log_oid: None,
+            git_oid: None,
+            state: RefState::Unreadable,
+            reason: reason.to_string(),
+        }
+    }
+
+    /// The namespaced `<repo>:<refname>` name, as the log spells it.
+    pub fn name(&self) -> String {
+        if self.refname.is_empty() {
+            self.repo.clone()
+        } else {
+            format!("{}:{}", self.repo, self.refname)
+        }
+    }
+
+    /// The finding as it goes over the wire.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ref": self.name(),
+            "state": self.state.as_str(),
+            "log_oid": self.log_oid,
+            "git_oid": self.git_oid,
+            "reason": self.reason,
+        })
     }
 }
 
