@@ -87,16 +87,30 @@ impl Rng {
     /// sorted order and any other order differ in more places than a set of
     /// unrelated names would.
     ///
-    /// Some names carry characters JSON has to escape. A tree key is a file
-    /// path, and a path may legally contain a quote or a backslash, so the
-    /// escaped form is part of the canonical form and belongs in the
-    /// corpus. This is only safe because
+    /// Some names carry characters JSON has to escape, because real ones
+    /// do: git permits any byte in a path except NUL and `/`, so a quote,
+    /// a backslash, a newline and a tab are all legal in a filename and
+    /// therefore in a tree key. Verified rather than assumed — `git add`
+    /// stores all four without complaint. The escaped form is thus part of
+    /// this format's canonical form, not adversarial exotica, and it had
+    /// no coverage while every generated key was plain ASCII.
+    ///
+    /// NUL is the one byte git refuses, so it is deliberately absent.
+    ///
+    /// This is only affordable because
     /// [`tree_keys_are_emitted_in_sorted_order`] looks keys up by their
     /// *encoded* spelling; searching for the raw key would report a hostile
     /// key as missing from output that in fact contains it.
     fn path(&mut self) -> String {
         const DIRS: [&str; 6] = ["src", "src/bin", "tests", "docs", "crates/a", ""];
-        const NAMES: [&str; 6] = ["lib.rs", "ma\"in.rs", "back\\slash.rs", "a.rs", "Zed.toml", ".hidden"];
+        const NAMES: [&str; 6] = [
+            "lib.rs",
+            "ma\"in.rs",
+            "back\\slash.rs",
+            "nl\nhere.rs",
+            "tab\there.rs",
+            ".hidden",
+        ];
         let dir = DIRS[self.below(DIRS.len())];
         let name = NAMES[self.below(NAMES.len())];
         let tag = self.next_u64() % 1_000;
@@ -295,6 +309,11 @@ fn tree_keys_are_emitted_in_sorted_order() {
     // ever tamed, this test silently stops covering escaped keys, and the
     // escaping-aware lookup below stops being exercised at all.
     let mut saw_escaped_key = false;
+    // Tracked separately from the quote/backslash class. A control
+    // character in a key is the case that would break line framing if an
+    // encoder ever emitted it raw, and git allows it in a path, so losing
+    // it from the corpus is the more expensive silent regression.
+    let mut saw_control_char_key = false;
     for seed in SEEDS {
         let mut rng = Rng::new(seed);
         for case in 0..8 {
@@ -315,6 +334,7 @@ fn tree_keys_are_emitted_in_sorted_order() {
                 // quotes, so only the colon is appended.
                 let needle = format!("{}:", serde_json::to_string(key).expect("a key encodes"));
                 saw_escaped_key |= needle != format!("\"{key}\":");
+                saw_control_char_key |= key.chars().any(|c| c.is_control());
                 let found = bytes.find(&needle).unwrap_or_else(|| {
                     panic!("{at}: key {key} (encoded {needle}) missing from the canonical form")
                 });
@@ -330,6 +350,12 @@ fn tree_keys_are_emitted_in_sorted_order() {
         saw_escaped_key,
         "no generated tree key needed escaping, so the escaping-aware lookup \
          is untested; restore a quote or backslash to the path alphabet"
+    );
+    assert!(
+        saw_control_char_key,
+        "no generated tree key held a control character; git allows them in \
+         paths, and they are the class that would break line framing if an \
+         encoder emitted them raw"
     );
 }
 

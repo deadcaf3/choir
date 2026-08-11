@@ -338,8 +338,29 @@ fn every_field_is_covered_by_the_entry_hash() {
 /// holds — but nothing in the type system says so, and a future switch to a
 /// bytes-as-string encoding would break it silently.
 ///
-/// Proven end to end rather than only on the bytes: a channel containing a
-/// newline is appended to a real `FileLog`, which is then reopened.
+/// **Unproven by mutation, but the input is reachable.** No non-invasive
+/// edit makes this fail, so unlike its neighbours it has not been shown to
+/// catch anything. It is kept because the hostile value is not exotic:
+/// [`OpEntry::channel`] is a `String` written straight from the client's
+/// submission (`choir-node` platform, submit path) with no rejection of
+/// control characters, and it lands in the line-framed log verbatim. A
+/// submitter can therefore put a newline in a field that shares a line
+/// with every other field of the entry. That is the input this test
+/// drives, through a real `FileLog` and a real reopen, below.
+///
+/// A file path can carry one too — git permits any byte in a path except
+/// NUL and `/`, so `nl\nhere.txt` is a legal filename — but that lands in
+/// a `Commit` tree key, which reaches the chunk store rather than this
+/// log, so it is a canonicalization concern and not a framing one. The
+/// framing exposure is the channel string.
+///
+/// **This half cannot fail, and that is stated rather than hidden.** It
+/// asserts a property of `serde_json` — that it escapes control characters
+/// inside strings — which no edit to this workspace can change. It is kept
+/// as the executable form of *why* line framing is safe, so a future
+/// encoder swap has something to break. The half with teeth is
+/// [`a_log_of_newline_bearing_channels_reopens_intact`], which was proven
+/// by making `FileLog` pretty-print.
 #[test]
 fn canonical_bytes_never_contain_a_raw_newline() {
     for_each_entry(|entry, at| {
@@ -348,7 +369,19 @@ fn canonical_bytes_never_contain_a_raw_newline() {
             "{at}: canonical bytes contain a raw newline, which breaks line framing"
         );
     });
+}
 
+/// The proven half: entries whose channel really holds a newline survive a
+/// write and a reopen of a real `FileLog`.
+///
+/// Mutation-verified, unlike its neighbour above. Changing `FileLog` to
+/// `serde_json::to_vec_pretty` — a plausible "make the log readable" edit
+/// — fails this with `Corrupt("EOF while parsing an object")` on reopen,
+/// because one entry has become many lines. Five pre-existing durability
+/// tests catch that too, so this is not the only guard; it is the one that
+/// states the reason.
+#[test]
+fn a_log_of_newline_bearing_channels_reopens_intact() {
     let dir = std::env::temp_dir().join(format!(
         "choir-canonical-{}-{:?}",
         std::process::id(),
