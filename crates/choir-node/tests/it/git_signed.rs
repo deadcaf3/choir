@@ -120,12 +120,19 @@ fn signed_push_attributes_the_pushers_key() {
         .expect("curl runs");
     let log: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let entries = log["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
+    // Two rows per push: the ref op, then the node's D25 attestation of
+    // the state it left.
+    assert_eq!(entries.len(), 2);
     let ws = entries[0]["workspace"].as_str().unwrap();
     assert_eq!(
         ws,
         format!("key/{principal}"),
         "workspace must be the certificate principal"
+    );
+    assert_eq!(
+        entries[1]["workspace"].as_str().unwrap(),
+        "node/snapshot",
+        "the attestation is the node's own, never the pusher's"
     );
 
     // An unsigned push still lands, attributed to the transport user.
@@ -134,7 +141,7 @@ fn signed_push_attributes_the_pushers_key() {
     git(&c1, &["commit", "-q", "-m", "unsigned work"]);
     assert!(git(&c1, &["push", "-q", "origin", "HEAD:main"]).status.success());
     let out = std::process::Command::new("curl")
-        .args(["-s", &format!("http://127.0.0.1:{port}/api/log?from=1")])
+        .args(["-s", &format!("http://127.0.0.1:{port}/api/log?from=2")])
         .output()
         .expect("curl runs");
     let log: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();

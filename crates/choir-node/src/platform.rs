@@ -2280,6 +2280,20 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode());
         }
+        // A ref snapshot is the node's own attestation of its complete
+        // ref-state (D25): the unit a witness will cosign and the thing
+        // two readers compare to detect equivocation. The fold already
+        // refuses an untruthful one; this guard is about authorship —
+        // signed by anyone else it attests nothing about the node while
+        // reading as though it did.
+        if matches!(op.kind, OpKind::RecordRefSnapshot { .. }) && actor_id != self.node_id {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may record ref snapshots",
+                "read the latest snapshot from the view; the node attests its own ref-state",
+            )
+            .encode());
+        }
         // Key bindings are the durable operator record that T3 attribution
         // and T1's ordering primitive read, so a binding any trusted key
         // could author is evidence forgeable by the actors it is meant to
@@ -3256,7 +3270,53 @@ impl Platform {
         let sig = self.node_key.sign_submission(&workspace, &payload);
         self.handle
             .try_submit(&workspace, payload, Some(sig))
-            .map(|_| ())
+            .map(|_| ())?;
+        // Every ref movement the node authors ends in an attestation of
+        // where the refs now stand. Per accepted ref rather than per
+        // push, because the pre-receive protocol has no end-of-push
+        // signal to hang a single emission on.
+        self.record_snapshot();
+        Ok(())
+    }
+
+    /// Attests the current ref-state (D25): submits a node-signed
+    /// [`OpKind::RecordRefSnapshot`] of the view as it stands, and on
+    /// admission projects the snapshot's canonical bytes to
+    /// `refs.snapshot` beside the op log — the detached copy a backup
+    /// pulls with the log, byte-identical to the payload in it.
+    ///
+    /// Best-effort on both legs. A lost submission race means another
+    /// writer moved the view between read and submit, and that writer's
+    /// own ref op ends in another attestation, so the chain catches up
+    /// without retries here. The file write is tmp-plus-rename with a
+    /// per-call tmp name: concurrent admissions cannot tear the file,
+    /// and if their renames land out of order it briefly holds the older
+    /// of two valid snapshots until the next attestation replaces it.
+    fn record_snapshot(&self) {
+        let snapshot = self.view.lock().expect("view lock").snapshot();
+        let bytes = snapshot.canonical_bytes();
+        let (node, head) = self.scope_now();
+        let payload = ViewOp::new(OpKind::RecordRefSnapshot { snapshot })
+            .in_scope(node, head)
+            .to_payload();
+        let channel = "node/snapshot";
+        let sig = self.node_key.sign_submission(channel, &payload);
+        if self.handle.try_submit(channel, payload, Some(sig)).is_err() {
+            return;
+        }
+        let Some(log) = &self.log_path else { return };
+        static TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = log.with_file_name(format!("refs.snapshot.{n}.tmp"));
+        if std::fs::write(&tmp, &bytes)
+            .and_then(|()| std::fs::rename(&tmp, log.with_file_name("refs.snapshot")))
+            .is_err()
+        {
+            // The attestation is in the log either way; a missing
+            // detached copy fails the next backup pull loudly, which is
+            // the reader that cares.
+            std::fs::remove_file(&tmp).ok();
+        }
     }
 
     /// Points `workspace` at git oid `head_hex` with a node-signed op,
@@ -3700,6 +3760,17 @@ impl Platform {
                     .iter()
                     .map(|(key_id, binding)| (key_id.clone(), binding_json(binding)))
                     .collect();
+                // The latest admitted ref-state attestation (D25), as a
+                // summary: `refs` above already carries the full map, so
+                // repeating it here would double the hot-path response
+                // for no reader.
+                let snapshot = view.latest_snapshot.as_ref().map(|s| {
+                    serde_json::json!({
+                        "id": s.id().to_hex(),
+                        "at_seq": s.at_seq,
+                        "prev_snapshot": s.prev_snapshot.as_ref().map(ContentHash::to_hex),
+                    })
+                });
                 let ws = serde_json::json!(ws);
                 let refs = serde_json::json!(refs);
                 let reviews = serde_json::json!(reviews);
@@ -3753,6 +3824,7 @@ impl Platform {
                 });
                 let body = serde_json::json!({
                     "log": log,
+                    "snapshot": snapshot,
                     "workspaces": ws,
                     "refs": refs,
                     "reviews": reviews,

@@ -159,7 +159,7 @@ tag in `crontab -l`) is cut from the node's own bare repos, one bundle
 per line of `~/.choir/repos.list`:
 
 ```
-17 3 * * * for r in $(grep -v "^#" $HOME/.choir/repos.list); do git -C $HOME/.choir/repos/$r bundle create $HOME/bundles/$(basename $r .git)-$(date +\%F).bundle --all; done 2>>$HOME/bundles/cron.err # choir-bundle
+17 3 * * * for r in $(grep -v "^#" $HOME/.choir/repos.list); do b=$(basename $r .git); git -C $HOME/.choir/repos/$r bundle create $HOME/bundles/$b-$(date +\%F).bundle --all && find $HOME/bundles -name "$b-*.bundle" -mtime +13 -delete; done 2>>$HOME/bundles/cron.err # choir-bundle
 ```
 
 It used to fetch from Forgejo and bundle that clone, which quietly made
@@ -169,8 +169,11 @@ Bundling the bare repos directly removes Forgejo, the `~/choir-src`
 clone, and the fetch step from the failure chain — the bundle can now
 only be as stale as the node itself. Errors append to
 `~/bundles/cron.err` instead of `/dev/null`; a silently failing backup
-is the failure mode this repository keeps re-learning about. Bundles
-accumulate without pruning, same as before the repoint.
+is the failure mode this repository keeps re-learning about. Pruning
+keeps roughly two weeks per repo and is gated on the day's bundle
+having been created (`&&`): a repo whose bundling starts failing stops
+pruning too, so a persistent failure leaves the old bundles in place
+instead of quietly eroding them while the error sits in `cron.err`.
 
 ## Restoring the op log
 
@@ -235,6 +238,22 @@ swapfile — the host has under a gigabyte of RAM); the laptop becomes a
 client over an SSH tunnel, and the backup direction inverts: the laptop
 pulls (`choirctl pull-backup`), because a live log and its only copy on
 one disk is not a backup.
+
+Rebuilding the VM node after a landing (`choirctl install` prints this
+too): check `/proc/swaps` still lists the 3 GiB swapfile, then on the VM
+
+```
+git -C ~/choir-build fetch ~/.choir/repos/choir/choir.git main && git -C ~/choir-build merge --ff-only FETCH_HEAD
+CHOIR_GIT_HEAD=$(git -C ~/choir-build rev-parse HEAD) cargo build --release --manifest-path ~/choir-build/Cargo.toml -p choir-node -p choir-cli
+sh ~/choir-build/scripts/flip/install_node_linux.sh 8417 '' ~/bin ~/choir-build/target/release
+```
+
+The fetch source is the node's own bare repo, so the build is always of
+what the node itself serves as canonical. `CHOIR_GIT_HEAD` feeds the
+build stamp's sound path (`build.rs` source 1) — the git fallback reads
+right in a clean checkout, but the env var is the one cargo is
+guaranteed to rebuild on, and it is why `choirctl status` can compare
+`build:` against HEAD honestly.
 
 **Order matters, and the rehearsal is why.** A node booting over a
 restored log with an empty git repo does not wait: `reconcile_refs`

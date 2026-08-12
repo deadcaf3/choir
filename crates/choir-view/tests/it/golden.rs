@@ -46,7 +46,10 @@ use std::collections::BTreeMap;
 use choir_hash::ContentHash;
 use choir_oplog::{signing_hash, OpEntry, Witness, FORMAT_VERSION as OPLOG_FORMAT_VERSION};
 use choir_store::{ChunkerParams, Manifest, FORMAT_VERSION as STORE_FORMAT_VERSION};
-use choir_view::{Commit, OpKind, TreeEntry, Verdict, ViewOp, FORMAT_VERSION as VIEW_FORMAT_VERSION};
+use choir_view::{
+    Commit, OpKind, RefSnapshot, TreeEntry, Verdict, ViewOp,
+    FORMAT_VERSION as VIEW_FORMAT_VERSION,
+};
 
 /// Whether this run prints fresh constants instead of checking frozen ones.
 fn regenerating() -> bool {
@@ -436,6 +439,72 @@ fn manifest_is_frozen() {
             avg: 16 * 1024,
             max: 64 * 1024
         }
+    );
+}
+
+/// The D25 attestation unit, registered in `invariant_3.rs` the day it
+/// was added. The map key is deliberately hostile: a git ref name may
+/// legally carry `"` and non-ASCII bytes (git forbids control bytes,
+/// space, `~^:?*[\` — not quotes, not high bytes), and serde_json escapes
+/// map *keys* through a different path than string values. This vector is
+/// what pins that escaping; a signed snapshot whose canonical bytes drift
+/// is every historical attestation orphaned at once.
+#[test]
+fn ref_snapshot_is_frozen() {
+    let mut refs = BTreeMap::new();
+    refs.insert("choir/choir.git:refs/heads/main".to_string(), h(b"main head"));
+    refs.insert(
+        "choir/choir.git:refs/heads/a\"β".to_string(),
+        h(b"hostile ref"),
+    );
+    let first = RefSnapshot {
+        format_version: VIEW_FORMAT_VERSION,
+        refs: refs.clone(),
+        at_seq: 41,
+        prev_snapshot: None,
+    };
+    // A log's first snapshot has no predecessor, and the additive rule
+    // applies from birth: `prev_snapshot: None` must not serialize.
+    let canonical = serde_json::to_string(&first).expect("serializes");
+    assert!(
+        !canonical.contains("prev_snapshot"),
+        "a first snapshot must omit the additive chain field: {canonical}"
+    );
+    assert_golden(
+        "first ref snapshot (hostile key)",
+        &first,
+        r#"{"format_version":1,"refs":{"choir/choir.git:refs/heads/a\"β":{"codec":30,"digest":[53,85,138,128,7,62,31,16,126,81,216,201,3,71,105,19,197,111,174,67,209,10,198,75,220,75,70,10,134,233,43,213]},"choir/choir.git:refs/heads/main":{"codec":30,"digest":[202,222,155,104,158,4,227,17,129,30,22,192,7,208,231,85,91,67,231,133,81,79,114,121,158,17,93,74,19,7,57,44]}},"at_seq":41}"#,
+        "1e-cebbc7fb5627619b63ec8b23b629b39b6d4a64d96cb80bf64d58e5b633bbc602",
+    );
+
+    let chained = RefSnapshot {
+        format_version: VIEW_FORMAT_VERSION,
+        refs,
+        at_seq: 42,
+        prev_snapshot: Some(first.id()),
+    };
+    assert_golden(
+        "chained ref snapshot",
+        &chained,
+        r#"{"format_version":1,"refs":{"choir/choir.git:refs/heads/a\"β":{"codec":30,"digest":[53,85,138,128,7,62,31,16,126,81,216,201,3,71,105,19,197,111,174,67,209,10,198,75,220,75,70,10,134,233,43,213]},"choir/choir.git:refs/heads/main":{"codec":30,"digest":[202,222,155,104,158,4,227,17,129,30,22,192,7,208,231,85,91,67,231,133,81,79,114,121,158,17,93,74,19,7,57,44]}},"at_seq":42,"prev_snapshot":{"codec":30,"digest":[206,187,199,251,86,39,97,155,99,236,139,35,182,41,179,155,109,74,100,217,108,184,11,246,77,88,229,182,51,187,198,2]}}"#,
+        "1e-05e3a7ea8154628df2d66244dbfc3d6c23af521ab4616b16488057487ddd679e",
+    );
+    // `RefSnapshot::id` must agree with hashing the canonical bytes by
+    // hand — it is the identity the next snapshot's chain pointer names.
+    assert_frozen(
+        "chained ref snapshot id",
+        &chained.id().to_hex(),
+        "1e-05e3a7ea8154628df2d66244dbfc3d6c23af521ab4616b16488057487ddd679e",
+    );
+
+    // The op that carries a snapshot into the log, as a client would
+    // re-serialize it: the payload-bytes exposure the ViewOp vectors
+    // exist for.
+    assert_golden(
+        "record-ref-snapshot op",
+        &ViewOp::new(OpKind::RecordRefSnapshot { snapshot: chained }),
+        r#"{"format_version":1,"kind":{"RecordRefSnapshot":{"snapshot":{"format_version":1,"refs":{"choir/choir.git:refs/heads/a\"β":{"codec":30,"digest":[53,85,138,128,7,62,31,16,126,81,216,201,3,71,105,19,197,111,174,67,209,10,198,75,220,75,70,10,134,233,43,213]},"choir/choir.git:refs/heads/main":{"codec":30,"digest":[202,222,155,104,158,4,227,17,129,30,22,192,7,208,231,85,91,67,231,133,81,79,114,121,158,17,93,74,19,7,57,44]}},"at_seq":42,"prev_snapshot":{"codec":30,"digest":[206,187,199,251,86,39,97,155,99,236,139,35,182,41,179,155,109,74,100,217,108,184,11,246,77,88,229,182,51,187,198,2]}}}}}"#,
+        "1e-42e7d07b34c6c887aa4f6349ce7694fbf29711464c735453adbbd683b8c08694",
     );
 }
 

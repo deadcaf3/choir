@@ -226,6 +226,24 @@ fn durable_log_precedes_ref_publication_precedes_client_ack() {
     assert!(matches!(push_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
 
     release_sync_tx.send(()).unwrap();
+
+    // The ref op's D25 attestation rides the same durability path: the
+    // node appends a RecordRefSnapshot of the state the push left, and
+    // that append's own barrier must be released before the hook can be
+    // acknowledged and Git can publish.
+    assert!(
+        synced_rx.recv_timeout(BARRIER_BUDGET).is_ok(),
+        "the ref op's attestation never reached the durability barrier"
+    );
+    let raw = std::fs::read_to_string(&log_path).expect("synced log is readable");
+    assert_eq!(
+        raw.lines().count(),
+        2,
+        "the attestation is the second durable row, before any publication"
+    );
+    assert!(!is_ref(&bare, "refs/heads/main", &expected));
+    release_sync_tx.send(()).unwrap();
+
     if !wait_for(&published) {
         std::fs::write(&release_publish, b"").ok();
         panic!("push never reached post-receive publication boundary");

@@ -19,7 +19,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir appeal <api> <attempt-id>` — appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir reviews <api> <reviewer>` — your pending review queue
-- `choir view <api>` — the materialized view plus durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
+- `choir view <api>` — the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
 
 ## Endpoints
 
@@ -27,7 +27,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
 | `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
-| `GET /api/view` | The materialized view plus durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate |
+| `GET /api/view` | The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate |
 | `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
 | `POST /api/workspace` | Provision a copy-on-write workspace and register it in the view |

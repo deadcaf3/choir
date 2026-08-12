@@ -19,7 +19,7 @@
 //! seed list, so the suite is deterministic and reproducible.
 
 use choir_hash::ContentHash;
-use choir_view::{Commit, OpKind, TreeEntry, Verdict, ViewOp, FORMAT_VERSION};
+use choir_view::{Commit, OpKind, RefSnapshot, TreeEntry, Verdict, ViewOp, FORMAT_VERSION};
 
 /// Fixed seeds: deterministic, but more than one draw.
 const SEEDS: [u64; 3] = [0x0123_4567_89ab_cdef, 0xdead_beef, 7];
@@ -436,6 +436,18 @@ fn view_ops_round_trip_byte_for_byte() {
                     key: rng.hash(),
                     channel: None,
                 }),
+                ViewOp::new(OpKind::RecordRefSnapshot {
+                    snapshot: RefSnapshot {
+                        format_version: FORMAT_VERSION,
+                        refs: (0..4)
+                            .map(|_| {
+                                (format!("repo.git:refs/heads/{}", rng.path()), rng.hash())
+                            })
+                            .collect(),
+                        at_seq: rng.next_u64() % 1_000,
+                        prev_snapshot: None,
+                    },
+                }),
             ];
             for op in &ops {
                 let bytes = canonical(op);
@@ -456,6 +468,52 @@ fn view_ops_round_trip_byte_for_byte() {
                 !canonical(&ops[5]).contains("channel"),
                 "{at}: channelless BindKey emitted the additive field"
             );
+            assert!(
+                !canonical(&ops[6]).contains("prev_snapshot"),
+                "{at}: a first snapshot emitted the additive chain field"
+            );
+        }
+    }
+}
+
+/// The D25 snapshot is a signature over canonical bytes whose map keys are
+/// ref names — legal carriers of quotes and non-ASCII bytes in git's own
+/// grammar, and arbitrary strings through the signed API. An attestation
+/// that serialized differently for a differently-built map would be an
+/// equivocation detector that cries wolf, so order independence is pinned
+/// here over hostile names, complementing `golden.rs`'s fixed vector.
+#[test]
+fn ref_snapshots_serialize_independent_of_insertion_order() {
+    for seed in SEEDS {
+        let mut rng = Rng::new(seed);
+        for case in 0..8 {
+            let at = format!("seed {seed:#x} case {case}");
+            let mut pairs: Vec<(String, ContentHash)> = (0..TREE_SIZE)
+                .map(|_| (format!("repo.git:refs/heads/{}", rng.path()), rng.hash()))
+                .collect();
+            let snapshot_from = |pairs: &[(String, ContentHash)]| RefSnapshot {
+                format_version: FORMAT_VERSION,
+                refs: pairs.iter().cloned().collect(),
+                at_seq: 7,
+                prev_snapshot: Some(ContentHash::blake3(b"previous")),
+            };
+            let reference = snapshot_from(&pairs);
+            let bytes = canonical(&reference);
+            let decoded: RefSnapshot = serde_json::from_str(&bytes).expect("snapshot decodes");
+            assert_eq!(
+                canonical(&decoded),
+                bytes,
+                "{at}: snapshot re-serialization drifted"
+            );
+            assert_eq!(decoded.id(), reference.id(), "{at}: identity drifted");
+            for _ in 0..3 {
+                rng.shuffle(&mut pairs);
+                assert_eq!(
+                    canonical(&snapshot_from(&pairs)),
+                    bytes,
+                    "{at}: insertion order leaked into the attestation bytes"
+                );
+            }
         }
     }
 }
