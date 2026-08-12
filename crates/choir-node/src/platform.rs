@@ -3727,6 +3727,24 @@ impl Platform {
         self.view.lock().expect("view lock").next_seq
     }
 
+    /// Repository the review `id` proposes to land on, in the canonical
+    /// D29 spelling, or `None` when the review is unknown or unbound.
+    ///
+    /// Exposed for per-repository authorization: it is what lets posting
+    /// a verdict require write on the repository under review, instead
+    /// of the node-wide grant every review op would otherwise need.
+    pub fn review_repo(&self, id: &str) -> Option<String> {
+        self.view
+            .lock()
+            .expect("view lock")
+            .reviews
+            .get(id)?
+            .target_ref
+            .as_deref()
+            .and_then(|target| target.split_once(':'))
+            .map(|(repo, _)| crate::acl::normalize_repo(repo))
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {

@@ -15,6 +15,7 @@
 
 mod support;
 
+mod acl;
 mod api;
 mod assignment;
 mod auth;

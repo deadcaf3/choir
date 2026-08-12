@@ -18,6 +18,9 @@ GET /api/ref-agreement - Where the op log and the bare repos disagree about a re
 POST /api/git-update - Internal: the pre-receive hook callback
 POST /api/git-abort - Internal: retracts a refused push's already-accepted refs
 
+## Access
+A node may enforce per-repository grants. 404 on a repository means you hold no read grant on it, and says nothing about whether it exists; 403 means you can read it but not write it, or the operation needs a node-wide grant (the op log, the ref-state attestation, and ops naming no repository). Neither is retryable — ask the operator for a grant line.
+
 ## CLI
 For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form

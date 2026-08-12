@@ -1,7 +1,7 @@
 //! choir-node daemon entry point.
 //!
 //! Configured usage: `choir-node <repo-root> <port> [--create owner/name.git]...
-//! [--auth-file path] [--keys-file path] [--reviewers-file path]
+//! [--auth-file path] [--acl-file path] [--keys-file path] [--reviewers-file path]
 //! [--require-assignment] [--protected-refs path] [--require-review]
 //! [--require-scope]
 //! [--reviewer-conflict-graph path --reviewer-conflict-distance hops]
@@ -14,7 +14,13 @@
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
 //! `user:token`-per-line file (0600; never in-repo) and turns on
-//! mandatory basic auth. `--keys-file` turns on the platform API; each
+//! mandatory basic auth. It authenticates and nothing more: without
+//! `--acl-file` every credential reaches every repository, which the
+//! node says out loud at startup. `--acl-file` (D29) adds the
+//! per-repository decision — `<user> <repo|*|@node> <level>` per line,
+//! `read` < `write`, `auditor` on `@node`, fail closed, reloaded on
+//! mtime — and requires `--auth-file`, since it grades authenticated
+//! users. `--keys-file` turns on the platform API; each
 //! line is `<64-char hex>` or `<name> <64-char hex>`, where the optional
 //! name binds that key to one review channel (a key with no name is
 //! unconstrained, as every key was before the column existed). The op log
@@ -96,6 +102,7 @@ fn main() -> std::io::Result<()> {
         "--newcomer-audit",
         "--newcomer-adjudications",
         "--review-adjudications",
+        "--acl-file",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -194,6 +201,7 @@ fn main() -> std::io::Result<()> {
         ));
     }
 
+    let auth_enabled = auth.is_some();
     let mut node = Node::bind_full(&root, &bind, port, auth, tls)?;
     if let Some(i) = rest.iter().position(|a| a == "--keys-file") {
         let path = rest.get(i + 1).ok_or_else(|| {
@@ -393,6 +401,28 @@ fn main() -> std::io::Result<()> {
             std::io::ErrorKind::InvalidInput,
             "--review-retention needs --keys-file",
         ));
+    }
+    // D29. Authorization is keyed on the authenticated username, so an
+    // ACL without authentication would grade everybody as `anon` and
+    // grant them whatever `anon` holds. Refusing the combination is the
+    // difference between a fail-closed table and a decorative one.
+    match flag_value("--acl-file") {
+        Some(path) if auth_enabled => {
+            node.watch_acl_file(path.into())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        }
+        Some(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--acl-file needs --auth-file: authorization is per authenticated user",
+            ))
+        }
+        // Said out loud rather than assumed. Every operator running
+        // without an ACL should know that one credential reaches
+        // everything, especially before issuing a second one.
+        None => eprintln!(
+            "acl: no --acl-file, so every authenticated actor reaches every repository"
+        ),
     }
     let mut create_next = false;
     for a in rest {

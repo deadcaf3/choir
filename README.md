@@ -120,21 +120,50 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 
 | File | Format |
 |---|---|
-| `--auth-file` | `user:token` per line — **authentication only; see the warning below** |
+| `--auth-file` | `user:token` per line — authentication only; pair with `--acl-file` |
+| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `write`, and `auditor` on `@node` |
 | `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
 | `--reviewer-conflict-graph` | undirected `operator operator` edges; pair with an explicit maximum hop distance |
 
-Hot-reload: trusted keys, channel bindings, push-certificate signers, and reviewers take effect on the next request.
+Hot-reload: trusted keys, channel bindings, push-certificate signers, reviewers, and ACL grants take effect on the next request.
 
-> **Every credential reaches every repository.** The auth file authenticates; there is no per-repo access control yet. A second `user:token` line can clone every repo on the node, push to any unprotected ref, and provision workspaces anywhere. Protected refs and the review requirement still hold, so it cannot land on a gated `main` unreviewed. Treat additional credentials as full read/write on the whole node until per-repo authorization exists.
+> **Without `--acl-file`, every credential reaches every repository.** The auth file authenticates and nothing else; the node prints a line saying so at startup. A second `user:token` line can then clone every repo, push to any unprotected ref, and provision workspaces anywhere. Protected refs and the review requirement still hold, so it cannot land on a gated `main` unreviewed. **Do not issue a second credential without an ACL.**
+
+### Per-repository authorization (D29)
+
+`--acl-file` gates each repository per user. Three whitespace-separated columns, `#` comments, and the same append-a-line discipline as the keys file:
+
+```
+# <user>   <repo|*|@node>   <level>
+alice      owner/demo       write
+bob        owner/demo       read
+bob        owner/notes      write
+carol      *                read
+dave       @node            auditor
+```
+
+`read` clones and fetches; `write` adds push, workspace provisioning, and submitting ops that touch that repository. There is no `admin`: no endpoint performs a repository-scoped administrative action, since repo creation and ref protection are operator-side flags.
+
+The operator's own credential usually wants two lines, since neither covers the other:
+
+```
+myself     *      write
+myself     @node  write
+```
+
+`*` covers every repository and never covers `@node`. `@node` is the node itself: `auditor` reads `/api/log` and `/api/ref-agreement`, which are gated rather than filtered because the log is a hash chain and the attestation covers the complete ref state. `@node write` is needed for ops that name no repository, such as key bindings.
+
+Fail closed: with the flag set, anything not granted is refused. A repository you cannot read answers `404` rather than `403`, so a denial never confirms that it exists. The flag requires `--auth-file` — an ACL over anonymous requests would grade everyone the same. A malformed file refuses to start; a malformed *edit* keeps the previous table and complains, so a typo cannot silently revoke access.
+
+> **Phase A.** `/api/view` and the browser page are not yet filtered: any authenticated credential can still read every repository's ref names, oids, workspaces and reviews. Repository *contents* are gated; the inventory is not.
 
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 

@@ -486,6 +486,16 @@ pub fn llms_txt() -> String {
     for e in ENDPOINTS {
         out.push_str(&format!("{} {} - {}\n", e.method, e.path, e.purpose));
     }
+    // What a denial means, because the two statuses carry different
+    // instructions and neither is worth retrying (D29).
+    out.push_str(
+        "\n## Access\n\
+         A node may enforce per-repository grants. 404 on a repository means you hold no \
+         read grant on it, and says nothing about whether it exists; 403 means you can read \
+         it but not write it, or the operation needs a node-wide grant (the op log, the \
+         ref-state attestation, and ops naming no repository). Neither is retryable — ask \
+         the operator for a grant line.\n",
+    );
     out.push_str("\n## CLI\n");
     out.push_str(&format!(
         "For authenticated nodes: choir {AUTH_OPTIONS} <command> ...\n"

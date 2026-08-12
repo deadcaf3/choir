@@ -325,18 +325,43 @@ Access for a new user is one appended `user:token` line in
 hand it over out of band). Credentials are per-user, so one person can
 be revoked without disturbing anyone else.
 
-**Know what that line grants before you write it.** The auth file
-authenticates; it does not authorize. There is no per-repo access
-control, so a new credential can clone every repository this node
-serves, push to any unprotected ref on any of them, and provision
-workspaces anywhere. What still holds is everything keyed to the ref
-rather than the identity: protected refs, the review requirement, and
-the sequencer's ordering — so a new user cannot land on a gated `main`
-without a node-assigned review reaching approval weight two.
+**That line authenticates and nothing more.** Write the matching grant
+into `~/.choir/acl` (0600) in the same breath, one line per repository:
 
-The practical rule until per-repo authorization exists: issue a token
-only to someone you would give full read/write on the whole node, and
-put anything they should not reach on a different node.
+```
+<user>   <owner/repo>   read      # clone and fetch
+<user>   <owner/repo>   write     # and push, provision, submit
+```
+
+Start the node with `--acl-file ~/.choir/acl` and it fails closed. **The
+service renderers do not pass this flag yet** — `render_node_service.sh`
+and `render_node_plist.sh` take their policy flags as positional
+arguments and adding one means changing both plus the comparison test in
+`crates/choir-cli/tests/it/install_policy.rs`. Until that lands, the
+installed node ignores an ACL file no matter what is in it; only a
+hand-started node enforces one. Do that wiring before issuing a second
+credential on the dogfood node.
+
+What the flag does once it is passed:
+anything ungranted is refused, and a repository the user cannot read
+answers `404` rather than `403`, so a denial never confirms it exists.
+Grants reload on mtime, so appending a line needs no restart, and a
+malformed edit keeps the previous table rather than revoking anyone.
+`--acl-file` requires `--auth-file`; the node refuses the combination
+the other way round.
+
+**Without that flag, one credential reaches every repository** — clone
+anything, push to any unprotected ref, provision workspaces anywhere.
+The node prints a line saying so on every start that lacks an ACL. What
+still holds either way is everything keyed to the ref rather than the
+identity: protected refs, the review requirement, and the sequencer's
+ordering — so a new user cannot land on a gated `main` without a
+node-assigned review reaching approval weight two.
+
+One gap survives phase A: `/api/view` and the browser page are not yet
+filtered, so any credential can read every repository's ref names,
+oids, workspaces and reviews. Contents are gated; the inventory is not.
+Say that to whoever you hand the token to.
 
 After the flip, the operator's own tooling must switch schemes too: a
 plaintext `http://` through the tunnel now hits a TLS listener and gets

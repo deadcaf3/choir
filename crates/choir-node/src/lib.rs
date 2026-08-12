@@ -13,6 +13,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub mod acl;
 pub mod platform;
 pub mod provision;
 pub mod reject;
@@ -85,6 +86,10 @@ pub struct Node {
     /// Trusted-keys file to watch, so `allowed_signers` tracks it
     /// without a restart. `None` = generated once at startup.
     keys_watch: Option<std::sync::Arc<KeysWatch>>,
+    /// Per-repository authorization table (D29), watched like the keys
+    /// file. `None` = no `--acl-file`, so every authenticated actor
+    /// reaches every repository, which is the pre-D29 behaviour.
+    acl_watch: Option<std::sync::Arc<AclWatch>>,
     /// The browser page, prebuilt and keyed by view sequence. Shared
     /// across request threads so one render serves every reader until
     /// the state it describes changes.
@@ -96,6 +101,13 @@ pub struct Node {
 struct KeysWatch {
     path: PathBuf,
     mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
+}
+
+/// A watched ACL file, the mtime last parsed, and the table in force.
+struct AclWatch {
+    path: PathBuf,
+    mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
+    table: std::sync::RwLock<std::sync::Arc<acl::Acl>>,
 }
 
 impl Node {
@@ -180,6 +192,7 @@ impl Node {
             scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
             keys_watch: None,
+            acl_watch: None,
             ui_cache: std::sync::Arc::new(ui::UiCache::new()),
         })
     }
@@ -253,6 +266,61 @@ impl Node {
             }
             Err(e) => eprintln!("allowed_signers: keys file unusable, keeping previous: {e}"),
         }
+    }
+
+    /// Enforces per-repository authorization (D29) from `path`, reloaded
+    /// whenever its mtime moves — so granting access is "append a line",
+    /// the same discipline as the trusted-keys file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the file cannot be read or does not parse.
+    /// This is fatal by design: there is no previous table to fall back
+    /// to at startup, and an empty table under a fail-closed ACL locks
+    /// out everyone including the operator.
+    pub fn watch_acl_file(&mut self, path: PathBuf) -> Result<(), String> {
+        let table = acl::Acl::load(&path)?;
+        eprintln!("acl enabled ({} grants)", table.len());
+        self.acl_watch = Some(std::sync::Arc::new(AclWatch {
+            mtime: std::sync::Mutex::new(
+                std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+            ),
+            table: std::sync::RwLock::new(std::sync::Arc::new(table)),
+            path,
+        }));
+        Ok(())
+    }
+
+    /// Reparses the ACL file if it changed. Runs on the accept loop, so
+    /// an edit takes effect on the *next* request with no restart.
+    ///
+    /// A malformed file leaves the previous table in force and complains
+    /// once per edit — the same rule as the keys file, for the same
+    /// reason: a partially parsed ACL would silently revoke access.
+    fn refresh_acl(&self) {
+        let Some(watch) = &self.acl_watch else {
+            return;
+        };
+        let mtime = std::fs::metadata(&watch.path).and_then(|m| m.modified()).ok();
+        let mut last = watch.mtime.lock().expect("acl mtime lock");
+        if mtime.is_none() || mtime == *last {
+            return;
+        }
+        *last = mtime;
+        match acl::Acl::load(&watch.path) {
+            Ok(table) => {
+                eprintln!("acl: reloaded ({} grants)", table.len());
+                *watch.table.write().expect("acl write lock") = std::sync::Arc::new(table);
+            }
+            Err(e) => eprintln!("acl: file unusable, keeping previous: {e}"),
+        }
+    }
+
+    /// The ACL table currently in force, if one is configured.
+    fn acl_now(&self) -> Option<std::sync::Arc<acl::Acl>> {
+        self.acl_watch
+            .as_ref()
+            .map(|w| std::sync::Arc::clone(&w.table.read().expect("acl read lock")))
     }
 
     /// Port the daemon is listening on.
@@ -385,7 +453,13 @@ impl Node {
 
     /// Rejects path traversal and normalizes the repo path under root.
     fn repo_path(&self, name: &str) -> std::io::Result<PathBuf> {
-        if name.split('/').any(|c| c == ".." || c.is_empty()) || name.starts_with('/') {
+        // `@` is reserved so a repository can never alias the ACL's
+        // `@node` pseudo-repository (D29); `*` likewise for its wildcard.
+        if name.split('/').any(|c| c == ".." || c.is_empty())
+            || name.starts_with('/')
+            || name.contains('@')
+            || name.contains('*')
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "bad repo name",
@@ -403,6 +477,9 @@ impl Node {
             // channel name becomes enforced, with no restart and no wait
             // for some later event.
             self.refresh_allowed_signers();
+            // Same reasoning, same cost: an appended grant takes effect
+            // on this request rather than on a restart.
+            self.refresh_acl();
             // A writer that has failed a durability barrier refuses every
             // submission from then on. Staying up in that state is worse
             // than being down: process supervision only restarts a process
@@ -431,6 +508,7 @@ impl Node {
             let auth = self.auth.clone();
             let platform = self.platform.clone();
             let ui_cache = std::sync::Arc::clone(&self.ui_cache);
+            let acl = self.acl_now();
             let internal_token = self.internal_token.clone();
             let port = self.port;
             let scheme = self.scheme;
@@ -459,6 +537,30 @@ impl Node {
                             return;
                         }
                     }
+                }
+                // The hook callbacks are privileged: they submit a ref op
+                // under any user's name, spending authorization that the
+                // git route which triggered them already checked.
+                // Requiring the loopback secret keeps a user credential
+                // from reaching them directly — which would otherwise
+                // forge a ref update on any repository and walk straight
+                // around the git-route check below.
+                if (request.url().starts_with("/api/git-update")
+                    || request.url().starts_with("/api/git-abort"))
+                    && !internal_ok
+                {
+                    let response =
+                        tiny_http::Response::from_string("{\"error\":\"internal endpoint\"}\n")
+                            .with_status_code(403)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .expect("static header"),
+                            );
+                    let _ = request.respond(response);
+                    return;
                 }
                 // The surface as plain text, for an agent that has never
                 // seen choir. Behind auth like everything else; it
@@ -493,8 +595,40 @@ impl Node {
                 }
                 if request.url().starts_with("/api/") {
                     let base_url = format!("{scheme}://127.0.0.1:{port}");
-                    let _ = handle_api(platform.as_deref(), &root, &base_url, &user, request);
+                    // A hook callback carries the loopback secret rather
+                    // than a user's grants, so it is not an ACL subject.
+                    let acl_for_api = if internal_ok { None } else { acl.as_deref() };
+                    let _ = handle_api(
+                        platform.as_deref(),
+                        &root,
+                        &base_url,
+                        &user,
+                        acl_for_api,
+                        request,
+                    );
                     return;
+                }
+                // Git smart-HTTP. The repository is in the URL, so this
+                // decision needs nothing but the path — which is why it
+                // sits here, once, rather than inside the CGI bridge. A
+                // path naming no repository, or an operation outside the
+                // smart-HTTP surface, is refused rather than handed to
+                // `git http-backend`.
+                if let Some(table) = acl.as_ref() {
+                    let method = request.method().as_str().to_string();
+                    let denial = match acl::git_requirement(&method, request.url()) {
+                        Some((repo, level)) => {
+                            table.check(&user, &acl::Scope::Repo(repo), level)
+                        }
+                        None => Some(acl::Denial {
+                            status: 404,
+                            reason: "no such repository".to_string(),
+                        }),
+                    };
+                    if let Some(denial) = denial {
+                        respond_git_denial(request, &denial);
+                        return;
+                    }
                 }
                 // Platform-enabled daemons pass the sequencer callback
                 // into git's hook environment.
@@ -534,9 +668,21 @@ fn header(request: &tiny_http::Request, name: &str) -> Option<String> {
         .map(|h| h.value.as_str().to_string())
 }
 
+/// Answers a git request the ACL refused. Plain text, because that is
+/// what a git client surfaces to whoever ran the command.
+fn respond_git_denial(request: tiny_http::Request, denial: &acl::Denial) {
+    let response = tiny_http::Response::from_string(format!("{}\n", denial.reason))
+        .with_status_code(denial.status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+                .expect("static header"),
+        );
+    let _ = request.respond(response);
+}
+
 /// Extracts `owner/repo.git` from a smart-HTTP path like
 /// `/owner/repo.git/git-receive-pack`.
-fn repo_from_path(url: &str) -> Option<String> {
+pub(crate) fn repo_from_path(url: &str) -> Option<String> {
     let path = url.split('?').next().unwrap_or(url);
     let end = path.find(".git/").map(|i| i + 4).or_else(|| {
         path.ends_with(".git").then_some(path.len())
@@ -806,6 +952,7 @@ fn handle_api(
     root: &Path,
     base_url: &str,
     user: &str,
+    acl: Option<&acl::Acl>,
     mut request: tiny_http::Request,
 ) -> std::io::Result<()> {
     let (status, body) = match platform {
@@ -814,7 +961,14 @@ fn handle_api(
             request.as_reader().read_to_end(&mut req_body)?;
             let method = request.method().as_str().to_string();
             let path = request.url().to_string();
-            if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
+            // The body is already in hand, which is the only place the
+            // repository a submission touches can be recovered from.
+            let denial = acl.and_then(|table| {
+                acl::api_denial(table, user, &method, &path, &req_body, |id| p.review_repo(id))
+            });
+            if let Some(denial) = denial {
+                (denial.status, serde_json::json!({ "error": denial.reason }).to_string())
+            } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
                 provision::create_workspace(root, p, base_url, &format!("git/{user}"), &req_body)
             } else if (method.as_str(), path.as_str()) == ("GET", "/api/ref-agreement") {
                 // Routed here rather than inside the platform for the
