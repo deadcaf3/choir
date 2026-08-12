@@ -8,6 +8,7 @@
 # Pulls, by explicit name and nothing else:
 #   - ~/.choir/repos/.choir/ops.jsonl   (the live log)
 #   - ~/.choir/repos/.choir/node.fingerprint
+#   - ~/.choir/repos/.choir/refs.snapshot  (the D25 ref attestation)
 #   - the five policy files a restore needs to boot
 #
 # Never pulled, and refused if seen: auth, *.key, *.pem. The signing key
@@ -105,6 +106,35 @@ for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudicatio
 done
 chmod 700 "$DEST" && chmod 600 "$DEST/policy/"*
 
+# 6b. The ref attestation (D25), pulled beside the log it rides with.
+#    The node rewrites this file after every ref op it admits, as the
+#    canonical bytes of the latest RecordRefSnapshot in the log — the
+#    fold is its adversarial-grade verifier, replaying anywhere. This
+#    leg checks the operational half only: the copy arrived intact, the
+#    attestation never goes backwards across pulls, and the bundles
+#    below actually hold the state it attests. Absent on a node that
+#    has not admitted a ref op since the attesting build: noted loudly,
+#    not fatal, so the upgrade does not break the hourly pull.
+SNAP=
+if ssh_run "cat $REMOTE_STATE/refs.snapshot" > "$DEST/refs.snapshot.part" 2>/dev/null; then
+  local_sum=$(shasum -a 256 < "$DEST/refs.snapshot.part" | awk '{print $1}')
+  remote_sum=$(ssh_run "sha256sum < $REMOTE_STATE/refs.snapshot | cut -d' ' -f1")
+  [ "$local_sum" = "$remote_sum" ] \
+    || fail "REF ATTESTATION MISMATCH local=$local_sum remote=$remote_sum"
+  new_at=$(sed -n 's/.*"at_seq":\([0-9][0-9]*\).*/\1/p' "$DEST/refs.snapshot.part")
+  [ -n "$new_at" ] || fail "the pulled refs.snapshot carries no at_seq: not an attestation"
+  if [ -f "$DEST/refs.snapshot" ]; then
+    old_at=$(sed -n 's/.*"at_seq":\([0-9][0-9]*\).*/\1/p' "$DEST/refs.snapshot")
+    [ "$new_at" -ge "${old_at:-0}" ] \
+      || fail "the node's attestation is OLDER than the last pull ($new_at < $old_at): an attestation chain cannot go backwards"
+  fi
+  mv "$DEST/refs.snapshot.part" "$DEST/refs.snapshot"
+  SNAP=$DEST/refs.snapshot
+else
+  rm -f "$DEST/refs.snapshot.part"
+  echo "pull-backup: no refs.snapshot on the node yet (no ref op since the attesting build); this run's bundles are unverified against an attestation" >&2
+fi
+
 # 7. Git objects, one full bundle per served repo. The op log carries
 #    ref *history*; the objects those refs name lived only on the node
 #    host — and the on-box follower is a second copy on the same disk,
@@ -121,17 +151,33 @@ while IFS= read -r repo; do
   refs=$(ssh_run "git --git-dir ~/.choir/repos/$repo for-each-ref | sha256sum | cut -d' ' -f1") \
     || fail "could not read the refs of $repo on the node host"
   if [ -f "$bundle" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$refs" ]; then
-    bundles=$((bundles + 1))
-    continue
+    : # unchanged since the last pull; still verified against the attestation below
+  else
+    ssh_run "git --git-dir ~/.choir/repos/$repo bundle create /tmp/choir-pull.\$\$.bundle --all 2>/dev/null \
+             && cat /tmp/choir-pull.\$\$.bundle && rm -f /tmp/choir-pull.\$\$.bundle" > "$bundle.part" \
+      || fail "could not bundle $repo on the node host"
+    git -C "$(dirname "$0")/.." bundle verify "$bundle.part" 2>/dev/null \
+      | grep -q "complete history" \
+      || fail "the pulled bundle for $repo does not verify as complete; keeping the previous copy"
+    mv "$bundle.part" "$bundle"
+    printf '%s\n' "$refs" > "$marker"
   fi
-  ssh_run "git --git-dir ~/.choir/repos/$repo bundle create /tmp/choir-pull.\$\$.bundle --all 2>/dev/null \
-           && cat /tmp/choir-pull.\$\$.bundle && rm -f /tmp/choir-pull.\$\$.bundle" > "$bundle.part" \
-    || fail "could not bundle $repo on the node host"
-  git -C "$(dirname "$0")/.." bundle verify "$bundle.part" 2>/dev/null \
-    | grep -q "complete history" \
-    || fail "the pulled bundle for $repo does not verify as complete; keeping the previous copy"
-  mv "$bundle.part" "$bundle"
-  printf '%s\n' "$refs" > "$marker"
+  # The D25 cross-check: the bundle's heads must be exactly what the
+  # node attested. sed on canonical JSON is deliberate operational-grade
+  # parsing (the fold is the real verifier); a ref name carrying a quote
+  # or comma would read as a mismatch here, never as a silent pass. A
+  # push landing mid-pull also reads as a mismatch — a re-run comes back
+  # clean; anything persistent is real divergence.
+  if [ -n "$SNAP" ]; then
+    tr ',' '\n' < "$SNAP" \
+      | sed -n "s|.*\"$repo:\(refs/[^\"]*\)\":\"11-\([0-9a-f]*\)\".*|\2 \1|p" \
+      | sort > "$DEST/.snap_refs"
+    git -C "$(dirname "$0")/.." bundle list-heads "$bundle" \
+      | grep ' refs/' | sort > "$DEST/.bundle_refs"
+    cmp -s "$DEST/.snap_refs" "$DEST/.bundle_refs" \
+      || fail "the bundle for $repo does not match the node's attested ref-state (re-run once; a persistent mismatch is divergence)"
+    rm -f "$DEST/.snap_refs" "$DEST/.bundle_refs"
+  fi
   bundles=$((bundles + 1))
 done <"$DEST/policy/repos.list"
 [ "$bundles" -gt 0 ] || fail "repos.list lists no repos; the objects leg backed up nothing"
