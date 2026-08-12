@@ -8,7 +8,8 @@ and `choirctl logs` are the usual operator path.
 This is the D20 operator procedure. The flip makes the choir node canonical
 and Forgejo a follower (D21 single-canonical invariant — one direction,
 never dual-write). The
-git-bundle cron on the mirror VM continues unchanged as insurance.
+git-bundle cron on the mirror VM continues as insurance, cut from the
+node's own bare repos since the flip (see "The bundle cron" below).
 
 Every step below was rehearsed on a throwaway loopback node; the
 verification commands are the ones that were actually run.
@@ -150,6 +151,26 @@ it. Neither touches `~/.choir`.
 Nothing is lost by stopping: `~/.choir/repos` and the op log at
 `~/.choir/repos/.choir/ops.jsonl` persist, and the daemon replays the
 log on restart (rehearsed: refs and workspaces survived a kill).
+
+## The bundle cron
+
+The daily insurance bundle on the mirror VM (03:17, `# choir-bundle`
+tag in `crontab -l`) is cut from the node's own bare repos, one bundle
+per line of `~/.choir/repos.list`:
+
+```
+17 3 * * * for r in $(grep -v "^#" $HOME/.choir/repos.list); do git -C $HOME/.choir/repos/$r bundle create $HOME/bundles/$(basename $r .git)-$(date +\%F).bundle --all; done 2>>$HOME/bundles/cron.err # choir-bundle
+```
+
+It used to fetch from Forgejo and bundle that clone, which quietly made
+the insurance depend on the follower: a dead or stale Forgejo meant
+stale bundles of a repo whose canonical copy was healthy next to it.
+Bundling the bare repos directly removes Forgejo, the `~/choir-src`
+clone, and the fetch step from the failure chain — the bundle can now
+only be as stale as the node itself. Errors append to
+`~/bundles/cron.err` instead of `/dev/null`; a silently failing backup
+is the failure mode this repository keeps re-learning about. Bundles
+accumulate without pruning, same as before the repoint.
 
 ## Restoring the op log
 
