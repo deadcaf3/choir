@@ -262,11 +262,19 @@ verdict)
   #   choirctl verdict <reviewer> <id> <approve|request-changes> [note]
   [ $# -ge 4 ] || { echo "usage: choirctl verdict <reviewer> <id> <approve|request-changes> [note]" >&2; exit 2; }
   remote_node && tunnel_up
-  note=()
-  [ $# -ge 5 ] && note=("$5")
-  "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
-    verdict "http://127.0.0.1:$PORT" "$STATE/review-$2.key" "$2/reviewer" \
-    "$3" "$4" "${note[@]}"
+  # No array for the optional note: this script is documented to run as
+  # `sh scripts/choirctl`, and macOS sh is bash 3.2, where expanding an
+  # empty array under `set -u` dies with `note[@]: unbound variable` —
+  # which killed both verdict seats of a real landing round.
+  if [ $# -ge 5 ]; then
+    "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+      verdict "http://127.0.0.1:$PORT" "$STATE/review-$2.key" "$2/reviewer" \
+      "$3" "$4" "$5"
+  else
+    "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+      verdict "http://127.0.0.1:$PORT" "$STATE/review-$2.key" "$2/reviewer" \
+      "$3" "$4"
+  fi
   ;;
 
 abandon)
