@@ -426,7 +426,6 @@ fn main() -> std::io::Result<()> {
         eprintln!("choir: UNRECONCILED {note} — the log and this repo disagree and only an \
              operator can say which is right");
     }
-||||||| 37a9381
     eprintln!(
         "choir-node serving {} on {}://{}:{}",
         root.display(),
