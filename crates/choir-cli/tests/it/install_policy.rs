@@ -164,10 +164,6 @@ fn render_unit_output(
     output
 }
 
-fn render_unit(protected: Option<&str>, scope: bool) -> String {
-    render_unit_tls(protected, scope, None)
-}
-
 fn render_unit_tls(protected: Option<&str>, scope: bool, tls: Option<(&str, &str)>) -> String {
     let output = render_unit_output("owner/repo.git\n", protected, scope, tls);
     assert!(output.status.success());
