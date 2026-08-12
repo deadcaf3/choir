@@ -3213,6 +3213,16 @@ impl Platform {
             }
             for (refname, oid) in &in_git {
                 if !wanted.contains(refname) {
+                    // A remote-tracking ref is this repo's own record of
+                    // what it pushed elsewhere — the on-box follower feed
+                    // writes refs/remotes/<follower>/* on every push — not
+                    // canonical state, so its absence from the log is not a
+                    // divergence. Skipped only on this side: a log that
+                    // *does* name one is still compared above, and still
+                    // retracted if git cannot back it.
+                    if refname.starts_with("refs/remotes/") {
+                        continue;
+                    }
                     findings.push(RefFinding {
                         repo: repo.clone(),
                         refname: refname.clone(),

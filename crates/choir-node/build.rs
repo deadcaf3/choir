@@ -42,7 +42,12 @@ fn main() {
                         println!("cargo:rerun-if-changed={resolved}");
                     }
                 }
-                let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+                // Untracked files are excluded: a module can only reach the
+                // build through a tracked file naming it, and counting them
+                // stamped the VM's build `+dirty` over its own target/
+                // artifacts sitting in the checkout.
+                let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+                    .is_some_and(|s| !s.is_empty());
                 (head, "git", dirty)
             }
             None => ("unknown".to_string(), "unavailable", false),

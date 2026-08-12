@@ -234,6 +234,32 @@ fn a_live_node_reports_a_divergence_without_a_restart() {
     assert_eq!(after["agree"], serde_json::json!(true), "{after}");
 }
 
+/// The on-box follower feed pushes from the node's own bare repo, and a
+/// successful push records what it sent as `refs/remotes/<follower>/*`.
+/// That is the repo's private bookkeeping, not canonical state, so it
+/// must not be reported at every boot — two warning lines of routine
+/// noise per start is exactly where a real out-of-band ref would hide.
+#[test]
+fn a_remote_tracking_ref_is_not_reported_as_out_of_band() {
+    let f = Fixture::new("tracking");
+    let head = f.head();
+    assert!(
+        git(&f.bare, &["update-ref", "refs/remotes/follower/main", &head]).status.success()
+    );
+
+    let report = f.node.reconcile_refs();
+    assert!(report.is_empty(), "{report:?}");
+
+    // Only the tracking namespace is exempt: a branch smuggled in
+    // beside it is still reported.
+    assert!(git(&f.bare, &["update-ref", "refs/heads/smuggled", &head]).status.success());
+    let report = f.node.reconcile_refs();
+    assert_eq!(
+        report.unreconciled,
+        vec!["agents/demo.git:refs/heads/smuggled: in git, not in the log".to_string()]
+    );
+}
+
 /// The ordinary start. Agreement must be silent, and must append nothing:
 /// a reconciliation that writes an op every boot would grow the log with
 /// uptime and make the repair itself the thing to audit.
