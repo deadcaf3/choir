@@ -116,7 +116,13 @@ install)
   # Build, mint secrets, load the supervised LaunchAgent. Idempotent.
   if remote_node; then
     echo "the node lives on the VM now (~/.choir/node-remote); install there:" >&2
-    echo "  ssh in, then: sh ~/choir-build/scripts/flip/install_node_linux.sh $PORT <repo> ~/bin" >&2
+    echo "  ssh in, then:" >&2
+    echo "    git -C ~/choir-build fetch ~/.choir/repos/choir/choir.git main && git -C ~/choir-build merge --ff-only FETCH_HEAD" >&2
+    # CHOIR_GIT_HEAD is the stamp's sound path (build.rs source 1); the
+    # git fallback happens to be right in a clean checkout, but the env
+    # var is the one cargo is guaranteed to rebuild on.
+    echo "    CHOIR_GIT_HEAD=\$(git -C ~/choir-build rev-parse HEAD) cargo build --release --manifest-path ~/choir-build/Cargo.toml -p choir-node -p choir-cli" >&2
+    echo "    sh ~/choir-build/scripts/flip/install_node_linux.sh $PORT <repo> ~/bin ~/choir-build/target/release" >&2
     exit 1
   fi
   sh "$HERE/flip/install_node.sh" "$PORT" "${2:-choir/choir.git}"
