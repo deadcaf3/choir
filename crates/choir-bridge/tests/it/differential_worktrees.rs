@@ -480,7 +480,7 @@ printf '{{"format_version":1,"observation_id":1,"merge":"%s","report":{{"verdict
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("harvest: 1 observed, 1 failed, 0 skipped, 2 enumerated"),
+        stdout.contains("harvest: 1 observed, 1 failed, 0 skipped, 0 inert, 2 enumerated"),
         "{stdout}"
     );
     assert_eq!(
@@ -504,7 +504,7 @@ printf '{{"format_version":1,"observation_id":1,"merge":"%s","report":{{"verdict
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("harvest: 1 observed, 0 failed, 0 skipped, 1 enumerated"),
+        stdout.contains("harvest: 1 observed, 0 failed, 0 skipped, 0 inert, 1 enumerated"),
         "{stdout}"
     );
 
@@ -568,7 +568,7 @@ printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("harvest: 2 observed, 0 failed, 0 skipped, 2 enumerated"),
+        stdout.contains("harvest: 2 observed, 0 failed, 0 skipped, 0 inert, 2 enumerated"),
         "{stdout}"
     );
 
@@ -578,7 +578,7 @@ printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("harvest: 0 observed, 0 failed, 2 skipped, 2 enumerated"),
+        stdout.contains("harvest: 0 observed, 0 failed, 2 skipped, 0 inert, 2 enumerated"),
         "{stdout}"
     );
     let ledger = std::fs::read_to_string(state.join("observations.jsonl")).unwrap();
@@ -630,7 +630,7 @@ printf '{{"format_version":1,"observation_id":4,"merge":"%s","report":{{"verdict
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("harvest: 2 observed, 0 failed, 0 skipped, 2 enumerated"),
+        stdout.contains("harvest: 2 observed, 0 failed, 0 skipped, 0 inert, 2 enumerated"),
         "{stdout}"
     );
     assert!(stdout.contains("specimen recorded"), "{stdout}");
@@ -663,6 +663,189 @@ printf '{{"format_version":1,"observation_id":4,"merge":"%s","report":{{"verdict
     assert_eq!(specimen["run_errors"].as_u64(), Some(0));
     // The clean merge earned no specimen.
     assert!(!state.join("specimens").join(format!("{second}.json")).exists());
+
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
+fn harvest_restricts_the_population_and_writes_down_that_it_did() {
+    // The older merge touches only documentation on both sides; the newer
+    // one touches code, so only it is a real observation.
+    let work = std::env::temp_dir().join(format!(
+        "choir-bridge-harvest-inert-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    git(&work, &["init", "-q", "."]);
+    std::fs::write(work.join("src.rs"), "fn main() {}\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-q", "-m", "base"]);
+
+    let mut merges = Vec::new();
+    for (step, branch_file, main_file) in [
+        ("docs", "README.md", "CHANGELOG.md"),
+        ("code", "src.rs", "other.rs"),
+    ] {
+        git(&work, &["checkout", "-q", "-b", &format!("topic-{step}"), "main"]);
+        std::fs::write(work.join(branch_file), format!("{step} branch\n")).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", step]);
+        git(&work, &["checkout", "-q", "main"]);
+        std::fs::write(work.join(main_file), format!("{step} main\n")).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", &format!("main {step}")]);
+        git(&work, &["merge", "-q", "--no-ff", &format!("topic-{step}"), "-m", step]);
+        merges.push(git(&work, &["rev-parse", "HEAD"]));
+    }
+    let (inert_merge, code_merge) = (merges[0].clone(), merges[1].clone());
+
+    let runner = work.join("runner.sh");
+    std::fs::write(
+        &runner,
+        r#"#!/bin/sh
+set -eu
+mkdir -p "$3"
+printf '%s\n' "$8" >> "$3/observed"
+printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":"clean"},"calibration":{"target":{"met":true},"pending_interactions":0,"confidence_claim":null,"confidence_policy":{"format_version":1,"method":"one_sided_exact_binomial_zero_spurious","confidence":{"numerator":95,"denominator":100},"target":{"numerator":1,"denominator":1000,"comparison":"strictly_less_than"},"minimum_evaluated_merges":2995,"requires_zero_spurious_failures":true,"assumptions":["independent_runs","representative_queue_command_and_merge_population"]},"landing_gate_enabled":false}}\n' "$8"
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let state = work.join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg("--skip-inert")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("harvest: 1 observed, 0 failed, 0 skipped, 1 inert, 2 enumerated"),
+        "{stdout}"
+    );
+    // Only the code merge was actually run.
+    assert_eq!(
+        std::fs::read_to_string(state.join("observed")).unwrap(),
+        format!("{code_merge}\n")
+    );
+    // And the exclusion is written down: a reader must be able to tell a
+    // merge observed-and-clean from one never observed.
+    let population = std::fs::read_to_string(state.join("population.jsonl")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(population.trim()).unwrap();
+    assert_eq!(record["format_version"].as_u64(), Some(1));
+    assert_eq!(
+        record["inert_merges"].as_array().unwrap(),
+        &vec![serde_json::Value::String(inert_merge)]
+    );
+    assert!(record["inert_rule"].as_str().is_some());
+    assert!(record["stopped_after_consecutive_inconclusive"].is_null());
+
+    // Without the flag the same repo yields two observations and no record.
+    let plain_state = work.join("plain-state");
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&plain_state)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("harvest: 2 observed, 0 failed, 0 skipped, 0 inert, 2 enumerated"));
+    assert!(!plain_state.join("population.jsonl").exists());
+
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
+fn harvest_stops_at_a_run_of_inconclusive_verdicts_and_records_it() {
+    let (work, first, second) = two_merge_calibration_fixture("harvest-horizon");
+
+    // Every merge is inconclusive: the shape of an ancient, unbuildable
+    // band at the old end of a history.
+    let runner = work.join("runner.sh");
+    let receipt = r#"printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":"%s"},"calibration":{"target":{"met":null},"pending_interactions":0,"confidence_claim":null,"confidence_policy":{"format_version":1,"method":"one_sided_exact_binomial_zero_spurious","confidence":{"numerator":95,"denominator":100},"target":{"numerator":1,"denominator":1000,"comparison":"strictly_less_than"},"minimum_evaluated_merges":2995,"requires_zero_spurious_failures":true,"assumptions":["independent_runs","representative_queue_command_and_merge_population"]},"landing_gate_enabled":false}}\n' "$8" "$verdict""#;
+    std::fs::write(
+        &runner,
+        format!(
+            "#!/bin/sh\nset -eu\nmkdir -p \"$3\"\nprintf '%s\\n' \"$8\" >> \"$3/observed\"\nverdict=inconclusive_parent_failure\n{receipt}\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let state = work.join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg("--stop-after-inconclusive")
+        .arg("1")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stopping: 1 consecutive inconclusive"), "{stdout}");
+    // Oldest-first: the walk stopped after the older merge, never reaching
+    // the newer one.
+    assert_eq!(
+        std::fs::read_to_string(state.join("observed")).unwrap(),
+        format!("{first}\n"),
+        "the walk must stop, not continue past the horizon"
+    );
+    let record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(state.join("population.jsonl")).unwrap().trim())
+            .unwrap();
+    assert_eq!(record["stopped_after_consecutive_inconclusive"].as_u64(), Some(1));
+
+    // A conclusive verdict resets the run, so a threshold of 2 never trips
+    // on an alternating history: both merges are observed.
+    let alternating = work.join("alternating-state");
+    std::fs::write(
+        &runner,
+        format!(
+            "#!/bin/sh\nset -eu\nmkdir -p \"$3\"\nprintf '%s\\n' \"$8\" >> \"$3/observed\"\nverdict=inconclusive_parent_failure\nif [ \"$8\" = \"{second}\" ]; then verdict=clean; fi\n{receipt}\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg("--stop-after-inconclusive")
+        .arg("2")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&alternating)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(alternating.join("observed")).unwrap(),
+        format!("{first}\n{second}\n")
+    );
+    assert!(!alternating.join("population.jsonl").exists());
 
     std::fs::remove_dir_all(work).ok();
 }

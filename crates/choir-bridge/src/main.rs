@@ -704,23 +704,32 @@ fn main() {
     // packaged as a specimen under <state-dir>/specimens/.
     if args.first().map(String::as_str) == Some("harvest") {
         const HARVEST_USAGE: &str =
-            "usage: choir-bridge harvest [--fresh-worktrees] [--limit <n>] <repo> <runner> <command-file> <state-dir>";
+            "usage: choir-bridge harvest [--fresh-worktrees] [--limit <n>] [--skip-inert] [--stop-after-inconclusive <n>] <repo> <runner> <command-file> <state-dir>";
         let mut fresh_worktrees = false;
         let mut limit = 0usize;
+        let mut skip_inert = false;
+        let mut stop_after_inconclusive = 0usize;
         let mut positional: Vec<&String> = Vec::new();
         let mut rest = args[1..].iter();
         while let Some(arg) = rest.next() {
             if arg == "--fresh-worktrees" {
                 fresh_worktrees = true;
-            } else if arg == "--limit" {
+            } else if arg == "--skip-inert" {
+                skip_inert = true;
+            } else if arg == "--limit" || arg == "--stop-after-inconclusive" {
                 let value = rest.next().unwrap_or_else(|| {
                     eprintln!("{HARVEST_USAGE}");
                     std::process::exit(2);
                 });
-                limit = value.parse().unwrap_or_else(|_| {
-                    eprintln!("--limit must be a non-negative integer; 0 means all");
+                let parsed = value.parse().unwrap_or_else(|_| {
+                    eprintln!("{arg} must be a non-negative integer; 0 disables it");
                     std::process::exit(2);
                 });
+                if arg == "--limit" {
+                    limit = parsed;
+                } else {
+                    stop_after_inconclusive = parsed;
+                }
             } else {
                 positional.push(arg);
             }
@@ -766,6 +775,9 @@ fn main() {
         let mut observed = 0usize;
         let mut failed = 0usize;
         let mut skipped = 0usize;
+        let mut inert = Vec::new();
+        let mut consecutive_inconclusive = 0usize;
+        let mut stopped_early = false;
         // Oldest first: along a first-parent corpus the next merge's parent a
         // is often the previous observation's merge, so a held session's
         // parent-a checkout is a no-op (see DifferentialSession).
@@ -773,6 +785,17 @@ fn main() {
             let number = index + 1;
             if known.contains(merge) {
                 skipped += 1;
+                continue;
+            }
+            // A merge whose whole union diff is documentation cannot fail a
+            // build-and-test command its parents pass. Restricting the
+            // population is recorded below, never silent.
+            if skip_inert
+                && choir_bridge::queue::merge_changes_only_inert_paths(repo, merge.as_str())
+                    .unwrap_or(false)
+            {
+                inert.push(merge.clone());
+                println!("harvest: {number}/{total}: {merge}: inert, not observed");
                 continue;
             }
             match run_once(&mut session, merge.as_str()) {
@@ -784,6 +807,28 @@ fn main() {
                         outcome.observation_id,
                         outcome.pending_interactions
                     );
+                    // The buildability horizon: a run of consecutive
+                    // inconclusive verdicts at the old end of a history is a
+                    // toolchain that cannot build those trees at all, and each
+                    // one still costs three build attempts. Any conclusive
+                    // verdict resets the run, so this stops a band, never a
+                    // scattered few.
+                    if outcome.verdict
+                        == choir_bridge::queue::DifferentialVerdict::InconclusiveParentFailure
+                    {
+                        consecutive_inconclusive += 1;
+                        if stop_after_inconclusive > 0
+                            && consecutive_inconclusive >= stop_after_inconclusive
+                        {
+                            println!(
+                                "harvest: stopping: {consecutive_inconclusive} consecutive inconclusive verdicts"
+                            );
+                            stopped_early = true;
+                            break;
+                        }
+                    } else {
+                        consecutive_inconclusive = 0;
+                    }
                     // A first interaction_failure verdict earns reproduction
                     // runs, each in a FRESH worktree triple regardless of the
                     // walk's session mode: a held tree carries the previous
@@ -822,15 +867,29 @@ fn main() {
             }
         }
         let cleanup = session.map_or(Ok(()), choir_bridge::queue::DifferentialSession::close);
-        println!("harvest: {observed} observed, {failed} failed, {skipped} skipped, {total} enumerated");
+        // Whatever narrowed the population is written down beside the ledger,
+        // because both levers change which merges the denominator counts and
+        // a reader of the corpus must be able to see that without inferring
+        // it from a missing oid.
+        if let Err(error) = choir_bridge::queue::record_population_restrictions(
+            state,
+            &inert,
+            stopped_early.then_some(consecutive_inconclusive),
+        ) {
+            eprintln!("harvest: population restrictions not recorded: {error}");
+        }
+        println!(
+            "harvest: {observed} observed, {failed} failed, {skipped} skipped, {} inert, {total} enumerated",
+            inert.len()
+        );
         if let Err(error) = cleanup {
             eprintln!("harvest cleanup failed: {error}");
             std::process::exit(1);
         }
         // Nothing observed out of a non-empty corpus is a failed harvest,
-        // not a quiet one — unless every merge was already in the ledger,
-        // which is the incremental steady state.
-        if observed == 0 && skipped == 0 {
+        // not a quiet one — unless every merge was already in the ledger or
+        // restricted out of the population, which are working outcomes.
+        if observed == 0 && skipped == 0 && inert.is_empty() {
             std::process::exit(1);
         }
         return;

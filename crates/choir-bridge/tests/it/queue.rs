@@ -253,6 +253,73 @@ not json at all
 }
 
 #[test]
+fn inert_paths_are_a_short_conservative_allowlist() {
+    use choir_bridge::queue::path_is_inert;
+    for inert in [
+        "README.md",
+        "docs/design/notes.md",
+        "LICENSE",
+        "LICENSE-MIT",
+        "COPYING",
+        "CHANGELOG.md",
+        ".gitignore",
+        ".gitattributes",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(path_is_inert(inert), "{inert} should be inert");
+    }
+    // Everything that can change what a build-and-test command observes
+    // stays in the population, including the near misses.
+    for relevant in [
+        "src/lib.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "build.rs",
+        "tests/fixtures/expected.txt",
+        "src/markdown.rs",
+        "benches/bench.rs",
+        "src/github/mod.rs",
+    ] {
+        assert!(!path_is_inert(relevant), "{relevant} must not be inert");
+    }
+}
+
+#[test]
+fn a_merge_is_inert_only_when_both_parent_diffs_are() {
+    use choir_bridge::queue::merge_changes_only_inert_paths;
+    let work = tempdir("harvest-inert");
+    git(&work, &["init", "-q", "."]);
+    std::fs::write(work.join("src.rs"), "fn main() {}\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-q", "-m", "base"]);
+
+    // A merge whose two branches only touch documentation.
+    let mut inert_merge = String::new();
+    let mut live_merge = String::new();
+    for (step, branch_file, main_file, target) in [
+        ("docs", "README.md", "CHANGELOG.md", &mut inert_merge),
+        ("code", "README.md", "src.rs", &mut live_merge),
+    ] {
+        git(&work, &["checkout", "-q", "-b", &format!("topic-{step}"), "main"]);
+        std::fs::write(work.join(branch_file), format!("{step} branch\n")).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", step]);
+        git(&work, &["checkout", "-q", "main"]);
+        std::fs::write(work.join(main_file), format!("{step} main\n")).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", &format!("main {step}")]);
+        git(&work, &["merge", "-q", "--no-ff", &format!("topic-{step}"), "-m", step]);
+        *target = rev(&work, "HEAD");
+    }
+
+    assert!(merge_changes_only_inert_paths(&work, &inert_merge).unwrap());
+    // One side touching real code is enough to keep the merge in the
+    // population: the union of both parent diffs is what could interact.
+    assert!(!merge_changes_only_inert_paths(&work, &live_merge).unwrap());
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
 fn harvestable_merges_walks_first_parent_history_newest_first() {
     use choir_bridge::queue::harvestable_merges;
     let work = tempdir("harvest-enum");

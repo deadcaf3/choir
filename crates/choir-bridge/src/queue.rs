@@ -601,6 +601,108 @@ pub fn parse_observed_merges(text: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+/// Whether a path cannot change what a build-and-test command observes.
+///
+/// Deliberately a short, conservative allowlist rather than a guess at what
+/// matters: documentation, licences, and forge bookkeeping. Everything else
+/// — including `Cargo.toml`, `build.rs`, and any `.txt` that might be a test
+/// fixture — counts as relevant, because the cost of wrongly skipping a
+/// merge is a semantic conflict that never enters the corpus, while the cost
+/// of wrongly keeping one is three builds.
+#[must_use]
+pub fn path_is_inert(path: &str) -> bool {
+    if path.starts_with(".github/") {
+        return true;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name.ends_with(".md") {
+        return true;
+    }
+    // `LICENSE-MIT` and `LICENSE-APACHE` are the usual dual-licence spelling,
+    // so the licence names match by prefix; the rest match exactly, because a
+    // prefix rule on them would swallow real source files.
+    if name.starts_with("LICENSE") || name.starts_with("LICENCE") {
+        return true;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(stem, "COPYING" | "NOTICE" | "AUTHORS" | "CHANGELOG")
+        || matches!(name, ".gitignore" | ".gitattributes" | ".mailmap")
+}
+
+/// Whether every file this merge changed, against **either** parent, is
+/// inert by [`path_is_inert`].
+///
+/// A semantic conflict is an interaction between the two branches' changes,
+/// so the population that can possibly hold one is the union of the two
+/// parent diffs. A merge whose whole union is documentation cannot fail a
+/// build-and-test command in a way the parents pass, so harvesting it buys
+/// three builds' worth of nothing. Skipping it is a **population
+/// restriction**, not an optimization detail: callers record it rather than
+/// applying it silently, because it changes which merges the denominator
+/// counts.
+///
+/// An empty union — a merged tree identical to both parents — returns
+/// `false`: it is strange enough to be worth observing rather than assuming
+/// away.
+///
+/// # Errors
+///
+/// The merge cannot be resolved to two parents, or git fails.
+pub fn merge_changes_only_inert_paths(repo: &Path, merge: &str) -> Result<bool, String> {
+    let (parent_a, parent_b, merged) = resolve_merge_revisions(repo, merge)?;
+    let mut any = false;
+    for parent in [&parent_a, &parent_b] {
+        let diff = git(repo, &["diff", "--name-only", parent, &merged])?;
+        for path in diff.lines().map(str::trim).filter(|p| !p.is_empty()) {
+            any = true;
+            if !path_is_inert(path) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(any)
+}
+
+/// Records, beside the ledger, every way a harvest narrowed the population
+/// it walked: the merges excluded as inert, and the consecutive-inconclusive
+/// run that stopped the walk early.
+///
+/// This exists so a corpus reader can tell a merge that was *observed and
+/// found clean* from one that was *never observed*, which a ledger of
+/// observations alone cannot express. Appends one versioned line per run, so
+/// an incremental re-run's restrictions accumulate rather than overwrite.
+/// Writes nothing when a run restricted nothing.
+///
+/// # Errors
+///
+/// The state directory cannot be created or the record cannot be appended.
+pub fn record_population_restrictions(
+    state_dir: &Path,
+    inert: &[String],
+    stopped_after_inconclusive: Option<usize>,
+) -> Result<(), String> {
+    if inert.is_empty() && stopped_after_inconclusive.is_none() {
+        return Ok(());
+    }
+    let record = serde_json::json!({
+        "format_version": 1,
+        "inert_merges": inert,
+        "inert_rule": "every path in the union of both parent diffs is documentation, licence, or forge bookkeeping",
+        "stopped_after_consecutive_inconclusive": stopped_after_inconclusive,
+    });
+    std::fs::create_dir_all(state_dir)
+        .map_err(|error| format!("create state dir: {error}"))?;
+    let mut line = serde_json::to_vec(&record)
+        .map_err(|error| format!("serialize population restrictions: {error}"))?;
+    line.push(b'\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_dir.join("population.jsonl"))
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &line))
+        .map_err(|error| format!("append population restrictions: {error}"))
+}
+
 /// Reproduction runs a harvest adds after a first `interaction_failure`
 /// verdict, so a specimen records six runs in total — the bar specimen #1
 /// (rust-lang/log `11eda98d`, reproduced 6/6) set for calling a flag a
