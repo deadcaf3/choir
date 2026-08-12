@@ -46,7 +46,15 @@ mkdir -p "$STATE" "$ROOT" "$HOME/Library/LaunchAgents"
 chmod 700 "$STATE"
 
 # 1. Binaries. Built release so the daemon is not a debug build.
-cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p choir-node -p choir-cli
+#
+# CHOIR_GIT_HEAD stamps the binary with the commit it came from, which is
+# what lets `choirctl status` tell "the rebuild reached the running
+# process" from "it did not" — the two are otherwise identical from
+# outside. Passed as an env var rather than left to the build script's own
+# git call because cargo reruns a build script when a declared env var
+# changes, and cannot rerun it on every source edit.
+CHOIR_GIT_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)" \
+  cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p choir-node -p choir-cli
 
 # Refuse before step 7 rather than after. `launchctl bootout` stops the
 # node that is currently serving; everything after this line assumes a

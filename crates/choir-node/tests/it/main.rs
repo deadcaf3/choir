@@ -30,6 +30,7 @@ mod key_names;
 mod landing;
 mod newcomer_config;
 mod newcomer_harm;
+mod observability;
 mod policy_hardening;
 mod reconcile_refs;
 mod rejections;

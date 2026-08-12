@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
+use choir_sequencer::lag::LagMeter;
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
 use choir_view::{reviewer_operator, OpKind, ReviewStatus, Verdict, View, ViewOp};
 
@@ -2287,6 +2288,20 @@ pub struct Platform {
     /// race normally through the sequencer; only duplicate pruning scans
     /// and archive batches are coalesced.
     review_prune_lock: Mutex<()>,
+    /// The writer's own latency record for the traffic this node is
+    /// serving, so the Phase-0 decision-latency gate is checked in
+    /// production and not only by the test suite.
+    lag: Arc<LagMeter>,
+    /// Where drained gate breaches are appended, one JSON object per
+    /// line. `None` keeps them in memory only, where the ring eventually
+    /// drops the oldest (reported, never silent).
+    lag_log: Option<std::path::PathBuf>,
+    /// Last failure to write the lag log and how many writes have failed,
+    /// surfaced in the report. A breach record that could not be written
+    /// is itself an operational fact; swallowing it would make the lag log
+    /// a check that cannot fail. The count does not reset on a later
+    /// success, so a transient failure is still visible afterwards.
+    lag_log_error: Mutex<(Option<String>, u64)>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -2432,6 +2447,9 @@ impl Platform {
         );
         let platform = Self {
             handle: sequencer.handle(),
+            lag: sequencer.lag(),
+            lag_log: None,
+            lag_log_error: Mutex::new((None, 0)),
             view,
             node_key,
             entries,
@@ -3269,6 +3287,120 @@ impl Platform {
         self.handle.durability_failed()
     }
 
+    /// Appends gate breaches to `path`, one JSON object per line.
+    ///
+    /// Separate from the op log on purpose: a breach is an observation
+    /// about this node's storage and load, not a fact about the ordered
+    /// history, and it must not change a hash anyone else replays.
+    #[must_use]
+    pub fn with_lag_log(mut self, path: std::path::PathBuf) -> Self {
+        self.lag_log = Some(path);
+        self
+    }
+
+    /// The live latency record, for a caller that wants to tighten the
+    /// gate or read it without going through the API.
+    #[must_use]
+    pub fn lag(&self) -> Arc<LagMeter> {
+        self.lag.clone()
+    }
+
+    /// Writes any breaches recorded since the last drain to the lag log.
+    ///
+    /// Called by the daemon's accept loop, which is the same place it
+    /// polls for a failed durability barrier: both are things the writer
+    /// thread can only report, never act on. No traffic means no drain,
+    /// which is harmless because no traffic also means no breaches.
+    pub fn drain_lag_log(&self) {
+        let Some(path) = self.lag_log.as_ref() else {
+            return;
+        };
+        let (breaches, dropped) = self.lag.drain();
+        if breaches.is_empty() && dropped == 0 {
+            return;
+        }
+        let gate_us = u64::try_from(self.lag.gate().as_micros()).unwrap_or(u64::MAX);
+        let mut lines = String::new();
+        if dropped > 0 {
+            // The gap is written into the log rather than only counted,
+            // so a reader of the file alone can see that it is not the
+            // whole story.
+            lines.push_str(
+                &serde_json::json!({
+                    "format_version": 1,
+                    "event": "breaches_dropped",
+                    "count": dropped,
+                })
+                .to_string(),
+            );
+            lines.push('\n');
+        }
+        for breach in breaches {
+            lines.push_str(
+                &serde_json::json!({
+                    "format_version": 1,
+                    "event": "gate_breach",
+                    "seq": breach.seq,
+                    "at_unix_ms": breach.at_unix_ms,
+                    "gate_us": gate_us,
+                    "decision_us": breach.decision_us,
+                    "durable_us": breach.durable_us,
+                    "batch": breach.batch,
+                })
+                .to_string(),
+            );
+            lines.push('\n');
+        }
+        let write = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, lines.as_bytes()));
+        if let Err(e) = write {
+            // The reason, not the path: this string is served over the
+            // API, and the path names the operator's home directory.
+            let mut last = self.lag_log_error.lock().expect("lag log error lock");
+            last.0 = Some(e.to_string());
+            last.1 += 1;
+        }
+    }
+
+    /// The latency report as served under `/api/view`.
+    fn lag_json(&self) -> serde_json::Value {
+        let report = self.lag.report();
+        let last_error = self.lag_log_error.lock().expect("lag log error lock").clone();
+        serde_json::json!({
+            "format_version": 1,
+            "gate_us": report.gate_us,
+            "gate_basis": "dequeue to acknowledgement, durability barrier included",
+            "observed_ops": report.observed_ops,
+            "decision": {
+                "basis": "dequeue to append; the Phase-0 gate as written",
+                "p50_us": report.decision_p50_us,
+                "p99_us": report.decision_p99_us,
+                "max_us": report.decision_max_us,
+                "breaches": report.decision_breaches,
+            },
+            "durable": {
+                "basis": "dequeue to acknowledgement; what a submitter waits out",
+                "p50_us": report.durable_p50_us,
+                "p99_us": report.durable_p99_us,
+                "max_us": report.durable_max_us,
+                "breaches": report.durable_breaches,
+            },
+            "percentile_basis": "power-of-two bucket upper bound capped at the observed maximum: over-estimates by at most 2x, never under-estimates",
+            "since": "process start; not replayed from the log",
+            // Whether, not where. An API client learning the daemon's
+            // filesystem layout (which carries the operator's home
+            // directory) buys nothing it can act on; the operator already
+            // knows the path from the runbook.
+            "log_configured": self.lag_log.is_some(),
+            "log_error": last_error.0,
+            "log_write_failures": last_error.1,
+            "pending_breaches": report.pending_breaches,
+        })
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {
@@ -3359,6 +3491,8 @@ impl Platform {
                     "view_growth": view_growth,
                     "newcomer_harm": newcomer_harm,
                     "new_actor_review_outcomes": new_actor_review_outcomes,
+                    "sequencer_lag": self.lag_json(),
+                    "build": crate::build_json(),
                 });
                 (200, body.to_string())
             }
