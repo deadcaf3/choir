@@ -2280,6 +2280,20 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode());
         }
+        // A ref snapshot is the node's own attestation of its complete
+        // ref-state (D25): the unit a witness will cosign and the thing
+        // two readers compare to detect equivocation. The fold already
+        // refuses an untruthful one; this guard is about authorship —
+        // signed by anyone else it attests nothing about the node while
+        // reading as though it did.
+        if matches!(op.kind, OpKind::RecordRefSnapshot { .. }) && actor_id != self.node_id {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may record ref snapshots",
+                "read the latest snapshot from the view; the node attests its own ref-state",
+            )
+            .encode());
+        }
         // Key bindings are the durable operator record that T3 attribution
         // and T1's ordering primitive read, so a binding any trusted key
         // could author is evidence forgeable by the actors it is meant to

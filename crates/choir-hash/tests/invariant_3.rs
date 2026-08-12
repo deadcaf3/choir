@@ -271,7 +271,11 @@ fn the_set_of_persisted_shapes_is_frozen() {
     // Every entry here has a frozen golden vector in
     // choir-view/tests/it/golden.rs and canonicalization properties in
     // the `canonical.rs` suites.
-    const REGISTERED: [&str; 4] = ["Commit", "Manifest", "OpEntry", "ViewOp"];
+    //
+    // RefSnapshot registered 2026-08-12 (D25): golden vector with a
+    // hostile map key (ref names may legally carry `"` and non-ASCII
+    // bytes) plus canonicalization properties over arbitrary ref names.
+    const REGISTERED: [&str; 5] = ["Commit", "Manifest", "OpEntry", "RefSnapshot", "ViewOp"];
 
     let mut found: Vec<String> = crate_sources()
         .iter()

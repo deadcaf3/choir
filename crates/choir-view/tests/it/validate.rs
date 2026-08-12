@@ -16,8 +16,10 @@
 //! today. These tests exist so that a future edit which reintroduces a
 //! precondition into `apply` alone gets caught.
 
+use std::collections::BTreeMap;
+
 use choir_hash::ContentHash;
-use choir_view::{OpKind, Verdict, View, ViewOp};
+use choir_view::{OpKind, RefSnapshot, Verdict, View, ViewOp};
 
 fn h(tag: &[u8]) -> ContentHash {
     ContentHash::blake3(tag)
@@ -211,6 +213,25 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
         key: h(b"k-stranger"), reason: "compromised".into() });
     push("revoke without a reason", &bound, OpKind::RevokeKey {
         key: h(b"k-live"), reason: String::new() });
+
+    // Ref snapshots (D25). `attested` holds one admitted snapshot so the
+    // chain arm has a view that reaches it.
+    let attested = {
+        let mut v = populated.clone();
+        let snapshot = v.snapshot();
+        v.apply(&ViewOp::new(OpKind::RecordRefSnapshot { snapshot })).expect("setup");
+        v
+    };
+    push("snapshot of the current state", &populated,
+        OpKind::RecordRefSnapshot { snapshot: populated.snapshot() });
+    push("snapshot chained onto the latest", &attested,
+        OpKind::RecordRefSnapshot { snapshot: attested.snapshot() });
+    push("snapshot with a lying ref map", &populated, OpKind::RecordRefSnapshot {
+        snapshot: RefSnapshot { refs: BTreeMap::new(), ..populated.snapshot() } });
+    push("snapshot at a stale position", &attested, OpKind::RecordRefSnapshot {
+        snapshot: RefSnapshot { at_seq: 0, ..attested.snapshot() } });
+    push("snapshot with a broken chain", &attested, OpKind::RecordRefSnapshot {
+        snapshot: RefSnapshot { prev_snapshot: None, ..attested.snapshot() } });
 
     out
 }

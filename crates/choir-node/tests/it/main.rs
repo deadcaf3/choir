@@ -42,6 +42,7 @@ mod review_pruning;
 mod reviewer_conflict_config;
 mod signers_reload;
 mod smart_http;
+mod snapshot_admission;
 mod sync_contract;
 mod t1_attack_edge;
 mod tls;

@@ -388,6 +388,93 @@ pub enum OpKind {
         /// Operator-visible reason for the withdrawal (non-empty).
         reason: String,
     },
+    /// Record a signed attestation of the **complete** ref-state at one
+    /// log position (D25; additive variant, wire-format unchanged).
+    ///
+    /// This is the object that closes the gap the attestation section of
+    /// the design notes states: every existing check proves the chain a
+    /// reader *was shown* is consistent and authentically authored, none
+    /// proves another reader was shown the same chain. A snapshot is the
+    /// unit two readers compare, the record that makes a mirror bundle
+    /// checkable against the log, the checkpoint truncation needs, and —
+    /// when D16's gate opens — the thing a witness cosigns. One object,
+    /// because those are one question: "what was the whole ref-state at
+    /// seq N?".
+    ///
+    /// The fold *verifies* the claim rather than storing it: admission
+    /// compares [`RefSnapshot::refs`] against the view's refs and
+    /// [`RefSnapshot::at_seq`] against the fold position, so a snapshot
+    /// that lies about the log it sits in is refused by every replayer,
+    /// not just by the node that admitted it. The chain rule
+    /// (`prev_snapshot` must name the latest admitted snapshot) makes
+    /// replaying an old snapshot a chain violation even where the ref
+    /// map recurs — the ABA shape D26 measured, answered here the same
+    /// way `prev` answers it for refs.
+    ///
+    /// *Who* may record one is admission policy (L2), as for
+    /// [`OpKind::AssignReviewers`]: the daemon accepts it only from its
+    /// own key. The view enforces truth, not authority.
+    RecordRefSnapshot {
+        /// The snapshot; its detached file projection is these exact
+        /// canonical bytes, never a second schema.
+        snapshot: RefSnapshot,
+    },
+}
+
+/// A signed attestation that the complete ref-state at log position
+/// [`RefSnapshot::at_seq`] was exactly [`RefSnapshot::refs`] (D25).
+///
+/// Carried inside [`OpKind::RecordRefSnapshot`], and written detached —
+/// byte-identical — beside mirror bundles so a bundle is checkable
+/// against something other than itself.
+///
+/// The chain pointer lives **inside** this struct rather than being
+/// inherited from `OpEntry.parent` because `seq`/`parent` are assigned
+/// after signing: a snapshot copied out of the log would otherwise carry
+/// no chain of its own, and an old one could be served forever. Same
+/// discipline as the CAS `prev` inside a payload.
+///
+/// Ref names are map keys, and a git ref name may legally carry `"` and
+/// any non-ASCII byte (git forbids control bytes, space, `~^:?*[\`, but
+/// not quotes or high bytes) — and an API-submitted name is not bound by
+/// git's grammar at all. Canonical serialization of hostile keys is
+/// therefore pinned by this struct's golden vector and property tests,
+/// not assumed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefSnapshot {
+    /// Wire-format version; see [`FORMAT_VERSION`].
+    pub format_version: u16,
+    /// The complete ref map at `at_seq`, in the view's namespaced form
+    /// (`<repo>:<refname>`). Every ref the view holds — a selection
+    /// would let an equivocating node attest only the refs it is honest
+    /// about.
+    pub refs: BTreeMap<String, ContentHash>,
+    /// The fold position the state was read at: the number of ops
+    /// applied before this one. Admission requires it to equal the
+    /// view's position, so it is also the sequence this op itself
+    /// occupies in the log.
+    pub at_seq: u64,
+    /// Content address ([`RefSnapshot::id`]) of the previous snapshot on
+    /// this log; `None` only for a log's first snapshot. Additive per
+    /// invariant 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_snapshot: Option<ContentHash>,
+}
+
+impl RefSnapshot {
+    /// The canonical bytes: what is hashed, what the author signs over
+    /// (inside the op payload), and what the detached file contains.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("RefSnapshot is always serializable")
+    }
+
+    /// Content address of the canonical bytes — the identity the next
+    /// snapshot's `prev_snapshot` names.
+    #[must_use]
+    pub fn id(&self) -> ContentHash {
+        ContentHash::blake3(&self.canonical_bytes())
+    }
 }
 
 /// One actor key's durable binding to an operator identity, as the fold
@@ -638,6 +725,10 @@ pub enum ViewError {
     /// operator, a channel that reads as a different operator, a key
     /// already bound elsewhere, or a revoked/unbound key.
     Identity(String),
+    /// Ref-snapshot precondition failure: the claimed ref map does not
+    /// match the view, the claimed position is not the fold position, or
+    /// the chain pointer does not name the latest admitted snapshot.
+    Snapshot(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -739,6 +830,11 @@ pub struct View {
     /// entry.seq` before applying; nothing inside the fold can check it
     /// on their behalf.
     pub next_seq: u64,
+    /// The most recent admitted [`RefSnapshot`], whole rather than by
+    /// id: readers ask a view "what is the latest attestation?" and the
+    /// chain check needs its identity, which [`RefSnapshot::id`] derives
+    /// from the value.
+    pub latest_snapshot: Option<RefSnapshot>,
 }
 
 impl View {
@@ -981,6 +1077,33 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::RecordRefSnapshot { snapshot } => {
+                // Truth first: an attestation the fold cannot reproduce
+                // is refused by every replayer, not archived as a claim.
+                if snapshot.refs != self.refs {
+                    return Err(ViewError::Snapshot(
+                        "snapshot does not match the ref-state it claims to attest".to_string(),
+                    ));
+                }
+                if snapshot.at_seq != self.next_seq {
+                    return Err(ViewError::Snapshot(format!(
+                        "snapshot was taken at position {}, the view is at {}",
+                        snapshot.at_seq, self.next_seq
+                    )));
+                }
+                // The chain rule is what makes an *old* snapshot
+                // inadmissible even when the ref map recurs (the ABA
+                // shape): its `prev_snapshot` no longer names the latest.
+                let expected = self.latest_snapshot.as_ref().map(RefSnapshot::id);
+                if snapshot.prev_snapshot != expected {
+                    return Err(ViewError::Snapshot(format!(
+                        "snapshot chain expected prev {:?}, op names {:?}",
+                        expected.as_ref().map(ContentHash::to_hex),
+                        snapshot.prev_snapshot.as_ref().map(ContentHash::to_hex)
+                    )));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1120,12 +1243,30 @@ impl View {
                     reason: reason.clone(),
                 });
             }
+            OpKind::RecordRefSnapshot { snapshot } => {
+                self.latest_snapshot = Some(snapshot.clone());
+            }
         }
         // Only a successful apply advances the fold position, so the
         // counter counts ops that are actually in the log. `validate`
         // returned above on every rejection, leaving it untouched.
         self.next_seq += 1;
         Ok(())
+    }
+
+    /// The snapshot attesting this view's current ref-state, chained to
+    /// the latest admitted one — the value [`OpKind::RecordRefSnapshot`]
+    /// admits as long as nothing lands in between (its `at_seq` is the
+    /// CAS: any interleaved op moves the fold position and the emitter
+    /// re-takes rather than attesting a state it did not read).
+    #[must_use]
+    pub fn snapshot(&self) -> RefSnapshot {
+        RefSnapshot {
+            format_version: FORMAT_VERSION,
+            refs: self.refs.clone(),
+            at_seq: self.next_seq,
+            prev_snapshot: self.latest_snapshot.as_ref().map(RefSnapshot::id),
+        }
     }
 
     /// The operator `key` is bound to, if the log ever bound it.

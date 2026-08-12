@@ -7,5 +7,6 @@
 mod canonical;
 mod golden;
 mod operator_identity;
+mod snapshot;
 mod validate;
 mod view;
