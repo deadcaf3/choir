@@ -24,6 +24,7 @@
 //! Exit codes: 0 = the node accepted, 1 = the node rejected (the JSON
 //! error body is printed), 2 = usage error.
 
+use choir_hash::ContentHash;
 use choir_identity::ActorKey;
 use choir_view::{OpKind, Verdict, ViewOp};
 
@@ -158,9 +159,66 @@ fn current_binding(
     (!binding.is_null()).then(|| binding.clone())
 }
 
+/// The log identity to sign a scope against: `(node, head)` from
+/// `/api/view`.
+///
+/// Unlike [`current_binding`], a failed read here is fatal. The two are
+/// different kinds of read: that one reports on a decision the node will
+/// make anyway, while this one is *part of what gets signed*. Guessing a
+/// scope, or quietly signing without one, would produce a signature that
+/// is either refused or — worse, on a node that does not require scopes —
+/// admissible forever and everywhere.
+fn log_scope(api: &str, auth: AuthOptions<'_>) -> (ContentHash, Option<ContentHash>) {
+    let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
+    let fail = |why: &str| -> ! {
+        eprintln!("choir: cannot read the log scope from {api}: {why}");
+        eprintln!("choir: not signing an op that names no log. Retry when the node answers.");
+        std::process::exit(1);
+    };
+    if !(200..300).contains(&status) {
+        fail(&format!("GET /api/view returned {status}"));
+    }
+    let view: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(view) => view,
+        Err(error) => fail(&format!("response is not JSON: {error}")),
+    };
+    let Some(node) = view["log"]["node"].as_str().and_then(hash_from_hex) else {
+        fail("response has no `log.node`; this node predates op scopes");
+    };
+    let head = match view["log"]["head"].as_str() {
+        Some(hex) => match hash_from_hex(hex) {
+            Some(head) => Some(head),
+            None => fail("`log.head` is not a content hash"),
+        },
+        // A null head is an empty log, which is a real state and the one
+        // a genesis op is signed against.
+        None => None,
+    };
+    (node, head)
+}
+
+/// Parses a `<codec>-<digest>` content hash as served by the node.
+fn hash_from_hex(hex: &str) -> Option<ContentHash> {
+    let (codec, digest) = hex.split_once('-')?;
+    let codec = u8::from_str_radix(codec, 16).ok()?;
+    let digest: Option<Vec<u8>> = (0..digest.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(digest.get(i..i + 2)?, 16).ok())
+        .collect();
+    Some(ContentHash {
+        codec,
+        digest: digest?,
+    })
+}
+
 /// Signs `op` on attribution channel `channel` and posts it.
+///
+/// The op is scoped to the node's current head first, so the signature
+/// is admissible on this log once and nowhere else.
 fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptions<'_>) -> ! {
     let key = load_key(key_file);
+    let (node, head) = log_scope(api, auth);
+    let op = op.clone().in_scope(node, head);
     let payload = op.to_payload();
     let sig = key.sign_submission(channel, &payload);
     let body = serde_json::json!({

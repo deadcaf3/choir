@@ -3,6 +3,7 @@
 //! Configured usage: `choir-node <repo-root> <port> [--create owner/name.git]...
 //! [--auth-file path] [--keys-file path] [--reviewers-file path]
 //! [--require-assignment] [--protected-refs path] [--require-review]
+//! [--require-scope]
 //! [--reviewer-conflict-graph path --reviewer-conflict-distance hops]
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--newcomer-audit path --newcomer-adjudications path]
@@ -31,6 +32,11 @@
 //! `--require-review` additionally refuses to move a protected ref to
 //! any commit without approval weight from two distinct operators, and
 //! refuses to delete one at all — including for this daemon's own pushes.
+//! `--require-scope` admits only ops whose author signed a scope naming
+//! this node and a log head still in the window, which is what makes a
+//! captured signature unreplayable — on this node after the state it
+//! expected returns, and on any other node at all. Off by default because
+//! it refuses clients that predate scopes, not because unscoped is safe.
 //! `--review-retention` keeps at most that many live reviews when
 //! completed reviews can be archived. Incomplete reviews are never killed by default;
 //! `--review-lapse-after-secs` is the explicit operator policy that lets
@@ -341,6 +347,13 @@ fn main() -> std::io::Result<()> {
             if rest.iter().any(|a| a == "--require-assignment") {
                 platform = platform.with_required_assignment();
                 eprintln!("reviewer assignment required (self-named reviewers refused)");
+            }
+            if rest.iter().any(|a| a == "--require-scope") {
+                platform = platform.with_required_scope();
+                eprintln!(
+                    "signed op scopes required (a signature is admissible on this log \
+                     once, and on no other node)"
+                );
             }
             if let Some(refs) = flag_value("--protected-refs") {
                 platform = platform.with_protected_refs(refs.into());

@@ -46,6 +46,36 @@ use serde::{Deserialize, Serialize};
 /// incompatible change; additive changes keep the version (plan.md §E).
 pub const FORMAT_VERSION: u16 = 1;
 
+/// Where and when an op is admissible: the author's own statement of
+/// which log they are submitting into and which head they observed.
+///
+/// This is an admission precondition, exactly like [`OpKind`]'s `prev`,
+/// and it lives in the payload for the same reason `prev` does — the
+/// payload is what the author signs. A signature over `(channel,
+/// payload)` is otherwise position-independent, log-independent and
+/// occurrence-independent, so a captured op replays onto any node that
+/// trusts the key, and replays again on the node it came from as soon
+/// as CAS state returns to what it expected (ABA). `prev` cannot close
+/// that: it asks whether the state matches, not whether the op has run.
+///
+/// A head hash can occur at exactly one position in exactly one chain,
+/// which is what makes it a usable freshness token without a clock: the
+/// house rule is that elapsed time is not a thing this system measures.
+///
+/// The admission rule is in `choir-node`'s policy, not in [`View`]: the
+/// view is pure state and knows nothing about nodes or log windows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpScope {
+    /// Actor id of the node whose log this op was signed for.
+    pub node: ContentHash,
+    /// A log head the author had observed when they signed. `None` says
+    /// the author read an empty log — admissible only while the node has
+    /// evicted nothing, which is the span its duplicate index still
+    /// covers in full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<ContentHash>,
+}
+
 /// A typed operation carried in [`OpEntry::payload`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewOp {
@@ -53,15 +83,32 @@ pub struct ViewOp {
     pub format_version: u16,
     /// What the operation does to the view.
     pub kind: OpKind,
+    /// The log and head this op was signed for, when the author bound it
+    /// to one. Additive (`default` + `skip_serializing_if`), so ops
+    /// written before scopes existed decode as `None` and re-serialize
+    /// byte-identically — invariant 1, and the reason adding a replay
+    /// defence is not a log migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<OpScope>,
 }
 
 impl ViewOp {
-    /// Wraps `kind` at the current [`FORMAT_VERSION`].
+    /// Wraps `kind` at the current [`FORMAT_VERSION`], unscoped.
     pub fn new(kind: OpKind) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             kind,
+            scope: None,
         }
+    }
+
+    /// Binds this op to one log and one observed head. The scope is
+    /// inside the payload, so it is covered by the author's signature
+    /// and cannot be stripped or rewritten by whoever relays the bytes.
+    #[must_use]
+    pub fn in_scope(mut self, node: ContentHash, head: Option<ContentHash>) -> Self {
+        self.scope = Some(OpScope { node, head });
+        self
     }
 
     /// Serializes into an [`OpEntry::payload`].

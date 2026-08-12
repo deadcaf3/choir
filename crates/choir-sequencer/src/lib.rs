@@ -55,7 +55,13 @@ pub trait SubmitPolicy: Send {
 
     /// Observes an entry that was just appended (for cached-state
     /// policies to fold). Default: ignore.
-    fn accepted(&mut self, _entry: &OpEntry) {}
+    ///
+    /// `hash` is the entry's content hash, which the sequencer has just
+    /// computed to answer the submitter. It is passed rather than left
+    /// to the policy to recompute: a policy that indexes entries by hash
+    /// would otherwise re-serialize every entry on the write path, which
+    /// the allocation budget already caught once.
+    fn accepted(&mut self, _entry: &OpEntry, _hash: &ContentHash) {}
 }
 
 /// The default policy: everything is admitted (localhost/dev shape).
@@ -315,7 +321,7 @@ impl Sequencer {
                                         author_sig: sub.author_sig,
                                     };
                                     let hash = entry.content_hash();
-                                    policy.accepted(&entry);
+                                    policy.accepted(&entry, &hash);
                                     log.append(entry)
                                         .expect("single writer never sees a stale head");
                                     acks.push((

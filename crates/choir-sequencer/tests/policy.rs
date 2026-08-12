@@ -28,7 +28,7 @@ impl SubmitPolicy for ChoirPolicy {
         trial.apply(&op).map_err(|e| format!("stale: {e:?}"))
     }
 
-    fn accepted(&mut self, entry: &OpEntry) {
+    fn accepted(&mut self, entry: &OpEntry, _hash: &ContentHash) {
         let op = ViewOp::from_payload(&entry.payload).expect("checked in check()");
         self.view.apply(&op).expect("checked in check()");
     }
