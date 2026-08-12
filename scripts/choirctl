@@ -14,6 +14,15 @@ PORT=${CHOIR_PORT:-8417}
 auth_user() { head -1 "$STATE/auth" | cut -d: -f1; }
 auth_pass() { head -1 "$STATE/auth" | cut -d: -f2-; }
 
+# The operator-side CLI, built by `choirctl install`. The review and
+# verdict passthroughs refuse rather than guess when it is missing: a
+# wrong path found via PATH could be a stale binary signing real ops.
+choir_bin() {
+  local bin="$HERE/../target/release/choir"
+  [ -x "$bin" ] || { echo "choirctl: no CLI at $bin — build it: cargo build --release -p choir-cli" >&2; exit 1; }
+  echo "$bin"
+}
+
 # After the D20 host move the canonical node lives on the mirror VM and
 # every 127.0.0.1:$PORT below reaches it through an SSH -L forward. The
 # marker is what says which world this machine is in; the scripts that
@@ -232,6 +241,34 @@ mirror)
   sh "$HERE/push_mirror.sh"
   ;;
 
+review)
+  # First seat of a landing round: open a review naming the exact oid a
+  # landing will move a protected ref to. Tunnel-aware, because the raw
+  # CLI command at a dead forward burned three retries in one afternoon
+  # — the command was right every time, the port was not listening.
+  #   choirctl review <id> <oid> [repo:ref]
+  [ $# -ge 3 ] || { echo "usage: choirctl review <id> <oid> [repo:ref]" >&2; exit 2; }
+  remote_node && tunnel_up
+  "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+    review "http://127.0.0.1:$PORT" "$STATE/agent.key" \
+    "${CHOIR_REVIEW_CHANNEL:-op/codex}" "$2" "$3" \
+    --ref "${4:-choir/choir.git:refs/heads/main}"
+  ;;
+
+verdict)
+  # A reviewer seat of the round. The reviewer key stays operator-held
+  # and operator-invoked; this only removes the boilerplate around it,
+  # not the second pair of hands D24 actually wants.
+  #   choirctl verdict <reviewer> <id> <approve|request-changes> [note]
+  [ $# -ge 4 ] || { echo "usage: choirctl verdict <reviewer> <id> <approve|request-changes> [note]" >&2; exit 2; }
+  remote_node && tunnel_up
+  note=()
+  [ $# -ge 5 ] && note=("$5")
+  "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+    verdict "http://127.0.0.1:$PORT" "$STATE/review-$2.key" "$2/reviewer" \
+    "$3" "$4" "${note[@]}"
+  ;;
+
 sync)
   if remote_node; then
     # Same D21 order, new topology: canonical first (through the
@@ -277,6 +314,12 @@ pull-backup)
   sh "$HERE/pull_backup.sh" "${2:-}"
   ;;
 
+schedule-backup)
+  # Load a LaunchAgent that runs pull-backup on an interval (default
+  # hourly), so the offsite copy stops depending on manual syncs.
+  sh "$HERE/flip/install_pull_timer.sh" "${2:-}"
+  ;;
+
 logs)
   if remote_node; then
     node_ssh "tail -n ${2:-30} '.choir/node.log'"
@@ -306,6 +349,12 @@ sh scripts/choirctl <command>
   push [repo]      push this repo to the node only (--all and --tags)
   mirror           push to the private Forgejo follower only
   url [repo]       clone/push URL including credentials
+
+  review <id> <oid> [repo:ref]                   open a landing review
+  verdict <reviewer> <id> <verdict> [note]       cast a reviewer verdict
+  verify-backup    pull the offsite copy back and check all five ways
+  pull-backup      fetch the log copy from the node host (remote mode)
+  schedule-backup [secs]   pull-backup on a launchd interval (default 3600)
 
 Port is $PORT (override with CHOIR_PORT). Runbook: scripts/flip/RUNBOOK.md
 USAGE

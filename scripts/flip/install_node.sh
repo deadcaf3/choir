@@ -60,7 +60,7 @@ if [[ ! -f $REPOS_LIST ]]; then
   } > "$REPOS_LIST"
   chmod 600 "$REPOS_LIST"
   echo "seeded $REPOS_LIST with $REPO"
-elif [[ $# -ge 2 ]] && ! grep -qxF "$2" "$REPOS_LIST"; then
+elif [[ $# -ge 2 && -n $2 ]] && ! grep -qxF "$2" "$REPOS_LIST"; then
   echo "$2" >> "$REPOS_LIST"
   echo "appended $2 to $REPOS_LIST"
 fi

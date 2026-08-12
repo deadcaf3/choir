@@ -349,6 +349,62 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
     std::fs::remove_dir_all(&home).ok();
 }
 
+/// Three papercuts from the first operating day, pinned so they stay
+/// fixed: landing rounds must open the tunnel themselves (the raw CLI
+/// at a dead forward burned three retries), the Linux binary swap must
+/// survive ETXTBSY (cp straight over a running daemon fails), and the
+/// backup pull must be schedulable — with the schedule refusing on a
+/// node host, where pulling from yourself backs up nothing.
+#[test]
+fn the_landing_round_opens_the_tunnel_and_the_binary_swap_survives_etxtbsy() {
+    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
+        .expect("choirctl source");
+    for case in ["\nreview)", "\nverdict)", "\nschedule-backup)"] {
+        assert!(driver.contains(case), "choirctl lacks the {} command", case.trim());
+    }
+    for start in [
+        driver.find("\nreview)").unwrap(),
+        driver.find("\nverdict)").unwrap(),
+    ] {
+        let case = &driver[start..start + driver[start..].find(";;").expect("case closes")];
+        assert!(
+            case.contains("tunnel_up"),
+            "a landing seat does not open the tunnel first: {case}"
+        );
+        assert!(
+            case.contains("choir_bin"),
+            "a landing seat guesses at the CLI binary instead of refusing: {case}"
+        );
+    }
+
+    let installer =
+        std::fs::read_to_string(repo_root().join("scripts/flip/install_node_linux.sh"))
+            .expect("linux installer source");
+    let copy = installer
+        .find("$BIN_DIR/$f.new\"")
+        .expect("installer must copy to .new, not straight over the running binary");
+    let rename = installer
+        .find("mv \"$BIN_DIR/$f.new\" \"$BIN_DIR/$f\"")
+        .expect("installer must rename the copy into place");
+    assert!(copy < rename, "the rename must follow the copy");
+
+    // The timer's refusal path runs for real; it exits before launchd.
+    let home = std::env::temp_dir().join(format!("choir-timer-{}", std::process::id()));
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::create_dir_all(&home).unwrap();
+    let out = std::process::Command::new("sh")
+        .arg(repo_root().join("scripts/flip/install_pull_timer.sh"))
+        .env("HOME", &home)
+        .output()
+        .expect("timer installer runs");
+    assert!(
+        !out.status.success(),
+        "the timer must refuse where there is no node-remote marker"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no ~/.choir/node-remote"));
+    std::fs::remove_dir_all(&home).ok();
+}
+
 #[test]
 fn the_linux_installer_carries_the_same_policy_wiring() {
     let installer = std::fs::read_to_string(repo_root().join("scripts/flip/install_node_linux.sh"))

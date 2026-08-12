@@ -22,6 +22,7 @@ set -eu
 PORT=${1:-8417}
 REPO=${2:-choir/choir.git}
 BIN_DIR=${3:-$HOME/bin}
+ARTIFACTS=${4:-}
 REPOS_LIST=$HOME/.choir/repos.list
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -50,13 +51,29 @@ if [ ! -f "$REPOS_LIST" ]; then
   } > "$REPOS_LIST"
   chmod 600 "$REPOS_LIST"
   echo "seeded $REPOS_LIST with $REPO"
-elif [ "$#" -ge 2 ] && ! grep -qxF "$2" "$REPOS_LIST"; then
+elif [ "$#" -ge 2 ] && [ -n "$2" ] && ! grep -qxF "$2" "$REPOS_LIST"; then
   echo "$2" >> "$REPOS_LIST"
   echo "appended $2 to $REPOS_LIST"
 fi
 
-# 1. Binaries must already be here. Failing loudly beats starting a unit
-#    that will crash-loop under Restart=always.
+# 1. Binaries must already be here — or be named as a fourth argument,
+#    e.g. `install_node_linux.sh 8417 '' '' ~/choir-build/target/release`.
+#    The copy goes through `.new` + `mv` because `cp` straight over the
+#    running daemon's binary fails with ETXTBSY on Linux; the rename
+#    swaps the path atomically and the running process keeps its old
+#    inode until the restart below.
+if [ -n "$ARTIFACTS" ]; then
+  mkdir -p "$BIN_DIR"
+  for f in choir-node choir; do
+    [ -f "$ARTIFACTS/$f" ] || { echo "no $f in $ARTIFACTS" >&2; exit 1; }
+    cp "$ARTIFACTS/$f" "$BIN_DIR/$f.new"
+    mv "$BIN_DIR/$f.new" "$BIN_DIR/$f"
+  done
+  echo "copied choir-node + choir in from $ARTIFACTS"
+fi
+
+#    Failing loudly beats starting a unit that will crash-loop under
+#    Restart=always.
 for f in "$BIN" "$CHOIR"; do
   [ -x "$f" ] || { echo "missing executable: $f (build elsewhere and copy in)" >&2; exit 1; }
 done
