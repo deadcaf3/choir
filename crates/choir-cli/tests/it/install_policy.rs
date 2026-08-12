@@ -507,6 +507,60 @@ fn the_mirror_receipt_is_read_not_merely_written() {
     std::fs::remove_dir_all(work).ok();
 }
 
+/// Writing a backup and being able to restore one are different claims,
+/// and only the second matters. This pins the checks that separate them.
+#[test]
+fn the_backup_is_verified_by_pulling_it_back_not_by_having_written_it() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/verify_backup.sh"))
+        .expect("scripts/verify_backup.sh");
+    let code: String = script
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // A restore that boots needs all five; the reviewers file is the one
+    // whose absence stops the daemon outright.
+    for needed in ["reviewers", "protected-refs", "newcomer-audit.jsonl"] {
+        assert!(
+            code.contains(needed),
+            "verify-backup stopped checking for {needed}; a restore can stop booting again"
+        );
+    }
+    // An assertion about the backup itself, so it holds even if someone
+    // copies a file up by hand rather than through push_mirror.sh.
+    assert!(
+        code.contains("SECRETS IN THE BACKUP"),
+        "verify-backup must fail loudly if a token or key reached the backup"
+    );
+    // Prefix, not equality: the live log grows between syncs.
+    assert!(
+        code.contains("prefix") && code.contains("cmp"),
+        "verify-backup must compare the backup as a prefix of the live log"
+    );
+    assert!(
+        code.contains("seq gap"),
+        "verify-backup must localise a gap; a whole-file checksum cannot"
+    );
+
+    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl");
+    assert!(
+        driver.contains("verify-backup)") && driver.contains("verify_backup.sh"),
+        "choirctl must expose verify-backup, or nothing ever runs it"
+    );
+
+    let syntax = std::process::Command::new("sh")
+        .arg("-n")
+        .arg(repo_root().join("scripts/verify_backup.sh"))
+        .output()
+        .expect("run sh -n");
+    assert!(
+        syntax.status.success(),
+        "verify_backup.sh is not valid sh: {}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
+}
+
 /// The op log is the only state in the system with exactly one copy:
 /// git bundles carry commits, and `ops.jsonl` has never been a git
 /// object. This asserts the backup leg exists, that it verifies rather

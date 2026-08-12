@@ -154,6 +154,13 @@ sync)
   echo "mirror: running in background -> $RECEIPT (see: sh scripts/choirctl status)"
   ;;
 
+verify-backup)
+  # Pull the offsite copy back and check it. The mirror leg reports that
+  # it wrote a backup; this is the only thing that reports the backup is
+  # restorable.
+  sh "$HERE/verify_backup.sh" "${2:-}"
+  ;;
+
 logs)
   tail -n "${2:-30}" "$STATE/node.log"
   ;;
