@@ -253,6 +253,102 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
     }
 }
 
+/// The follower feed must mirror every repo the node serves, not just
+/// the canonical one: after the first imported repo, the node host was
+/// the only holder of that repo's git objects. The remote command is
+/// extracted from choirctl and executed here with real git against a
+/// scratch HOME, because a loop that is merely grepped for could still
+/// skip everything and read like success.
+#[test]
+fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
+    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
+        .expect("choirctl source");
+
+    // Both remote-mode call sites go through the one function; a stray
+    // hardcoded single-repo push would silently shrink the follower.
+    assert!(
+        driver.matches("follower_feed").count() >= 3,
+        "choirctl must define follower_feed and call it from mirror and sync"
+    );
+    assert!(
+        !driver.contains("repos/choir/choir.git\" push"),
+        "a hardcoded single-repo follower push survives in choirctl"
+    );
+    // D21 ordering inside the remote sync branch: canonical, follower,
+    // then the backup pull.
+    let sync = driver.find("sync)").expect("sync branch");
+    let canonical = driver[sync..].find("push_canonical.sh").expect("canonical leg") + sync;
+    let follower = driver[canonical..].find("follower_feed").expect("follower leg") + canonical;
+    let backup = driver[follower..].find("pull_backup.sh").expect("backup leg") + follower;
+    assert!(canonical < follower && follower < backup);
+
+    // The command that actually runs on the node host.
+    let def = driver.find("follower_feed()").expect("follower_feed defined");
+    let body = &driver[def..];
+    let start = body.find("node_ssh '").expect("one remote command") + "node_ssh '".len();
+    let end = body[start..].find("'\n}").expect("remote command closes") + start;
+    let remote = &body[start..end];
+
+    let home = std::env::temp_dir().join(format!("choir-follower-{}", std::process::id()));
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::create_dir_all(home.join(".choir/repos/agents")).unwrap();
+    let sh = |cmd: &str| {
+        std::process::Command::new("sh")
+            .args(["-c", cmd])
+            .env("HOME", &home)
+            .output()
+            .expect("sh runs")
+    };
+
+    // No repos.list: refuse, loudly.
+    let out = sh(remote);
+    assert!(!out.status.success(), "must refuse without a repos.list");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no repos.list"));
+
+    // A served repo with no forgejo remote is named but not fatal, and
+    // comments are skipped.
+    std::fs::write(
+        home.join(".choir/repos.list"),
+        "# comment\nagents/demo.git\n",
+    )
+    .unwrap();
+    let git = |cmd: &str| assert!(sh(cmd).status.success(), "fixture git failed: {cmd}");
+    git("git init -q --bare \"$HOME/.choir/repos/agents/demo.git\"");
+    let out = sh(remote);
+    assert!(out.status.success(), "an unconfigured follower must not fail the run");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("NO forgejo remote"));
+
+    // Configured: the push happens for real, into a second bare repo.
+    git("git init -q \"$HOME/work\" && cd \"$HOME/work\" \
+         && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one \
+         && git push -q \"$HOME/.choir/repos/agents/demo.git\" HEAD:refs/heads/main");
+    git("git init -q --bare \"$HOME/follower.git\" \
+         && git --git-dir \"$HOME/.choir/repos/agents/demo.git\" remote add forgejo \"$HOME/follower.git\"");
+    let out = sh(remote);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("follower updated: agents/demo.git"));
+    let shown = sh("git --git-dir \"$HOME/follower.git\" rev-parse refs/heads/main");
+    assert!(shown.status.success(), "the follower never received the ref");
+
+    // A configured push that fails is the one thing that fails the run.
+    std::fs::write(
+        home.join(".choir/repos.list"),
+        "agents/demo.git\nagents/bad.git\n",
+    )
+    .unwrap();
+    git("git init -q --bare \"$HOME/.choir/repos/agents/bad.git\" \
+         && git --git-dir \"$HOME/.choir/repos/agents/bad.git\" remote add forgejo \"$HOME/absent.git\"");
+    let out = sh(remote);
+    assert!(!out.status.success(), "a failed configured push must fail the run");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("push FAILED for agents/bad.git"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("follower updated: agents/demo.git"),
+        "one bad repo must not stop the others from being pushed"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
 #[test]
 fn the_linux_installer_carries_the_same_policy_wiring() {
     let installer = std::fs::read_to_string(repo_root().join("scripts/flip/install_node_linux.sh"))

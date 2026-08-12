@@ -45,6 +45,38 @@ node_ssh() {
       "choir@$ip" "$@"
 }
 
+# The follower is fed on-box from the node's own bare repos, so it can
+# never hold a commit the canonical node has not sequenced (D21). Every
+# repo in the node host's ~/.choir/repos.list is pushed, not just the
+# canonical one: after the design-tokens import the node was the only
+# holder of that repo's git objects, and a follower that mirrors one
+# repo reads like a follower that mirrors all of them. A repo whose
+# bare has no `forgejo` remote is named on every run rather than
+# silently skipped — unconfigured means "no second copy yet", and that
+# should stay annoying until an operator configures it on the node
+# host. Exit is nonzero only when a configured push fails.
+follower_feed() {
+  node_ssh '
+    [ -f "$HOME/.choir/repos.list" ] || { echo "follower: no repos.list on the node host" >&2; exit 1; }
+    failed=
+    while IFS= read -r repo; do
+      case $repo in ""|"#"*) continue ;; esac
+      bare=$HOME/.choir/repos/$repo
+      if ! git --git-dir "$bare" remote get-url forgejo >/dev/null 2>&1; then
+        echo "follower: $repo has NO forgejo remote — its objects have no second copy yet" >&2
+        continue
+      fi
+      if git --git-dir "$bare" push -q forgejo "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"; then
+        echo "follower updated: $repo"
+      else
+        echo "follower: push FAILED for $repo" >&2
+        failed=1
+      fi
+    done < "$HOME/.choir/repos.list"
+    [ -z "$failed" ]
+  '
+}
+
 # The mirror leg runs detached, so its result has to be written down and
 # then actually read somewhere an operator looks. A receipt nobody reads
 # is the same as no receipt: before this, a mirror push could fail and
@@ -194,9 +226,7 @@ push)
 mirror)
   # Repo -> the private Forgejo follower on the mirror VM.
   if remote_node; then
-    # The follower is fed from the node's own repo, on-box, so it can
-    # never hold a commit the canonical node has not sequenced (D21).
-    node_ssh 'git --git-dir "$HOME/.choir/repos/choir/choir.git" push -q forgejo "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*" && echo "follower updated"'
+    follower_feed
     exit 0
   fi
   sh "$HERE/push_mirror.sh"
@@ -209,7 +239,10 @@ sync)
     # offsite copy of the log — which is now this machine, pulling.
     tunnel_up
     sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
-    node_ssh 'git --git-dir "$HOME/.choir/repos/choir/choir.git" push -q forgejo "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*" && echo "follower updated"'
+    # A follower failure is reported but does not block the backup pull:
+    # the log copy matters more than the ref mirror, and the failure is
+    # already loud on this run's own output.
+    follower_feed || echo "sync: follower leg failed — continuing to the backup pull" >&2
     sh "$HERE/pull_backup.sh"
     exit 0
   fi
