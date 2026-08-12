@@ -7,9 +7,12 @@
 //! callers own checkout/sandbox construction, while this module fixes the
 //! classification and calibration semantics shared by queue implementations.
 //!
-//! Commands are argv, not shell strings. Execution is synchronous and adds no
+//! Commands are argv, not shell strings, and the environment they run in is
+//! explicit: the child sees exactly the map the caller passes, never this
+//! process's inherited variables. Execution is synchronous and adds no
 //! runtime or dependency.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// One command's process outcome in one revision tree.
@@ -141,9 +144,16 @@ impl DifferentialReport {
     }
 }
 
-fn run_one(program: &str, args: &[String], dir: &Path) -> Result<Observation, String> {
+fn run_one(
+    program: &str,
+    args: &[String],
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Observation, String> {
     let status = std::process::Command::new(program)
         .args(args)
+        .env_clear()
+        .envs(env)
         .current_dir(dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -156,6 +166,14 @@ fn run_one(program: &str, args: &[String], dir: &Path) -> Result<Observation, St
 }
 
 /// Runs one explicit command in both parent trees and the merged tree.
+///
+/// `env` is the complete environment every run sees; nothing is inherited
+/// from this process. That closes the reproducibility gap where "same
+/// command" enforced same argv while an ambient variable (a leaked
+/// `CARGO_TARGET_DIR`, a changed `RUSTFLAGS`) silently changed what the
+/// three runs measured. Callers building the map from a command file should
+/// use [`crate::differential_ledger::effective_environment`], which is what
+/// the ledger's recorded environment hash is computed over.
 ///
 /// The three runs happen **concurrently**, one thread each. They are
 /// independent by construction — three separate checkouts, and the caller
@@ -190,6 +208,7 @@ pub fn run_merged_vs_parents(
     parent_a: &Path,
     parent_b: &Path,
     merged: &Path,
+    env: &BTreeMap<String, String>,
 ) -> Result<DifferentialReport, String> {
     if program.is_empty() {
         return Err("differential program must not be empty".to_string());
@@ -198,9 +217,9 @@ pub fn run_merged_vs_parents(
     // three paths outlive the threads without cloning anything, and the
     // scope will not return until all three have been joined.
     let (parent_a, parent_b, merged) = std::thread::scope(|scope| {
-        let a = scope.spawn(|| run_one(program, args, parent_a));
-        let b = scope.spawn(|| run_one(program, args, parent_b));
-        let m = scope.spawn(|| run_one(program, args, merged));
+        let a = scope.spawn(|| run_one(program, args, parent_a, env));
+        let b = scope.spawn(|| run_one(program, args, parent_b, env));
+        let m = scope.spawn(|| run_one(program, args, merged, env));
         (
             a.join().expect("parent-a differential thread panicked"),
             b.join().expect("parent-b differential thread panicked"),

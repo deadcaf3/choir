@@ -5,6 +5,16 @@
 //! can always be rebuilt from those rows. No timestamp is used as evidence:
 //! observation ids are the local total order, and exact integer counts drive
 //! the `< 1/1000` calculation.
+//!
+//! Reproducibility is frozen along two axes, not one. The command file's raw
+//! bytes are hashed so a ledger cannot silently mix command versions, and the
+//! effective environment the runs execute in — the command file's declared
+//! `env` plus the small pass-through list in [`effective_environment`] — is
+//! hashed into `activation.json` the same way, so a ledger cannot silently
+//! mix environments either. A state directory activated before environment
+//! hashing existed adopts the current environment on its next observation and
+//! enforces it from then on; its earlier rows predate enforcement and cannot
+//! be retroactively attested.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -17,7 +27,7 @@ use choir_oplog::ContentHash;
 use crate::differential::{Calibration, DifferentialReport, Verdict};
 
 const FORMAT_VERSION: u64 = 1;
-static RECEIPT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static REPLACE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Explicit argv loaded from a versioned JSON file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +36,10 @@ pub struct CommandSpec {
     pub program: String,
     /// Exact argv applied in all three worktrees.
     pub args: Vec<String>,
+    /// Environment variables declared by the command file. The runs see
+    /// these plus the pass-through list in [`effective_environment`], and
+    /// nothing else.
+    pub env: BTreeMap<String, String>,
     /// BLAKE3 content address of the command file bytes.
     pub snapshot_hash: String,
 }
@@ -87,14 +101,17 @@ pub struct RecordedObservation {
 /// Reads and validates a command specification.
 ///
 /// The file schema is
-/// `{"format_version":1,"program":"cargo","args":["test"]}`.
-/// Its raw bytes are hashed so a ledger cannot silently mix command versions.
+/// `{"format_version":1,"program":"cargo","args":["test"],"env":{"NAME":"value"}}`
+/// with `env` optional and empty by default. Its raw bytes are hashed so a
+/// ledger cannot silently mix command versions; because `env` lives in those
+/// bytes, a declared-environment change is a command change.
 ///
 /// # Errors
 ///
 /// The file is unreadable, malformed, has the wrong version, has an empty
-/// program/non-string argument, or gives Cargo a target directory outside the
-/// current revision worktree.
+/// program/non-string argument, declares an environment entry whose name is
+/// empty or contains `=` or NUL, or gives Cargo a target directory outside
+/// the current revision worktree.
 pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
     let bytes = fs::read(path).map_err(|error| format!("read differential command: {error}"))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -117,14 +134,60 @@ pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
                 .ok_or("differential command arguments must be strings".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let env = match &value["env"] {
+        serde_json::Value::Null => BTreeMap::new(),
+        serde_json::Value::Object(entries) => entries
+            .iter()
+            .map(|(name, value)| {
+                if name.is_empty() || name.contains(['=', '\0']) {
+                    return Err("differential command env names must be non-empty and free of = and NUL".to_string());
+                }
+                value
+                    .as_str()
+                    .map(|value| (name.clone(), value.to_string()))
+                    .ok_or("differential command env values must be strings".to_string())
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?,
+        _ => return Err("differential command env must be an object".to_string()),
+    };
     if !cargo_target_dirs_are_isolated(&program, &args) {
         return Err("cargo target directory must stay inside each revision worktree".to_string());
     }
     Ok(CommandSpec {
         program,
         args,
+        env,
         snapshot_hash: ContentHash::blake3(&bytes).to_hex(),
     })
+}
+
+/// The complete environment a differential run executes in.
+///
+/// Starts from the pass-through list — `PATH`, `HOME`, `TMPDIR`, taken from
+/// this process when present, because subprocess commands are unrunnable
+/// without them — and lets the command file's declared `env` override. The
+/// result is exactly what [`crate::differential::run_merged_vs_parents`]
+/// should be given, and exactly what [`environment_hash`] attests.
+#[must_use]
+pub fn effective_environment(declared: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    for name in ["PATH", "HOME", "TMPDIR"] {
+        if let Ok(value) = std::env::var(name) {
+            env.insert(name.to_string(), value);
+        }
+    }
+    env.extend(declared.iter().map(|(k, v)| (k.clone(), v.clone())));
+    env
+}
+
+/// BLAKE3 content address of one effective environment.
+///
+/// The preimage is the canonical JSON encoding of the map; `BTreeMap` order
+/// makes it deterministic, the same discipline every hashed struct in the
+/// workspace relies on.
+#[must_use]
+pub fn environment_hash(env: &BTreeMap<String, String>) -> String {
+    ContentHash::blake3(&serde_json::to_vec(env).expect("string map always encodes")).to_hex()
 }
 
 fn chmod(path: &Path, mode: u32) -> Result<(), String> {
@@ -230,12 +293,20 @@ fn write_new(path: &Path, body: &[u8]) -> Result<(), String> {
     chmod(path, 0o600)
 }
 
-fn prepare_state(state: &Path, command_hash: &str) -> Result<(), String> {
+/// `environment_hash` is `Some` only on the run path: recording an
+/// observation must pin the environment, while adjudication and refresh
+/// neither run the command nor should be refused because the operator's
+/// shell has since changed.
+fn prepare_state(
+    state: &Path,
+    command_hash: &str,
+    environment_hash: Option<&str>,
+) -> Result<(), String> {
     fs::create_dir_all(state).map_err(|error| format!("create calibration directory: {error}"))?;
     chmod(state, 0o700)?;
     let (activation, observations, adjudications, _) = state_paths(state);
     if activation.exists() {
-        let value: serde_json::Value = serde_json::from_slice(
+        let mut value: serde_json::Value = serde_json::from_slice(
             &fs::read(&activation)
                 .map_err(|error| format!("read calibration activation: {error}"))?,
         )
@@ -245,13 +316,39 @@ fn prepare_state(state: &Path, command_hash: &str) -> Result<(), String> {
         {
             return Err("calibration state belongs to a different command snapshot".to_string());
         }
+        if let Some(environment_hash) = environment_hash {
+            match value["environment_hash"].as_str() {
+                Some(recorded) if recorded == environment_hash => {}
+                Some(_) => {
+                    return Err(
+                        "calibration state belongs to a different environment".to_string()
+                    );
+                }
+                // Activated before environments were hashed: adopt the
+                // current one and enforce it from here on. The rows already
+                // in the ledger predate enforcement, which the module doc
+                // says out loud rather than pretending to attest them.
+                None => {
+                    value["environment_hash"] =
+                        serde_json::Value::String(environment_hash.to_string());
+                    let body = serde_json::to_vec(&value).map_err(|error| {
+                        format!("encode calibration activation: {error}")
+                    })?;
+                    replace_file(state, &activation, &body)?;
+                }
+            }
+        }
         chmod(&activation, 0o600)?;
     } else {
-        let body = serde_json::to_vec(&serde_json::json!({
+        let mut fields = serde_json::json!({
             "format_version": FORMAT_VERSION,
             "command_snapshot_hash": command_hash,
-        }))
-        .map_err(|error| format!("encode calibration activation: {error}"))?;
+        });
+        if let Some(environment_hash) = environment_hash {
+            fields["environment_hash"] = serde_json::Value::String(environment_hash.to_string());
+        }
+        let body = serde_json::to_vec(&fields)
+            .map_err(|error| format!("encode calibration activation: {error}"))?;
         write_new(&activation, &body)?;
     }
     drop(secure_append(&observations)?);
@@ -270,7 +367,7 @@ struct Folded {
 }
 
 fn fold(state: &Path, command_hash: &str) -> Result<Folded, String> {
-    let (_, observations_path, adjudications_path, _) = state_paths(state);
+    let (activation_path, observations_path, adjudications_path, _) = state_paths(state);
     let mut reports = BTreeMap::new();
     let mut unique_merge_commits = BTreeSet::new();
     let rows = read_rows(&observations_path)?;
@@ -342,6 +439,17 @@ fn fold(state: &Path, command_hash: &str) -> Result<Folded, String> {
         "command_snapshot_hash".to_string(),
         serde_json::Value::String(command_hash.to_string()),
     );
+    // Null means this state directory has never had its environment pinned,
+    // which is itself worth seeing in the receipt.
+    let activation: serde_json::Value = serde_json::from_slice(
+        &fs::read(&activation_path)
+            .map_err(|error| format!("read calibration activation: {error}"))?,
+    )
+    .map_err(|error| format!("parse calibration activation: {error}"))?;
+    receipt_object.insert(
+        "environment_hash".to_string(),
+        activation["environment_hash"].clone(),
+    );
     receipt_object.insert("observations".to_string(), serde_json::json!(reports.len()));
     receipt_object.insert(
         "unique_merge_commits".to_string(),
@@ -365,40 +473,50 @@ fn fold(state: &Path, command_hash: &str) -> Result<Folded, String> {
     })
 }
 
-fn write_receipt(state: &Path, receipt: &serde_json::Value) -> Result<(), String> {
-    let (_, _, _, receipt_path) = state_paths(state);
+fn replace_file(state: &Path, path: &Path, body: &[u8]) -> Result<(), String> {
     let temp = state.join(format!(
-        ".receipt-{}-{}",
+        ".replace-{}-{}",
         std::process::id(),
-        RECEIPT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        REPLACE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut body = serde_json::to_vec_pretty(receipt)
-        .map_err(|error| format!("encode calibration receipt: {error}"))?;
-    body.push(b'\n');
-    write_new(&temp, &body)?;
-    fs::rename(&temp, &receipt_path)
-        .map_err(|error| format!("replace calibration receipt: {error}"))?;
-    chmod(&receipt_path, 0o600)?;
+    write_new(&temp, body)?;
+    fs::rename(&temp, path)
+        .map_err(|error| format!("replace calibration file: {error}"))?;
+    chmod(path, 0o600)?;
     File::open(state)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("sync calibration directory: {error}"))
 }
 
+fn write_receipt(state: &Path, receipt: &serde_json::Value) -> Result<(), String> {
+    let (_, _, _, receipt_path) = state_paths(state);
+    let mut body = serde_json::to_vec_pretty(receipt)
+        .map_err(|error| format!("encode calibration receipt: {error}"))?;
+    body.push(b'\n');
+    replace_file(state, &receipt_path, &body)
+}
+
 /// Appends a report and rebuilds the advisory receipt.
+///
+/// `environment_hash` is the [`environment_hash`] of the
+/// [`effective_environment`] the report's three runs actually executed in.
+/// The first observation pins it in `activation.json`; later observations
+/// must match it or are refused, exactly as a changed command snapshot is.
 ///
 /// # Errors
 ///
 /// A revision is not a canonical full Git object id, state cannot be created,
-/// belongs to another command, contains an invalid row, or cannot be durably
-/// updated.
+/// belongs to another command or another environment, contains an invalid
+/// row, or cannot be durably updated.
 pub fn record_observation(
     state: &Path,
     command_hash: &str,
+    environment_hash: &str,
     revisions: &Revisions,
     report: &DifferentialReport,
 ) -> Result<RecordedObservation, String> {
     validate_revisions(revisions)?;
-    prepare_state(state, command_hash)?;
+    prepare_state(state, command_hash, Some(environment_hash))?;
     let before = fold(state, command_hash)?;
     let (_, observations, _, _) = state_paths(state);
     let row = serde_json::json!({
@@ -434,7 +552,7 @@ pub fn adjudicate(
     observation_id: u64,
     real_interaction: bool,
 ) -> Result<serde_json::Value, String> {
-    prepare_state(state, command_hash)?;
+    prepare_state(state, command_hash, None)?;
     let before = fold(state, command_hash)?;
     match before.reports.get(&observation_id) {
         Some(report) if report.verdict == Verdict::InteractionFailure => {}
@@ -462,7 +580,7 @@ pub fn adjudicate(
 ///
 /// The command snapshot does not match or any source row is invalid.
 pub fn refresh(state: &Path, command_hash: &str) -> Result<serde_json::Value, String> {
-    prepare_state(state, command_hash)?;
+    prepare_state(state, command_hash, None)?;
     let folded = fold(state, command_hash)?;
     write_receipt(state, &folded.receipt)?;
     Ok(folded.receipt)

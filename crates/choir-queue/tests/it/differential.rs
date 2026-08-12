@@ -1,5 +1,6 @@
 //! Executable D23 three-revision classification and exact-rate calibration.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use choir_queue::differential::{
@@ -7,7 +8,8 @@ use choir_queue::differential::{
     Verdict, CONFIDENCE_MIN_EVALUATED_MERGES,
 };
 use choir_queue::differential_ledger::{
-    adjudicate, load_command, record_observation, refresh, Revisions,
+    adjudicate, effective_environment, environment_hash, load_command, record_observation,
+    refresh, Revisions,
 };
 
 fn report(verdict: Verdict) -> DifferentialReport {
@@ -63,7 +65,8 @@ fn same_command_finds_behavior_that_only_the_merge_breaks() {
     .unwrap();
 
     let args = vec![check.display().to_string()];
-    let found = run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged).unwrap();
+    let env = effective_environment(&BTreeMap::new());
+    let found = run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env).unwrap();
     assert_eq!(found.verdict, Verdict::InteractionFailure, "{found:?}");
     assert!(found.parent_a.success && found.parent_b.success);
     assert!(!found.merged.success);
@@ -72,7 +75,8 @@ fn same_command_finds_behavior_that_only_the_merge_breaks() {
     // blaming the merge. This is the control that prevents ordinary broken
     // branches from inflating the semantic-interaction count.
     std::fs::write(parent_a.join("feature-b"), "enabled\n").unwrap();
-    let inconclusive = run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged).unwrap();
+    let inconclusive =
+        run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env).unwrap();
     assert_eq!(
         inconclusive.verdict,
         Verdict::InconclusiveParentFailure,
@@ -172,6 +176,11 @@ fn shipped_calibration_command_is_the_complete_workspace_test_gate() {
             "target/d23-calibration",
         ]
     );
+    assert_eq!(
+        command.env,
+        BTreeMap::new(),
+        "the shipped gate declares no environment of its own; the runs see only the pass-through list"
+    );
 }
 
 #[test]
@@ -222,10 +231,12 @@ fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
         merged: "c".repeat(7),
         ..revisions.clone()
     };
+    let pinned = environment_hash(&effective_environment(&command.env));
     let invalid_state = work.join("invalid-state");
     let error = record_observation(
         &invalid_state,
         &command.snapshot_hash,
+        &pinned,
         &abbreviated,
         &report(Verdict::Clean),
     )
@@ -236,6 +247,7 @@ fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
     let clean = record_observation(
         &state,
         &command.snapshot_hash,
+        &pinned,
         &revisions,
         &report(Verdict::Clean),
     )
@@ -251,6 +263,7 @@ fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
     let pending = record_observation(
         &state,
         &command.snapshot_hash,
+        &pinned,
         &revisions,
         &report(Verdict::InteractionFailure),
     )
@@ -301,6 +314,189 @@ fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
     .unwrap();
     let changed = load_command(&command_file).unwrap();
     assert!(refresh(&state, &changed.snapshot_hash).is_err());
+    std::fs::remove_dir_all(work).ok();
+}
+
+/// The child sees the declared environment plus the pass-through list and
+/// nothing else. The leak probe is a variable cargo injects into this test
+/// process; if inheritance ever comes back, the merged run fails and so does
+/// this test.
+#[test]
+fn the_run_environment_is_the_declared_one_not_the_inherited_one() {
+    assert!(
+        std::env::var("CARGO_MANIFEST_DIR").is_ok(),
+        "the leak probe must exist in this process for its absence in the child to mean anything"
+    );
+    let work = std::env::temp_dir().join(format!("choir-differential-env-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    let trees: Vec<std::path::PathBuf> = ["parent-a", "parent-b", "merged"]
+        .iter()
+        .map(|name| {
+            let dir = work.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        })
+        .collect();
+    let check = work.join("check.sh");
+    std::fs::write(
+        &check,
+        "#!/bin/sh\ntest \"${CHOIR_DIFFERENTIAL_MARKER:-}\" = calibrated || exit 1\ntest -z \"${CARGO_MANIFEST_DIR:-}\" || exit 1\n",
+    )
+    .unwrap();
+
+    let mut declared = BTreeMap::new();
+    declared.insert(
+        "CHOIR_DIFFERENTIAL_MARKER".to_string(),
+        "calibrated".to_string(),
+    );
+    let env = effective_environment(&declared);
+    assert!(
+        env.contains_key("PATH"),
+        "the pass-through list is what keeps subprocess commands runnable at all"
+    );
+    let args = vec![check.display().to_string()];
+    let report = run_merged_vs_parents("sh", &args, &trees[0], &trees[1], &trees[2], &env).unwrap();
+    assert_eq!(report.verdict, Verdict::Clean, "{report:?}");
+    std::fs::remove_dir_all(work).ok();
+}
+
+/// Same-argv was never enough: an ambient variable can change what the runs
+/// measure. The first observation pins the environment in `activation.json`,
+/// a drifted one is refused like a changed command snapshot, and a state
+/// directory from before environment hashing adopts the current environment
+/// on its next observation rather than being orphaned.
+#[test]
+fn observations_refuse_a_changed_environment_and_legacy_state_adopts_one() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-differential-envhash-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let command_file = work.join("command.json");
+    std::fs::write(
+        &command_file,
+        r#"{"format_version":1,"program":"sh","args":["check.sh"]}"#,
+    )
+    .unwrap();
+    let command = load_command(&command_file).unwrap();
+    let revisions = Revisions {
+        parent_a: "a".repeat(40),
+        parent_b: "b".repeat(40),
+        merged: "c".repeat(40),
+    };
+    let pinned = environment_hash(&effective_environment(&command.env));
+    let mut drifted_declared = BTreeMap::new();
+    drifted_declared.insert("RUSTFLAGS".to_string(), "-Cdebug-assertions=on".to_string());
+    let drifted = environment_hash(&effective_environment(&drifted_declared));
+    assert_ne!(pinned, drifted);
+
+    let state = work.join("state");
+    let first = record_observation(
+        &state,
+        &command.snapshot_hash,
+        &pinned,
+        &revisions,
+        &report(Verdict::Clean),
+    )
+    .unwrap();
+    assert_eq!(first.calibration["environment_hash"], pinned.as_str());
+    record_observation(
+        &state,
+        &command.snapshot_hash,
+        &pinned,
+        &revisions,
+        &report(Verdict::Clean),
+    )
+    .unwrap();
+    let error = record_observation(
+        &state,
+        &command.snapshot_hash,
+        &drifted,
+        &revisions,
+        &report(Verdict::Clean),
+    )
+    .unwrap_err();
+    assert!(error.contains("different environment"), "{error}");
+    // A changed shell must not lock the operator out of adjudicating or
+    // rebuilding what was already observed.
+    let rebuilt = refresh(&state, &command.snapshot_hash).unwrap();
+    assert_eq!(rebuilt["environment_hash"], pinned.as_str());
+    assert_eq!(rebuilt["observations"], 2);
+
+    let legacy = work.join("legacy-state");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(
+        legacy.join("activation.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": 1,
+            "command_snapshot_hash": command.snapshot_hash,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let adopted = record_observation(
+        &legacy,
+        &command.snapshot_hash,
+        &pinned,
+        &revisions,
+        &report(Verdict::Clean),
+    )
+    .unwrap();
+    assert_eq!(adopted.calibration["environment_hash"], pinned.as_str());
+    let activation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(legacy.join("activation.json")).unwrap()).unwrap();
+    assert_eq!(
+        activation["environment_hash"],
+        pinned.as_str(),
+        "adoption must be durable, not per-process"
+    );
+    let error = record_observation(
+        &legacy,
+        &command.snapshot_hash,
+        &drifted,
+        &revisions,
+        &report(Verdict::Clean),
+    )
+    .unwrap_err();
+    assert!(error.contains("different environment"), "{error}");
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
+fn command_env_must_be_named_string_pairs() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-differential-envspec-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let command_file = work.join("command.json");
+    for (body, expected) in [
+        (
+            r#"{"format_version":1,"program":"sh","args":[],"env":{"A=B":"x"}}"#,
+            "env names",
+        ),
+        (
+            r#"{"format_version":1,"program":"sh","args":[],"env":{"A":1}}"#,
+            "env values must be strings",
+        ),
+        (
+            r#"{"format_version":1,"program":"sh","args":[],"env":[]}"#,
+            "env must be an object",
+        ),
+    ] {
+        std::fs::write(&command_file, body).unwrap();
+        let error = load_command(&command_file).unwrap_err();
+        assert!(error.contains(expected), "{body} -> {error}");
+    }
+    std::fs::write(
+        &command_file,
+        r#"{"format_version":1,"program":"sh","args":[],"env":{"MARKER":"yes"}}"#,
+    )
+    .unwrap();
+    let command = load_command(&command_file).unwrap();
+    assert_eq!(command.env.get("MARKER").map(String::as_str), Some("yes"));
     std::fs::remove_dir_all(work).ok();
 }
 
@@ -365,6 +561,7 @@ exit 0
         &trees[0],
         &trees[1],
         &trees[2],
+        &effective_environment(&BTreeMap::new()),
     )
     .expect("the barrier command spawns in all three trees");
     assert_eq!(

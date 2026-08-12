@@ -1,14 +1,16 @@
 //! Explicit D23 runner invoked by `choir-bridge queue`.
 //!
 //! The bridge supplies three isolated worktrees. This process runs one argv
-//! specification in all three, appends the observation, and prints only a
+//! specification in all three — under an explicit environment, never this
+//! process's inherited one — appends the observation, and prints only a
 //! structured result. Interaction failures are data, not a nonzero exit.
 
 use std::path::Path;
 
 use choir_queue::differential::run_merged_vs_parents;
 use choir_queue::differential_ledger::{
-    adjudicate, load_command, record_observation, refresh, Revisions,
+    adjudicate, effective_environment, environment_hash, load_command, record_observation,
+    refresh, Revisions,
 };
 
 fn usage() -> ! {
@@ -25,12 +27,14 @@ fn run(args: &[String]) -> Result<serde_json::Value, String> {
         usage();
     };
     let command = load_command(Path::new(command_file))?;
+    let environment = effective_environment(&command.env);
     let report = run_merged_vs_parents(
         &command.program,
         &command.args,
         Path::new(parent_a_dir),
         Path::new(parent_b_dir),
         Path::new(merged_dir),
+        &environment,
     )?;
     let revisions = Revisions {
         parent_a: parent_a_oid.clone(),
@@ -40,6 +44,7 @@ fn run(args: &[String]) -> Result<serde_json::Value, String> {
     let recorded = record_observation(
         Path::new(state_dir),
         &command.snapshot_hash,
+        &environment_hash(&environment),
         &revisions,
         &report,
     )?;
