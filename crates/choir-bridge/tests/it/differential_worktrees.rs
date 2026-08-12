@@ -438,3 +438,92 @@ printf '{"format_version":1,"observation_id":%s,"merge":"%s","report":{"verdict"
     assert!(!work.join(".choir-differential").exists());
     std::fs::remove_dir_all(work).ok();
 }
+
+#[test]
+fn harvest_cli_replays_enumerated_merges_and_survives_a_failing_one() {
+    let (work, first, second) = two_merge_calibration_fixture("harvest-cli");
+
+    // Re-point the fixture's runner: fail the OLDER merge, succeed on the
+    // newer one. Harvest replays oldest-first, so a failure on the first
+    // observation proves the loop continues rather than aborting the
+    // corpus, which is exactly where it differs from calibrate.
+    let runner = work.join("runner.sh");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"#!/bin/sh
+set -eu
+mkdir -p "$3"
+if [ "$8" = "{first}" ]; then exit 3; fi
+printf '%s\n' "$8" >> "$3/observed"
+printf '{{"format_version":1,"observation_id":1,"merge":"%s","report":{{"verdict":"clean"}},"calibration":{{"target":{{"met":true}},"pending_interactions":0,"confidence_claim":null,"confidence_policy":{{"format_version":1,"method":"one_sided_exact_binomial_zero_spurious","confidence":{{"numerator":95,"denominator":100}},"target":{{"numerator":1,"denominator":1000,"comparison":"strictly_less_than"}},"minimum_evaluated_merges":2995,"requires_zero_spurious_failures":true,"assumptions":["independent_runs","representative_queue_command_and_merge_population"]}},"landing_gate_enabled":false}}}}\n' "$8"
+"#
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let state = work.join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&state)
+        .output()
+        .unwrap();
+    // One failure out of two is a partial harvest, not a failed one.
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("harvest: 1 observed, 1 failed, 2 enumerated"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("observed")).unwrap(),
+        format!("{second}\n")
+    );
+    assert!(!work.join(".choir-differential").exists());
+
+    // --limit 1 keeps only the newest merge: the failing older one is
+    // never enumerated, so the harvest is clean.
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg("--limit")
+        .arg("1")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("harvest: 1 observed, 0 failed, 1 enumerated"),
+        "{stdout}"
+    );
+
+    // Every merge failing is a failed harvest: exit 1, not a quiet 0.
+    std::fs::write(&runner, "#!/bin/sh\nexit 3\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+
+    std::fs::remove_dir_all(work).ok();
+}

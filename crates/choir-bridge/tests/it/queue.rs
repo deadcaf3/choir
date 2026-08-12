@@ -215,3 +215,63 @@ fn tempdir(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[test]
+fn merge_list_keeps_exactly_two_parent_commits_in_order() {
+    use choir_bridge::queue::parse_merge_list;
+    let log = "\
+aaa1 p1 p2
+bbb2 p1
+ccc3 p1 p2 p3
+ddd4 p4 p5
+";
+    // Ordinary commits and octopus merges are enumerated past: the
+    // differential adapter seats exactly three worktrees.
+    assert_eq!(parse_merge_list(log), vec!["aaa1", "ddd4"]);
+    assert_eq!(parse_merge_list(""), Vec::<String>::new());
+    // A root commit has no parents at all.
+    assert_eq!(parse_merge_list("eee5\n"), Vec::<String>::new());
+}
+
+#[test]
+fn harvestable_merges_walks_first_parent_history_newest_first() {
+    use choir_bridge::queue::harvestable_merges;
+    let work = tempdir("harvest-enum");
+    git(&work, &["init", "-q", "."]);
+    std::fs::write(work.join("base.txt"), "base\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-q", "-m", "base"]);
+
+    // Two ordinary two-parent merges, oldest first.
+    let mut merges = Vec::new();
+    for step in ["one", "two"] {
+        git(&work, &["checkout", "-q", "-b", &format!("topic-{step}")]);
+        std::fs::write(work.join(format!("{step}.txt")), step).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", step]);
+        git(&work, &["checkout", "-q", "main"]);
+        git(
+            &work,
+            &["merge", "-q", "--no-ff", &format!("topic-{step}"), "-m", &format!("merge {step}")],
+        );
+        merges.push(rev(&work, "HEAD"));
+    }
+
+    // One octopus merge on top: enumerated past, not failed on.
+    for step in ["oct-a", "oct-b"] {
+        git(&work, &["checkout", "-q", "-b", step, "main~2"]);
+        std::fs::write(work.join(format!("{step}.txt")), step).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", step]);
+    }
+    git(&work, &["checkout", "-q", "main"]);
+    git(&work, &["merge", "-q", "oct-a", "oct-b", "-m", "octopus"]);
+    let octopus = rev(&work, "HEAD");
+
+    let all = harvestable_merges(&work, 0).unwrap();
+    assert_eq!(all, vec![merges[1].clone(), merges[0].clone()]);
+    assert!(!all.contains(&octopus));
+    // limit keeps the most recent merges.
+    assert_eq!(harvestable_merges(&work, 1).unwrap(), vec![merges[1].clone()]);
+    std::fs::remove_dir_all(work).ok();
+}

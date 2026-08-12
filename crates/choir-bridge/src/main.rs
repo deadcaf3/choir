@@ -690,6 +690,102 @@ fn main() {
         }
         return;
     }
+    // `choir-bridge harvest [--fresh-worktrees] [--limit <n>] <repo> <runner> <command-file> <state-dir>`
+    // D27: calibrate without the hand-picked merge list — enumerate every
+    // two-parent merge on the first-parent mainline and replay each one
+    // through the same advisory adapter. Unlike calibrate, a per-merge
+    // failure is reported and the loop continues: a foreign history is
+    // expected to hold revisions that no longer build, and one of them
+    // must not cost the rest of the corpus.
+    if args.first().map(String::as_str) == Some("harvest") {
+        const HARVEST_USAGE: &str =
+            "usage: choir-bridge harvest [--fresh-worktrees] [--limit <n>] <repo> <runner> <command-file> <state-dir>";
+        let mut fresh_worktrees = false;
+        let mut limit = 0usize;
+        let mut positional: Vec<&String> = Vec::new();
+        let mut rest = args[1..].iter();
+        while let Some(arg) = rest.next() {
+            if arg == "--fresh-worktrees" {
+                fresh_worktrees = true;
+            } else if arg == "--limit" {
+                let value = rest.next().unwrap_or_else(|| {
+                    eprintln!("{HARVEST_USAGE}");
+                    std::process::exit(2);
+                });
+                limit = value.parse().unwrap_or_else(|_| {
+                    eprintln!("--limit must be a non-negative integer; 0 means all");
+                    std::process::exit(2);
+                });
+            } else {
+                positional.push(arg);
+            }
+        }
+        let [repo, runner, command_file, state_dir] = positional.as_slice() else {
+            eprintln!("{HARVEST_USAGE}");
+            std::process::exit(2);
+        };
+        let repo = Path::new(repo.as_str());
+        let merges = choir_bridge::queue::harvestable_merges(repo, limit).unwrap_or_else(|error| {
+            eprintln!("harvest: {error}");
+            std::process::exit(1);
+        });
+        if merges.is_empty() {
+            println!("harvest: no two-parent merges in first-parent history");
+            return;
+        }
+        let total = merges.len();
+        let mut session =
+            (!fresh_worktrees).then(|| choir_bridge::queue::DifferentialSession::open(repo));
+        let mut observed = 0usize;
+        let mut failed = 0usize;
+        // Oldest first: along a first-parent corpus the next merge's parent a
+        // is often the previous observation's merge, so a held session's
+        // parent-a checkout is a no-op (see DifferentialSession).
+        for (index, merge) in merges.iter().rev().enumerate() {
+            let number = index + 1;
+            let result = match session.as_mut() {
+                Some(session) => choir_bridge::queue::run_differential_in(
+                    session,
+                    merge.as_str(),
+                    Path::new(runner.as_str()),
+                    Path::new(command_file.as_str()),
+                    Path::new(state_dir.as_str()),
+                ),
+                None => choir_bridge::queue::run_differential(
+                    repo,
+                    merge.as_str(),
+                    Path::new(runner.as_str()),
+                    Path::new(command_file.as_str()),
+                    Path::new(state_dir.as_str()),
+                ),
+            };
+            match result {
+                Ok(outcome) => {
+                    observed += 1;
+                    println!(
+                        "harvest: {number}/{total}: {merge}: {:?} (observation {}, pending {})",
+                        outcome.verdict, outcome.observation_id, outcome.pending_interactions
+                    );
+                }
+                Err(error) => {
+                    failed += 1;
+                    eprintln!("harvest: {number}/{total}: {merge}: failed: {error}");
+                }
+            }
+        }
+        let cleanup = session.map_or(Ok(()), choir_bridge::queue::DifferentialSession::close);
+        println!("harvest: {observed} observed, {failed} failed, {total} enumerated");
+        if let Err(error) = cleanup {
+            eprintln!("harvest cleanup failed: {error}");
+            std::process::exit(1);
+        }
+        // Nothing observed out of a non-empty corpus is a failed harvest,
+        // not a quiet one.
+        if observed == 0 {
+            std::process::exit(1);
+        }
+        return;
+    }
     // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]`
     // Queue-as-bot: speculative-train rounds. Verdict-only by default;
     // --land fast-forwards the default branch on a green train (and

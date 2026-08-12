@@ -516,6 +516,49 @@ pub fn run_train_differentials(
         .collect()
 }
 
+/// Two-parent merge commits along `repo`'s first-parent history, newest
+/// first: the population `choir-bridge harvest` replays (D27).
+///
+/// Exactly two parents because the differential adapter seats exactly
+/// three worktrees — parent a, parent b, merged — so an octopus merge has
+/// no seat for its third parent and is enumerated past rather than failed
+/// on. First-parent order for the same reason it is load-bearing in
+/// choir-queue's corpus module: it lists the merges that landed on this
+/// branch and skips commits internal to the branches they merged, which
+/// is the population D23 cares about.
+///
+/// `limit` keeps only the most recent `limit` merges; 0 keeps them all.
+/// Replay order is the caller's: oldest-first pays best with a held
+/// [`DifferentialSession`], whose docs explain why.
+///
+/// # Errors
+///
+/// Git failing to spawn or exiting nonzero.
+pub fn harvestable_merges(repo: &Path, limit: usize) -> Result<Vec<String>, String> {
+    let log = git(repo, &["log", "--first-parent", "--merges", "--format=%H %P"])?;
+    let mut merges = parse_merge_list(&log);
+    if limit > 0 {
+        merges.truncate(limit);
+    }
+    Ok(merges)
+}
+
+/// Parses `git log --format="%H %P"` output into the ids of commits with
+/// exactly two parents, preserving order.
+///
+/// Pure, so the format contract is testable without a repository — the
+/// same parse/shell-out split choir-queue's corpus module uses.
+#[must_use]
+pub fn parse_merge_list(log: &str) -> Vec<String> {
+    log.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let id = fields.next()?;
+            (fields.count() == 2).then(|| id.to_string())
+        })
+        .collect()
+}
+
 /// Lands a green train: pushes `tip` to `branch` on the remote at
 /// `url` WITHOUT force, so git's fast-forward rule is the race guard —
 /// if the branch moved since the train was built, the push is rejected
