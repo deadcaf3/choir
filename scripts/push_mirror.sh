@@ -14,6 +14,18 @@ IP=${1:-$(cat ~/.choir-mirror-ip)}
 KEY=~/.ssh/choir_bench_ed25519
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Direction guard, added with the D20 host move. This script's whole
+# topology is "the node lives here, the VM holds the backup". Run after
+# the move, its oplog leg would overwrite the historical backup with
+# this machine's frozen pre-flip log — a stale copy that still checksums
+# clean. The follower is fed on-box now (choirctl mirror), and the
+# backup direction is pull_backup.sh.
+if [ -f "$HOME/.choir/node-remote" ]; then
+  echo "mirror: ~/.choir/node-remote exists — this machine no longer hosts the node." >&2
+  echo "        use: sh scripts/choirctl sync   (follower + backup, new topology)" >&2
+  exit 1
+fi
+
 # This script talks to the VM twice, and a fresh handshake to us-east1
 # measured 3.78s of which only 0.28s is the 275ms RTT: the rest is KEX
 # plus auth latency. Multiplexing the second trip onto the first makes

@@ -644,3 +644,95 @@ fn the_oplog_backup_carries_the_log_and_the_pin_but_never_the_key() {
         String::from_utf8_lossy(&syntax.stderr)
     );
 }
+
+/// After the D20 host move the backup direction inverts: the node host
+/// holds the live log and this machine pulls the offsite copy. Same
+/// non-negotiables as the push direction, pinned the same way: the log,
+/// the pin, and the policy travel; the signing key and the token never
+/// do; and every copy is verified rather than hoped.
+#[test]
+fn the_pulled_backup_carries_the_log_and_the_pin_but_never_the_key() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/pull_backup.sh"))
+        .expect("scripts/pull_backup.sh");
+    let code: String = script
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        code.contains("ops.jsonl") && code.contains("node.fingerprint"),
+        "the pull must carry the log and its pin, or a restore appends under a new identity"
+    );
+    assert!(
+        !code.contains("node.key"),
+        "the pulled backup must never carry node.key off the node that owns it"
+    );
+    assert!(
+        code.contains("OP LOG BACKUP MISMATCH"),
+        "the pull stopped comparing checksums; a truncated copy now looks like a good one"
+    );
+    assert!(
+        code.contains("ops.jsonl.part") && code.contains("mv "),
+        "the pull stopped writing .part then renaming; an interrupted run truncates the backup"
+    );
+    // Append-only is the backup's integrity model: each pull must extend
+    // the previous one, never rewrite it.
+    assert!(
+        code.contains("cmp") && code.contains("prefix"),
+        "the pull stopped checking the previous copy is a prefix of the new one"
+    );
+    assert!(
+        code.contains("seq gap"),
+        "the pull must localise a gap; a whole-file checksum cannot"
+    );
+    // Pull by explicit name, never by directory: a directory inherits
+    // whatever lands in it, including a key copied there by accident.
+    let list = code
+        .lines()
+        .find(|l| l.contains("for f in") && l.contains("reviewers"))
+        .expect("the policy-file pull list");
+    for needed in ["keys", "reviewers", "protected-refs", "newcomer-audit.jsonl"] {
+        assert!(
+            list.contains(needed),
+            "the policy pull dropped {needed}; a restore stops booting again"
+        );
+    }
+    for forbidden in ["auth", ".pem", ".key"] {
+        assert!(
+            !list.contains(forbidden),
+            "the policy pull list names {forbidden}; secrets must not travel with it"
+        );
+    }
+    // Direction guard: run where the live log lives, a pull would
+    // overwrite the real backup relation with a vacuous self-copy.
+    assert!(
+        code.contains("node-remote"),
+        "the pull lost its direction guard; run on the node host it clobbers the backup"
+    );
+
+    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl");
+    assert!(
+        driver.contains("pull-backup)") && driver.contains("pull_backup.sh"),
+        "choirctl must expose pull-backup, or nothing ever runs it"
+    );
+    // And the old direction must refuse to run after the move: its oplog
+    // leg would overwrite the historical backup with a frozen stale log.
+    let push = std::fs::read_to_string(repo_root().join("scripts/push_mirror.sh"))
+        .expect("scripts/push_mirror.sh");
+    assert!(
+        push.contains("node-remote"),
+        "push_mirror.sh lost its direction guard; run after the host move it clobbers the backup"
+    );
+
+    let syntax = std::process::Command::new("sh")
+        .arg("-n")
+        .arg(repo_root().join("scripts/pull_backup.sh"))
+        .output()
+        .expect("run sh -n");
+    assert!(
+        syntax.status.success(),
+        "pull_backup.sh is not valid sh: {}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
+}

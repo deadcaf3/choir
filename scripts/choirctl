@@ -14,6 +14,37 @@ PORT=${CHOIR_PORT:-8417}
 auth_user() { head -1 "$STATE/auth" | cut -d: -f1; }
 auth_pass() { head -1 "$STATE/auth" | cut -d: -f2-; }
 
+# After the D20 host move the canonical node lives on the mirror VM and
+# every 127.0.0.1:$PORT below reaches it through an SSH -L forward. The
+# marker is what says which world this machine is in; the scripts that
+# only make sense in one of them check it and refuse in the other.
+remote_node() { [ -f "$STATE/node-remote" ]; }
+
+# Idempotent: -O check asks the existing master, and only a missing one
+# opens a new forward. ControlPersist outlives the command so the next
+# one is instant, same reasoning as the mirror scripts' socket.
+tunnel_up() {
+  local ip ctl key
+  ip=$(cat "$HOME/.choir-mirror-ip")
+  key=$HOME/.ssh/choir_bench_ed25519
+  ctl=$HOME/.ssh/cm-choir-tunnel.sock
+  if ! ssh -o ControlPath="$ctl" -O check "choir@$ip" 2>/dev/null; then
+    ssh -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
+        -o ControlMaster=auto -o ControlPath="$ctl" -o ControlPersist=600 \
+        -f -N -L "$PORT:127.0.0.1:$PORT" "choir@$ip"
+  fi
+}
+
+# One ssh for the remote-node cases below, same options as the tunnel.
+node_ssh() {
+  local ip
+  ip=$(cat "$HOME/.choir-mirror-ip")
+  ssh -i "$HOME/.ssh/choir_bench_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o ConnectTimeout=10 -o ControlMaster=auto \
+      -o ControlPath="$HOME/.ssh/cm-choir-mirror.sock" -o ControlPersist=600 \
+      "choir@$ip" "$@"
+}
+
 # The mirror leg runs detached, so its result has to be written down and
 # then actually read somewhere an operator looks. A receipt nobody reads
 # is the same as no receipt: before this, a mirror push could fail and
@@ -42,11 +73,19 @@ case "${1:-}" in
 
 install)
   # Build, mint secrets, load the supervised LaunchAgent. Idempotent.
+  if remote_node; then
+    echo "the node lives on the VM now (~/.choir/node-remote); install there:" >&2
+    echo "  ssh in, then: sh ~/choir-build/scripts/flip/install_node_linux.sh $PORT <repo> ~/bin" >&2
+    exit 1
+  fi
   sh "$HERE/flip/install_node.sh" "$PORT" "${2:-choir/choir.git}"
   ;;
 
 status)
-  if launchctl print "gui/$(id -u)/$LABEL" > /dev/null 2>&1; then
+  if remote_node; then
+    tunnel_up
+    echo "agent:  remote ($(node_ssh 'systemctl --user is-active choir-node.service') on the node host, via tunnel)"
+  elif launchctl print "gui/$(id -u)/$LABEL" > /dev/null 2>&1; then
     echo "agent:  loaded ($LABEL)"
   else
     echo "agent:  not loaded — run: sh scripts/choirctl install"
@@ -58,7 +97,11 @@ status)
   # restart cleanly, and still run the old binary. An API-shaped check
   # cannot catch that when both binaries have the feature you are testing
   # for; only the path can. Reloading properly is bootout then bootstrap.
-  echo "binary: $(ps -eo args | grep "[c]hoir-node" | head -1 | awk '{print $1}')"
+  if remote_node; then
+    echo "binary: $(node_ssh 'ps -eo args | grep "[c]hoir-node" | head -1' | awk '{print $1}') (on the node host)"
+  else
+    echo "binary: $(ps -eo args | grep "[c]hoir-node" | head -1 | awk '{print $1}')"
+  fi
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/view" || true)
   echo "auth:   $code on an unauthenticated /api/view (401 = auth is on)"
   view=$(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")
@@ -97,19 +140,32 @@ if lag["log_write_failures"]:
     print("lag:    lag log unwritable (%s)" % lag["log_error"])
 ' 2>/dev/null || echo "lag:    unreadable"
   echo "view:   $view"
-  mirror_line
-  # Outcome is not currency: a run can succeed and still leave the mirror
-  # a commit behind if it was started before the last commit landed.
-  if [ -f "$RECEIPT" ]; then
-    mirrored=$(awk 'NR==1{print $3}' "$RECEIPT")
-    head=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
-    [ "$mirrored" = "$head" ] || echo "mirror: BEHIND — mirrored $mirrored, HEAD is $head"
+  if remote_node; then
+    # The backup relation is inverted: this machine holds the pull.
+    if [ -f "$HOME/choir-oplog/ops.jsonl" ]; then
+      echo "backup: $(wc -l < "$HOME/choir-oplog/ops.jsonl" | tr -d ' ') ops pulled, last $(date -r "$HOME/choir-oplog/ops.jsonl" '+%F %H:%M')"
+    else
+      echo "backup: NEVER PULLED — run: sh scripts/choirctl pull-backup"
+    fi
+  else
+    mirror_line
+    # Outcome is not currency: a run can succeed and still leave the mirror
+    # a commit behind if it was started before the last commit landed.
+    if [ -f "$RECEIPT" ]; then
+      mirrored=$(awk 'NR==1{print $3}' "$RECEIPT")
+      head=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
+      [ "$mirrored" = "$head" ] || echo "mirror: BEHIND — mirrored $mirrored, HEAD is $head"
+    fi
   fi
   ;;
 
 stop)
   # Unloads for this boot only: the plist stays in LaunchAgents, so
   # launchd starts it again at next login. Use uninstall to end it.
+  if remote_node; then
+    echo "the node lives on the VM now; stop it there: systemctl --user stop choir-node" >&2
+    exit 1
+  fi
   launchctl bootout "gui/$(id -u)/$LABEL"
   echo "stopped $LABEL — but it returns at next login"
   echo "to end it for good: sh scripts/choirctl uninstall"
@@ -118,6 +174,10 @@ stop)
 uninstall)
   # Stop it and remove the plist, so it does not come back. Data is
   # deliberately kept: $STATE holds the keys, the repos, and the op log.
+  if remote_node; then
+    echo "the node lives on the VM now; nothing to uninstall here" >&2
+    exit 1
+  fi
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
   echo "uninstalled $LABEL (agent unloaded, plist removed)"
@@ -127,15 +187,32 @@ uninstall)
 
 push)
   # Local repo -> the choir node, as the canonical remote (--all + --tags).
+  remote_node && tunnel_up
   sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
   ;;
 
 mirror)
   # Repo -> the private Forgejo follower on the mirror VM.
+  if remote_node; then
+    # The follower is fed from the node's own repo, on-box, so it can
+    # never hold a commit the canonical node has not sequenced (D21).
+    node_ssh 'git --git-dir "$HOME/.choir/repos/choir/choir.git" push -q forgejo "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*" && echo "follower updated"'
+    exit 0
+  fi
   sh "$HERE/push_mirror.sh"
   ;;
 
 sync)
+  if remote_node; then
+    # Same D21 order, new topology: canonical first (through the
+    # tunnel), follower second (on-box, node repo -> Forgejo), then the
+    # offsite copy of the log — which is now this machine, pulling.
+    tunnel_up
+    sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
+    node_ssh 'git --git-dir "$HOME/.choir/repos/choir/choir.git" push -q forgejo "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*" && echo "follower updated"'
+    sh "$HERE/pull_backup.sh"
+    exit 0
+  fi
   # The post-flip order, in one command: canonical first, follower
   # second. `set -e` stops here if the canonical push fails, so the
   # mirror can never get ahead of the node (D21 single-canonical).
@@ -161,12 +238,24 @@ verify-backup)
   sh "$HERE/verify_backup.sh" "${2:-}"
   ;;
 
+pull-backup)
+  # Node host -> this machine: the offsite copy of the live log, after
+  # the host move. Self-verifying (checksum, prefix, seq contiguity).
+  sh "$HERE/pull_backup.sh" "${2:-}"
+  ;;
+
 logs)
+  if remote_node; then
+    node_ssh "tail -n ${2:-30} '.choir/node.log'"
+    exit 0
+  fi
   tail -n "${2:-30}" "$STATE/node.log"
   ;;
 
 url)
-  # Clone/push URL with credentials, for pasting into git or curl.
+  # Clone/push URL with credentials, for pasting into git or curl. In
+  # remote mode 127.0.0.1 is the tunnel, so the URL is unchanged.
+  remote_node && tunnel_up
   echo "http://$(auth_user):$(auth_pass)@127.0.0.1:$PORT/${2:-choir/choir.git}"
   ;;
 

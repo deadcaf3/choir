@@ -180,6 +180,57 @@ author at that point.
 Restoring refs is separate and unchanged: the Forgejo mirror holds every
 ref, and the daily bundle holds a copy.
 
+## Host move: the canonical node leaves the laptop
+
+The D20 follow-on, rehearsed on the VM before it was done for real. The
+node moves to the mirror VM (built there by hand: rustup + a temporary
+swapfile — the host has under a gigabyte of RAM); the laptop becomes a
+client over an SSH tunnel, and the backup direction inverts: the laptop
+pulls (`choirctl pull-backup`), because a live log and its only copy on
+one disk is not a backup.
+
+**Order matters, and the rehearsal is why.** A node booting over a
+restored log with an empty git repo does not wait: `reconcile_refs`
+appends a compensating retraction for every ref whose commit git does
+not hold ("the log named a commit this repo does not have"). Rehearsed:
+an unprotected ref was retracted from the log copy on first boot. So the
+repo is seeded before the node ever sees the restored log:
+
+1. On the laptop: `git --git-dir ~/.choir/repos/choir/choir.git bundle
+   create node-repo.bundle --all`, ship it to the VM. Stop the laptop
+   node (`choirctl uninstall` — `stop` alone returns at next login).
+2. On the VM: restore policy files from the backup into `~/.choir`
+   (keys, reviewers, protected-refs, both newcomer files, the
+   `review-gates.enabled` marker), **not** the log yet, **never**
+   `auth`/`*.key`/`*.pem`. Run `scripts/flip/install_node_linux.sh` —
+   first boot creates the repo and the pre-receive hook over an empty
+   log and pins a fresh key.
+3. Stop the unit. Seed the bare repo: `git --git-dir
+   ~/.choir/repos/choir/choir.git fetch <bundle>
+   '+refs/heads/*:refs/heads/*'` (fetch writes refs directly and runs no
+   hooks). Copy the final `ops.jsonl` into `~/.choir/repos/.choir/`,
+   keeping the fingerprint the first boot pinned. Start the unit;
+   reconcile must be silent.
+4. On the laptop: create `~/.choir/node-remote`. From then on `choirctl
+   status|push|sync|url` tunnel automatically, `install|stop|uninstall`
+   refuse, `push_mirror.sh` refuses (its oplog leg would clobber the
+   historical backup), and `sync` = canonical push through the tunnel,
+   follower fed on-box (node repo -> Forgejo, never ahead), then
+   `pull_backup.sh`.
+
+**The identity changes at the move, on purpose.** The signing key never
+travels (same rule as every backup), so the moved node mints and pins a
+fresh key and the log changes author at that seq. The old identity's pin
+travels with the historical backup; the refusal it would produce on any
+other host is the intended behaviour, and PHASE0 records the seq where
+the seam sits. Old ops replay fine: replay is a pure fold, policy runs
+at admission only.
+
+The rehearsal also proved the moved node re-registers its own fresh key
+(a push under the new identity was sequenced) and that the review gate
+survives the restore (an unreviewed push to protected `main` was still
+refused).
+
 ## Still open
 
 - This dogfood installation has no TLS, so its bind stays loopback
