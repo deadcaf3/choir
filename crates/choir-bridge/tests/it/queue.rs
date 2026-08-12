@@ -234,6 +234,25 @@ ddd4 p4 p5
 }
 
 #[test]
+fn observed_merges_come_from_ledger_rows_and_tolerate_junk() {
+    use choir_bridge::queue::parse_observed_merges;
+    let text = "\
+{\"format_version\":1,\"revisions\":{\"merged\":\"aaa1\"}}
+not json at all
+{\"format_version\":1,\"revisions\":{\"parent_a\":\"bbb2\"}}
+{\"format_version\":1,\"revisions\":{\"merged\":\"aaa1\"}}
+{\"format_version\":1,\"revisions\":{\"merged\":\"ccc3\"}}
+";
+    let observed = parse_observed_merges(text);
+    // Junk rows are skipped, duplicates collapse, parent oids don't count.
+    assert_eq!(
+        observed.into_iter().collect::<Vec<_>>(),
+        vec!["aaa1".to_string(), "ccc3".to_string()]
+    );
+    assert!(parse_observed_merges("").is_empty());
+}
+
+#[test]
 fn harvestable_merges_walks_first_parent_history_newest_first() {
     use choir_bridge::queue::harvestable_merges;
     let work = tempdir("harvest-enum");

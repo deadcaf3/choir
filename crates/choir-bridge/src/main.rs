@@ -696,7 +696,10 @@ fn main() {
     // through the same advisory adapter. Unlike calibrate, a per-merge
     // failure is reported and the loop continues: a foreign history is
     // expected to hold revisions that no longer build, and one of them
-    // must not cost the rest of the corpus.
+    // must not cost the rest of the corpus. Merges already in the state
+    // directory's ledger are skipped (incremental re-runs), and a first
+    // interaction_failure verdict triggers reproduction runs that are
+    // packaged as a specimen under <state-dir>/specimens/.
     if args.first().map(String::as_str) == Some("harvest") {
         const HARVEST_USAGE: &str =
             "usage: choir-bridge harvest [--fresh-worktrees] [--limit <n>] <repo> <runner> <command-file> <state-dir>";
@@ -734,38 +737,70 @@ fn main() {
             return;
         }
         let total = merges.len();
+        let state = Path::new(state_dir.as_str());
+        // Incremental: a merge whose oid is already a `revisions.merged`
+        // in this state directory's ledger was harvested by an earlier
+        // run; replay only the rest.
+        let known = choir_bridge::queue::observed_merges(state);
         let mut session =
             (!fresh_worktrees).then(|| choir_bridge::queue::DifferentialSession::open(repo));
+        let run_once = |session: &mut Option<choir_bridge::queue::DifferentialSession>,
+                            merge: &str| match session.as_mut() {
+            Some(session) => choir_bridge::queue::run_differential_in(
+                session,
+                merge,
+                Path::new(runner.as_str()),
+                Path::new(command_file.as_str()),
+                state,
+            ),
+            None => choir_bridge::queue::run_differential(
+                repo,
+                merge,
+                Path::new(runner.as_str()),
+                Path::new(command_file.as_str()),
+                state,
+            ),
+        };
         let mut observed = 0usize;
         let mut failed = 0usize;
+        let mut skipped = 0usize;
         // Oldest first: along a first-parent corpus the next merge's parent a
         // is often the previous observation's merge, so a held session's
         // parent-a checkout is a no-op (see DifferentialSession).
         for (index, merge) in merges.iter().rev().enumerate() {
             let number = index + 1;
-            let result = match session.as_mut() {
-                Some(session) => choir_bridge::queue::run_differential_in(
-                    session,
-                    merge.as_str(),
-                    Path::new(runner.as_str()),
-                    Path::new(command_file.as_str()),
-                    Path::new(state_dir.as_str()),
-                ),
-                None => choir_bridge::queue::run_differential(
-                    repo,
-                    merge.as_str(),
-                    Path::new(runner.as_str()),
-                    Path::new(command_file.as_str()),
-                    Path::new(state_dir.as_str()),
-                ),
-            };
-            match result {
+            if known.contains(merge) {
+                skipped += 1;
+                continue;
+            }
+            match run_once(&mut session, merge.as_str()) {
                 Ok(outcome) => {
                     observed += 1;
                     println!(
                         "harvest: {number}/{total}: {merge}: {:?} (observation {}, pending {})",
                         outcome.verdict, outcome.observation_id, outcome.pending_interactions
                     );
+                    // A first interaction_failure verdict earns reproduction
+                    // runs on the spot, while the worktrees are still warm:
+                    // the specimen records how often it reproduced, which is
+                    // what separates a semantic conflict from a flake.
+                    if outcome.verdict == choir_bridge::queue::DifferentialVerdict::InteractionFailure
+                    {
+                        let mut runs = vec![Ok(outcome)];
+                        for _ in 0..choir_bridge::queue::SPECIMEN_REPRODUCTION_RUNS {
+                            runs.push(run_once(&mut session, merge.as_str()));
+                        }
+                        match choir_bridge::queue::write_specimen(repo, merge, &runs, state) {
+                            Ok(path) => println!(
+                                "harvest: specimen recorded at {} ({} runs)",
+                                path.display(),
+                                runs.len()
+                            ),
+                            Err(error) => {
+                                eprintln!("harvest: specimen for {merge} not recorded: {error}");
+                            }
+                        }
+                    }
                 }
                 Err(error) => {
                     failed += 1;
@@ -774,14 +809,15 @@ fn main() {
             }
         }
         let cleanup = session.map_or(Ok(()), choir_bridge::queue::DifferentialSession::close);
-        println!("harvest: {observed} observed, {failed} failed, {total} enumerated");
+        println!("harvest: {observed} observed, {failed} failed, {skipped} skipped, {total} enumerated");
         if let Err(error) = cleanup {
             eprintln!("harvest cleanup failed: {error}");
             std::process::exit(1);
         }
         // Nothing observed out of a non-empty corpus is a failed harvest,
-        // not a quiet one.
-        if observed == 0 {
+        // not a quiet one — unless every merge was already in the ledger,
+        // which is the incremental steady state.
+        if observed == 0 && skipped == 0 {
             std::process::exit(1);
         }
         return;

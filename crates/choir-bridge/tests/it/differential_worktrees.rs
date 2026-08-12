@@ -480,7 +480,7 @@ printf '{{"format_version":1,"observation_id":1,"merge":"%s","report":{{"verdict
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("harvest: 1 observed, 1 failed, 2 enumerated"),
+        stdout.contains("harvest: 1 observed, 1 failed, 0 skipped, 2 enumerated"),
         "{stdout}"
     );
     assert_eq!(
@@ -504,7 +504,7 @@ printf '{{"format_version":1,"observation_id":1,"merge":"%s","report":{{"verdict
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("harvest: 1 observed, 0 failed, 1 enumerated"),
+        stdout.contains("harvest: 1 observed, 0 failed, 0 skipped, 1 enumerated"),
         "{stdout}"
     );
 
@@ -524,6 +524,132 @@ printf '{{"format_version":1,"observation_id":1,"merge":"%s","report":{{"verdict
         .output()
         .unwrap();
     assert!(!output.status.success(), "{output:?}");
+
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
+fn harvest_skips_merges_already_in_the_ledger() {
+    let (work, first, second) = two_merge_calibration_fixture("harvest-skip");
+
+    // This stub keeps an observation ledger the way the real runner does:
+    // one row per run whose `revisions.merged` is the merge it was handed.
+    // That ledger is exactly what an incremental re-run consults.
+    let runner = work.join("runner.sh");
+    std::fs::write(
+        &runner,
+        r#"#!/bin/sh
+set -eu
+mkdir -p "$3"
+printf '{"format_version":1,"observation_id":1,"revisions":{"merged":"%s"}}\n' "$8" >> "$3/observations.jsonl"
+printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":"clean"},"calibration":{"target":{"met":true},"pending_interactions":0,"confidence_claim":null,"confidence_policy":{"format_version":1,"method":"one_sided_exact_binomial_zero_spurious","confidence":{"numerator":95,"denominator":100},"target":{"numerator":1,"denominator":1000,"comparison":"strictly_less_than"},"minimum_evaluated_merges":2995,"requires_zero_spurious_failures":true,"assumptions":["independent_runs","representative_queue_command_and_merge_population"]},"landing_gate_enabled":false}}\n' "$8"
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let state = work.join("state");
+    let harvest = || {
+        Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+            .arg("harvest")
+            .arg(&work)
+            .arg(&runner)
+            .arg(work.join("command.json"))
+            .arg(&state)
+            .output()
+            .unwrap()
+    };
+
+    let output = harvest();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("harvest: 2 observed, 0 failed, 0 skipped, 2 enumerated"),
+        "{stdout}"
+    );
+
+    // Re-running against the same ledger replays nothing, and an
+    // everything-skipped harvest is the incremental steady state: exit 0.
+    let output = harvest();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("harvest: 0 observed, 0 failed, 2 skipped, 2 enumerated"),
+        "{stdout}"
+    );
+    let ledger = std::fs::read_to_string(state.join("observations.jsonl")).unwrap();
+    assert_eq!(ledger.lines().count(), 2, "the re-run must not extend the ledger");
+    assert!(ledger.contains(&first) && ledger.contains(&second));
+
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
+fn harvest_reproduces_an_interaction_failure_into_a_specimen() {
+    let (work, first, second) = two_merge_calibration_fixture("harvest-specimen");
+
+    // The OLDER merge reports interaction_failure on every run; the newer
+    // one is clean. The harvest must rerun the flagged merge and package
+    // the reproduction counts as a specimen, and must not do so for the
+    // clean one.
+    let runner = work.join("runner.sh");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"#!/bin/sh
+set -eu
+mkdir -p "$3"
+printf '%s\n' "$8" >> "$3/runs"
+verdict=clean
+if [ "$8" = "{first}" ]; then verdict=interaction_failure; fi
+printf '{{"format_version":1,"observation_id":4,"merge":"%s","report":{{"verdict":"%s"}},"calibration":{{"target":{{"met":null}},"pending_interactions":1,"confidence_claim":null,"confidence_policy":{{"format_version":1,"method":"one_sided_exact_binomial_zero_spurious","confidence":{{"numerator":95,"denominator":100}},"target":{{"numerator":1,"denominator":1000,"comparison":"strictly_less_than"}},"minimum_evaluated_merges":2995,"requires_zero_spurious_failures":true,"assumptions":["independent_runs","representative_queue_command_and_merge_population"]}},"landing_gate_enabled":false}}}}\n' "$8" "$verdict"
+"#
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let state = work.join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
+        .arg("harvest")
+        .arg(&work)
+        .arg(&runner)
+        .arg(work.join("command.json"))
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("harvest: 2 observed, 0 failed, 0 skipped, 2 enumerated"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("specimen recorded"), "{stdout}");
+
+    // 1 first run + 5 reproductions for the flagged merge, 1 for the clean one.
+    let runs = std::fs::read_to_string(state.join("runs")).unwrap();
+    assert_eq!(runs.lines().filter(|line| *line == first).count(), 6);
+    assert_eq!(runs.lines().filter(|line| *line == second).count(), 1);
+
+    let specimen: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state.join("specimens").join(format!("{first}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(specimen["format_version"].as_u64(), Some(1));
+    assert_eq!(specimen["merge"].as_str(), Some(first.as_str()));
+    assert_eq!(specimen["runs"].as_u64(), Some(6));
+    assert_eq!(specimen["interaction_failures"].as_u64(), Some(6));
+    assert_eq!(specimen["run_errors"].as_u64(), Some(0));
+    // The clean merge earned no specimen.
+    assert!(!state.join("specimens").join(format!("{second}.json")).exists());
 
     std::fs::remove_dir_all(work).ok();
 }

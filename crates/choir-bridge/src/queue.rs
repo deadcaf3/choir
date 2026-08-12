@@ -559,6 +559,98 @@ pub fn parse_merge_list(log: &str) -> Vec<String> {
         .collect()
 }
 
+/// Merge commits already recorded in `state_dir`'s observation ledger,
+/// keyed by the ledger row's `revisions.merged` oid.
+///
+/// This is what makes `choir-bridge harvest` incremental (D27): a re-run
+/// against an updated mirror consults the ledger it is about to extend and
+/// replays only the merges it has never seen. A missing or unreadable
+/// ledger is an empty set — the first harvest into a fresh state directory
+/// must not fail on its own absence — and a malformed row is skipped
+/// rather than trusted, so it can never suppress a replay.
+#[must_use]
+pub fn observed_merges(state_dir: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_to_string(state_dir.join("observations.jsonl"))
+        .map(|text| parse_observed_merges(&text))
+        .unwrap_or_default()
+}
+
+/// Parses observation-ledger lines into the set of merged-revision oids.
+///
+/// Pure, so the ledger-row contract is testable without a state directory.
+#[must_use]
+pub fn parse_observed_merges(text: &str) -> std::collections::BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|row| row["revisions"]["merged"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Reproduction runs a harvest adds after a first `interaction_failure`
+/// verdict, so a specimen records six runs in total — the bar specimen #1
+/// (rust-lang/log `11eda98d`, reproduced 6/6) set for calling a flag a
+/// semantic conflict rather than a flake.
+pub const SPECIMEN_REPRODUCTION_RUNS: usize = 5;
+
+/// Packages a flagged merge and its reproduction runs as a corpus
+/// specimen under `state_dir/specimens/<merge>.json` (D27).
+///
+/// The specimen is metadata, not evidence: the observation rows it points
+/// at (by id) stay in the ledger, and the JSON records how often the
+/// interaction failure reproduced so a reader can tell a 6/6 conflict
+/// from a 1/6 flake without replaying anything. Nothing is published;
+/// the file lives in the operator's state directory.
+///
+/// # Errors
+///
+/// The merge cannot be resolved to two parents, or the specimen file
+/// cannot be written.
+pub fn write_specimen(
+    repo: &Path,
+    merge: &str,
+    outcomes: &[Result<DifferentialOutcome, String>],
+    state_dir: &Path,
+) -> Result<PathBuf, String> {
+    let (parent_a, parent_b, merged_revision) = resolve_merge_revisions(repo, merge)?;
+    let mut interaction_failures = 0u64;
+    let mut clean = 0u64;
+    let mut inconclusive = 0u64;
+    let mut errors = 0u64;
+    let mut observation_ids = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(outcome) => {
+                observation_ids.push(outcome.observation_id);
+                match outcome.verdict {
+                    DifferentialVerdict::Clean => clean += 1,
+                    DifferentialVerdict::InteractionFailure => interaction_failures += 1,
+                    DifferentialVerdict::InconclusiveParentFailure => inconclusive += 1,
+                }
+            }
+            Err(_) => errors += 1,
+        }
+    }
+    let specimen = serde_json::json!({
+        "format_version": 1,
+        "merge": merged_revision,
+        "parent_a": parent_a,
+        "parent_b": parent_b,
+        "runs": outcomes.len(),
+        "interaction_failures": interaction_failures,
+        "clean": clean,
+        "inconclusive_parent_failures": inconclusive,
+        "run_errors": errors,
+        "observation_ids": observation_ids,
+    });
+    let dir = state_dir.join("specimens");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create specimens dir: {error}"))?;
+    let path = dir.join(format!("{merged_revision}.json"));
+    let body = serde_json::to_vec_pretty(&specimen)
+        .map_err(|error| format!("serialize specimen: {error}"))?;
+    std::fs::write(&path, body).map_err(|error| format!("write specimen: {error}"))?;
+    Ok(path)
+}
+
 /// Lands a green train: pushes `tip` to `branch` on the remote at
 /// `url` WITHOUT force, so git's fast-forward rule is the race guard —
 /// if the branch moved since the train was built, the push is rejected
