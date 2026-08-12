@@ -99,6 +99,8 @@ Auth stays mandatory when public: anonymous requests get **401** on both the API
 printf 'alice:%s\n' "$(openssl rand -hex 32)" >> ~/.choir/auth   # hand the token over out of band
 ```
 
+That token grants read and write on **every** repository the node serves (see the warning under file formats). Until per-repo authorization exists, only hand one to someone you would give full node access.
+
 Operator scripts follow the public name automatically if you put it in an untracked `~/.choir-public-url`; without that file they use the loopback tunnel. Details and the operator checklist: `scripts/flip/RUNBOOK.md`.
 
 ### Option B — any Unix (foreground)
@@ -124,13 +126,15 @@ Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--p
 
 | File | Format |
 |---|---|
-| `--auth-file` | `user:token` per line |
+| `--auth-file` | `user:token` per line — **authentication only; see the warning below** |
 | `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
 | `--reviewer-conflict-graph` | undirected `operator operator` edges; pair with an explicit maximum hop distance |
 
 Hot-reload: trusted keys, channel bindings, push-certificate signers, and reviewers take effect on the next request.
+
+> **Every credential reaches every repository.** The auth file authenticates; there is no per-repo access control yet. A second `user:token` line can clone every repo on the node, push to any unprotected ref, and provision workspaces anywhere. Protected refs and the review requirement still hold, so it cannot land on a gated `main` unreviewed. Treat additional credentials as full read/write on the whole node until per-repo authorization exists.
 
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 

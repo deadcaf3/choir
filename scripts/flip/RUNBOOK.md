@@ -322,7 +322,21 @@ steps, all on the node host, all reversible by deleting one marker file:
 
 Access for a new user is one appended `user:token` line in
 `~/.choir/auth` (0600; mint the token with `openssl rand -hex 32`,
-hand it over out of band) — the auth table is per-user already.
+hand it over out of band). Credentials are per-user, so one person can
+be revoked without disturbing anyone else.
+
+**Know what that line grants before you write it.** The auth file
+authenticates; it does not authorize. There is no per-repo access
+control, so a new credential can clone every repository this node
+serves, push to any unprotected ref on any of them, and provision
+workspaces anywhere. What still holds is everything keyed to the ref
+rather than the identity: protected refs, the review requirement, and
+the sequencer's ordering — so a new user cannot land on a gated `main`
+without a node-assigned review reaching approval weight two.
+
+The practical rule until per-repo authorization exists: issue a token
+only to someone you would give full read/write on the whole node, and
+put anything they should not reach on a different node.
 
 After the flip, the operator's own tooling must switch schemes too: a
 plaintext `http://` through the tunnel now hits a TLS listener and gets
