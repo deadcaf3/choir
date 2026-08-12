@@ -8,7 +8,7 @@
 #   1. the log arrives and every line carries a seq
 #   2. seq starts at 0 and has no gaps  (a truncated middle is the
 #      failure a checksum on the whole file cannot localise)
-#   3. the five policy files are present (a node restored without
+#   3. the six policy files are present (a node restored without
 #      reviewers refuses to boot -- that is how this was found)
 #   4. no secret travelled: no auth, no *.key, no *.pem
 #   5. when this machine holds the live log, the backup is a byte-exact
@@ -68,7 +68,7 @@ else
   ssh_run 'ls ~/choir-oplog/policy' > "$WORK/policy" 2>/dev/null || : > "$WORK/policy"
 fi
 missing=
-for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl; do
+for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list; do
   grep -qx "$f" "$WORK/policy" || missing="$missing $f"
 done
 [ -z "$missing" ] || fail "policy files missing from the backup:$missing"
@@ -99,4 +99,4 @@ if [ -f "$LIVE" ]; then
   prefix="ok ($backup_bytes of $live_bytes bytes)"
 fi
 
-echo "verify-backup: $lines ops, seq 0..$((lines - 1)), 5 policy files, no secrets, prefix $prefix"
+echo "verify-backup: $lines ops, seq 0..$((lines - 1)), 6 policy files, no secrets, prefix $prefix"

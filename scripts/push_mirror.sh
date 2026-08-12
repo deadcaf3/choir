@@ -157,7 +157,7 @@ fi
 # file, extracted into .part and swapped in only once it is complete.
 CHOIR_HOME=${CHOIR_HOME:-$HOME/.choir}
 policy_files=""
-for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl; do
+for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list; do
   if [ -f "$CHOIR_HOME/$f" ]; then policy_files="$policy_files $f"; fi
 done
 policy_count=0

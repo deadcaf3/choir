@@ -152,8 +152,13 @@ policy is configuration, not sequenced fact, and so lives outside the
 log. `sync` therefore also ships five policy files to
 `~/choir-oplog/policy/` as one tar.
 
-What travels: the log, `node.fingerprint`, and `keys`, `reviewers`,
-`protected-refs`, `newcomer-audit.jsonl`, `newcomer-adjudications.jsonl`.
+What travels: the log, `node.fingerprint`, the six policy files —
+`keys`, `reviewers`, `protected-refs`, `newcomer-audit.jsonl`,
+`newcomer-adjudications.jsonl`, `repos.list` — and, since the host
+move, one full `--all` bundle per served repo under `repos/`, verified
+complete on arrival and re-pulled only when the refs hash moves. The
+bundles are what make the git *objects* restorable off-host; the log
+alone only proves which commits the refs named.
 
 What does not, and must not: the signing key, `auth`, and any
 `*.key`/`*.pem`. A backup carrying the key would let whoever holds the

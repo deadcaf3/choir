@@ -25,8 +25,11 @@ DEST=${CHOIR_BACKUP_DIR:-$HOME/choir-oplog}
 REMOTE_STATE='~/.choir/repos/.choir'
 REMOTE_HOME='~/.choir'
 
+# -n: nothing here feeds ssh stdin, and without it an ssh inside the
+# objects leg's while-read loop silently swallows the rest of
+# repos.list — measured: two listed repos, one bundle, no error.
 ssh_run() {
-  ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
+  ssh -n -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
       -o ControlMaster=auto -o ControlPath="$SSH_CONTROL" -o ControlPersist=600 \
       "choir@$IP" "$@"
 }
@@ -89,20 +92,54 @@ ssh_run "cat $REMOTE_STATE/node.fingerprint" > "$DEST/node.fingerprint.part" \
 # 6. Policy, by explicit name: what a restore needs to boot and nothing
 #    else. Pulling a directory would inherit whatever lands there,
 #    including a key someone copies in by accident; a name list cannot.
-for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl; do
+#    repos.list joined the set when the served repos moved into it: a
+#    restore without it serves only the default repo, and the log's refs
+#    for the others would be retracted by reconcile at first boot.
+for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list; do
   ssh_run "cat $REMOTE_HOME/$f" > "$DEST/policy.part.$f" \
     || fail "policy file $f missing on the node host; a restore without it does not boot"
 done
 mkdir -p "$DEST/policy"
-for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl; do
+for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list; do
   mv "$DEST/policy.part.$f" "$DEST/policy/$f"
 done
 chmod 700 "$DEST" && chmod 600 "$DEST/policy/"*
 
-# 7. An assertion about the backup itself, not about this script: if a
+# 7. Git objects, one full bundle per served repo. The op log carries
+#    ref *history*; the objects those refs name lived only on the node
+#    host — and the on-box follower is a second copy on the same disk,
+#    which is the same failure domain. The refs hash short-circuits the
+#    transfer when nothing moved, so the hourly schedule does not
+#    re-ship megabytes of unchanged history; the bundle is verified
+#    here, against this checkout, before it replaces the previous one.
+bundles=0
+while IFS= read -r repo; do
+  case $repo in ''|\#*) continue ;; esac
+  bundle=$DEST/repos/$repo.bundle
+  marker=$DEST/repos/$repo.refs
+  mkdir -p "$(dirname "$bundle")"
+  refs=$(ssh_run "git --git-dir ~/.choir/repos/$repo for-each-ref | sha256sum | cut -d' ' -f1") \
+    || fail "could not read the refs of $repo on the node host"
+  if [ -f "$bundle" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$refs" ]; then
+    bundles=$((bundles + 1))
+    continue
+  fi
+  ssh_run "git --git-dir ~/.choir/repos/$repo bundle create /tmp/choir-pull.\$\$.bundle --all 2>/dev/null \
+           && cat /tmp/choir-pull.\$\$.bundle && rm -f /tmp/choir-pull.\$\$.bundle" > "$bundle.part" \
+    || fail "could not bundle $repo on the node host"
+  git -C "$(dirname "$0")/.." bundle verify "$bundle.part" 2>/dev/null \
+    | grep -q "complete history" \
+    || fail "the pulled bundle for $repo does not verify as complete; keeping the previous copy"
+  mv "$bundle.part" "$bundle"
+  printf '%s\n' "$refs" > "$marker"
+  bundles=$((bundles + 1))
+done <"$DEST/policy/repos.list"
+[ "$bundles" -gt 0 ] || fail "repos.list lists no repos; the objects leg backed up nothing"
+
+# 8. An assertion about the backup itself, not about this script: if a
 #    secret is sitting in the destination, say so loudly, whoever put it
 #    there.
 leaked=$(ls "$DEST" "$DEST/policy" | grep -E '^(auth)$|\.key$|\.pem$' || true)
 [ -z "$leaked" ] || fail "SECRETS IN THE BACKUP: $leaked (a backup holding a token or key is a credential channel)"
 
-echo "pull-backup: $lines ops, fingerprint, 5 policy files -> $DEST"
+echo "pull-backup: $lines ops, fingerprint, 6 policy files, $bundles repo bundles -> $DEST"

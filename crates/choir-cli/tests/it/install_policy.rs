@@ -925,6 +925,24 @@ fn the_pulled_backup_carries_the_log_and_the_pin_but_never_the_key() {
         code.contains("seq gap"),
         "the pull must localise a gap; a whole-file checksum cannot"
     );
+    // The objects leg: the op log carries ref history, and the objects
+    // those refs name must land off-host too — the on-box follower is
+    // the same failure domain. One full bundle per served repo, verified
+    // as complete before it replaces the previous copy, and repos.list
+    // itself travels with policy or a restore retracts every ref of a
+    // repo the installer did not seed.
+    for required in [
+        "repos.list",
+        "bundle create",
+        "bundle verify",
+        "complete history",
+        "$bundle.part",
+    ] {
+        assert!(
+            code.contains(required),
+            "the pull's objects leg lost `{required}`; the git objects have no off-host copy"
+        );
+    }
     // Pull by explicit name, never by directory: a directory inherits
     // whatever lands in it, including a key copied there by accident.
     let list = code
