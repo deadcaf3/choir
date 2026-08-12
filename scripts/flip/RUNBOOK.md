@@ -333,16 +333,15 @@ into `~/.choir/acl` (0600) in the same breath, one line per repository:
 <user>   <owner/repo>   write     # and push, provision, submit
 ```
 
-Start the node with `--acl-file ~/.choir/acl` and it fails closed. **The
-service renderers do not pass this flag yet** — `render_node_service.sh`
-and `render_node_plist.sh` take their policy flags as positional
-arguments and adding one means changing both plus the comparison test in
-`crates/choir-cli/tests/it/install_policy.rs`. Until that lands, the
-installed node ignores an ACL file no matter what is in it; only a
-hand-started node enforces one. Do that wiring before issuing a second
-credential on the dogfood node.
+The file's existence is its own marker: create `~/.choir/acl`, re-run the
+installer, and both supervisors render `--acl-file`. No enable-flag, because
+an empty ACL and an absent one mean opposite things and a separate marker
+could disagree with the file it guards. Every install prints which way it
+went — `per-repository authorization enabled (...)` or `no ~/.choir/acl:
+every authenticated credential reaches every repository` — so the posture is
+in the install output, not in anyone's memory.
 
-What the flag does once it is passed:
+What the flag does:
 anything ungranted is refused, and a repository the user cannot read
 answers `404` rather than `403`, so a denial never confirms it exists.
 Grants reload on mtime, so appending a line needs no restart, and a

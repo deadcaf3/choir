@@ -4,8 +4,8 @@
 # secrets, or touching launchd.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 15 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 16 ]; then
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl]" >&2
   exit 2
 fi
 
@@ -34,6 +34,14 @@ REQUIRE_SCOPE=${13:-}
 # and the renderer failing here beats a unit that crash-loops there.
 TLS_CERT=${14:-}
 TLS_KEY=${15:-}
+# A non-empty 16th argument is the D29 ACL path. Positional and
+# empty-means-absent like the policy slots above, so an installer branch
+# can always pass the slot and let the file's existence decide. Absent is
+# not a safe default here in the way it is for TLS — without it every
+# credential reaches every repository — but the node says so at startup,
+# and refusing to render would lock out every single-operator node that
+# has never needed one.
+ACL=${16:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_plist.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -70,6 +78,10 @@ cat <<PLIST_HEAD
     <string>--newcomer-audit</string><string>$NEWCOMER_AUDIT</string>
     <string>--newcomer-adjudications</string><string>$NEWCOMER_ADJUDICATIONS</string>
 PLIST_HEAD
+
+if [ -n "$ACL" ]; then
+  printf '    <string>--acl-file</string><string>%s</string>\n' "$ACL"
+fi
 
 if [ -n "$PROTECTED_REFS" ]; then
   cat <<PLIST_POLICY

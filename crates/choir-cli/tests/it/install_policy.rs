@@ -21,6 +21,7 @@ fn render_output(
     protected: Option<&str>,
     scope: bool,
     tls: Option<(&str, &str)>,
+    acl: Option<&str>,
 ) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_plist.sh");
     let repos_path = repos_file(repos);
@@ -44,16 +45,21 @@ fn render_output(
     // in for an absent policy.
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope || tls.is_some() {
+    } else if scope || tls.is_some() || acl.is_some() {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
-    } else if tls.is_some() {
+    } else if tls.is_some() || acl.is_some() {
         command.arg("");
     }
     if let Some((cert, key)) = tls {
         command.args([cert, key]);
+    } else if acl.is_some() {
+        command.args(["", ""]);
+    }
+    if let Some(path) = acl {
+        command.arg(path);
     }
     let output = command.output().expect("render plist");
     std::fs::remove_file(repos_path).ok();
@@ -61,11 +67,16 @@ fn render_output(
 }
 
 fn render(protected: Option<&str>, scope: bool) -> String {
-    render_tls(protected, scope, None)
+    render_tls(protected, scope, None, None)
 }
 
-fn render_tls(protected: Option<&str>, scope: bool, tls: Option<(&str, &str)>) -> String {
-    let output = render_output("owner/repo.git\n", protected, scope, tls);
+fn render_tls(
+    protected: Option<&str>,
+    scope: bool,
+    tls: Option<(&str, &str)>,
+    acl: Option<&str>,
+) -> String {
+    let output = render_output("owner/repo.git\n", protected, scope, tls, acl);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 plist")
 }
@@ -128,6 +139,7 @@ fn render_unit_output(
     protected: Option<&str>,
     scope: bool,
     tls: Option<(&str, &str)>,
+    acl: Option<&str>,
 ) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
     let repos_path = repos_file(repos);
@@ -148,24 +160,34 @@ fn render_unit_output(
     ]);
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope || tls.is_some() {
+    } else if scope || tls.is_some() || acl.is_some() {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
-    } else if tls.is_some() {
+    } else if tls.is_some() || acl.is_some() {
         command.arg("");
     }
     if let Some((cert, key)) = tls {
         command.args([cert, key]);
+    } else if acl.is_some() {
+        command.args(["", ""]);
+    }
+    if let Some(path) = acl {
+        command.arg(path);
     }
     let output = command.output().expect("render unit");
     std::fs::remove_file(repos_path).ok();
     output
 }
 
-fn render_unit_tls(protected: Option<&str>, scope: bool, tls: Option<(&str, &str)>) -> String {
-    let output = render_unit_output("owner/repo.git\n", protected, scope, tls);
+fn render_unit_tls(
+    protected: Option<&str>,
+    scope: bool,
+    tls: Option<(&str, &str)>,
+    acl: Option<&str>,
+) -> String {
+    let output = render_unit_output("owner/repo.git\n", protected, scope, tls, acl);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 unit")
 }
@@ -208,8 +230,9 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
     for protected in [None, Some("/state/protected-refs")] {
         for scope in [false, true] {
         for tls in [None, Some(("/state/tls/fullchain.pem", "/state/tls/privkey.pem"))] {
-            let plist = plist_argv(&render_tls(protected, scope, tls));
-            let unit = unit_argv(&render_unit_tls(protected, scope, tls));
+        for acl in [None, Some("/state/acl")] {
+            let plist = plist_argv(&render_tls(protected, scope, tls, acl));
+            let unit = unit_argv(&render_unit_tls(protected, scope, tls, acl));
 
             // Without this the whole test passes vacuously when a renderer
             // rejects its arguments and prints usage to stderr — which is
@@ -249,12 +272,21 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
                 if tls.is_some() { "0.0.0.0" } else { "127.0.0.1" },
                 "the bind must flip with the TLS pair and only with it"
             );
+            // The gate that decides which repositories a credential can
+            // reach, pinned to its slot rather than to the sibling
+            // renderer, so both dropping it cannot read as agreement.
+            assert_eq!(
+                plist.iter().any(|arg| arg == "--acl-file"),
+                acl.is_some(),
+                "--acl-file must appear exactly when the acl slot is set"
+            );
             assert_eq!(
                 plist, unit,
                 "launchd and systemd must start the node with identical \
                  arguments; a flag added to one supervisor and not the other \
                  is a node running without the gate its operator configured"
             );
+        }
         }
         }
     }
@@ -267,9 +299,9 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
 #[test]
 fn a_half_tls_pair_is_refused_by_both_renderers() {
     for (cert, key) in [("/state/tls/fullchain.pem", ""), ("", "/state/tls/privkey.pem")] {
-        let plist = render_output("owner/repo.git\n", None, false, Some((cert, key)));
+        let plist = render_output("owner/repo.git\n", None, false, Some((cert, key)), None);
         assert!(!plist.status.success(), "plist renderer accepted half a TLS pair");
-        let unit = render_unit_output("owner/repo.git\n", None, false, Some((cert, key)));
+        let unit = render_unit_output("owner/repo.git\n", None, false, Some((cert, key)), None);
         assert!(!unit.status.success(), "unit renderer accepted half a TLS pair");
     }
 }
@@ -282,9 +314,9 @@ fn a_half_tls_pair_is_refused_by_both_renderers() {
 #[test]
 fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
     let repos = "# comment\n\nowner/repo.git\nsecond/other.git\n";
-    let plist_out = render_output(repos, Some("/state/protected-refs"), false, None);
+    let plist_out = render_output(repos, Some("/state/protected-refs"), false, None, None);
     assert!(plist_out.status.success());
-    let unit_out = render_unit_output(repos, Some("/state/protected-refs"), false, None);
+    let unit_out = render_unit_output(repos, Some("/state/protected-refs"), false, None, None);
     assert!(unit_out.status.success());
 
     let plist = plist_argv(&String::from_utf8(plist_out.stdout).expect("UTF-8 plist"));
@@ -306,11 +338,11 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 
     for empty in ["", "# only a comment\n"] {
         assert!(
-            !render_output(empty, None, false, None).status.success(),
+            !render_output(empty, None, false, None, None).status.success(),
             "the plist renderer must refuse a repos list with no entries"
         );
         assert!(
-            !render_unit_output(empty, None, false, None).status.success(),
+            !render_unit_output(empty, None, false, None, None).status.success(),
             "the unit renderer must refuse a repos list with no entries"
         );
     }
@@ -512,6 +544,26 @@ fn the_linux_installer_carries_the_same_policy_wiring() {
         !installer.contains("cargo build"),
         "the Linux installer must not build on the node host"
     );
+    // Both installers must find the D29 ACL file and pass its slot. The
+    // renderer comparison test drives the renderers directly, so it
+    // cannot see an installer that reads the file and then forgets to
+    // hand it over — which would leave one platform serving every
+    // repository to every credential while its ACL sits there looking
+    // configured.
+    for path in [
+        "scripts/flip/install_node.sh",
+        "scripts/flip/install_node_linux.sh",
+    ] {
+        let source = std::fs::read_to_string(repo_root().join(path)).expect("installer source");
+        assert!(source.contains("$STATE/acl"), "{path} never reads the ACL file");
+        // Matched against the renderer call, not against `$ACL` anywhere:
+        // the variable also appears in the branch that sets it, so the
+        // looser check passed with the argument deleted.
+        assert!(
+            source.contains("\"$TLS_KEY\" \"$ACL\""),
+            "{path} never passes the ACL slot to its renderer"
+        );
+    }
 }
 
 /// Both installers stop the running node before installing the new one,

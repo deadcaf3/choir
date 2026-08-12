@@ -129,6 +129,15 @@ REQUIRE_SCOPE=""
 if [[ -f "$SCOPE_MARKER" ]]; then
   REQUIRE_SCOPE="require-scope"
 fi
+# D29 per-repository authorization: the file's existence is the marker,
+# since an empty ACL and no ACL mean opposite things and a separate
+# enable-flag could disagree with the file it guards. Absent = the node
+# keeps saying "every authenticated actor reaches every repository" at
+# startup, which is the honest description of a single-operator node.
+ACL=""
+if [[ -f "$STATE/acl" ]]; then
+  ACL="$STATE/acl"
+fi
 # TLS marker: two lines, cert path then key path -- same contract as the
 # Linux installer, same fail-closed refusal on a half-filled marker.
 TLS_CERT=""
@@ -146,13 +155,18 @@ if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" > "$PLIST"
+fi
+if [[ -n "$ACL" ]]; then
+  echo "per-repository authorization enabled ($ACL): ungranted access is refused"
+else
+  echo "no $STATE/acl: every authenticated credential reaches every repository"
 fi
 if [[ -n "$REQUIRE_SCOPE" ]]; then
   echo "scope gate enabled ($SCOPE_MARKER): ops must name this node's log and a recent head"

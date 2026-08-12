@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 15 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 16 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl]" >&2
   exit 2
 fi
 
@@ -39,6 +39,9 @@ REQUIRE_SCOPE=${13:-}
 # at all, and their presence flips the bind from loopback to 0.0.0.0.
 TLS_CERT=${14:-}
 TLS_KEY=${15:-}
+# Same contract as the plist renderer: a non-empty 16th argument is the
+# D29 ACL path, empty means no per-repository authorization.
+ACL=${16:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -62,6 +65,9 @@ EXEC="$EXEC --keys-file $KEYS"
 EXEC="$EXEC --reviewers-file $REVIEWERS"
 EXEC="$EXEC --newcomer-audit $NEWCOMER_AUDIT"
 EXEC="$EXEC --newcomer-adjudications $NEWCOMER_ADJUDICATIONS"
+if [ -n "$ACL" ]; then
+  EXEC="$EXEC --acl-file $ACL"
+fi
 if [ -n "$PROTECTED_REFS" ]; then
   EXEC="$EXEC --require-assignment --protected-refs $PROTECTED_REFS --require-review"
 fi
