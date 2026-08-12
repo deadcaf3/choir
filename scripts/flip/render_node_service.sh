@@ -16,7 +16,7 @@
 set -eu
 
 if [ "$#" -ne 11 ] && [ "$#" -ne 12 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repo> <newcomer-audit> <newcomer-adjudications> [protected-refs]" >&2
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs]" >&2
   exit 2
 fi
 
@@ -28,10 +28,16 @@ AUTH=$5
 KEYS=$6
 REVIEWERS=$7
 LOG=$8
-REPO=$9
+REPOS_FILE=$9
 NEWCOMER_AUDIT=${10}
 NEWCOMER_ADJUDICATIONS=${11}
 PROTECTED_REFS=${12:-}
+
+# Same repos-file contract as the plist renderer: one repo per line,
+# `#` comments and blank lines skipped, an empty list refused. The two
+# loops must stay in lockstep or the argv comparison in install_policy.rs
+# is what catches it.
+[ -f "$REPOS_FILE" ] || { echo "render_node_service.sh: no repos file at $REPOS_FILE" >&2; exit 1; }
 
 # ExecStart is assembled incrementally rather than interpolated in one
 # line, so that an absent policy contributes no argument at all. Splicing
@@ -48,7 +54,14 @@ EXEC="$EXEC --newcomer-adjudications $NEWCOMER_ADJUDICATIONS"
 if [ -n "$PROTECTED_REFS" ]; then
   EXEC="$EXEC --require-assignment --protected-refs $PROTECTED_REFS --require-review"
 fi
-EXEC="$EXEC --bind 127.0.0.1 --create $REPO"
+EXEC="$EXEC --bind 127.0.0.1"
+repo_count=0
+while IFS= read -r repo; do
+  case $repo in ''|\#*) continue ;; esac
+  EXEC="$EXEC --create $repo"
+  repo_count=$((repo_count + 1))
+done < "$REPOS_FILE"
+[ "$repo_count" -gt 0 ] || { echo "render_node_service.sh: $REPOS_FILE lists no repos" >&2; exit 1; }
 
 cat <<UNIT
 [Unit]

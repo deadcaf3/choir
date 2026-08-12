@@ -22,6 +22,7 @@ set -eu
 PORT=${1:-8417}
 REPO=${2:-choir/choir.git}
 BIN_DIR=${3:-$HOME/bin}
+REPOS_LIST=$HOME/.choir/repos.list
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE=$HOME/.choir
@@ -38,6 +39,21 @@ NEWCOMER_ADJUDICATIONS="$STATE/newcomer-adjudications.jsonl"
 
 mkdir -p "$STATE" "$ROOT" "$UNIT_DIR"
 chmod 700 "$STATE"
+
+# 0. Repos list, same contract as the macOS installer: seeded once, and
+#    a later run appends only a repo named explicitly on the command
+#    line, so a bare re-run never resurrects a deleted line.
+if [ ! -f "$REPOS_LIST" ]; then
+  {
+    echo "# repos served by the node, one owner/name.git per line"
+    echo "$REPO"
+  } > "$REPOS_LIST"
+  chmod 600 "$REPOS_LIST"
+  echo "seeded $REPOS_LIST with $REPO"
+elif [ "$#" -ge 2 ] && ! grep -qxF "$2" "$REPOS_LIST"; then
+  echo "$2" >> "$REPOS_LIST"
+  echo "appended $2 to $REPOS_LIST"
+fi
 
 # 1. Binaries must already be here. Failing loudly beats starting a unit
 #    that will crash-loop under Restart=always.
@@ -77,12 +93,12 @@ chmod 600 "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS"
 if [ -f "$POLICY_MARKER" ]; then
   sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
-    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" \
+    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" > "$UNIT"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
-    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" \
+    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" > "$UNIT"
 fi
 

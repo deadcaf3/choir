@@ -5,7 +5,7 @@
 set -eu
 
 if [ "$#" -ne 11 ] && [ "$#" -ne 12 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repo> <newcomer-audit> <newcomer-adjudications> [protected-refs]" >&2
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs]" >&2
   exit 2
 fi
 
@@ -17,10 +17,24 @@ AUTH=$5
 KEYS=$6
 REVIEWERS=$7
 LOG=$8
-REPO=$9
+REPOS_FILE=$9
 NEWCOMER_AUDIT=${10}
 NEWCOMER_ADJUDICATIONS=${11}
 PROTECTED_REFS=${12:-}
+
+# The served repos come from a file (one `owner/name.git` per line,
+# `#` comments and blank lines skipped) rather than a single positional
+# argument, so adding a repo is an appended line and a reinstall instead
+# of a renderer signature change. An empty list is refused: a dogfood
+# node with no --create serves nothing and installs no pre-receive hook,
+# which reads like success until the first push is never sequenced.
+[ -f "$REPOS_FILE" ] || { echo "render_node_plist.sh: no repos file at $REPOS_FILE" >&2; exit 1; }
+repo_count=0
+while IFS= read -r repo; do
+  case $repo in ''|\#*) continue ;; esac
+  repo_count=$((repo_count + 1))
+done < "$REPOS_FILE"
+[ "$repo_count" -gt 0 ] || { echo "render_node_plist.sh: $REPOS_FILE lists no repos" >&2; exit 1; }
 
 cat <<PLIST_HEAD
 <?xml version="1.0" encoding="UTF-8"?>
@@ -48,9 +62,13 @@ if [ -n "$PROTECTED_REFS" ]; then
 PLIST_POLICY
 fi
 
+echo '    <string>--bind</string><string>127.0.0.1</string>'
+while IFS= read -r repo; do
+  case $repo in ''|\#*) continue ;; esac
+  printf '    <string>--create</string><string>%s</string>\n' "$repo"
+done < "$REPOS_FILE"
+
 cat <<PLIST_TAIL
-    <string>--bind</string><string>127.0.0.1</string>
-    <string>--create</string><string>$REPO</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

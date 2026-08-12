@@ -5,8 +5,20 @@ fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn render(protected: Option<&str>) -> String {
+/// Writes the repos file both renderers read in place of the old single
+/// positional repo. Unique per call: these tests run on parallel threads
+/// inside one process, so a pid-keyed name would collide.
+fn repos_file(entries: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("choir-repos-list-{}-{n}", std::process::id()));
+    std::fs::write(&path, entries).unwrap();
+    path
+}
+
+fn render_output(repos: &str, protected: Option<&str>) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_plist.sh");
+    let repos_path = repos_file(repos);
     let mut command = std::process::Command::new("sh");
     command.arg(script).args([
         "com.example.node",
@@ -17,7 +29,8 @@ fn render(protected: Option<&str>) -> String {
         "/state/keys",
         "/state/reviewers",
         "/state/node.log",
-        "owner/repo.git",
+    ]);
+    command.arg(&repos_path).args([
         "/state/newcomer-audit.jsonl",
         "/state/newcomer-adjudications.jsonl",
     ]);
@@ -25,6 +38,12 @@ fn render(protected: Option<&str>) -> String {
         command.arg(path);
     }
     let output = command.output().expect("render plist");
+    std::fs::remove_file(repos_path).ok();
+    output
+}
+
+fn render(protected: Option<&str>) -> String {
+    let output = render_output("owner/repo.git\n", protected);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 plist")
 }
@@ -79,9 +98,10 @@ fn explicit_policy_renders_all_three_review_gates_or_none() {
     }
 }
 
-/// The Linux sibling of [`render`], fed byte-identical arguments.
-fn render_unit(protected: Option<&str>) -> String {
+/// The Linux sibling of [`render_output`], fed byte-identical arguments.
+fn render_unit_output(repos: &str, protected: Option<&str>) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
+    let repos_path = repos_file(repos);
     let mut command = std::process::Command::new("sh");
     command.arg(script).args([
         "com.example.node",
@@ -92,7 +112,8 @@ fn render_unit(protected: Option<&str>) -> String {
         "/state/keys",
         "/state/reviewers",
         "/state/node.log",
-        "owner/repo.git",
+    ]);
+    command.arg(&repos_path).args([
         "/state/newcomer-audit.jsonl",
         "/state/newcomer-adjudications.jsonl",
     ]);
@@ -100,6 +121,12 @@ fn render_unit(protected: Option<&str>) -> String {
         command.arg(path);
     }
     let output = command.output().expect("render unit");
+    std::fs::remove_file(repos_path).ok();
+    output
+}
+
+fn render_unit(protected: Option<&str>) -> String {
+    let output = render_unit_output("owner/repo.git\n", protected);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 unit")
 }
@@ -162,6 +189,66 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
             "launchd and systemd must start the node with identical \
              arguments; a flag added to one supervisor and not the other \
              is a node running without the gate its operator configured"
+        );
+    }
+}
+
+/// The repos file is what lets a new repo land as an appended line plus
+/// a reinstall instead of a renderer signature change. Every entry must
+/// reach both supervisors, identically ordered — and an empty list must
+/// refuse to render, because a node with no `--create` installs no
+/// pre-receive hook and its pushes are silently never sequenced.
+#[test]
+fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
+    let repos = "# comment\n\nowner/repo.git\nsecond/other.git\n";
+    let plist_out = render_output(repos, Some("/state/protected-refs"));
+    assert!(plist_out.status.success());
+    let unit_out = render_unit_output(repos, Some("/state/protected-refs"));
+    assert!(unit_out.status.success());
+
+    let plist = plist_argv(&String::from_utf8(plist_out.stdout).expect("UTF-8 plist"));
+    let unit = unit_argv(&String::from_utf8(unit_out.stdout).expect("UTF-8 unit"));
+    assert_eq!(
+        plist, unit,
+        "a multi-repo list must reach both supervisors identically"
+    );
+    let created: Vec<&str> = plist
+        .windows(2)
+        .filter(|pair| pair[0] == "--create")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert_eq!(
+        created,
+        ["owner/repo.git", "second/other.git"],
+        "comments and blank lines are skipped; entry order is preserved"
+    );
+
+    for empty in ["", "# only a comment\n"] {
+        assert!(
+            !render_output(empty, None).status.success(),
+            "the plist renderer must refuse a repos list with no entries"
+        );
+        assert!(
+            !render_unit_output(empty, None).status.success(),
+            "the unit renderer must refuse a repos list with no entries"
+        );
+    }
+
+    // Both installers own the file's lifecycle: seed it once, and append
+    // only a repo named explicitly, as an exact whole line — a bare
+    // re-run must never resurrect a line the operator deleted.
+    for name in [
+        "scripts/flip/install_node.sh",
+        "scripts/flip/install_node_linux.sh",
+    ] {
+        let installer = std::fs::read_to_string(repo_root().join(name)).expect(name);
+        assert!(
+            installer.contains("repos.list"),
+            "{name} must wire the repos list"
+        );
+        assert!(
+            installer.contains("grep -qxF"),
+            "{name} must append only an exact missing line"
         );
     }
 }

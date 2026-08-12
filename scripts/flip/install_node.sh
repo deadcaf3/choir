@@ -13,10 +13,15 @@
 set -euo pipefail
 
 PORT=${1:-8417}
-# Repo to serve. `--create` is idempotent (an existing repo is skipped),
-# so it lives in the plist permanently: creation is also what installs
-# the pre-receive hook that turns pushes into signed ops.
+# Repos to serve live in ~/.choir/repos.list, one `owner/name.git` per
+# line, rendered into one `--create` each. `--create` is idempotent (an
+# existing repo is skipped), so the list stays in the plist permanently:
+# creation is also what installs the pre-receive hook that turns pushes
+# into signed ops. $2 seeds the list on first install and is appended on
+# a later one if missing, so adding a repo is either an appended line or
+# a re-run with the new name — both end in a reinstall.
 REPO=${2:-choir/choir.git}
+REPOS_LIST=$HOME/.choir/repos.list
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE=$HOME/.choir
 ROOT="$STATE/repos"
@@ -44,6 +49,21 @@ NEWCOMER_ADJUDICATIONS="$STATE/newcomer-adjudications.jsonl"
 
 mkdir -p "$STATE" "$ROOT" "$HOME/Library/LaunchAgents"
 chmod 700 "$STATE"
+
+# 0. Repos list. Seeded once; a later run only appends, and only a repo
+#    named explicitly on the command line, so a bare re-run never
+#    resurrects a line the operator deleted on purpose.
+if [[ ! -f $REPOS_LIST ]]; then
+  {
+    echo "# repos served by the node, one owner/name.git per line"
+    echo "$REPO"
+  } > "$REPOS_LIST"
+  chmod 600 "$REPOS_LIST"
+  echo "seeded $REPOS_LIST with $REPO"
+elif [[ $# -ge 2 ]] && ! grep -qxF "$2" "$REPOS_LIST"; then
+  echo "$2" >> "$REPOS_LIST"
+  echo "appended $2 to $REPOS_LIST"
+fi
 
 # 1. Binaries. Built release so the daemon is not a debug build.
 #
@@ -102,12 +122,12 @@ chmod 600 "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS"
 if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
-    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" \
+    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
-    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPO" \
+    "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" > "$PLIST"
 fi
 

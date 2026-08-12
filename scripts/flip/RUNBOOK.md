@@ -23,7 +23,13 @@ Nothing here is destructive and nothing touches the mirror VM.
    mints `~/.choir/auth` (0600) and `~/.choir/agent.key`, creates an
    empty `~/.choir/reviewers` pool plus 0600 newcomer audit/adjudication files, writes and loads the
    `com.choir.node` LaunchAgent serving the named repo. Idempotent:
-   re-run after any rebuild.
+   re-run after any rebuild. The served repos live in
+   `~/.choir/repos.list` (one `owner/name.git` per line, `#` comments
+   skipped); the optional repo argument seeds the list on first install
+   and is appended on a later run if missing. Adding a repo is an
+   appended line followed by a reinstall on the node host — `--create`
+   is idempotent, so existing repos are untouched, and an empty list
+   refuses to render rather than starting a node that serves nothing.
 3. Add reviewer names to `~/.choir/reviewers`, one per line. Re-read on
    every draw, so no restart. An empty pool means review requests come
    back with `assignment_error` and stay unassigned (never approved).
