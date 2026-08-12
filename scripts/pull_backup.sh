@@ -163,17 +163,30 @@ while IFS= read -r repo; do
     printf '%s\n' "$refs" > "$marker"
   fi
   # The D25 cross-check: the bundle's heads must be exactly what the
-  # node attested. sed on canonical JSON is deliberate operational-grade
-  # parsing (the fold is the real verifier); a ref name carrying a quote
-  # or comma would read as a mismatch here, never as a silent pass. A
-  # push landing mid-pull also reads as a mismatch — a re-run comes back
-  # clean; anything persistent is real divergence.
+  # node attested, in the namespaces the pre-receive hook routes (heads
+  # and tags — refs/remotes/* in a bare repo are local bookkeeping no op
+  # ever attested). ContentHash serializes canonically as
+  # {codec, digest bytes}, not display hex, so this projects it with
+  # python3 (present on the macOS follower this runs on) rather than
+  # pattern-matching the JSON; the first live run proved a sed pattern
+  # written against imagined hex silently compared nothing. A push
+  # landing mid-pull reads as a mismatch — a re-run comes back clean;
+  # anything persistent is real divergence.
   if [ -n "$SNAP" ]; then
-    tr ',' '\n' < "$SNAP" \
-      | sed -n "s|.*\"$repo:\(refs/[^\"]*\)\":\"11-\([0-9a-f]*\)\".*|\2 \1|p" \
-      | sort > "$DEST/.snap_refs"
+    python3 - "$SNAP" "$repo" > "$DEST/.snap_refs" <<'PY' \
+      || fail "could not project the attestation for $repo"
+import json, sys
+snap = json.load(open(sys.argv[1]))
+prefix = sys.argv[2] + ":"
+rows = []
+for name, h in snap["refs"].items():
+    ref = name[len(prefix):] if name.startswith(prefix) else None
+    if ref and (ref.startswith("refs/heads/") or ref.startswith("refs/tags/")):
+        rows.append(bytes(h["digest"]).hex() + " " + ref)
+sys.stdout.write("".join(r + "\n" for r in sorted(rows)))
+PY
     git -C "$(dirname "$0")/.." bundle list-heads "$bundle" \
-      | grep ' refs/' | sort > "$DEST/.bundle_refs"
+      | grep -E ' refs/(heads|tags)/' | LC_ALL=C sort > "$DEST/.bundle_refs"
     cmp -s "$DEST/.snap_refs" "$DEST/.bundle_refs" \
       || fail "the bundle for $repo does not match the node's attested ref-state (re-run once; a persistent mismatch is divergence)"
     rm -f "$DEST/.snap_refs" "$DEST/.bundle_refs"
