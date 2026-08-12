@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 pub mod platform;
 pub mod provision;
 pub mod reject;
+mod ui;
 
 pub use platform::Platform;
 
@@ -84,6 +85,10 @@ pub struct Node {
     /// Trusted-keys file to watch, so `allowed_signers` tracks it
     /// without a restart. `None` = generated once at startup.
     keys_watch: Option<std::sync::Arc<KeysWatch>>,
+    /// The browser page, prebuilt and keyed by view sequence. Shared
+    /// across request threads so one render serves every reader until
+    /// the state it describes changes.
+    ui_cache: std::sync::Arc<ui::UiCache>,
 }
 
 /// A watched trusted-keys file and the mtime last folded into
@@ -175,6 +180,7 @@ impl Node {
             scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
             keys_watch: None,
+            ui_cache: std::sync::Arc::new(ui::UiCache::new()),
         })
     }
 
@@ -424,6 +430,7 @@ impl Node {
             let root = self.root.clone();
             let auth = self.auth.clone();
             let platform = self.platform.clone();
+            let ui_cache = std::sync::Arc::clone(&self.ui_cache);
             let internal_token = self.internal_token.clone();
             let port = self.port;
             let scheme = self.scheme;
@@ -474,6 +481,14 @@ impl Node {
                         .expect("static header"),
                     );
                     let _ = request.respond(response);
+                    return;
+                }
+                // The browser surface. Matched exactly so it can never
+                // shadow a repository path: git routes are
+                // `/owner/repo.git/...`, and `/` is the one URL that
+                // cannot name a repository.
+                if request.url() == "/" || request.url() == "/index.html" {
+                    let _ = handle_ui(platform.as_deref(), &ui_cache, request);
                     return;
                 }
                 if request.url().starts_with("/api/") {
@@ -718,6 +733,74 @@ const LLMS_TXT: &str = include_str!("llms.txt");
 const SYNC_MD: &str = include_str!("../../../SYNC.md");
 
 /// Routes one `/api/...` request to the platform (503 when disabled).
+/// Serves the browser page from the cache, or `304` when the client
+/// already holds the current one.
+///
+/// The conditional check happens before the cache lookup and before
+/// any rendering, so a reader polling an idle node costs one integer
+/// comparison and an empty response. That is the whole reason the page
+/// can be refreshed aggressively without the node noticing.
+fn handle_ui(
+    platform: Option<&Platform>,
+    cache: &ui::UiCache,
+    request: tiny_http::Request,
+) -> std::io::Result<()> {
+    let platform = match platform {
+        Some(p) => p,
+        None => {
+            let response = tiny_http::Response::from_string(
+                "the platform API is not enabled on this node, so there is nothing to show\n",
+            )
+            .with_status_code(503);
+            return request.respond(response);
+        }
+    };
+
+    let seq = platform.view_seq();
+    let tag = ui::etag(seq);
+    if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
+        let response = tiny_http::Response::empty(304).with_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+        );
+        return request.respond(response);
+    }
+
+    let page = cache.page(seq, || platform.handle_api("GET", "/api/view", &[]).1);
+    let response = tiny_http::Response::from_string(page.as_str())
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+        )
+        // The page is private per node and changes with every op; a
+        // shared cache must never hold it, and a browser must ask.
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-cache"[..])
+                .expect("static header"),
+        )
+        // Defence in depth behind the escaper: even if a value slipped
+        // through unescaped, the page may not run scripts, load
+        // anything remote, or be framed by another origin.
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Security-Policy"[..],
+                &b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"[..],
+            )
+            .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    request.respond(response)
+}
+
 fn handle_api(
     platform: Option<&Platform>,
     root: &Path,

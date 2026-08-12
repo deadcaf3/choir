@@ -47,6 +47,7 @@ mod snapshot_emission;
 mod sync_contract;
 mod t1_attack_edge;
 mod tls;
+mod ui;
 mod view_growth;
 mod window;
 mod workspace;

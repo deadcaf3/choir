@@ -82,6 +82,25 @@ sh scripts/choirctl logs
 
 Override port with `CHOIR_PORT`. Full flip procedure: `scripts/flip/RUNBOOK.md`.
 
+### Option A2 — serving beyond loopback (TLS)
+
+A non-loopback bind requires TLS (invariant 9), so going public is a certificate step, not a flag you can just add. On a Linux node host:
+
+```bash
+sh scripts/flip/setup_tls.sh <your.domain> [port]   # certbot + renewal hook + marker
+sh scripts/flip/install_node_linux.sh <port> '' ~/bin   # re-render the unit
+```
+
+`setup_tls.sh` writes `~/.choir/tls.enabled` (cert path, then key path). That marker is what flips the rendered unit to `--bind 0.0.0.0 --tls-cert … --tls-key …`; delete it and reinstall to go back to loopback. Keep inbound **80** open permanently — renewals rebind it — and your serving port open too.
+
+Auth stays mandatory when public: anonymous requests get **401** on both the API and git, and a browser opening the URL gets a login prompt. That is the expected state, not a misconfiguration. Give each additional person their own line in `~/.choir/auth`:
+
+```bash
+printf 'alice:%s\n' "$(openssl rand -hex 32)" >> ~/.choir/auth   # hand the token over out of band
+```
+
+Operator scripts follow the public name automatically if you put it in an untracked `~/.choir-public-url`; without that file they use the loopback tunnel. Details and the operator checklist: `scripts/flip/RUNBOOK.md`.
+
 ### Option B — any Unix (foreground)
 
 ```bash
@@ -126,6 +145,14 @@ choir --auth-file ~/.choir/auth --auth-user choir <command> ...
 Exit codes: **0** accepted, **1** rejected (JSON body printed — see `ERRORS.md`), **2** usage.
 
 The signed-operation API is the primary agent path: it carries actor identity and batches many operations behind one durability barrier. `git push` remains the compatibility and bulk-transfer path.
+
+### Browser surface
+
+Open the node's base URL (`/`) in a browser and it serves one read-only page: refs grouped by repository, the review queue with approval weights and verdicts, the latest ref-state attestation, workspaces, and sequencer health against the 100 ms gate. It is behind the same auth wall as everything else, so a browser prompts for a `--auth-file` user and token — anonymous readers get `401`, on the page exactly as on the API.
+
+It is deliberately not an app. The page is server-rendered from the same `/api/view` payload the API serves (so it cannot drift from the API), cached by view sequence, and revalidated with an `ETag` — a repeat visit on unchanged state returns `304` with no body, so refreshing or polling it costs the node nothing. No JavaScript, no build step, no external fetch, so it works offline and inside networks with no route to the internet.
+
+Writes are not available from the browser and are not planned without their own decision: every write still goes through the signed-operation API.
 
 ### Git compatibility path
 
@@ -235,7 +262,7 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 
 Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).
 
-Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), exercise one commit-status write (`post-status`), and replay existing merge commits for offline D23 calibration (`calibrate`). Queue mode can optionally run the advisory three-worktree D23 detector documented in `internal/design.md`; it never changes the landing condition. Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
+Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), exercise one commit-status write (`post-status`), replay existing merge commits for offline D23 calibration (`calibrate`), and mine a mirrored foreign history for real semantic-conflict specimens (`harvest`, D27 — offline, no forge access, landing policy untouched). Queue mode can optionally run the advisory three-worktree D23 detector documented in `internal/design.md`; it never changes the landing condition. Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
 
 ### Agent templates
 
@@ -254,6 +281,7 @@ source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key
 | `choir-actor` ignored test fails / download broken | rivetkit 2.3.10 auto-download | Workarounds in `PHASE0.md`. Run: `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored` |
 | Node refuses bind address | Non-loopback without TLS | Add `--tls-cert` / `--tls-key`, or stay on `127.0.0.1` / SSH tunnel |
 | `/api/view` → 401 | Auth enabled (expected) | Pass `-u user:token` or `--auth-file` / `--auth-user` |
+| Browser asks for a username/password | Auth is mandatory on every endpoint, including public TLS binds | Enter a user and token from `--auth-file`. Nothing is served anonymously by design |
 | Push not in `/api/view` | Repo created without `--create` | Recreate via node/`choirctl` so `pre-receive` exists |
 | `unknown_key` | Key not in `--keys-file` | `choir key … [channel] >> keys-file` (hot-reloaded) |
 | `bad_signature` | Signature does not cover the bytes sent; key **is** trusted | Re-sign the exact `(channel, payload)`. Registering a key does not help. Unexpected → someone replayed a signature |

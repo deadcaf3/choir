@@ -3717,6 +3717,16 @@ impl Platform {
         })
     }
 
+    /// The sequence the next admitted op will occupy, which is the
+    /// cheapest complete description of "what state is this node in".
+    ///
+    /// Exposed for the browser surface's cache: it asks this before
+    /// deciding whether to rebuild a page, so an unchanged node costs
+    /// one `u64` read rather than a full view serialization.
+    pub fn view_seq(&self) -> u64 {
+        self.view.lock().expect("view lock").next_seq
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {
