@@ -205,6 +205,13 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: false,
     },
     Command {
+        name: "abandon",
+        args: "<api> <node-key-file> <id>",
+        summary: "archive a stale incomplete review as lapsed, settling it unapproved; \
+                  operator-only and never moves a ref",
+        agent_facing: false,
+    },
+    Command {
         name: "bind",
         args: "<api> <node-key-file> <operator> <key-hex> [channel]",
         summary: "record in the log that a key belongs to an operator; operator-only and never moves a ref",

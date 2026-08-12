@@ -344,6 +344,21 @@ fn main() {
             // not this attribution string.
             submit(api, node_key_file, "node/slash", &op, auth);
         }
+        // The operator's retention verb for a review that will never
+        // finish: settle it as lapsed-unapproved. `lapsed` is hardwired
+        // true because freezing a *complete* review is the retention
+        // policy's job, and the fold refuses the other two shapes
+        // anyway. Node-key-only at admission, same reasoning as slash:
+        // archiving drops verdicts, so an unguarded verb would let an
+        // agent erase a RequestChanges it did not like.
+        ["abandon", api, node_key_file, id] => {
+            require_node_key_file(node_key_file);
+            let op = ViewOp::new(OpKind::ArchiveReview {
+                id: (*id).into(),
+                lapsed: true,
+            });
+            submit(api, node_key_file, "node/abandon", &op, auth);
+        }
         // The operator's path to the durable identity record. Without
         // this, `BindKey` is node-only and the node has no CLI, so the
         // record stays empty and D24 T3 attribution — which reads it —

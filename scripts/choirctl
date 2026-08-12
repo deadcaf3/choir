@@ -269,6 +269,20 @@ verdict)
     "$3" "$4" "${note[@]}"
   ;;
 
+abandon)
+  # Operator retention: settle a stale, incomplete review as lapsed and
+  # unapproved. The node key signs it and the node key never leaves the
+  # node host, so in remote mode the CLI runs there, on-box.
+  #   choirctl abandon <id>
+  [ $# -ge 2 ] || { echo "usage: choirctl abandon <id>" >&2; exit 2; }
+  if remote_node; then
+    node_ssh "\$HOME/bin/choir --auth-file \$HOME/.choir/auth --auth-user choir abandon http://127.0.0.1:$PORT \$HOME/.choir/repos/.choir/node.key '$2'"
+    exit 0
+  fi
+  "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+    abandon "http://127.0.0.1:$PORT" "$STATE/repos/.choir/node.key" "$2"
+  ;;
+
 sync)
   if remote_node; then
     # Same D21 order, new topology: canonical first (through the
@@ -352,6 +366,7 @@ sh scripts/choirctl <command>
 
   review <id> <oid> [repo:ref]                   open a landing review
   verdict <reviewer> <id> <verdict> [note]       cast a reviewer verdict
+  abandon <id>     settle a stale incomplete review as lapsed-unapproved
   verify-backup    pull the offsite copy back and check all five ways
   pull-backup      fetch the log copy from the node host (remote mode)
   schedule-backup [secs]   pull-backup on a launchd interval (default 3600)

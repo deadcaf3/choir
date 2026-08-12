@@ -163,6 +163,30 @@ fn cli_end_to_end() {
         "{view}"
     );
 
+    // `abandon` settles a review that will never finish. Same node-only
+    // rule as slash (archiving drops verdicts), and the fold's own
+    // guards do the rest: a complete review cannot be lapsed, and an
+    // archived one cannot be archived twice.
+    let out = choir(&["review", &api, key_file, "cli-agent", "r3", &head, "bot"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    let out = choir(&["abandon", &api, key_file, "r3"]);
+    assert_eq!(out.status.code(), Some(1), "an agent key must not abandon");
+    assert_eq!(json(&out)["code"], "node_only", "{:?}", json(&out));
+    let out = choir(&["abandon", &api, node_key_file.to_str().unwrap(), "r3"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    let view = json(&choir(&["view", &api]));
+    assert_eq!(view["reviews"]["r3"]["archived"], true, "{view}");
+    assert_eq!(view["reviews"]["r3"]["approved"], false, "{view}");
+    let out = choir(&["abandon", &api, node_key_file.to_str().unwrap(), "r3"]);
+    assert_eq!(out.status.code(), Some(1), "already archived must refuse");
+    let out = choir(&["abandon", &api, node_key_file.to_str().unwrap(), "r1"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a complete review reached an outcome and must not lapse: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
     // `bind` is the operator's only path to the durable identity record,
     // and D24 T3 attribution reads nothing else. Same node-only rule as
     // `slash`: an agent key cannot mint a binding naming itself.
