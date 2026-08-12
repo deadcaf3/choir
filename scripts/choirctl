@@ -29,11 +29,29 @@ choir_bin() {
 # only make sense in one of them check it and refuse in the other.
 remote_node() { [ -f "$STATE/node-remote" ]; }
 
+# Once the node serves TLS publicly, ~/.choir-public-url holds the base
+# (e.g. https://<domain>:<port>) and every HTTP leg goes straight to it
+# — the cert verifies, the hairpin from the node host to its own public
+# name works, and the tunnel stops being load-bearing for HTTP. The
+# file is untracked on purpose: hostnames stay out of the repo. Without
+# it, everything reaches the node as plaintext over the tunnel exactly
+# as before the flip.
+api_base() {
+  if [ -f "$HOME/.choir-public-url" ]; then
+    cat "$HOME/.choir-public-url"
+  else
+    echo "http://127.0.0.1:$PORT"
+  fi
+}
+
 # Idempotent: -O check asks the existing master, and only a missing one
 # opens a new forward. ControlPersist outlives the command so the next
 # one is instant, same reasoning as the mirror scripts' socket.
 tunnel_up() {
   local ip ctl key
+  # Public TLS makes the HTTP forward unnecessary; ssh legs (node_ssh,
+  # pulls, mirrors) hold their own connections and never needed it.
+  [ -f "$HOME/.choir-public-url" ] && return 0
   ip=$(cat "$HOME/.choir-mirror-ip")
   key=$HOME/.ssh/choir_bench_ed25519
   ctl=$HOME/.ssh/cm-choir-tunnel.sock
@@ -149,9 +167,9 @@ status)
   else
     echo "binary: $(ps -eo args | grep "[c]hoir-node" | head -1 | awk '{print $1}')"
   fi
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/view" || true)
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$(api_base)/api/view" || true)
   echo "auth:   $code on an unauthenticated /api/view (401 = auth is on)"
-  view=$(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")
+  view=$(curl -s -u "$(auth_user):$(auth_pass)" "$(api_base)/api/view")
   # The path above says which file is serving. This says what that file
   # was built from, which is the question "did my rebuild reach the
   # running process" actually asks. A stamp of `unknown` means the binary
@@ -256,7 +274,7 @@ review)
   [ $# -ge 3 ] || { echo "usage: choirctl review <id> <oid> [repo:ref]" >&2; exit 2; }
   remote_node && tunnel_up
   "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
-    review "http://127.0.0.1:$PORT" "$STATE/agent.key" \
+    review "$(api_base)" "$STATE/agent.key" \
     "${CHOIR_REVIEW_CHANNEL:-op/codex}" "$2" "$3" \
     --ref "${4:-choir/choir.git:refs/heads/main}"
   ;;
@@ -274,11 +292,11 @@ verdict)
   # which killed both verdict seats of a real landing round.
   if [ $# -ge 5 ]; then
     "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
-      verdict "http://127.0.0.1:$PORT" "$STATE/review-$2.key" "$2/reviewer" \
+      verdict "$(api_base)" "$STATE/review-$2.key" "$2/reviewer" \
       "$3" "$4" "$5"
   else
     "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
-      verdict "http://127.0.0.1:$PORT" "$STATE/review-$2.key" "$2/reviewer" \
+      verdict "$(api_base)" "$STATE/review-$2.key" "$2/reviewer" \
       "$3" "$4"
   fi
   ;;
@@ -290,11 +308,11 @@ abandon)
   #   choirctl abandon <id>
   [ $# -ge 2 ] || { echo "usage: choirctl abandon <id>" >&2; exit 2; }
   if remote_node; then
-    node_ssh "\$HOME/bin/choir --auth-file \$HOME/.choir/auth --auth-user choir abandon http://127.0.0.1:$PORT \$HOME/.choir/repos/.choir/node.key '$2'"
+    node_ssh "\$HOME/bin/choir --auth-file \$HOME/.choir/auth --auth-user choir abandon $(api_base) \$HOME/.choir/repos/.choir/node.key '$2'"
     exit 0
   fi
   "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
-    abandon "http://127.0.0.1:$PORT" "$STATE/repos/.choir/node.key" "$2"
+    abandon "$(api_base)" "$STATE/repos/.choir/node.key" "$2"
   ;;
 
 sync)
@@ -360,7 +378,7 @@ url)
   # Clone/push URL with credentials, for pasting into git or curl. In
   # remote mode 127.0.0.1 is the tunnel, so the URL is unchanged.
   remote_node && tunnel_up
-  echo "http://$(auth_user):$(auth_pass)@127.0.0.1:$PORT/${2:-choir/choir.git}"
+  echo "$(api_base)/${2:-choir/choir.git}" | sed "s|://|://$(auth_user):$(auth_pass)@|"
   ;;
 
 *)

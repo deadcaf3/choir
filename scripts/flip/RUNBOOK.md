@@ -322,8 +322,18 @@ steps, all on the node host, all reversible by deleting one marker file:
 
 Access for a new user is one appended `user:token` line in
 `~/.choir/auth` (0600; mint the token with `openssl rand -hex 32`,
-hand it over out of band) — the auth table is per-user already. The
-tunnel keeps working after the flip; 127.0.0.1 is unaffected.
+hand it over out of band) — the auth table is per-user already.
+
+After the flip, the operator's own tooling must switch schemes too: a
+plaintext `http://` through the tunnel now hits a TLS listener and gets
+nothing. Write the public base to the untracked `~/.choir-public-url`
+on the operator machine (e.g. `https://<domain>:<port>`) and every
+`choirctl` HTTP leg — status, review, verdict, the canonical push —
+goes straight to the public name with a verifying cert; the HTTP
+tunnel stops being load-bearing (ssh legs never used it). The hairpin
+from the node host to its own public name works, so on-node CLI calls
+use the same base. Deleting the file restores the pre-flip
+tunnel-and-plaintext behaviour, matching a marker rollback on the node.
 
 ## Still open
 
