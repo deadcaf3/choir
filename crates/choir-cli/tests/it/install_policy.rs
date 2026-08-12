@@ -16,7 +16,12 @@ fn repos_file(entries: &str) -> std::path::PathBuf {
     path
 }
 
-fn render_output(repos: &str, protected: Option<&str>, scope: bool) -> std::process::Output {
+fn render_output(
+    repos: &str,
+    protected: Option<&str>,
+    scope: bool,
+    tls: Option<(&str, &str)>,
+) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_plist.sh");
     let repos_path = repos_file(repos);
     let mut command = std::process::Command::new("sh");
@@ -35,14 +40,20 @@ fn render_output(repos: &str, protected: Option<&str>, scope: bool) -> std::proc
         "/state/newcomer-adjudications.jsonl",
     ]);
     // Positional like the installers pass them: [protected-refs] then
-    // [require-scope], an empty slot standing in for an absent policy.
+    // [require-scope] then [tls-cert] [tls-key], an empty slot standing
+    // in for an absent policy.
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope {
+    } else if scope || tls.is_some() {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
+    } else if tls.is_some() {
+        command.arg("");
+    }
+    if let Some((cert, key)) = tls {
+        command.args([cert, key]);
     }
     let output = command.output().expect("render plist");
     std::fs::remove_file(repos_path).ok();
@@ -50,7 +61,11 @@ fn render_output(repos: &str, protected: Option<&str>, scope: bool) -> std::proc
 }
 
 fn render(protected: Option<&str>, scope: bool) -> String {
-    let output = render_output("owner/repo.git\n", protected, scope);
+    render_tls(protected, scope, None)
+}
+
+fn render_tls(protected: Option<&str>, scope: bool, tls: Option<(&str, &str)>) -> String {
+    let output = render_output("owner/repo.git\n", protected, scope, tls);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 plist")
 }
@@ -108,7 +123,12 @@ fn explicit_policy_renders_all_three_review_gates_or_none() {
 }
 
 /// The Linux sibling of [`render_output`], fed byte-identical arguments.
-fn render_unit_output(repos: &str, protected: Option<&str>, scope: bool) -> std::process::Output {
+fn render_unit_output(
+    repos: &str,
+    protected: Option<&str>,
+    scope: bool,
+    tls: Option<(&str, &str)>,
+) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
     let repos_path = repos_file(repos);
     let mut command = std::process::Command::new("sh");
@@ -128,11 +148,16 @@ fn render_unit_output(repos: &str, protected: Option<&str>, scope: bool) -> std:
     ]);
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope {
+    } else if scope || tls.is_some() {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
+    } else if tls.is_some() {
+        command.arg("");
+    }
+    if let Some((cert, key)) = tls {
+        command.args([cert, key]);
     }
     let output = command.output().expect("render unit");
     std::fs::remove_file(repos_path).ok();
@@ -140,7 +165,11 @@ fn render_unit_output(repos: &str, protected: Option<&str>, scope: bool) -> std:
 }
 
 fn render_unit(protected: Option<&str>, scope: bool) -> String {
-    let output = render_unit_output("owner/repo.git\n", protected, scope);
+    render_unit_tls(protected, scope, None)
+}
+
+fn render_unit_tls(protected: Option<&str>, scope: bool, tls: Option<(&str, &str)>) -> String {
+    let output = render_unit_output("owner/repo.git\n", protected, scope, tls);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 unit")
 }
@@ -182,8 +211,9 @@ fn unit_argv(unit: &str) -> Vec<String> {
 fn both_supervisors_launch_the_node_with_the_same_arguments() {
     for protected in [None, Some("/state/protected-refs")] {
         for scope in [false, true] {
-            let plist = plist_argv(&render(protected, scope));
-            let unit = unit_argv(&render_unit(protected, scope));
+        for tls in [None, Some(("/state/tls/fullchain.pem", "/state/tls/privkey.pem"))] {
+            let plist = plist_argv(&render_tls(protected, scope, tls));
+            let unit = unit_argv(&render_unit_tls(protected, scope, tls));
 
             // Without this the whole test passes vacuously when a renderer
             // rejects its arguments and prints usage to stderr — which is
@@ -206,6 +236,23 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
                 scope,
                 "--require-scope must appear exactly when the scope slot is set"
             );
+            // The TLS pair and the bind are one decision: a public bind
+            // must carry the cert pair, loopback must carry neither.
+            assert_eq!(
+                plist.iter().any(|arg| arg == "--tls-cert"),
+                tls.is_some(),
+                "--tls-cert must appear exactly when the tls slots are set"
+            );
+            let bind = plist
+                .windows(2)
+                .find(|pair| pair[0] == "--bind")
+                .map(|pair| pair[1].clone())
+                .expect("--bind is always rendered");
+            assert_eq!(
+                bind,
+                if tls.is_some() { "0.0.0.0" } else { "127.0.0.1" },
+                "the bind must flip with the TLS pair and only with it"
+            );
             assert_eq!(
                 plist, unit,
                 "launchd and systemd must start the node with identical \
@@ -213,6 +260,21 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
                  is a node running without the gate its operator configured"
             );
         }
+        }
+    }
+}
+
+/// Half a TLS pair is a configuration error, not a default: the node
+/// would refuse the non-loopback bind anyway (invariant 9), and the
+/// renderer refusing first is what keeps that from becoming a unit that
+/// crash-loops under supervision.
+#[test]
+fn a_half_tls_pair_is_refused_by_both_renderers() {
+    for (cert, key) in [("/state/tls/fullchain.pem", ""), ("", "/state/tls/privkey.pem")] {
+        let plist = render_output("owner/repo.git\n", None, false, Some((cert, key)));
+        assert!(!plist.status.success(), "plist renderer accepted half a TLS pair");
+        let unit = render_unit_output("owner/repo.git\n", None, false, Some((cert, key)));
+        assert!(!unit.status.success(), "unit renderer accepted half a TLS pair");
     }
 }
 
@@ -224,9 +286,9 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
 #[test]
 fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
     let repos = "# comment\n\nowner/repo.git\nsecond/other.git\n";
-    let plist_out = render_output(repos, Some("/state/protected-refs"), false);
+    let plist_out = render_output(repos, Some("/state/protected-refs"), false, None);
     assert!(plist_out.status.success());
-    let unit_out = render_unit_output(repos, Some("/state/protected-refs"), false);
+    let unit_out = render_unit_output(repos, Some("/state/protected-refs"), false, None);
     assert!(unit_out.status.success());
 
     let plist = plist_argv(&String::from_utf8(plist_out.stdout).expect("UTF-8 plist"));
@@ -248,11 +310,11 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 
     for empty in ["", "# only a comment\n"] {
         assert!(
-            !render_output(empty, None, false).status.success(),
+            !render_output(empty, None, false, None).status.success(),
             "the plist renderer must refuse a repos list with no entries"
         );
         assert!(
-            !render_unit_output(empty, None, false).status.success(),
+            !render_unit_output(empty, None, false, None).status.success(),
             "the unit renderer must refuse a repos list with no entries"
         );
     }

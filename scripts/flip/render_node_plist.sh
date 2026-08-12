@@ -4,8 +4,8 @@
 # secrets, or touching launchd.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 13 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 15 ]; then
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key]" >&2
   exit 2
 fi
 
@@ -27,6 +27,17 @@ PROTECTED_REFS=${12:-}
 # means absent for the same reason: an installer branch can always pass
 # both slots and let the marker files decide.
 REQUIRE_SCOPE=${13:-}
+# TLS is one decision, not two: cert and key arrive together or not at
+# all, and their presence is what flips the bind from loopback to
+# 0.0.0.0. Half a pair is refused rather than defaulted, because the
+# node itself will refuse a non-loopback bind without TLS (invariant 9)
+# and the renderer failing here beats a unit that crash-loops there.
+TLS_CERT=${14:-}
+TLS_KEY=${15:-}
+if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
+  echo "render_node_plist.sh: tls-cert and tls-key must be given together" >&2
+  exit 2
+fi
 
 # The served repos come from a file (one `owner/name.git` per line,
 # `#` comments and blank lines skipped) rather than a single positional
@@ -72,7 +83,15 @@ if [ -n "$REQUIRE_SCOPE" ]; then
   echo '    <string>--require-scope</string>'
 fi
 
-echo '    <string>--bind</string><string>127.0.0.1</string>'
+if [ -n "$TLS_CERT" ]; then
+  cat <<PLIST_TLS
+    <string>--bind</string><string>0.0.0.0</string>
+    <string>--tls-cert</string><string>$TLS_CERT</string>
+    <string>--tls-key</string><string>$TLS_KEY</string>
+PLIST_TLS
+else
+  echo '    <string>--bind</string><string>127.0.0.1</string>'
+fi
 while IFS= read -r repo; do
   case $repo in ''|\#*) continue ;; esac
   printf '    <string>--create</string><string>%s</string>\n' "$repo"

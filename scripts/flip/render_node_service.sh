@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 13 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 15 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key]" >&2
   exit 2
 fi
 
@@ -35,6 +35,14 @@ PROTECTED_REFS=${12:-}
 # Same contract as the plist renderer: any non-empty 13th argument emits
 # --require-scope (D26 replay containment), empty means absent.
 REQUIRE_SCOPE=${13:-}
+# Same TLS contract as the plist renderer: cert and key together or not
+# at all, and their presence flips the bind from loopback to 0.0.0.0.
+TLS_CERT=${14:-}
+TLS_KEY=${15:-}
+if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
+  echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
+  exit 2
+fi
 
 # Same repos-file contract as the plist renderer: one repo per line,
 # `#` comments and blank lines skipped, an empty list refused. The two
@@ -60,7 +68,15 @@ fi
 if [ -n "$REQUIRE_SCOPE" ]; then
   EXEC="$EXEC --require-scope"
 fi
-EXEC="$EXEC --bind 127.0.0.1"
+if [ -n "$TLS_CERT" ]; then
+  EXEC="$EXEC --bind 0.0.0.0"
+  EXEC="$EXEC --tls-cert $TLS_CERT"
+  EXEC="$EXEC --tls-key $TLS_KEY"
+  BIND_DESC="TLS public bind"
+else
+  EXEC="$EXEC --bind 127.0.0.1"
+  BIND_DESC="loopback bind"
+fi
 repo_count=0
 while IFS= read -r repo; do
   case $repo in ''|\#*) continue ;; esac
@@ -71,7 +87,7 @@ done < "$REPOS_FILE"
 
 cat <<UNIT
 [Unit]
-Description=$LABEL — choir node (loopback bind, auth mandatory)
+Description=$LABEL — choir node ($BIND_DESC, auth mandatory)
 Documentation=file://$ROOT
 After=network-online.target
 Wants=network-online.target

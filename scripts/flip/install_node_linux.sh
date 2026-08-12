@@ -35,6 +35,7 @@ BIN="$BIN_DIR/choir-node"
 CHOIR="$BIN_DIR/choir"
 POLICY_MARKER="$STATE/review-gates.enabled"
 SCOPE_MARKER="$STATE/scope-required.enabled"
+TLS_MARKER="$STATE/tls.enabled"
 PROTECTED_REFS="$STATE/protected-refs"
 NEWCOMER_AUDIT="$STATE/newcomer-audit.jsonl"
 NEWCOMER_ADJUDICATIONS="$STATE/newcomer-adjudications.jsonl"
@@ -113,16 +114,36 @@ REQUIRE_SCOPE=""
 if [ -f "$SCOPE_MARKER" ]; then
   REQUIRE_SCOPE="require-scope"
 fi
+# TLS marker: two lines, cert path then key path, both readable by this
+# user. Once present, every reinstall keeps the public TLS bind — the
+# same one-way marker discipline as the review and scope gates, and the
+# same fail-closed shape: a marker naming unreadable files refuses to
+# render rather than installing a unit that crash-loops on startup.
+TLS_CERT=""
+TLS_KEY=""
+if [ -f "$TLS_MARKER" ]; then
+  TLS_CERT=$(sed -n 1p "$TLS_MARKER")
+  TLS_KEY=$(sed -n 2p "$TLS_MARKER")
+  [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ] \
+    || { echo "$TLS_MARKER must hold two lines: cert path, key path" >&2; exit 1; }
+  [ -r "$TLS_CERT" ] && [ -r "$TLS_KEY" ] \
+    || { echo "TLS enabled but the cert/key files named by $TLS_MARKER are not readable" >&2; exit 1; }
+fi
 if [ -f "$POLICY_MARKER" ]; then
   sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
-    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" > "$UNIT"
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
+    "$TLS_CERT" "$TLS_KEY" > "$UNIT"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
-    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" > "$UNIT"
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
+    "$TLS_CERT" "$TLS_KEY" > "$UNIT"
+fi
+if [ -n "$TLS_CERT" ]; then
+  echo "TLS public bind enabled ($TLS_MARKER): serving 0.0.0.0:$PORT with $TLS_CERT"
 fi
 if [ -n "$REQUIRE_SCOPE" ]; then
   echo "scope gate enabled ($SCOPE_MARKER): ops must name this node's log and a recent head"

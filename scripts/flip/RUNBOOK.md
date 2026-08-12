@@ -297,11 +297,37 @@ The rehearsal also proved the moved node re-registers its own fresh key
 survives the restore (an unreviewed push to protected `main` was still
 refused).
 
+## Going public: the TLS bind
+
+The node goes from tunnel-only to publicly reachable in three operator
+steps, all on the node host, all reversible by deleting one marker file:
+
+1. Firewall: allow inbound 80 (certbot standalone issuance, and every
+   ~60-day renewal rebinds it) and the serving port. Nothing else ever
+   serves on 80.
+2. `sh ~/choir-build/scripts/flip/setup_tls.sh <domain> [port]` — issues
+   the Let's Encrypt cert (account registered without an email, per the
+   standing privacy rule), installs a deploy hook that re-projects the
+   pair to `~/.choir/tls/` at 0600 and restarts the unit on every
+   renewal, runs that hook once now so it is proven today rather than at
+   the first renewal, and writes `~/.choir/tls.enabled` (two lines: cert
+   path, key path).
+3. Re-run the installer. The marker flips the rendered unit to
+   `--bind 0.0.0.0 --tls-cert ... --tls-key ...`; the same one-way
+   marker discipline as the review and scope gates, so every later
+   reinstall keeps the public bind. A marker naming unreadable files
+   refuses to render (fail closed) — and the node itself refuses a
+   non-loopback bind without TLS (invariant 9), so there is no
+   configuration in which plaintext basic auth crosses a real network.
+
+Access for a new user is one appended `user:token` line in
+`~/.choir/auth` (0600; mint the token with `openssl rand -hex 32`,
+hand it over out of band) — the auth table is per-user already. The
+tunnel keeps working after the flip; 127.0.0.1 is unaffected.
+
 ## Still open
 
-- This dogfood installation has no TLS, so its bind stays loopback
-  (invariant 9 refuses anything else without a cert). Remote access is an
-  SSH tunnel.
+- A node without a persisted log returns `log_evicted` when a reader falls
 - A node without a persisted log returns `log_evicted` when a reader falls
   behind its in-memory window. The reader can resume at `window_base`, but
   cannot verify continuity across the gap. See the [sync contract](../../SYNC.md).
