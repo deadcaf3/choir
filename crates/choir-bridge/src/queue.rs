@@ -128,6 +128,21 @@ pub enum DifferentialVerdict {
     InconclusiveParentFailure,
 }
 
+impl DifferentialVerdict {
+    /// The ledger's stable spelling. CLI output prints this rather than the
+    /// Rust `Debug` name so every consumer — ledger rows, receipts, stdout —
+    /// parses one vocabulary; the two spellings once cost a downstream
+    /// summarizer a silent zero.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::InteractionFailure => "interaction_failure",
+            Self::InconclusiveParentFailure => "inconclusive_parent_failure",
+        }
+    }
+}
+
 fn compatible_confidence_policy(value: &serde_json::Value) -> bool {
     value["format_version"].as_u64() == Some(1)
         && value["method"].as_str() == Some("one_sided_exact_binomial_zero_spurious")

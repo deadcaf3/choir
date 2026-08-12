@@ -604,6 +604,7 @@ fn harvest_reproduces_an_interaction_failure_into_a_specimen() {
 set -eu
 mkdir -p "$3"
 printf '%s\n' "$8" >> "$3/runs"
+printf '%s\n' "$5" >> "$3/trees"
 verdict=clean
 if [ "$8" = "{first}" ]; then verdict=interaction_failure; fi
 printf '{{"format_version":1,"observation_id":4,"merge":"%s","report":{{"verdict":"%s"}},"calibration":{{"target":{{"met":null}},"pending_interactions":1,"confidence_claim":null,"confidence_policy":{{"format_version":1,"method":"one_sided_exact_binomial_zero_spurious","confidence":{{"numerator":95,"denominator":100}},"target":{{"numerator":1,"denominator":1000,"comparison":"strictly_less_than"}},"minimum_evaluated_merges":2995,"requires_zero_spurious_failures":true,"assumptions":["independent_runs","representative_queue_command_and_merge_population"]}},"landing_gate_enabled":false}}}}\n' "$8" "$verdict"
@@ -638,6 +639,18 @@ printf '{{"format_version":1,"observation_id":4,"merge":"%s","report":{{"verdict
     let runs = std::fs::read_to_string(state.join("runs")).unwrap();
     assert_eq!(runs.lines().filter(|line| *line == first).count(), 6);
     assert_eq!(runs.lines().filter(|line| *line == second).count(), 1);
+
+    // Reproductions run in fresh worktree triples: the walk's two first
+    // runs share the held session tree, and each of the 5 reproductions
+    // gets its own, so 6 distinct parent-a paths across 7 runs.
+    let trees = std::fs::read_to_string(state.join("trees")).unwrap();
+    let distinct: std::collections::BTreeSet<&str> = trees.lines().collect();
+    assert_eq!(trees.lines().count(), 7, "{trees}");
+    assert_eq!(
+        distinct.len(),
+        6,
+        "reproduction runs must not share the walk's held trees: {trees}"
+    );
 
     let specimen: serde_json::Value = serde_json::from_slice(
         &std::fs::read(state.join("specimens").join(format!("{first}.json"))).unwrap(),

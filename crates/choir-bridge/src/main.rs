@@ -417,9 +417,9 @@ fn queue_round(
             ) {
             match result {
                 Ok(outcome) => println!(
-                    "queue: PR #{}: advisory differential {:?} (observation {}, pending {})",
+                    "queue: PR #{}: advisory differential {} (observation {}, pending {})",
                     entry_id,
-                    outcome.verdict,
+                    outcome.verdict.as_str(),
                     outcome.observation_id,
                     outcome.pending_interactions,
                 ),
@@ -667,8 +667,10 @@ fn main() {
                 };
                 match result {
                     Ok(outcome) => println!(
-                        "calibration: round {round}: {merge}: {:?} (observation {}, pending {})",
-                        outcome.verdict, outcome.observation_id, outcome.pending_interactions
+                        "calibration: round {round}: {merge}: {} (observation {}, pending {})",
+                        outcome.verdict.as_str(),
+                        outcome.observation_id,
+                        outcome.pending_interactions
                     ),
                     Err(error) => {
                         failure = Some(format!("calibration failed for {merge}: {error}"));
@@ -777,18 +779,29 @@ fn main() {
                 Ok(outcome) => {
                     observed += 1;
                     println!(
-                        "harvest: {number}/{total}: {merge}: {:?} (observation {}, pending {})",
-                        outcome.verdict, outcome.observation_id, outcome.pending_interactions
+                        "harvest: {number}/{total}: {merge}: {} (observation {}, pending {})",
+                        outcome.verdict.as_str(),
+                        outcome.observation_id,
+                        outcome.pending_interactions
                     );
                     // A first interaction_failure verdict earns reproduction
-                    // runs on the spot, while the worktrees are still warm:
-                    // the specimen records how often it reproduced, which is
-                    // what separates a semantic conflict from a flake.
+                    // runs, each in a FRESH worktree triple regardless of the
+                    // walk's session mode: a held tree carries the previous
+                    // run's untracked build output, so a stale-artifact flake
+                    // would "reproduce" perfectly in it. Independent trees are
+                    // what make a specimen's 6/6 mean semantic conflict rather
+                    // than shared state.
                     if outcome.verdict == choir_bridge::queue::DifferentialVerdict::InteractionFailure
                     {
                         let mut runs = vec![Ok(outcome)];
                         for _ in 0..choir_bridge::queue::SPECIMEN_REPRODUCTION_RUNS {
-                            runs.push(run_once(&mut session, merge.as_str()));
+                            runs.push(choir_bridge::queue::run_differential(
+                                repo,
+                                merge.as_str(),
+                                Path::new(runner.as_str()),
+                                Path::new(command_file.as_str()),
+                                state,
+                            ));
                         }
                         match choir_bridge::queue::write_specimen(repo, merge, &runs, state) {
                             Ok(path) => println!(

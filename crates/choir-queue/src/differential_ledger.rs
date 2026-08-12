@@ -40,6 +40,10 @@ pub struct CommandSpec {
     /// these plus the pass-through list in [`effective_environment`], and
     /// nothing else.
     pub env: BTreeMap<String, String>,
+    /// Per-run wall-clock bound in seconds, or `None` to wait forever.
+    /// Additive: an absent field decodes as before, and because the field
+    /// lives in the hashed file bytes, declaring one is a command change.
+    pub timeout_seconds: Option<u64>,
     /// BLAKE3 content address of the command file bytes.
     pub snapshot_hash: String,
 }
@@ -102,15 +106,19 @@ pub struct RecordedObservation {
 ///
 /// The file schema is
 /// `{"format_version":1,"program":"cargo","args":["test"],"env":{"NAME":"value"}}`
-/// with `env` optional and empty by default. Its raw bytes are hashed so a
+/// with `env` optional and empty by default, plus an optional
+/// `"timeout_seconds"` bounding each run's wall clock (absent = wait
+/// forever). Its raw bytes are hashed so a
 /// ledger cannot silently mix command versions; because `env` lives in those
-/// bytes, a declared-environment change is a command change.
+/// bytes, a declared-environment change is a command change, and so is a
+/// timeout change.
 ///
 /// # Errors
 ///
 /// The file is unreadable, malformed, has the wrong version, has an empty
 /// program/non-string argument, declares an environment entry whose name is
-/// empty or contains `=` or NUL, or gives Cargo a target directory outside
+/// empty or contains `=` or NUL, declares a zero or non-integer
+/// `timeout_seconds`, or gives Cargo a target directory outside
 /// the current revision worktree.
 pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
     let bytes = fs::read(path).map_err(|error| format!("read differential command: {error}"))?;
@@ -150,6 +158,15 @@ pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
             .collect::<Result<BTreeMap<_, _>, _>>()?,
         _ => return Err("differential command env must be an object".to_string()),
     };
+    let timeout_seconds = match &value["timeout_seconds"] {
+        serde_json::Value::Null => None,
+        value => Some(
+            value
+                .as_u64()
+                .filter(|seconds| *seconds > 0)
+                .ok_or("differential command timeout_seconds must be a positive integer")?,
+        ),
+    };
     if !cargo_target_dirs_are_isolated(&program, &args) {
         return Err("cargo target directory must stay inside each revision worktree".to_string());
     }
@@ -157,6 +174,7 @@ pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
         program,
         args,
         env,
+        timeout_seconds,
         snapshot_hash: ContentHash::blake3(&bytes).to_hex(),
     })
 }

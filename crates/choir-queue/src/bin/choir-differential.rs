@@ -35,6 +35,7 @@ fn run(args: &[String]) -> Result<serde_json::Value, String> {
         Path::new(parent_b_dir),
         Path::new(merged_dir),
         &environment,
+        command.timeout_seconds.map(std::time::Duration::from_secs),
     )?;
     let revisions = Revisions {
         parent_a: parent_a_oid.clone(),

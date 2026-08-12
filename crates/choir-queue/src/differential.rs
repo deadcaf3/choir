@@ -149,16 +149,52 @@ fn run_one(
     args: &[String],
     dir: &Path,
     env: &BTreeMap<String, String>,
+    timeout: Option<std::time::Duration>,
 ) -> Result<Observation, String> {
-    let status = std::process::Command::new(program)
+    let mut child = std::process::Command::new(program)
         .args(args)
         .env_clear()
         .envs(env)
         .current_dir(dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
         .map_err(|error| format!("run differential command in {}: {error}", dir.display()))?;
+    let status = match timeout {
+        None => child
+            .wait()
+            .map_err(|error| format!("wait for differential command in {}: {error}", dir.display()))?,
+        Some(timeout) => {
+            // Hand-rolled deadline poll: no wait-with-timeout in std, and no
+            // dependency for something this small. 100 ms of granularity is
+            // noise against runs measured in tens of seconds.
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) if std::time::Instant::now() >= deadline => {
+                        child.kill().ok();
+                        child.wait().ok();
+                        // Operational error, never a verdict: a timeout cannot
+                        // distinguish a hang from a slow run, so it must not
+                        // be allowed to mint an interaction failure.
+                        return Err(format!(
+                            "differential command in {} timed out after {} s",
+                            dir.display(),
+                            timeout.as_secs()
+                        ));
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Err(error) => {
+                        return Err(format!(
+                            "wait for differential command in {}: {error}",
+                            dir.display()
+                        ))
+                    }
+                }
+            }
+        }
+    };
     Ok(Observation {
         success: status.success(),
         exit_code: status.code(),
@@ -189,9 +225,18 @@ fn run_one(
 /// rather than run in parallel. Correctness is unaffected either way; the
 /// speedup is not. Keeping such state per-tree is what makes this pay.
 ///
+/// `timeout` bounds each of the three runs individually; `None` waits
+/// forever, which was the only behavior before the parameter existed. A
+/// run that exceeds it is killed and reported as an **error**, never as a
+/// verdict — a timeout cannot distinguish a hung command from a slow one,
+/// so it must not become evidence about the merge. Unattended corpus
+/// walks (`choir-bridge harvest`, D27) are the reason it exists: one hung
+/// test run must not stall a multi-hour walk forever.
+///
 /// # Errors
 ///
-/// The program could not be spawned in one of the three directories. All
+/// The program could not be spawned in one of the three directories, or a
+/// run exceeded `timeout`. All
 /// three are attempted before reporting: unlike the previous sequential
 /// form, a spawn failure in `parent_a` no longer prevents the other two
 /// from running. The reported error is still the earliest in
@@ -209,6 +254,7 @@ pub fn run_merged_vs_parents(
     parent_b: &Path,
     merged: &Path,
     env: &BTreeMap<String, String>,
+    timeout: Option<std::time::Duration>,
 ) -> Result<DifferentialReport, String> {
     if program.is_empty() {
         return Err("differential program must not be empty".to_string());
@@ -217,9 +263,9 @@ pub fn run_merged_vs_parents(
     // three paths outlive the threads without cloning anything, and the
     // scope will not return until all three have been joined.
     let (parent_a, parent_b, merged) = std::thread::scope(|scope| {
-        let a = scope.spawn(|| run_one(program, args, parent_a, env));
-        let b = scope.spawn(|| run_one(program, args, parent_b, env));
-        let m = scope.spawn(|| run_one(program, args, merged, env));
+        let a = scope.spawn(|| run_one(program, args, parent_a, env, timeout));
+        let b = scope.spawn(|| run_one(program, args, parent_b, env, timeout));
+        let m = scope.spawn(|| run_one(program, args, merged, env, timeout));
         (
             a.join().expect("parent-a differential thread panicked"),
             b.join().expect("parent-b differential thread panicked"),

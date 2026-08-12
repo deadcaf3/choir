@@ -66,7 +66,7 @@ fn same_command_finds_behavior_that_only_the_merge_breaks() {
 
     let args = vec![check.display().to_string()];
     let env = effective_environment(&BTreeMap::new());
-    let found = run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env).unwrap();
+    let found = run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env, None).unwrap();
     assert_eq!(found.verdict, Verdict::InteractionFailure, "{found:?}");
     assert!(found.parent_a.success && found.parent_b.success);
     assert!(!found.merged.success);
@@ -76,12 +76,108 @@ fn same_command_finds_behavior_that_only_the_merge_breaks() {
     // branches from inflating the semantic-interaction count.
     std::fs::write(parent_a.join("feature-b"), "enabled\n").unwrap();
     let inconclusive =
-        run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env).unwrap();
+        run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env, None).unwrap();
     assert_eq!(
         inconclusive.verdict,
         Verdict::InconclusiveParentFailure,
         "{inconclusive:?}"
     );
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
+fn a_hung_run_times_out_as_an_error_never_a_verdict() {
+    let work =
+        std::env::temp_dir().join(format!("choir-differential-timeout-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    let trees: Vec<_> = ["parent-a", "parent-b", "merged"]
+        .iter()
+        .map(|name| {
+            let dir = work.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        })
+        .collect();
+    // The merged tree hangs; both parents return immediately. Without a
+    // deadline this observation would never finish, which is exactly the
+    // failure mode an unattended corpus walk cannot afford.
+    std::fs::write(trees[2].join("hang"), "").unwrap();
+    let script = work.join("check.sh");
+    std::fs::write(&script, "#!/bin/sh\nif [ -f hang ]; then sleep 600; fi\n").unwrap();
+
+    let args = vec![script.display().to_string()];
+    let env = effective_environment(&BTreeMap::new());
+    let started = std::time::Instant::now();
+    let error = run_merged_vs_parents(
+        "sh",
+        &args,
+        &trees[0],
+        &trees[1],
+        &trees[2],
+        &env,
+        Some(std::time::Duration::from_secs(1)),
+    )
+    .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the deadline must actually bound the wait"
+    );
+
+    // The same deadline leaves a fast command untouched.
+    let clean = run_merged_vs_parents(
+        "sh",
+        &args,
+        &trees[0],
+        &trees[1],
+        &trees[0],
+        &env,
+        Some(std::time::Duration::from_secs(30)),
+    )
+    .unwrap();
+    assert_eq!(clean.verdict, Verdict::Clean, "{clean:?}");
+    std::fs::remove_dir_all(work).ok();
+}
+
+#[test]
+fn command_timeout_is_optional_positive_and_part_of_the_snapshot() {
+    let work = std::env::temp_dir().join(format!(
+        "choir-differential-timeout-spec-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let command_file = work.join("command.json");
+
+    std::fs::write(
+        &command_file,
+        r#"{"format_version":1,"program":"sh","args":["check.sh"]}"#,
+    )
+    .unwrap();
+    let bare = load_command(&command_file).unwrap();
+    assert_eq!(bare.timeout_seconds, None, "absent means wait forever");
+
+    std::fs::write(
+        &command_file,
+        r#"{"format_version":1,"program":"sh","args":["check.sh"],"timeout_seconds":1800}"#,
+    )
+    .unwrap();
+    let bounded = load_command(&command_file).unwrap();
+    assert_eq!(bounded.timeout_seconds, Some(1800));
+    assert_ne!(
+        bare.snapshot_hash, bounded.snapshot_hash,
+        "declaring a timeout is a command change"
+    );
+
+    for junk in [
+        r#"{"format_version":1,"program":"sh","args":[],"timeout_seconds":0}"#,
+        r#"{"format_version":1,"program":"sh","args":[],"timeout_seconds":"60"}"#,
+        r#"{"format_version":1,"program":"sh","args":[],"timeout_seconds":-5}"#,
+    ] {
+        std::fs::write(&command_file, junk).unwrap();
+        let error = load_command(&command_file).unwrap_err();
+        assert!(error.contains("timeout_seconds"), "{junk}: {error}");
+    }
     std::fs::remove_dir_all(work).ok();
 }
 
@@ -355,7 +451,7 @@ fn the_run_environment_is_the_declared_one_not_the_inherited_one() {
         "the pass-through list is what keeps subprocess commands runnable at all"
     );
     let args = vec![check.display().to_string()];
-    let report = run_merged_vs_parents("sh", &args, &trees[0], &trees[1], &trees[2], &env).unwrap();
+    let report = run_merged_vs_parents("sh", &args, &trees[0], &trees[1], &trees[2], &env, None).unwrap();
     assert_eq!(report.verdict, Verdict::Clean, "{report:?}");
     std::fs::remove_dir_all(work).ok();
 }
@@ -562,6 +658,7 @@ exit 0
         &trees[1],
         &trees[2],
         &effective_environment(&BTreeMap::new()),
+        None,
     )
     .expect("the barrier command spawns in all three trees");
     assert_eq!(
