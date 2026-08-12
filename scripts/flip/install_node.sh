@@ -43,6 +43,7 @@ TARGET_DIR="$(cargo metadata --format-version 1 --no-deps \
 TARGET_DIR="${TARGET_DIR:-$REPO_DIR/target}"
 BIN="$TARGET_DIR/release/choir-node"
 POLICY_MARKER="$STATE/review-gates.enabled"
+SCOPE_MARKER="$STATE/scope-required.enabled"
 PROTECTED_REFS="$STATE/protected-refs"
 NEWCOMER_AUDIT="$STATE/newcomer-audit.jsonl"
 NEWCOMER_ADJUDICATIONS="$STATE/newcomer-adjudications.jsonl"
@@ -119,16 +120,27 @@ chmod 600 "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS"
 #    once present, a reinstall must preserve the gate or refuse to run.
 #    Every pool member needs a bound key, and two distinct prefixes keep
 #    an accidental one-name or one-operator pool from looking complete.
+#
+#    The scope marker is the same idea for D26 replay containment: once
+#    present, every reinstall keeps --require-scope, so a captured op
+#    stops replaying and a rebuild cannot silently drop the defence.
+REQUIRE_SCOPE=""
+if [[ -f "$SCOPE_MARKER" ]]; then
+  REQUIRE_SCOPE="require-scope"
+fi
 if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
-    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" > "$PLIST"
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
-    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" > "$PLIST"
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" > "$PLIST"
+fi
+if [[ -n "$REQUIRE_SCOPE" ]]; then
+  echo "scope gate enabled ($SCOPE_MARKER): ops must name this node's log and a recent head"
 fi
 
 # 7. launchd agent. The renderer receives absolute paths because launchd

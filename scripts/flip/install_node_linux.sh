@@ -34,6 +34,7 @@ UNIT="$UNIT_DIR/$LABEL.service"
 BIN="$BIN_DIR/choir-node"
 CHOIR="$BIN_DIR/choir"
 POLICY_MARKER="$STATE/review-gates.enabled"
+SCOPE_MARKER="$STATE/scope-required.enabled"
 PROTECTED_REFS="$STATE/protected-refs"
 NEWCOMER_AUDIT="$STATE/newcomer-audit.jsonl"
 NEWCOMER_ADJUDICATIONS="$STATE/newcomer-adjudications.jsonl"
@@ -106,17 +107,25 @@ chmod 600 "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS"
 
 # 6. Optional fail-closed review policy, same marker and same validation
 #    as the macOS path: once present, a reinstall preserves the gate or
-#    refuses to run.
+#    refuses to run. The scope marker is the same idea for D26 replay
+#    containment: once present, every reinstall keeps --require-scope.
+REQUIRE_SCOPE=""
+if [ -f "$SCOPE_MARKER" ]; then
+  REQUIRE_SCOPE="require-scope"
+fi
 if [ -f "$POLICY_MARKER" ]; then
   sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
-    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" > "$UNIT"
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" > "$UNIT"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
-    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" > "$UNIT"
+    "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" > "$UNIT"
+fi
+if [ -n "$REQUIRE_SCOPE" ]; then
+  echo "scope gate enabled ($SCOPE_MARKER): ops must name this node's log and a recent head"
 fi
 
 # 7. Lingering is what makes a user unit a daemon: without it systemd stops

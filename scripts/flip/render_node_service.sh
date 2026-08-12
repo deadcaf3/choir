@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -ne 11 ] && [ "$#" -ne 12 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 13 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope]" >&2
   exit 2
 fi
 
@@ -32,6 +32,9 @@ REPOS_FILE=$9
 NEWCOMER_AUDIT=${10}
 NEWCOMER_ADJUDICATIONS=${11}
 PROTECTED_REFS=${12:-}
+# Same contract as the plist renderer: any non-empty 13th argument emits
+# --require-scope (D26 replay containment), empty means absent.
+REQUIRE_SCOPE=${13:-}
 
 # Same repos-file contract as the plist renderer: one repo per line,
 # `#` comments and blank lines skipped, an empty list refused. The two
@@ -53,6 +56,9 @@ EXEC="$EXEC --newcomer-audit $NEWCOMER_AUDIT"
 EXEC="$EXEC --newcomer-adjudications $NEWCOMER_ADJUDICATIONS"
 if [ -n "$PROTECTED_REFS" ]; then
   EXEC="$EXEC --require-assignment --protected-refs $PROTECTED_REFS --require-review"
+fi
+if [ -n "$REQUIRE_SCOPE" ]; then
+  EXEC="$EXEC --require-scope"
 fi
 EXEC="$EXEC --bind 127.0.0.1"
 repo_count=0

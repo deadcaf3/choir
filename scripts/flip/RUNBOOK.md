@@ -61,6 +61,21 @@ fails closed unless the reviewer pool has at least two prefixes, every reviewer
 has a bound key, and the protected-ref file is non-empty. Removing the marker
 and reinstalling deliberately returns to the ungated policy.
 
+To close replay (D26), create `~/.choir/scope-required.enabled` (mode 0600)
+and rerun the installer. The node then admits only ops whose signed payload
+carries an `OpScope` naming this node's log and a head still in its window,
+refusing the rest as `scope_required`, `foreign_scope`, or `stale_scope` —
+so a captured op no longer replays after an ABA ref move, and an op signed
+for another node's log is refused by name. This is a client-compatibility
+step, not just a flag: every submitter must sign a scope from then on.
+`choir submit` (and every CLI verb, MCP included) and the bridge already
+do; anything hand-rolling `/api/submit` with `curl` must first read
+`log.node` and `log.head` from `GET /api/view` and sign them into the op.
+`/api/view.log.scope_required` reports whether the gate is on. Removing
+the marker and reinstalling returns to transport containment (loopback
+bind plus the auth token), which is D26's documented fallback, not a
+misconfiguration.
+
 Verify the daemon:
 
 ```sh

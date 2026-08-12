@@ -4,8 +4,8 @@
 # secrets, or touching launchd.
 set -eu
 
-if [ "$#" -ne 11 ] && [ "$#" -ne 12 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 13 ]; then
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope]" >&2
   exit 2
 fi
 
@@ -21,6 +21,12 @@ REPOS_FILE=$9
 NEWCOMER_AUDIT=${10}
 NEWCOMER_ADJUDICATIONS=${11}
 PROTECTED_REFS=${12:-}
+# Any non-empty 13th argument turns on D26 replay containment: the node
+# then admits only ops whose signed payload names this node's log and a
+# head still in the window. Positional like [protected-refs], and empty
+# means absent for the same reason: an installer branch can always pass
+# both slots and let the marker files decide.
+REQUIRE_SCOPE=${13:-}
 
 # The served repos come from a file (one `owner/name.git` per line,
 # `#` comments and blank lines skipped) rather than a single positional
@@ -60,6 +66,10 @@ if [ -n "$PROTECTED_REFS" ]; then
     <string>--protected-refs</string><string>$PROTECTED_REFS</string>
     <string>--require-review</string>
 PLIST_POLICY
+fi
+
+if [ -n "$REQUIRE_SCOPE" ]; then
+  echo '    <string>--require-scope</string>'
 fi
 
 echo '    <string>--bind</string><string>127.0.0.1</string>'

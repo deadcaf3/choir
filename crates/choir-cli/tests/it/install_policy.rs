@@ -16,7 +16,7 @@ fn repos_file(entries: &str) -> std::path::PathBuf {
     path
 }
 
-fn render_output(repos: &str, protected: Option<&str>) -> std::process::Output {
+fn render_output(repos: &str, protected: Option<&str>, scope: bool) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_plist.sh");
     let repos_path = repos_file(repos);
     let mut command = std::process::Command::new("sh");
@@ -34,23 +34,30 @@ fn render_output(repos: &str, protected: Option<&str>) -> std::process::Output {
         "/state/newcomer-audit.jsonl",
         "/state/newcomer-adjudications.jsonl",
     ]);
+    // Positional like the installers pass them: [protected-refs] then
+    // [require-scope], an empty slot standing in for an absent policy.
     if let Some(path) = protected {
         command.arg(path);
+    } else if scope {
+        command.arg("");
+    }
+    if scope {
+        command.arg("require-scope");
     }
     let output = command.output().expect("render plist");
     std::fs::remove_file(repos_path).ok();
     output
 }
 
-fn render(protected: Option<&str>) -> String {
-    let output = render_output("owner/repo.git\n", protected);
+fn render(protected: Option<&str>, scope: bool) -> String {
+    let output = render_output("owner/repo.git\n", protected, scope);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 plist")
 }
 
 #[test]
 fn explicit_policy_renders_all_three_review_gates_or_none() {
-    let open = render(None);
+    let open = render(None, false);
     for required in [
         "--newcomer-audit",
         "/state/newcomer-audit.jsonl",
@@ -63,11 +70,12 @@ fn explicit_policy_renders_all_three_review_gates_or_none() {
         "--require-assignment",
         "--protected-refs",
         "--require-review",
+        "--require-scope",
     ] {
         assert!(!open.contains(flag), "ungated install contains {flag}");
     }
 
-    let protected = render(Some("/state/protected-refs"));
+    let protected = render(Some("/state/protected-refs"), false);
     let positions: Vec<usize> = [
         "--require-assignment",
         "--protected-refs",
@@ -85,6 +93,7 @@ fn explicit_policy_renders_all_three_review_gates_or_none() {
     let installer = std::fs::read_to_string(repo_root().join("scripts/flip/install_node.sh"))
         .expect("installer source");
     assert!(installer.contains("review-gates.enabled"));
+    assert!(installer.contains("scope-required.enabled"));
     assert!(installer.contains("render_node_plist.sh"));
     assert!(installer.contains("validate_review_policy.sh"));
     let here = installer
@@ -99,7 +108,7 @@ fn explicit_policy_renders_all_three_review_gates_or_none() {
 }
 
 /// The Linux sibling of [`render_output`], fed byte-identical arguments.
-fn render_unit_output(repos: &str, protected: Option<&str>) -> std::process::Output {
+fn render_unit_output(repos: &str, protected: Option<&str>, scope: bool) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
     let repos_path = repos_file(repos);
     let mut command = std::process::Command::new("sh");
@@ -119,14 +128,19 @@ fn render_unit_output(repos: &str, protected: Option<&str>) -> std::process::Out
     ]);
     if let Some(path) = protected {
         command.arg(path);
+    } else if scope {
+        command.arg("");
+    }
+    if scope {
+        command.arg("require-scope");
     }
     let output = command.output().expect("render unit");
     std::fs::remove_file(repos_path).ok();
     output
 }
 
-fn render_unit(protected: Option<&str>) -> String {
-    let output = render_unit_output("owner/repo.git\n", protected);
+fn render_unit(protected: Option<&str>, scope: bool) -> String {
+    let output = render_unit_output("owner/repo.git\n", protected, scope);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 unit")
 }
@@ -167,29 +181,38 @@ fn unit_argv(unit: &str) -> Vec<String> {
 #[test]
 fn both_supervisors_launch_the_node_with_the_same_arguments() {
     for protected in [None, Some("/state/protected-refs")] {
-        let plist = plist_argv(&render(protected));
-        let unit = unit_argv(&render_unit(protected));
+        for scope in [false, true] {
+            let plist = plist_argv(&render(protected, scope));
+            let unit = unit_argv(&render_unit(protected, scope));
 
-        // Without this the whole test passes vacuously when a renderer
-        // rejects its arguments and prints usage to stderr — which is
-        // exactly how the first version of this check reported success
-        // while comparing nothing to nothing.
-        assert!(
-            plist.len() >= 10,
-            "extracted {} arguments; the renderer did not run",
-            plist.len()
-        );
-        assert!(
-            !unit.iter().any(String::is_empty),
-            "unit ExecStart carries an empty argument (a spliced-in empty \
-             policy leaves a double space): {unit:?}"
-        );
-        assert_eq!(
-            plist, unit,
-            "launchd and systemd must start the node with identical \
-             arguments; a flag added to one supervisor and not the other \
-             is a node running without the gate its operator configured"
-        );
+            // Without this the whole test passes vacuously when a renderer
+            // rejects its arguments and prints usage to stderr — which is
+            // exactly how the first version of this check reported success
+            // while comparing nothing to nothing.
+            assert!(
+                plist.len() >= 10,
+                "extracted {} arguments; the renderer did not run",
+                plist.len()
+            );
+            assert!(
+                !unit.iter().any(String::is_empty),
+                "unit ExecStart carries an empty argument (a spliced-in empty \
+                 policy leaves a double space): {unit:?}"
+            );
+            // Equality alone passes when both renderers drop the flag, so
+            // its presence is pinned to the input, not to the sibling.
+            assert_eq!(
+                plist.iter().any(|arg| arg == "--require-scope"),
+                scope,
+                "--require-scope must appear exactly when the scope slot is set"
+            );
+            assert_eq!(
+                plist, unit,
+                "launchd and systemd must start the node with identical \
+                 arguments; a flag added to one supervisor and not the other \
+                 is a node running without the gate its operator configured"
+            );
+        }
     }
 }
 
@@ -201,9 +224,9 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
 #[test]
 fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
     let repos = "# comment\n\nowner/repo.git\nsecond/other.git\n";
-    let plist_out = render_output(repos, Some("/state/protected-refs"));
+    let plist_out = render_output(repos, Some("/state/protected-refs"), false);
     assert!(plist_out.status.success());
-    let unit_out = render_unit_output(repos, Some("/state/protected-refs"));
+    let unit_out = render_unit_output(repos, Some("/state/protected-refs"), false);
     assert!(unit_out.status.success());
 
     let plist = plist_argv(&String::from_utf8(plist_out.stdout).expect("UTF-8 plist"));
@@ -225,11 +248,11 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 
     for empty in ["", "# only a comment\n"] {
         assert!(
-            !render_output(empty, None).status.success(),
+            !render_output(empty, None, false).status.success(),
             "the plist renderer must refuse a repos list with no entries"
         );
         assert!(
-            !render_unit_output(empty, None).status.success(),
+            !render_unit_output(empty, None, false).status.success(),
             "the unit renderer must refuse a repos list with no entries"
         );
     }
@@ -380,6 +403,10 @@ fn the_landing_round_opens_the_tunnel_and_the_binary_swap_survives_etxtbsy() {
     let installer =
         std::fs::read_to_string(repo_root().join("scripts/flip/install_node_linux.sh"))
             .expect("linux installer source");
+    assert!(
+        installer.contains("scope-required.enabled"),
+        "the linux installer must honour the scope marker like the macOS one"
+    );
     let copy = installer
         .find("$BIN_DIR/$f.new\"")
         .expect("installer must copy to .new, not straight over the running binary");
