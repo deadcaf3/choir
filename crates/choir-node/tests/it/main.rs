@@ -47,6 +47,7 @@ mod signers_reload;
 mod smart_http;
 mod snapshot_admission;
 mod snapshot_emission;
+mod ssh;
 mod sync_contract;
 mod t1_attack_edge;
 mod tls;

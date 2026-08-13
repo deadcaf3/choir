@@ -9,7 +9,7 @@
 //! [--newcomer-audit path --newcomer-adjudications path]
 //! [--review-adjudications path]
 //! [--hooks-file path]
-//! [--bind addr]
+//! [--bind addr] [--ssh-handoff path]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
 //!
@@ -57,6 +57,9 @@
 //! `--review-lapse-after-secs` is the explicit operator policy that lets
 //! an over-limit incomplete review lapse. `--bind` with a non-loopback
 //! address is refused unless TLS is configured.
+//! `--ssh-handoff` (D31) writes this daemon's base URL and loopback
+//! secret to a 0600 file for the `choir-ssh` forced command, which is how
+//! a push arriving over SSH reaches the same sequencer an HTTP push does.
 
 use choir_node::platform::ReviewRetention;
 use choir_node::{AuthTable, Node, Platform};
@@ -113,6 +116,7 @@ fn main() -> std::io::Result<()> {
         "--review-adjudications",
         "--acl-file",
         "--hooks-file",
+        "--ssh-handoff",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -449,6 +453,14 @@ fn main() -> std::io::Result<()> {
         None => eprintln!(
             "acl: no --acl-file, so every authenticated actor reaches every repository"
         ),
+    }
+    // D31. The SSH shim runs as a separate process with no way to learn
+    // an ephemeral port or a per-process secret, so the daemon writes
+    // both where the shim's `--handoff` points. Written on every start,
+    // because both values change on every start.
+    if let Some(path) = flag_value("--ssh-handoff") {
+        node.write_ssh_handoff(std::path::Path::new(path))?;
+        eprintln!("ssh handoff written to {path} (git-over-ssh pushes reach the sequencer)");
     }
     let mut create_next = false;
     for a in rest {

@@ -19,6 +19,7 @@ pub mod platform;
 pub mod provision;
 pub mod reject;
 mod browse;
+pub mod ssh;
 mod ui;
 
 pub use platform::Platform;
@@ -328,6 +329,27 @@ impl Node {
     /// Port the daemon is listening on.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Writes the handoff file the SSH shim reads (D31): where this
+    /// daemon is listening, and the loopback secret its git hooks
+    /// authenticate with.
+    ///
+    /// Both are per-process values — an ephemeral port, a secret minted
+    /// at startup — so a forced command written once cannot carry them.
+    /// The secret is not returned to the caller, only written, at 0600.
+    ///
+    /// The ACL file goes in too, when one is configured, so a forced
+    /// command that forgot `--acl-file` still enforces what this daemon
+    /// enforces rather than reaching every repository.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error creating or writing the file.
+    pub fn write_ssh_handoff(&self, path: &Path) -> std::io::Result<()> {
+        let base = format!("{}://127.0.0.1:{}", self.scheme, self.port);
+        let acl = self.acl_watch.as_ref().map(|watch| watch.path.as_path());
+        ssh::write_handoff(path, &base, &self.internal_token, acl)
     }
 
     /// Creates a bare repo `name` (e.g. `"owner/repo.git"`) with pushes
