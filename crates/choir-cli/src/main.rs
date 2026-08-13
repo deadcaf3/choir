@@ -249,6 +249,235 @@ fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptio
     finish(status, &resp);
 }
 
+/// Emits a runner result and exits, data on stdout and nothing else.
+///
+/// An orchestrator parses stdout, so a diagnostic written there would be
+/// indistinguishable from a result. Every human-facing word goes to
+/// stderr and every machine-facing one to stdout, which is the same rule
+/// the rest of the machine surface follows.
+fn runner_finish(result: &Result<serde_json::Value, choir_cli::runner::Failure>) -> ! {
+    match result {
+        Ok(value) => {
+            println!("{value}");
+            std::process::exit(0);
+        }
+        Err(failure) => {
+            println!("{}", failure.to_json());
+            eprintln!("choir runner: {}: {}", failure.code, failure.message);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Reads a JSON document, mapping every failure to a typed refusal.
+fn runner_json(
+    source: &str,
+    code: &str,
+    what: &str,
+) -> Result<serde_json::Value, choir_cli::runner::Failure> {
+    serde_json::from_str(source)
+        .map_err(|error| choir_cli::runner::Failure::terminal(code, format!("{what}: {error}")))
+}
+
+/// One lifecycle step for an orchestrator adapter.
+///
+/// The adapter supplies its own wire format and its namespace; every
+/// decision that is about the lifecycle rather than the orchestrator is
+/// made in [`choir_cli::runner`], where it is unit-tested. This function
+/// is the I/O around those decisions and deliberately holds none of them.
+fn runner(config_file: &str, auth: AuthOptions<'_>) -> ! {
+    use choir_cli::runner::{Config, Failure, Operation, Request};
+
+    let outcome = (|| -> Result<serde_json::Value, Failure> {
+        let raw = std::fs::read_to_string(config_file).map_err(|error| {
+            Failure::terminal("invalid_config", format!("cannot read config: {error}"))
+        })?;
+        let config = Config::parse(&runner_json(&raw, "invalid_config", "config is not JSON")?)?;
+
+        let mut stdin = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin).map_err(|error| {
+            Failure::terminal("invalid_request", format!("cannot read stdin: {error}"))
+        })?;
+        let request = Request::parse(
+            &runner_json(&stdin, "invalid_request", "request is not JSON")?,
+            &config,
+        )?;
+
+        // Configured credentials win over inherited flags: the operator
+        // chose them at install time, and a scheduler's environment is
+        // not a place to pick up an identity from.
+        let auth = AuthOptions {
+            file: config.auth_file.as_deref().or(auth.file),
+            user: config.auth_user.as_deref().or(auth.user),
+        };
+        let id = &request.identity;
+
+        match request.operation {
+            Operation::Ensure => {
+                let base = match &request.base {
+                    Some(base) => base.clone(),
+                    None => {
+                        let base_ref = config.base_ref.as_ref().ok_or_else(|| {
+                            Failure::terminal(
+                                "invalid_config",
+                                "ensure needs either a request base or a config base_ref",
+                            )
+                        })?;
+                        let (status, body) = http(
+                            &config.api,
+                            auth,
+                            "choir_view",
+                            serde_json::json!({}),
+                        );
+                        if !(200..300).contains(&status) {
+                            return Err(choir_cli::runner::failure_from_response(
+                                &body,
+                                "base revision lookup",
+                            ));
+                        }
+                        choir_cli::runner::base_from_view(
+                            &runner_json(&body, "invalid_response", "view is not JSON")?,
+                            base_ref,
+                        )?
+                    }
+                };
+                let flags: Vec<&str> = vec![
+                    "--base",
+                    &base,
+                    "--owner",
+                    &config.owner,
+                    "--key-file",
+                    &config.key_file,
+                    "--change",
+                    &id.change_id,
+                    "--idempotency-key",
+                    &id.idempotency_key,
+                ];
+                let body = workspace_body(&config.repo, &id.workspace_name, &flags);
+                let (status, resp) = http(&config.api, auth, "choir_workspace", body);
+                if !(200..300).contains(&status) {
+                    return Err(choir_cli::runner::failure_from_response(
+                        &resp,
+                        "workspace creation",
+                    ));
+                }
+                let response = runner_json(&resp, "invalid_response", "creation is not JSON")?;
+                choir_cli::runner::verify_binding(&response, id)?;
+                Ok(serde_json::json!({
+                    "protocol_version": choir_cli::runner::PROTOCOL_VERSION,
+                    "operation": "ensure",
+                    "workspace": {
+                        "path": response.get("path").cloned().unwrap_or(serde_json::Value::Null),
+                        "created_now": response.get("created") == Some(&serde_json::json!(true)),
+                    },
+                    "binding": binding_json(id, &config, Some(&base)),
+                    "receipt": response.get("operation").cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                }))
+            }
+            Operation::Checkpoint => {
+                let revision = request.base.clone().ok_or_else(|| {
+                    Failure::terminal(
+                        "invalid_request",
+                        "checkpoint needs the exact committed and pushed Git object id as base",
+                    )
+                })?;
+                let Some(revision_hash) = choir_hash::ContentHash::from_git_oid(&revision) else {
+                    return Err(Failure::terminal(
+                        "invalid_request",
+                        "checkpoint base must be a 40- or 64-char hex Git object id",
+                    ));
+                };
+                let prev_revision = current_change_revision(&config.api, auth, &id.change_id);
+                let op = ViewOp::new(OpKind::CheckpointChange {
+                    id: id.change_id.clone(),
+                    workspace: id.workspace_id.clone(),
+                    revision: revision_hash,
+                    prev_revision,
+                });
+                let body = signed_body(&config.api, &config.key_file, &config.owner, &op, auth);
+                let (status, resp) = http(&config.api, auth, "choir_submit", body);
+                if !(200..300).contains(&status) {
+                    return Err(choir_cli::runner::failure_from_response(
+                        &resp,
+                        "revision checkpoint",
+                    ));
+                }
+                Ok(serde_json::json!({
+                    "protocol_version": choir_cli::runner::PROTOCOL_VERSION,
+                    "operation": "checkpoint",
+                    "checkpoint": {
+                        "change_id": id.change_id,
+                        "workspace_id": id.workspace_id,
+                        "revision_id": revision,
+                    },
+                    "receipt": runner_json(&resp, "invalid_response", "checkpoint is not JSON")
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                }))
+            }
+            Operation::Archive => {
+                let prev_revision = current_change_revision(&config.api, auth, &id.change_id);
+                let authorization = ArchiveAuthorization::new(
+                    id.change_id.clone(),
+                    id.workspace_id.clone(),
+                    prev_revision,
+                );
+                let mut body = signed_payload_body(
+                    &config.key_file,
+                    &config.owner,
+                    &authorization.to_payload(),
+                );
+                body["repo"] = serde_json::json!(config.repo);
+                body["name"] = serde_json::json!(id.workspace_name);
+                body["change"] = serde_json::json!(id.change_id);
+                body["idempotency_key"] = serde_json::json!(id.idempotency_key);
+                let (status, resp) = http(&config.api, auth, "choir_workspace_archive", body);
+                if !(200..300).contains(&status) {
+                    return Err(choir_cli::runner::failure_from_response(
+                        &resp,
+                        "workspace archive",
+                    ));
+                }
+                let response = runner_json(&resp, "invalid_response", "archive is not JSON")?;
+                choir_cli::runner::verify_binding(&response, id)?;
+                Ok(serde_json::json!({
+                    "protocol_version": choir_cli::runner::PROTOCOL_VERSION,
+                    "operation": "archive",
+                    "archive": {
+                        "workspace_id": id.workspace_id,
+                        "change_id": id.change_id,
+                        "archived_path": response.get("archived_path").cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        "already_archived":
+                            response.get("already_archived") == Some(&serde_json::json!(true)),
+                    },
+                    "receipt": response.get("operation").cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                }))
+            }
+        }
+    })();
+    runner_finish(&outcome);
+}
+
+/// The binding an adapter echoes back so its orchestrator can store it.
+fn binding_json(
+    id: &choir_cli::runner::Identity,
+    config: &choir_cli::runner::Config,
+    base: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "repo": config.repo,
+        "owner": config.owner,
+        "scheme": id.scheme.as_str(),
+        "workspace_id": id.workspace_id,
+        "workspace_name": id.workspace_name,
+        "change_id": id.change_id,
+        "idempotency_key": id.idempotency_key,
+        "base": base,
+    })
+}
+
 fn parse_auth(args: &[String]) -> (AuthOptions<'_>, &[String]) {
     let mut file = None;
     let mut user = None;
@@ -414,6 +643,7 @@ fn main() {
             let (status, resp) = http(api, auth, "choir_workspace_archive", body);
             finish(status, &resp);
         }
+        ["runner", config_file] => runner(config_file, auth),
         ["submit", api, key_file, channel, op_json] => {
             // Round-trip through ViewOp so the signed bytes are exactly
             // what the daemon will decode.

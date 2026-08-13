@@ -8,5 +8,6 @@ mod claude_hooks;
 mod cli;
 mod install_policy;
 mod mcp;
+mod runner;
 mod surface;
 mod symphony_backend;

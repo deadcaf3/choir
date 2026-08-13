@@ -232,6 +232,13 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "runner",
+        args: "<config-file>",
+        summary: "drive one workspace lifecycle step for an orchestrator; \
+                  a JSON request on stdin, a JSON result on stdout",
+        agent_facing: false,
+    },
+    Command {
         name: "submit",
         args: "<api> <key-file> <channel> '<op-json>'",
         summary: "sign and submit one raw operation",

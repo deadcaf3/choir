@@ -490,9 +490,232 @@ pub fn failure_from_response(body: &str, context: &str) -> Failure {
     }
 }
 
+/// One lifecycle step an orchestrator asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// Bind a workspace and change at an exact base, idempotently.
+    Ensure,
+    /// Publish an immutable revision of the bound change.
+    Checkpoint,
+    /// Owner-authorized recoverable archive of the bound workspace.
+    Archive,
+}
+
+impl Operation {
+    fn parse(value: &str) -> Result<Self, Failure> {
+        match value {
+            "ensure" => Ok(Self::Ensure),
+            "checkpoint" => Ok(Self::Checkpoint),
+            "archive" => Ok(Self::Archive),
+            other => Err(Failure::terminal(
+                "unsupported_operation",
+                format!("operation must be ensure, checkpoint or archive, not {other}"),
+            )),
+        }
+    }
+}
+
+/// Install-time settings: the node, the repository, and the owner
+/// identity that signs. Supplied by the operator, not by the
+/// orchestrator, so a request cannot redirect a workspace at another
+/// repository or sign with another key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    /// Node API base URL.
+    pub api: String,
+    /// Repository as `owner/repo`.
+    pub repo: String,
+    /// Owner channel that signs lifecycle authorizations.
+    pub owner: String,
+    /// Absolute path to the owner's 32-byte key file.
+    pub key_file: String,
+    /// Identifier namespace separating this orchestrator from others.
+    pub namespace: String,
+    /// View ref an `ensure` resolves its base revision from.
+    pub base_ref: Option<String>,
+    /// Basic-auth credentials file, absolute when present.
+    pub auth_file: Option<String>,
+    /// Basic-auth username; needs `auth_file`.
+    pub auth_user: Option<String>,
+}
+
+fn string_field(object: &serde_json::Value, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+impl Config {
+    /// Parses and validates operator configuration.
+    ///
+    /// Every path is required to be absolute, because the adapter is
+    /// invoked by a scheduler whose working directory is its own
+    /// business, and a relative key path would resolve somewhere nobody
+    /// chose.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`Failure`] naming the first field that is missing or
+    /// unusable.
+    pub fn parse(value: &serde_json::Value) -> Result<Self, Failure> {
+        let missing = |field: &str| {
+            Failure::terminal("invalid_config", format!("config needs string {field}"))
+        };
+        let api = string_field(value, "api").ok_or_else(|| missing("api"))?;
+        let repo = string_field(value, "repo").ok_or_else(|| missing("repo"))?;
+        let owner = string_field(value, "owner").ok_or_else(|| missing("owner"))?;
+        let key_file = string_field(value, "key_file").ok_or_else(|| missing("key_file"))?;
+        let namespace = string_field(value, "namespace").ok_or_else(|| missing("namespace"))?;
+
+        if !(api.starts_with("http://") || api.starts_with("https://")) {
+            return Err(Failure::terminal(
+                "invalid_config",
+                "config api must use http:// or https://",
+            ));
+        }
+        split_repo(&repo)?;
+        checked_namespace(&namespace)?;
+        if !key_file.starts_with('/') {
+            return Err(Failure::terminal(
+                "invalid_config",
+                "config key_file must be an absolute path",
+            ));
+        }
+        let auth_file = string_field(value, "auth_file");
+        let auth_user = string_field(value, "auth_user");
+        if auth_file.as_ref().is_some_and(|path| !path.starts_with('/')) {
+            return Err(Failure::terminal(
+                "invalid_config",
+                "config auth_file must be an absolute path",
+            ));
+        }
+        if auth_user.is_some() && auth_file.is_none() {
+            return Err(Failure::terminal(
+                "invalid_config",
+                "config auth_user needs auth_file",
+            ));
+        }
+        let base_ref = string_field(value, "base_ref");
+        // A base ref naming another repository would provision this
+        // workspace from a history it has nothing to do with.
+        if let Some(base_ref) = &base_ref {
+            if !base_ref.starts_with(&format!("{repo}.git:refs/")) {
+                return Err(Failure::terminal(
+                    "invalid_config",
+                    "config base_ref must name this repository as owner/repo.git:refs/...",
+                ));
+            }
+        }
+        Ok(Self {
+            api,
+            repo,
+            owner,
+            key_file,
+            namespace,
+            base_ref,
+            auth_file,
+            auth_user,
+        })
+    }
+}
+
+/// One request from an orchestrator adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    /// Which lifecycle step.
+    pub operation: Operation,
+    /// The binding this request is about.
+    pub identity: Identity,
+    /// Workspace directory, required by checkpoint.
+    pub workspace_path: Option<String>,
+    /// Exact base revision, when the caller pins one itself instead of
+    /// resolving `base_ref`.
+    pub base: Option<String>,
+}
+
+impl Request {
+    /// Parses a request against operator `config`.
+    ///
+    /// The scheme is named by the caller rather than inferred from which
+    /// fields are present. Inferring it would make a typo in a field
+    /// name silently select the other scheme, and the two derive
+    /// different change ids for the same work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`Failure`] when the protocol version, operation, or
+    /// the fields the named scheme requires are missing or unusable.
+    pub fn parse(value: &serde_json::Value, config: &Config) -> Result<Self, Failure> {
+        if value.get("protocol_version").and_then(serde_json::Value::as_u64)
+            != Some(PROTOCOL_VERSION)
+        {
+            return Err(Failure::terminal(
+                "invalid_request",
+                format!("request must be a protocol_version {PROTOCOL_VERSION} object"),
+            ));
+        }
+        let operation = Operation::parse(
+            &string_field(value, "operation").ok_or_else(|| {
+                Failure::terminal("invalid_request", "request needs string operation")
+            })?,
+        )?;
+
+        let needs = |field: &str| {
+            Failure::terminal(
+                "invalid_request",
+                format!("this scheme needs string {field}"),
+            )
+        };
+        let identity = match string_field(value, "scheme").as_deref() {
+            Some("from-name") => Identity::from_name(
+                &config.namespace,
+                &config.repo,
+                &string_field(value, "workspace_name").ok_or_else(|| needs("workspace_name"))?,
+            )?,
+            Some("from-external") => Identity::from_external(
+                &config.namespace,
+                &config.repo,
+                &string_field(value, "workspace_key").ok_or_else(|| needs("workspace_key"))?,
+                &string_field(value, "external_id").ok_or_else(|| needs("external_id"))?,
+                &string_field(value, "generation").ok_or_else(|| needs("generation"))?,
+            )?,
+            _ => {
+                return Err(Failure::terminal(
+                    "invalid_request",
+                    "request needs scheme to be from-name or from-external",
+                ))
+            }
+        };
+
+        Ok(Self {
+            operation,
+            identity,
+            workspace_path: string_field(value, "workspace_path"),
+            base: string_field(value, "base"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_json() -> serde_json::Value {
+        serde_json::json!({
+            "api": "http://127.0.0.1:9000",
+            "repo": "owner/repo",
+            "owner": "operator/agent",
+            "key_file": "/keys/owner.key",
+            "namespace": "sy",
+            "base_ref": "owner/repo.git:refs/heads/main",
+        })
+    }
+
+    fn config() -> Config {
+        Config::parse(&config_json()).expect("config parses")
+    }
 
     fn identity(external: &str, generation: &str) -> Identity {
         Identity::from_external("sy", "owner/repo", "issue-7", external, generation)
@@ -764,6 +987,135 @@ mod tests {
         assert_eq!(garbage.code, "choir_unavailable");
         assert!(garbage.retryable, "an unreadable body stranded the work");
         assert!(garbage.message.contains("creation"));
+    }
+
+    /// Operator settings are not negotiable by the caller. Each of
+    /// these would let a request reach a repository, a key, or a history
+    /// the operator did not choose.
+    #[test]
+    fn configuration_refuses_what_would_redirect_the_lifecycle() {
+        for (field, value, why) in [
+            ("api", serde_json::json!("ftp://host"), "a non-HTTP scheme"),
+            ("api", serde_json::json!(""), "an empty api"),
+            ("repo", serde_json::json!("owner"), "a one-segment repo"),
+            ("repo", serde_json::json!("a/b/c"), "a three-segment repo"),
+            ("repo", serde_json::json!("../etc/passwd"), "a traversal repo"),
+            ("key_file", serde_json::json!("relative.key"), "a relative key path"),
+            ("namespace", serde_json::json!("../sy"), "an unsafe namespace"),
+            ("auth_file", serde_json::json!("relative"), "a relative auth file"),
+            (
+                "base_ref",
+                serde_json::json!("other/repo.git:refs/heads/main"),
+                "a base ref naming another repository",
+            ),
+        ] {
+            let mut raw = config_json();
+            raw[field] = value;
+            assert!(
+                Config::parse(&raw).is_err(),
+                "config accepted {why}"
+            );
+        }
+
+        let mut raw = config_json();
+        raw["auth_user"] = serde_json::json!("someone");
+        assert!(
+            Config::parse(&raw).is_err(),
+            "config accepted a username with no credentials file"
+        );
+    }
+
+    /// The scheme is named, never inferred from which fields happen to
+    /// be present. Inference would turn a typo into a silent switch
+    /// between two rules that derive different change ids for one unit
+    /// of work.
+    #[test]
+    fn the_scheme_is_named_rather_than_guessed_from_the_fields() {
+        let config = config();
+        let complete = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "operation": "ensure",
+            "workspace_key": "issue-7",
+            "external_id": "ISSUE-7",
+            "generation": "1",
+            "workspace_name": "sy-issue-7",
+        });
+        // Every field for both schemes is present, and it still refuses.
+        assert!(Request::parse(&complete, &config).is_err());
+
+        let mut named = complete.clone();
+        named["scheme"] = serde_json::json!("from-name");
+        let mut external = complete;
+        external["scheme"] = serde_json::json!("from-external");
+        let named = Request::parse(&named, &config).expect("from-name parses");
+        let external = Request::parse(&external, &config).expect("from-external parses");
+        assert_eq!(named.identity.scheme, Scheme::FromName);
+        assert_eq!(external.identity.scheme, Scheme::FromExternal);
+        assert_ne!(
+            named.identity.change_id, external.identity.change_id,
+            "the two schemes agreed, so naming one would not matter"
+        );
+    }
+
+    #[test]
+    fn a_request_is_refused_without_its_version_operation_or_scheme_fields() {
+        let config = config();
+        let good = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "operation": "ensure",
+            "scheme": "from-name",
+            "workspace_name": "sy-issue-7",
+        });
+        assert!(Request::parse(&good, &config).is_ok());
+
+        for (mutate, why) in [
+            (serde_json::json!({"protocol_version": 2}), "a future protocol version"),
+            (serde_json::json!({"protocol_version": null}), "no protocol version"),
+            (serde_json::json!({"operation": "delete"}), "an unknown operation"),
+            (serde_json::json!({"operation": null}), "no operation"),
+            (serde_json::json!({"scheme": "invented"}), "an unknown scheme"),
+            (serde_json::json!({"workspace_name": null}), "no workspace name"),
+            (serde_json::json!({"workspace_name": "../escape"}), "a traversal name"),
+        ] {
+            let mut raw = good.clone();
+            for (key, value) in mutate.as_object().expect("object") {
+                raw[key] = value.clone();
+            }
+            assert!(Request::parse(&raw, &config).is_err(), "accepted {why}");
+        }
+    }
+
+    /// A from-external request carries its own required fields, and the
+    /// binding it produces is the one the identity rules give.
+    #[test]
+    fn a_from_external_request_binds_what_its_fields_name() {
+        let config = config();
+        let raw = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "operation": "checkpoint",
+            "scheme": "from-external",
+            "workspace_key": "issue-7",
+            "external_id": "ISSUE-7",
+            "generation": "1",
+            "workspace_path": "/work/sy-issue-7",
+        });
+        let request = Request::parse(&raw, &config).expect("parses");
+        assert_eq!(request.operation, Operation::Checkpoint);
+        assert_eq!(request.workspace_path.as_deref(), Some("/work/sy-issue-7"));
+        assert_eq!(
+            request.identity,
+            Identity::from_external("sy", "owner/repo", "issue-7", "ISSUE-7", "1")
+                .expect("derives")
+        );
+
+        for missing in ["workspace_key", "external_id", "generation"] {
+            let mut raw = raw.clone();
+            raw[missing] = serde_json::Value::Null;
+            assert!(
+                Request::parse(&raw, &config).is_err(),
+                "accepted a from-external request with no {missing}"
+            );
+        }
     }
 
     #[test]

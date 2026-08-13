@@ -233,6 +233,7 @@ commands:
   choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
   choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
   choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
+  choir runner <config-file>
   choir submit <api> <key-file> <channel> '<op-json>'
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
