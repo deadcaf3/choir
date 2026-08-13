@@ -14,4 +14,5 @@
 //! ```
 
 pub mod mcp;
+pub mod runner;
 pub mod surface;
