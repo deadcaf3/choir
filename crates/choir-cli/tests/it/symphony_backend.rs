@@ -1,4 +1,10 @@
 //! Contract tests for the external Symphony workspace backend adapter.
+//!
+//! The adapter is a translation layer over `choir runner`, so these drive
+//! it against a real node with the real `choir` binary. Stubbing `choir`
+//! here would mean reimplementing the seam in bash, and the translation
+//! between Symphony's shapes and the seam's is precisely what a stub
+//! cannot check.
 
 #![cfg(unix)]
 
@@ -7,6 +13,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use choir_identity::{ActorKey, Registry};
+use choir_node::{Node, Platform};
+use choir_oplog::MemLog;
 
 fn tempdir() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -20,141 +30,109 @@ fn tempdir() -> PathBuf {
     path
 }
 
-fn write_executable(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+fn git(dir: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git runs")
 }
 
 struct Fixture {
     root: PathBuf,
     script: PathBuf,
     config: PathBuf,
-    workspace: PathBuf,
-    archived: PathBuf,
-    choir_log: PathBuf,
-    git_log: PathBuf,
+    api: String,
+    /// The commit `refs/heads/main` pointed at when the fixture was built.
+    head: String,
 }
 
 impl Fixture {
     fn new() -> Self {
         let root = tempdir();
-        let bin = root.join("bin");
-        let workspaces = root.join("workspaces");
-        let workspace = workspaces.join("sy-ABC-123-aaaaaaaaaaaaaaaa");
-        let archived = root.join("archive/change");
-        std::fs::create_dir_all(&bin).unwrap();
-        let choir_log = root.join("choir.log");
-        let git_log = root.join("git.log");
-        write_executable(
-            &bin.join("git"),
-            r#"#!/usr/bin/env bash
-set -eu
-{
-  printf 'CALL\n'
-  printf '%s\n' "$@"
-} >>"$SYMPHONY_TEST_GIT_LOG"
-if [[ "${1:-}" == "hash-object" ]]; then
-  printf '%040d\n' 0 | tr '0' 'a'
-elif [[ "${1:-}" == "-C" && "${3:-}" == "rev-parse" ]]; then
-  printf '%s\n' '2222222222222222222222222222222222222222'
-elif [[ "${1:-}" == "-C" && "${3:-}" == "push" ]]; then
-  exit 0
-else
-  exit 1
-fi
-"#,
-        );
-        write_executable(
-            &bin.join("choir"),
-            r#"#!/usr/bin/env bash
-set -eu
-{
-  printf 'CALL\n'
-  printf '%s\n' "$@"
-} >>"$SYMPHONY_TEST_CHOIR_LOG"
-while [[ "${1:-}" == "--auth-file" || "${1:-}" == "--auth-user" ]]; do
-  shift 2
-done
-case "${1:-}" in
-  view)
-    printf '%s\n' '{"refs":{"owner/repo.git:refs/heads/main":"11-1111111111111111111111111111111111111111"}}'
-    ;;
-  workspace)
-    mkdir -p "$SYMPHONY_TEST_WORKSPACE/.git"
-    if [[ -f "$SYMPHONY_TEST_CREATED_MARKER" ]]; then
-      created=false
-      reused=',"reused":true'
-    else
-      : >"$SYMPHONY_TEST_CREATED_MARKER"
-      created=true
-      reused=''
-    fi
-    printf '{"workspace":"%s/%s","path":"%s","change_id":"%s","created":%s%s,"operation":{"seq":7,"hash":"1e-receipt"}}\n' \
-      "$3" "$4" "$SYMPHONY_TEST_WORKSPACE" "${12}" "$created" "$reused"
-    ;;
-  checkpoint)
-    printf '%s\n' '{"seq":8,"hash":"1e-checkpoint"}'
-    ;;
-  workspace-archive)
-    if [[ -d "$SYMPHONY_TEST_WORKSPACE" ]]; then
-      mkdir -p "$(dirname "$SYMPHONY_TEST_ARCHIVED")"
-      mv "$SYMPHONY_TEST_WORKSPACE" "$SYMPHONY_TEST_ARCHIVED"
-      already=false
-    else
-      already=true
-    fi
-    printf '{"workspace":"%s/%s","change_id":"%s","archived_path":"%s","already_archived":%s,"operation":{"seq":9,"hash":"1e-archive"}}\n' \
-      "$5" "$6" "$7" "$SYMPHONY_TEST_ARCHIVED" "$already"
-    ;;
-  *)
-    printf '%s\n' '{"code":"synthetic","detail":"unexpected command"}'
-    exit 1
-    ;;
-esac
-"#,
-        );
+        let owner_key = ActorKey::from_secret_bytes(&[3; 32]);
         let key_file = root.join("symphony.key");
-        let auth_file = root.join("auth");
-        std::fs::write(&key_file, [3_u8; 32]).unwrap();
-        std::fs::write(&auth_file, "scheduler:placeholder\n").unwrap();
+        std::fs::write(&key_file, owner_key.secret_bytes()).unwrap();
+        let mut registry = Registry::new();
+        registry.register(&owner_key.public_key_bytes()).unwrap();
+
+        let mut node = Node::bind(&root.join("repos"), 0).unwrap();
+        node.enable_platform(
+            Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+        );
+        node.create_repo("owner/repo.git").unwrap();
+        let port = node.port();
+        let node = std::sync::Arc::new(node);
+        std::thread::spawn(move || node.serve_forever());
+        let api = format!("http://127.0.0.1:{port}");
+
+        // `base_ref` only resolves once a commit exists on the branch.
+        let seed = root.join("seed");
+        let url = format!("{api}/owner/repo.git");
+        assert!(git(&root, &["clone", "-q", &url, seed.to_str().unwrap()])
+            .status
+            .success());
+        std::fs::write(seed.join("f.txt"), "v1\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "first"]);
+        assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success());
+        let head = String::from_utf8_lossy(&git(&seed, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
         let config = root.join("config.json");
         std::fs::write(
             &config,
             serde_json::json!({
-                "api": "http://127.0.0.1:8417",
+                "api": api,
                 "repo": "owner/repo",
                 "owner": "operator/symphony",
+                "namespace": "sy",
                 "key_file": key_file,
-                "auth_file": auth_file,
-                "auth_user": "scheduler",
                 "base_ref": "owner/repo.git:refs/heads/main",
-                "state_dir": root.join("state"),
-                "choir_bin": bin.join("choir"),
-                "git_bin": bin.join("git"),
+                "choir_bin": env!("CARGO_BIN_EXE_choir"),
+                "git_bin": "git",
             })
             .to_string(),
         )
         .unwrap();
+
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../templates/symphony/choir-workspace-backend.sh");
         Self {
             root,
             script,
             config,
-            workspace,
-            archived,
-            choir_log,
-            git_log,
+            api,
+            head,
         }
     }
 
     fn request(&self, operation: &str, run_id: &str, workspace_path: Option<&Path>) -> String {
+        self.request_for(operation, run_id, "change-generation-1", workspace_path)
+    }
+
+    fn request_for(
+        &self,
+        operation: &str,
+        run_id: &str,
+        generation: &str,
+        workspace_path: Option<&Path>,
+    ) -> String {
         let mut request = serde_json::json!({
             "protocol_version": 1,
             "operation": operation,
             "issue": {"id": "tracker-opaque-7", "identifier": "ABC-123"},
             "workspace_key": "ABC-123",
-            "generation": "change-generation-1",
+            "generation": generation,
             "run_id": run_id,
         });
         if let Some(path) = workspace_path {
@@ -167,11 +145,6 @@ esac
         let mut child = Command::new("bash")
             .arg(&self.script)
             .arg(&self.config)
-            .env("SYMPHONY_TEST_CHOIR_LOG", &self.choir_log)
-            .env("SYMPHONY_TEST_GIT_LOG", &self.git_log)
-            .env("SYMPHONY_TEST_WORKSPACE", &self.workspace)
-            .env("SYMPHONY_TEST_ARCHIVED", &self.archived)
-            .env("SYMPHONY_TEST_CREATED_MARKER", self.root.join("created"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -186,115 +159,195 @@ esac
         child.wait_with_output().unwrap()
     }
 
-    fn calls(path: &Path) -> Vec<Vec<String>> {
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .split("CALL\n")
-            .skip(1)
-            .map(|call| call.lines().map(str::to_string).collect())
-            .collect()
+    fn ok(&self, request: &str) -> serde_json::Value {
+        let output = self.run(request);
+        assert!(
+            output.status.success(),
+            "adapter failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("the adapter answers JSON on stdout")
+    }
+
+    fn view(&self) -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_choir"))
+            .args(["view", &self.api])
+            .output()
+            .expect("choir view");
+        serde_json::from_slice(&out.stdout).expect("view is JSON")
     }
 }
 
 #[test]
 fn backend_converges_replacement_workers_and_completes_the_lifecycle() {
     let fixture = Fixture::new();
-    let first = fixture.run(&fixture.request("ensure", "run-1", None));
-    assert!(
-        first.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&first.stdout),
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+
+    let first = fixture.ok(&fixture.request("ensure", "run-1", None));
     assert_eq!(first["workspace"]["created_now"], true);
-    assert_eq!(
-        first["workspace"]["path"],
-        std::fs::canonicalize(&fixture.workspace)
-            .unwrap()
-            .display()
-            .to_string()
-    );
     assert_eq!(first["metadata"]["issue_id"], "tracker-opaque-7");
     assert_eq!(first["metadata"]["run_id"], "run-1");
+    assert_eq!(first["metadata"]["issue_identifier"], "ABC-123");
+    // The change identity is Choir's, derived from the tracker id rather
+    // than being it: an adapter that passed the tracker id through would
+    // let a second orchestrator on the same repo collide with it.
     assert_ne!(first["binding"]["change_id"], first["metadata"]["issue_id"]);
+    assert_eq!(first["binding"]["base"], fixture.head.as_str());
+    assert_eq!(first["binding"]["repo"], "owner/repo");
+    assert_eq!(first["binding"]["owner"], "operator/symphony");
+    // Symphony's binding is a fixed set of fields. A field arriving from
+    // the seam must be a decision, not a leak.
+    let mut binding_fields: Vec<&String> = first["binding"]
+        .as_object()
+        .expect("binding is an object")
+        .keys()
+        .collect();
+    binding_fields.sort();
     assert_eq!(
-        first["binding"]["base"],
-        "1111111111111111111111111111111111111111"
+        binding_fields,
+        ["base", "change_id", "idempotency_key", "owner", "repo", "workspace_id"]
     );
 
-    let replacement = fixture.run(&fixture.request("ensure", "run-2", None));
-    assert!(replacement.status.success());
-    let replacement: serde_json::Value = serde_json::from_slice(&replacement.stdout).unwrap();
+    let path = PathBuf::from(
+        first["workspace"]["path"]
+            .as_str()
+            .expect("a workspace path"),
+    );
+    assert_eq!(path, std::fs::canonicalize(&path).unwrap());
+    assert!(
+        path.join("f.txt").exists(),
+        "the workspace was not provisioned from the base revision"
+    );
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(path.join(".git/choir/symphony-backend.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sidecar["binding"], first["binding"]);
+    assert_eq!(sidecar["generation"], "change-generation-1");
+
+    // A replacement worker on the same generation is the same change and
+    // the same directory, which is the reason the binding is derived
+    // rather than allocated.
+    let replacement = fixture.ok(&fixture.request("ensure", "run-2", None));
     assert_eq!(replacement["workspace"]["created_now"], false);
     assert_eq!(replacement["metadata"]["run_id"], "run-2");
     assert_eq!(replacement["binding"], first["binding"]);
 
-    let choir_calls = Fixture::calls(&fixture.choir_log);
-    assert_eq!(
-        choir_calls.len(),
-        3,
-        "one view lookup and two create attempts"
-    );
-    assert_eq!(choir_calls[0][4], "view");
-    for call in [&choir_calls[1], &choir_calls[2]] {
-        assert_eq!(call[4], "workspace");
-        assert_eq!(call[7], "sy-ABC-123-aaaaaaaaaaaaaaaa");
-        assert_eq!(
-            call[8..12],
-            [
-                "--base",
-                "1111111111111111111111111111111111111111",
-                "--owner",
-                "operator/symphony"
-            ]
-        );
-        assert_eq!(call[12], "--key-file");
-        assert_eq!(call[14], "--change");
-        assert_eq!(call[16], "--idempotency-key");
-    }
-    assert_eq!(
-        std::fs::read_dir(fixture.root.join("state"))
-            .unwrap()
-            .count(),
-        1
-    );
-
-    let checkpoint = fixture.run(&fixture.request("checkpoint", "run-2", Some(&fixture.workspace)));
+    // The change reached the node under the derived identity.
+    let change_id = first["binding"]["change_id"].as_str().unwrap().to_string();
+    let view = fixture.view();
     assert!(
-        checkpoint.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&checkpoint.stdout),
-        String::from_utf8_lossy(&checkpoint.stderr)
+        view["changes"][&change_id].is_object(),
+        "the derived change is absent from the view: {}",
+        view["changes"]
     );
-    let checkpoint: serde_json::Value = serde_json::from_slice(&checkpoint.stdout).unwrap();
     assert_eq!(
-        checkpoint["checkpoint"]["revision_id"],
-        "2222222222222222222222222222222222222222"
+        view["changes"][&change_id]["workspace_id"],
+        first["binding"]["workspace_id"]
     );
-    let git_calls = Fixture::calls(&fixture.git_log);
-    assert!(git_calls.iter().any(|call| {
-        call.windows(2).any(|pair| pair == ["push", "origin"])
-            && call.iter().any(|arg| {
-                arg == "2222222222222222222222222222222222222222:refs/choir/revisions/2222222222222222222222222222222222222222"
-            })
-    }));
 
-    let archived = fixture.run(&fixture.request("archive", "run-2", Some(&fixture.workspace)));
-    assert!(archived.status.success());
-    let archived: serde_json::Value = serde_json::from_slice(&archived.stdout).unwrap();
+    // Checkpoint names an exact revision, so the agent's work has to be
+    // committed in the workspace first.
+    std::fs::write(path.join("f.txt"), "v2\n").unwrap();
+    git(&path, &["add", "."]);
+    git(&path, &["commit", "-q", "-m", "agent work"]);
+    let revision = String::from_utf8_lossy(&git(&path, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    let checkpoint = fixture.ok(&fixture.request("checkpoint", "run-2", Some(&path)));
+    assert_eq!(checkpoint["checkpoint"]["revision_id"], revision.as_str());
+    assert_eq!(checkpoint["checkpoint"]["change_id"], change_id.as_str());
+    // The revision is immutable and independent of any branch, so it has
+    // to be reachable on the node under its own id.
+    let after = fixture.view();
+    assert_eq!(
+        after["refs"][format!("owner/repo.git:refs/choir/revisions/{revision}")],
+        serde_json::json!(format!("11-{revision}")),
+        "the checkpoint object was not published: {}",
+        after["refs"]
+    );
+    assert_eq!(
+        after["changes"][&change_id]["revision_id"],
+        serde_json::json!(format!("11-{revision}"))
+    );
+
+    let archived = fixture.ok(&fixture.request("archive", "run-2", Some(&path)));
     assert_eq!(archived["archive"]["already_archived"], false);
-    assert!(!fixture.workspace.exists());
-    assert!(fixture.archived.exists());
+    assert_eq!(archived["archive"]["change_id"], change_id.as_str());
+    assert!(
+        archived["archive"]["archived_path"].is_string(),
+        "archive returned no recoverable path: {archived}"
+    );
+    assert!(!path.exists(), "the live workspace survived the archive");
 
-    let retried = fixture.run(&fixture.request("archive", "run-3", Some(&fixture.workspace)));
-    assert!(retried.status.success());
-    let retried: serde_json::Value = serde_json::from_slice(&retried.stdout).unwrap();
+    let retried = fixture.ok(&fixture.request("archive", "run-3", Some(&path)));
     assert_eq!(retried["archive"]["already_archived"], true);
 }
 
+/// A directory is not proof of a binding. Symphony hands back a path on
+/// later calls, and pointing one generation's path at another
+/// generation's request must refuse rather than checkpoint one attempt's
+/// work onto the other attempt's change.
 #[test]
-fn malformed_identity_fails_with_structured_json_before_any_backend_call() {
+fn a_workspace_is_refused_for_a_generation_it_is_not_bound_to() {
+    let fixture = Fixture::new();
+    let first = fixture.ok(&fixture.request("ensure", "run-1", None));
+    let path = PathBuf::from(first["workspace"]["path"].as_str().unwrap());
+
+    let second = fixture.ok(&fixture.request_for(
+        "ensure",
+        "run-1",
+        "change-generation-2",
+        None,
+    ));
+    assert_ne!(
+        second["binding"]["change_id"], first["binding"]["change_id"],
+        "a new generation reused the previous change"
+    );
+
+    std::fs::write(path.join("f.txt"), "v2\n").unwrap();
+    git(&path, &["add", "."]);
+    git(&path, &["commit", "-q", "-m", "agent work"]);
+    let revision = String::from_utf8_lossy(&git(&path, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    let output = fixture.run(&fixture.request_for(
+        "checkpoint",
+        "run-1",
+        "change-generation-2",
+        Some(&path),
+    ));
+    assert!(
+        !output.status.success(),
+        "checkpointed generation 1's workspace under generation 2: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "state_mismatch");
+    assert_eq!(error["error"]["retryable"], false);
+
+    // Refusing after the fact would be worth little: a checkpoint
+    // publishes an immutable object to the node before it is recorded,
+    // and that push cannot be taken back.
+    let view = fixture.view();
+    assert!(
+        view["refs"][format!("owner/repo.git:refs/choir/revisions/{revision}")].is_null(),
+        "the refused checkpoint published its object anyway: {}",
+        view["refs"]
+    );
+    // A change carries a revision from the moment it is created, so the
+    // property is that it was never advanced to the foreign commit.
+    assert_ne!(
+        view["changes"][second["binding"]["change_id"].as_str().unwrap()]["revision_id"],
+        serde_json::json!(format!("11-{revision}")),
+        "the refused checkpoint was recorded against the other generation's change"
+    );
+}
+
+#[test]
+fn malformed_identity_fails_with_structured_json_before_any_workspace_exists() {
     let fixture = Fixture::new();
     let request = serde_json::json!({
         "protocol_version": 1,
@@ -304,34 +357,61 @@ fn malformed_identity_fails_with_structured_json_before_any_backend_call() {
         "generation": "change-generation-1"
     })
     .to_string();
+
     let output = fixture.run(&request);
     assert!(!output.status.success());
     let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["protocol_version"], 1);
     assert_eq!(error["error"]["code"], "invalid_request");
     assert_eq!(error["error"]["retryable"], false);
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("placeholder"));
-    assert!(Fixture::calls(&fixture.choir_log).is_empty());
+    assert!(
+        fixture.view()["changes"]
+            .as_object()
+            .is_none_or(serde_json::Map::is_empty),
+        "a refused request still reached the node"
+    );
 }
 
+/// A config the runner will not accept has to fail as a typed refusal
+/// rather than as a shell error, because Symphony branches on the JSON.
 #[test]
-fn backend_runs_without_http_auth() {
+fn a_stale_config_is_refused_in_the_adapter_wire_format() {
     let fixture = Fixture::new();
     let mut config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&fixture.config).unwrap()).unwrap();
-    config.as_object_mut().unwrap().remove("auth_file");
-    config.as_object_mut().unwrap().remove("auth_user");
+    // `state_dir` was this adapter's own durable state before the runner
+    // seam made it unnecessary. A config carrying it is stale, and
+    // ignoring the field would silently change what the operator asked
+    // for.
+    config["state_dir"] = serde_json::json!("/tmp/symphony-state");
     std::fs::write(&fixture.config, config.to_string()).unwrap();
 
     let output = fixture.run(&fixture.request("ensure", "run-1", None));
+    assert!(!output.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "invalid_config");
+    assert_eq!(error["error"]["retryable"], false);
+}
+
+#[test]
+fn backend_runs_with_http_auth_configured() {
+    let fixture = Fixture::new();
+    let auth_file = fixture.root.join("auth");
+    std::fs::write(&auth_file, "scheduler:placeholder\n").unwrap();
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fixture.config).unwrap()).unwrap();
+    config["auth_file"] = serde_json::json!(auth_file);
+    config["auth_user"] = serde_json::json!("scheduler");
+    std::fs::write(&fixture.config, config.to_string()).unwrap();
+
+    let result = fixture.ok(&fixture.request("ensure", "run-1", None));
+    assert_eq!(result["workspace"]["created_now"], true);
+    let stderr = String::from_utf8_lossy(&fixture.run(&fixture.request("ensure", "run-2", None)).stderr)
+        .to_string();
     assert!(
-        output.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        !stderr.contains("placeholder"),
+        "the adapter echoed a credential to stderr"
     );
-    let calls = Fixture::calls(&fixture.choir_log);
-    assert_eq!(calls[0][0], "view");
-    assert_eq!(calls[1][0], "workspace");
 }
 
 #[test]
@@ -348,4 +428,8 @@ fn shipped_adapter_and_example_are_safe_to_install() {
     .unwrap();
     assert!(config["key_file"].as_str().unwrap().starts_with('/'));
     assert!(config.get("token").is_none());
+    // The runner refuses a config without a namespace, so an example
+    // missing one would ship an adapter that cannot run at all.
+    assert!(config["namespace"].as_str().is_some_and(|n| !n.is_empty()));
+    assert!(config.get("state_dir").is_none());
 }

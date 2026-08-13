@@ -2,11 +2,11 @@
   "api": "http://127.0.0.1:8417",
   "repo": "owner/repo",
   "owner": "operator/symphony",
+  "namespace": "sy",
   "key_file": "/absolute/path/to/symphony.key",
   "auth_file": "/absolute/path/to/auth",
   "auth_user": "choir",
   "base_ref": "owner/repo.git:refs/heads/main",
-  "state_dir": "/absolute/path/to/symphony-state",
   "choir_bin": "/absolute/path/to/choir",
   "git_bin": "/usr/bin/git"
 }

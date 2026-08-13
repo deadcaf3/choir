@@ -370,7 +370,11 @@ fn runner(config_file: &str, auth: AuthOptions<'_>) -> ! {
                         "path": response.get("path").cloned().unwrap_or(serde_json::Value::Null),
                         "created_now": response.get("created") == Some(&serde_json::json!(true)),
                     },
-                    "binding": binding_json(id, &config, Some(&base)),
+                    "binding": binding_json(
+                        id,
+                        &config,
+                        Some(&choir_cli::runner::bound_base(&response, &base)),
+                    ),
                     "receipt": response.get("operation").cloned()
                         .unwrap_or_else(|| serde_json::json!({})),
                 }))

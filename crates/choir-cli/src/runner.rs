@@ -416,6 +416,30 @@ pub fn base_from_view(view: &serde_json::Value, base_ref: &str) -> Result<String
     Ok(oid.to_string())
 }
 
+/// The base revision the node says the change is actually bound to.
+///
+/// Creation is idempotent, so a retry that resolved a `base_ref` which
+/// has since moved reuses the existing change at its original base.
+/// Reporting the requested revision there would describe a workspace
+/// that does not exist: the orchestrator would record one base while the
+/// change is bound to another, and every later comparison against it
+/// would be wrong. The node's answer is authoritative; `requested` is
+/// only a fallback for a response that carries none.
+#[must_use]
+pub fn bound_base(response: &serde_json::Value, requested: &str) -> String {
+    let reported = response
+        .get("base_revision")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| {
+            value
+                .strip_prefix("11-")
+                .or_else(|| value.strip_prefix("12-"))
+        })
+        .filter(|oid| oid.len() == 40 || oid.len() == 64)
+        .filter(|oid| oid.chars().all(|c| c.is_ascii_hexdigit()));
+    reported.map_or_else(|| requested.to_string(), str::to_string)
+}
+
 /// Checks the node returned the binding that was asked for.
 ///
 /// This is the step whose absence is silent. Creation is idempotent by
@@ -1114,6 +1138,35 @@ mod tests {
             assert!(
                 Request::parse(&raw, &config).is_err(),
                 "accepted a from-external request with no {missing}"
+            );
+        }
+    }
+
+    /// The reported base has to describe the workspace that exists, not
+    /// the one this call asked for. They differ exactly when a retry
+    /// resolves a ref that moved, which is the case an adapter is least
+    /// able to notice on its own.
+    #[test]
+    fn a_reused_change_reports_the_base_it_is_bound_to_not_the_one_requested() {
+        let requested = "a".repeat(40);
+        let bound = "b".repeat(40);
+        let reused = serde_json::json!({
+            "reused": true,
+            "base_revision": format!("11-{bound}"),
+        });
+        assert_eq!(bound_base(&reused, &requested), bound);
+
+        // A response that reports nothing usable must not invent one.
+        for absent in [
+            serde_json::json!({}),
+            serde_json::json!({ "base_revision": "13-not-a-git-object" }),
+            serde_json::json!({ "base_revision": format!("11-{}", "z".repeat(40)) }),
+            serde_json::json!({ "base_revision": "11-abc" }),
+        ] {
+            assert_eq!(
+                bound_base(&absent, &requested),
+                requested,
+                "an unusable base_revision was trusted: {absent}"
             );
         }
     }

@@ -70,24 +70,35 @@ same host or a shared filesystem mount. Install it and a mode-0600 config
 outside repositories:
 
 ```bash
-install -d "$HOME/.choir/bin" "$HOME/.choir/symphony-state"
+install -d "$HOME/.choir/bin"
 install -m 0755 templates/symphony/choir-workspace-backend.sh \
   "$HOME/.choir/bin/choir-symphony-workspace"
 install -m 0600 templates/symphony/config.example.json \
   "$HOME/.choir/symphony.json"
 ```
 
-Edit paths and identities in the copied config. `base_ref` is the exact
-namespaced ref from `choir view`, such as
-`owner/repo.git:refs/heads/main`. The adapter resolves it once when reserving a
-new generation, then persists that immutable Git object ID before contacting
-the workspace endpoint. Response-loss retries therefore use the original base
-even if the target ref advances.
+Edit paths and identities in the copied config. The same file is read by
+`choir runner`, which owns identity derivation and every call to the node;
+this adapter only translates Symphony's request and result shapes.
 
-The state directory contains non-secret issue and binding metadata. It must be
-durable across Symphony restarts and shared by competing schedulers. Keep key
-and HTTP credential values in their referenced mode-0600 files, never in the
-config or repository.
+`base_ref` is the exact namespaced ref from `choir view`, such as
+`owner/repo.git:refs/heads/main`. It is resolved when a generation is first
+created. A later retry that resolves a ref which has since moved still reports
+the base the change is actually bound to, because the node reports it and the
+adapter does not second-guess that answer.
+
+`namespace` separates this orchestrator's identifiers from every other one
+driving the same repository. Changing it after work is in flight derives
+different change ids, so treat it as fixed at install time.
+
+The adapter keeps no durable state of its own. Convergence between competing
+schedulers comes from Choir's idempotency key rather than from a lock on one
+machine, so two of them racing the same `ensure` reuse one workspace instead of
+forking the work. Non-secret binding metadata is written inside the workspace
+at `.git/choir/symphony-backend.json` and is used to refuse a `checkpoint` or
+`archive` aimed at a directory bound to a different change. Keep key and HTTP
+credential values in their referenced mode-0600 files, never in the config or
+repository.
 
 ## Checkpoint and recovery behavior
 
@@ -99,14 +110,16 @@ a CAS conflict.
 
 Exact create and archive retries converge on Choir's original operation
 receipt. A `workspace_state`, malformed request, unknown key, or channel
-ownership rejection is non-retryable until configuration or durable state is
-reconciled. Transport and other availability failures are marked retryable for
-Symphony's scheduler.
+ownership rejection is non-retryable until configuration is reconciled.
+Transport and other availability failures are marked retryable for Symphony's
+scheduler. The adapter forwards the runner's classification unchanged rather
+than forming a second opinion about it.
 
 Current limits:
 
-- Remote Symphony SSH workers need a shared node path and adapter state mount.
+- Remote Symphony SSH workers need a shared node path.
 - The reference Symphony checkout still needs the workspace-manager seam
   described above. This repository does not claim hook-only compatibility.
-- A crash while reserving state can leave a `.lock` directory. Remove it only
-  after verifying that no scheduler process owns the matching generation.
+- A workspace whose `.git/choir/symphony-backend.json` is lost cannot be
+  checkpointed or archived through this adapter. Recover it from the binding
+  Symphony was told to store, or archive the change directly with the CLI.
