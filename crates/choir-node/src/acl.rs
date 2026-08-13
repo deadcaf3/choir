@@ -533,24 +533,66 @@ pub fn api_denial(
         .find_map(|(scope, level)| acl.check(user, &scope, level))
 }
 
-/// Sections of `/api/view` that describe the node rather than any one
-/// repository, and so cannot be narrowed to a reader's repositories.
+/// How one top-level section of a read response may be disclosed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Disclosure {
+    /// Served to anyone who reaches the endpoint. It names no repository,
+    /// and a writer cannot bind a scoped submission without it.
+    Public,
+    /// Served whole to a reader holding [`Scope::Node`] and omitted from
+    /// everyone else. This is the "gate, never filter" rule `/api/log`
+    /// and `/api/ref-agreement` follow, applied one level down: the
+    /// section counts, attributes or times events across every
+    /// repository at once, so there is no honest way to narrow it.
+    NodeWide,
+    /// Narrowed entry by entry to the reader's repository grants.
+    PerRepo,
+}
+
+/// Every top-level section `/api/view` and `/api/reviews` serve.
 ///
-/// `snapshot` and `bindings` are the D25 attestation and the key
-/// bindings; the rest is node-wide telemetry that counts, attributes or
-/// times events across every repository at once. Each is served whole to
-/// a reader holding [`Scope::Node`] and omitted from everyone else,
-/// which is the same "gate, never filter" rule `/api/log` and
-/// `/api/ref-agreement` follow, applied one level down.
-const NODE_SECTIONS: [&str; 7] = [
-    "snapshot",
-    "bindings",
-    "concentration",
-    "view_growth",
-    "newcomer_harm",
-    "new_actor_review_outcomes",
-    "sequencer_lag",
+/// [`filter_response`] drives off this table and drops any section that
+/// has no row here, so a section added to the view without being
+/// classified is withheld from readers lacking a node-wide grant rather
+/// than served to all of them.
+///
+/// The omission is the failure mode worth designing against, because it
+/// has already happened once: `changes` was added to the view while the
+/// filter's section list was maintained by hand, and every authenticated
+/// reader received every change record — owner channel, workspace and
+/// revisions — for repositories they held no grant on. Failing closed
+/// keeps that quiet, so
+/// `every_section_the_view_serves_is_classified` in `tests/it/acl.rs`
+/// makes it loud, comparing this table against a view a real node
+/// served rather than against a sample written from memory.
+pub const SECTIONS: [(&str, Disclosure); 15] = [
+    ("log", Disclosure::Public),
+    ("build", Disclosure::Public),
+    ("snapshot", Disclosure::NodeWide),
+    ("bindings", Disclosure::NodeWide),
+    ("concentration", Disclosure::NodeWide),
+    ("view_growth", Disclosure::NodeWide),
+    ("newcomer_harm", Disclosure::NodeWide),
+    ("new_actor_review_outcomes", Disclosure::NodeWide),
+    ("sequencer_lag", Disclosure::NodeWide),
+    ("refs", Disclosure::PerRepo),
+    ("workspaces", Disclosure::PerRepo),
+    ("provenance", Disclosure::PerRepo),
+    ("reviews", Disclosure::PerRepo),
+    ("changes", Disclosure::PerRepo),
+    // `/api/reviews` rather than `/api/view`, narrowed by the same rule.
+    ("pending", Disclosure::PerRepo),
 ];
+
+/// The disclosure rule for `section`, or `None` when it has no row and
+/// must therefore be withheld.
+#[must_use]
+pub fn disclosure(section: &str) -> Option<Disclosure> {
+    SECTIONS
+        .iter()
+        .find(|(name, _)| *name == section)
+        .map(|(_, rule)| *rule)
+}
 
 /// A read response narrowed to what `user` may see (D29 phase B).
 ///
@@ -586,9 +628,15 @@ pub fn filter_response(acl: &Acl, user: &str, path: &str, body: &str) -> String 
         }
     };
     if !node_wide {
-        for section in NODE_SECTIONS {
-            object.remove(section);
-        }
+        // Unclassified sections leave with the node-wide ones. A section
+        // this build does not know about cannot be narrowed, and serving
+        // it whole is the disclosure this table exists to prevent.
+        object.retain(|section, _| {
+            matches!(
+                disclosure(section),
+                Some(Disclosure::Public | Disclosure::PerRepo)
+            )
+        });
     }
     retain_keys(object.get_mut("refs"), |key| readable(ref_repo(key)));
     for section in ["workspaces", "provenance"] {
@@ -665,6 +713,14 @@ fn retain_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sections gated whole on a node-wide grant.
+    fn node_wide_sections() -> impl Iterator<Item = &'static str> {
+        SECTIONS
+            .iter()
+            .filter(|(_, rule)| *rule == Disclosure::NodeWide)
+            .map(|(name, _)| *name)
+    }
 
     #[test]
     fn the_grammar_accepts_the_documented_file_and_nothing_else() {
@@ -927,7 +983,7 @@ mod tests {
     fn the_node_sections_need_the_node_grant_and_the_log_head_never_does() {
         let repo_only = Acl::parse("alice owner/mine write").expect("parses");
         let narrowed = filter_response(&repo_only, "alice", "/api/view", &sample_view());
-        for section in NODE_SECTIONS {
+        for section in node_wide_sections() {
             assert!(
                 !narrowed.contains(section),
                 "{section} reached a reader with no node grant"
@@ -939,7 +995,7 @@ mod tests {
 
         let auditor = Acl::parse("carol @node auditor").expect("parses");
         let whole = filter_response(&auditor, "carol", "/api/view", &sample_view());
-        for section in NODE_SECTIONS {
+        for section in node_wide_sections() {
             assert!(whole.contains(section), "{section} was withheld from an auditor");
         }
         // An auditor holds no repository grant, so the repository

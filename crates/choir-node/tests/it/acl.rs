@@ -518,3 +518,61 @@ fn a_conditional_request_is_answered_per_reader() {
     );
     assert_eq!(status, 200, "another reader's ETag produced a 304");
 }
+
+/// Every section a real node serves has a disclosure rule.
+///
+/// The filter used to carry a hand-maintained list of section names, and
+/// a section absent from it was served to everybody. That is not
+/// hypothetical: `changes` was added to the view and reached readers
+/// holding no grant on the repositories those changes belonged to.
+/// `filter_response` now fails closed instead, which fixes the
+/// disclosure but would hide the mistake — an unclassified section just
+/// quietly stops being served. This is the half that stays loud.
+///
+/// It reads the view an auditor is served rather than a sample written
+/// here, because a sample can only contain the sections whoever wrote it
+/// remembered. A node-wide reader is the right vantage point: the
+/// fail-closed retain does not run for them, so an unclassified section
+/// still appears and is caught here rather than silently dropped.
+#[test]
+fn every_section_the_view_serves_is_classified() {
+    let (base, _, work, _) = served(
+        "section-coverage",
+        "alice  agents/one  write\n\
+         dave   @node      auditor\n",
+        &["agents/one.git"],
+    );
+    // Seeded so the per-repository sections are populated rather than
+    // absent: a section that is never emitted cannot be checked, and an
+    // empty view would let this pass by having nothing to classify.
+    seed(&work, &base, "alice:a", "agents/one.git");
+
+    let (status, view) = curl(&["-u", "dave:d", &format!("{base}/api/view")]);
+    assert_eq!(status, 200, "the auditor's view was refused: {view}");
+    let served_sections = view.as_object().expect("the view is a JSON object");
+
+    let unclassified: Vec<&String> = served_sections
+        .keys()
+        .filter(|name| choir_node::acl::disclosure(name).is_none())
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "these sections are served but have no disclosure rule, so every reader \
+         without a node-wide grant silently stops seeing them: {unclassified:?}. \
+         Add a row to acl::SECTIONS saying whether each is Public, NodeWide or \
+         PerRepo, and give any PerRepo one a narrowing in filter_response."
+    );
+
+    // The reverse direction: a row for a section nothing serves is a
+    // rule guarding nothing, and it hides that the real one was renamed.
+    // `pending` is exempt because it belongs to /api/reviews.
+    let missing: Vec<&str> = choir_node::acl::SECTIONS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| *name != "pending" && !served_sections.contains_key(*name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "acl::SECTIONS classifies sections the view does not serve: {missing:?}"
+    );
+}
