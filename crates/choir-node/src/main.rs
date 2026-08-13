@@ -8,6 +8,7 @@
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--newcomer-audit path --newcomer-adjudications path]
 //! [--review-adjudications path]
+//! [--hooks-file path]
 //! [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
@@ -43,6 +44,14 @@
 //! captured signature unreplayable — on this node after the state it
 //! expected returns, and on any other node at all. Off by default because
 //! it refuses clients that predate scopes, not because unscoped is safe.
+//! `--hooks-file` (D32) subscribes operator-named URLs to refs that
+//! land: one `<repo:refname pattern> <url> <secret> [allow-private]` per
+//! line, the same trailing-`*` patterns `--protected-refs` uses,
+//! reloaded on mtime. Delivery runs on its own thread and is
+//! best-effort — every attempt and every queue-full drop is recorded in
+//! `<repo-root>/.choir/hooks.jsonl` — because a receiver must never be
+//! able to delay op admission. It needs `--keys-file`, since refs reach
+//! the log through the platform sequencer.
 //! `--review-retention` keeps at most that many live reviews when
 //! completed reviews can be archived. Incomplete reviews are never killed by default;
 //! `--review-lapse-after-secs` is the explicit operator policy that lets
@@ -103,6 +112,7 @@ fn main() -> std::io::Result<()> {
         "--newcomer-adjudications",
         "--review-adjudications",
         "--acl-file",
+        "--hooks-file",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -334,6 +344,14 @@ fn main() -> std::io::Result<()> {
                 .map_err(std::io::Error::other)?;
             eprintln!("review adjudications enabled (T2 stays indeterminate)");
         }
+        // D32. Delivery records go beside the lag log, for the same
+        // reason: an attempt to notify somebody is an observation about
+        // this node, not part of the ordered history anyone replays.
+        if let Some(path) = flag_value("--hooks-file") {
+            platform = platform
+                .with_hooks(path.into(), state_dir.join("hooks.jsonl"))
+                .map_err(std::io::Error::other)?;
+        }
         if let Some(count) = review_retention_count {
             match review_lapse_after {
                 Some(age) => eprintln!(
@@ -400,6 +418,14 @@ fn main() -> std::io::Result<()> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "--review-retention needs --keys-file",
+        ));
+    } else if flag_value("--hooks-file").is_some() {
+        // Refs reach the log through the platform sequencer, git pushes
+        // included, so without it nothing could ever fire and the flag
+        // would be decorative.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--hooks-file needs --keys-file",
         ));
     }
     // D29. Authorization is keyed on the authenticated username, so an
