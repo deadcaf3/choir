@@ -200,6 +200,45 @@ git push origin HEAD:main
 
 Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **never force-push** over a sequencer rejection.
 
+### Git over SSH (D31)
+
+Agents are content with HTTPS and a token. People expect `git@host:owner/repo.git`. The node does not run an SSH server; the host's `sshd` does, and a forced command hands each connection to the `choir-ssh` shim, which is how Gitea and gitolite do it. There is no in-process SSH server and there is not going to be one: every Rust SSH library within reach is tokio-based, and this daemon is synchronous threads.
+
+Start the node with a handoff file. It carries the daemon's address and the loopback secret its git hooks authenticate with, both of which change on every start, which is why they cannot live in an `authorized_keys` line:
+
+```bash
+choir-node <repo-root> 8417 --auth-file <auth-file> --keys-file <keys-file> \
+  --acl-file <acl-file> --ssh-handoff <handoff-file>
+```
+
+Then give the SSH account one line per registered key, all on one line:
+
+```
+command="/usr/local/bin/choir-ssh --root <repo-root> --user <choir-user> --acl-file <acl-file> --handoff <handoff-file> --git-binary /usr/bin/git",restrict ssh-ed25519 AAAA... <user>@<host>
+```
+
+`--user` is the choir username that key belongs to, and it is the entire key-to-actor mapping. The client cannot reach it: sshd runs the forced command and puts whatever the client asked for in `SSH_ORIGINAL_COMMAND`, which is the shim's only untrusted input. `restrict` turns off pty, agent, port and X11 forwarding. `--git-binary` is worth setting explicitly, because sshd runs the forced command through a non-interactive shell whose `PATH` is often not the operator's.
+
+Clone with either spelling:
+
+```bash
+git clone ssh://<ssh-account>@<SERVER_IP>/owner/demo.git
+git clone <ssh-account>@<SERVER_IP>:owner/demo.git
+```
+
+What the shim serves:
+
+- exactly `git-upload-pack '<repo>'` and `git-receive-pack '<repo>'` (the dashless `git upload-pack` spelling too), one argument, never a shell. Anything else, `git-upload-archive` and interactive logins included, is refused with a message the client prints.
+- `owner/repo` or `owner/repo.git`, two segments, ASCII, no segment starting with a dot — so the node's own `.choir` state directory is not addressable.
+- the same `--acl-file` the HTTP path reads, demanding the same level: `read` to fetch, `write` to push. A repository you may not read is refused in the same words as one that does not exist. Leave `--acl-file` off the line and the shim uses whatever the daemon named in the handoff, so a forgotten flag is not the difference between a gated repository and an open one.
+- pushes that run the repository's `pre-receive` hook, so an SSH push is sequenced exactly like an HTTPS one and lands in the log under the same `owner/repo.git:refs/heads/...` name. A shim installed without `--handoff` serves fetches and **refuses pushes**, rather than let one through unsequenced.
+
+Before deploying it, three limits:
+
+- the handoff file holds the daemon's loopback secret at `0600`, so the SSH account and the daemon must be the same uid. If your deployment needs them separate, stay on HTTPS: do not widen who can read that secret.
+- one line per key, and revocation is deleting the line. There is no expiry, no rotation and no key registry.
+- choir does not manage `sshd`. Its port, host keys, and account are the operator's, exactly as they were before choir was installed.
+
 ### Signed-operation CLI and API (primary agent path)
 
 <!-- generated: choir surface, do not edit -->
