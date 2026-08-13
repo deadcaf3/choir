@@ -340,6 +340,47 @@ fn an_edited_subscription_file_takes_effect_without_a_restart() {
 }
 
 #[test]
+fn a_deleted_ref_fires_too_and_says_what_it_was() {
+    let (port, rx) = receiver(200);
+    let fixture = node_with_hooks(
+        "delete",
+        &format!("owner/repo:refs/heads/* http://127.0.0.1:{port}/hook s3cret allow-private\n"),
+    );
+
+    let name = "owner/repo:refs/heads/doomed";
+    let commit = choir_oplog::ContentHash::blake3(name.as_bytes());
+    fixture.land(name);
+    let created = next(&rx);
+    assert_eq!(created.body["new"], commit.to_hex(), "{}", created.body);
+
+    let (code, response) = curl(&[
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(
+            &fixture.key,
+            "alice",
+            &ViewOp::new(OpKind::DeleteRef {
+                name: name.into(),
+                prev: Some(commit.clone()),
+            }),
+        ),
+        &format!("{}/submit", fixture.api),
+    ]);
+    assert_eq!(code, 200, "{response}");
+
+    // A deletion is a ref that moved, so it fires; `new` is null and
+    // `old` carries what was there, which is the pair a receiver needs
+    // to tell a deletion from a creation.
+    let deleted = next(&rx);
+    assert_eq!(deleted.body["ref_key"], name, "{}", deleted.body);
+    assert!(deleted.body["new"].is_null(), "{}", deleted.body);
+    assert_eq!(deleted.body["old"], commit.to_hex(), "{}", deleted.body);
+
+    fixture.node.unblock();
+}
+
+#[test]
 fn a_failing_receiver_is_retried_and_every_attempt_is_recorded() {
     let (port, _rx) = receiver(500);
     let fixture = node_with_hooks(
