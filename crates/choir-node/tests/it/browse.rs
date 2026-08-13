@@ -10,6 +10,7 @@
 use choir_identity::{ActorKey, Registry};
 use choir_node::{AuthTable, Node, Platform};
 use choir_oplog::MemLog;
+use choir_view::{OpKind, ViewOp};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
@@ -292,6 +293,142 @@ fn the_browse_prefix_did_not_take_a_clone_url() {
     let (status, _, page) = get(&format!("{base}/r/r/project"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "an owner named `r` cannot be browsed: {page}");
     assert!(page.contains("only.txt"), "the pushed file is not listed: {page}");
+}
+
+/// A review page joins the three things reviews have always carried and
+/// never shown together: what lands where, who was asked and what they
+/// said, and the diff between the proposal and its destination.
+#[test]
+fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
+    let work = std::env::temp_dir().join("choir-node-browse-review");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).expect("register author");
+
+    let mut node = Node::bind(&work.join("repos"), 0).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/one.git").expect("repo created");
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // A base branch and a proposal on top of it, both really pushed.
+    let clone = work.join("clone");
+    let url = format!("{base}/agents/one.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()]).status.success());
+    std::fs::write(clone.join("f.txt"), "base\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "base"]).status.success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    std::fs::write(clone.join("f.txt"), "proposed change\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "the proposal"]).status.success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:refs/heads/topic"]).status.success());
+    let proposal = String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+    // Main moves on after the proposal branched, which is the ordinary
+    // state of any review that took more than an afternoon. It is also
+    // what makes the two-dot/three-dot distinction observable: a two-dot
+    // diff would show this later commit as though the proposal reverted
+    // it, crediting one author with another's work.
+    assert!(git(&clone, &["checkout", "-q", "-B", "later", "HEAD~1"]).status.success());
+    std::fs::write(clone.join("other.txt"), "landed by somebody else\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "unrelated landing"]).status.success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success());
+
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-page".into(),
+        target: choir_oplog::ContentHash::from_git_oid(&proposal).expect("a git oid"),
+        reviewers: vec!["ana".into(), "bot".into()],
+        target_ref: Some("agents/one.git:refs/heads/main".into()),
+    });
+    let (code, resp) = crate::support::curl(&[
+        "-X",
+        "POST",
+        "-d",
+        &crate::support::submit_body_legacy(&author, "author", &request),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    // The index lists it against the repository it proposes to land on.
+    let (status, _, list) = get(&format!("{base}/r/agents/one/reviews"), &[]);
+    assert_eq!(status, 200);
+    assert!(list.contains("r-page"), "the review is not listed: {list}");
+
+    let (status, _, page) = get(&format!("{base}/r/agents/one/review/r-page"), &[]);
+    assert_eq!(status, 200);
+    // The relationship.
+    assert!(page.contains(&proposal[..12]), "the proposed commit is missing: {page}");
+    assert!(page.contains("refs/heads/main"), "the destination ref is missing");
+    // The people, including the one who has not answered.
+    assert!(page.contains("ana") && page.contains("bot"), "a reviewer is missing");
+    assert!(page.contains("waiting"), "an unanswered reviewer is not shown as waiting");
+    assert!(page.contains("open"), "a live review is not shown as open");
+    // The diff — and specifically the proposal's own change, not the
+    // whole difference between two branches.
+    assert!(page.contains("proposed change"), "the diff is missing: {page}");
+    assert!(page.contains("class=\"add\""), "the diff has no added lines");
+    assert!(
+        !page.contains("other.txt"),
+        "the diff shows work that landed on the destination as part of this proposal: {page}"
+    );
+
+    // A verdict with a note is the discussion the log actually carries.
+    let approve = ViewOp::new(OpKind::PostVerdict {
+        id: "r-page".into(),
+        reviewer: "ana".into(),
+        verdict: choir_view::Verdict::Approve,
+        note: "reads fine to me".into(),
+    });
+    let (code, resp) = crate::support::curl(&[
+        "-X",
+        "POST",
+        "-d",
+        &crate::support::submit_body_legacy(&author, "ana", &approve),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+    let (_, _, page) = get(&format!("{base}/r/agents/one/review/r-page"), &[]);
+    assert!(page.contains("reads fine to me"), "the verdict note is missing: {page}");
+    assert!(page.contains("approve"), "the verdict is missing");
+
+    // An unknown review is a 404, not an empty page pretending to be one.
+    let (status, _, _) = get(&format!("{base}/r/agents/one/review/nope"), &[]);
+    assert_eq!(status, 404, "an unknown review rendered as a page");
+
+    // A review may legitimately name a target git has never heard of —
+    // hashes in the log are self-describing, and BLAKE3 is one of them.
+    // The page must say it cannot diff that, not hand the digest to git.
+    let opaque = ViewOp::new(OpKind::RequestReview {
+        id: "r-opaque".into(),
+        target: choir_oplog::ContentHash::blake3(b"not a git object"),
+        reviewers: vec!["ana".into()],
+        target_ref: Some("agents/one.git:refs/heads/main".into()),
+    });
+    let (code, resp) = crate::support::curl(&[
+        "-X",
+        "POST",
+        "-d",
+        &crate::support::submit_body_legacy(&author, "author", &opaque),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+    let (status, _, page) = get(&format!("{base}/r/agents/one/review/r-opaque"), &[]);
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("names no commit"),
+        "a non-git target was not reported as one: {page}"
+    );
+    assert!(!page.contains("fatal:"), "a non-git target reached git anyway: {page}");
 }
 
 /// An anonymous reader gets nothing, exactly as on the D28 page. A

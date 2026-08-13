@@ -198,10 +198,14 @@ Writes are not available from the browser and are not planned without their own 
 | `/r/<owner>/<repo>/blob/<rev>/<path>` | one file, with line numbers |
 | `/r/<owner>/<repo>/commits/<rev>` | recent history |
 | `/r/<owner>/<repo>/commit/<oid>` | one commit and its diff |
+| `/r/<owner>/<repo>/reviews` | reviews proposing to land here |
+| `/r/<owner>/<repo>/review/<id>` | one review: proposal, reviewers, verdicts, diff |
 
 Same auth wall, and the same `read` grant a clone needs — a repository you hold no grant on answers `404` here too, so browsing never confirms that one exists. Content pages revalidate on the **commit oid** rather than the view sequence, because file content lives in the bare repository and the sequence describes the op log; a `304` here means "this commit's bytes have not changed", which is true forever.
 
 Large files are described rather than dumped (512 KiB), binary files are named rather than rendered, and long diffs truncate at 2,000 lines — the clone path exists for all three. Nothing from a URL reaches `git` unvalidated: revision arithmetic (`main~3`, `HEAD@{1}`), traversal and anything option-shaped are refused at the router rather than escaped later.
+
+A review page shows what commit lands on what ref, who was asked and what each said (with their verdict notes), the approval weight, any retroactive slashing, and the diff between the proposal and its destination. That diff is three-dot: it shows what the proposal added since it diverged, not every difference between two branches — so work that landed on the target while the review was open is never attributed to the author under review. The page adds no state; every field comes from the same payload `/api/view` serves. Comments are not implemented: a discussion record is a persisted operation and needs its own decision, so verdict notes are the discussion the log actually carries.
 
 ### Git compatibility path
 

@@ -25,7 +25,8 @@
 //! artifact.
 //!
 //! So every git command this module runs against the template carries
-//! [`TEMPLATE_CONFIG`], which turns both mechanisms off. The template is
+//! `gc.auto=0` and `maintenance.auto=false`, which turn both mechanisms
+//! off (see the private `TEMPLATE_CONFIG`). The template is
 //! a disposable internal artifact — re-fetched constantly, never served,
 //! recreated by deleting it — so housekeeping buys nothing there and
 //! costs a race. The alternative, tolerating `ENOENT` from `cp`, means

@@ -3,7 +3,7 @@
 //! The D28 page shows what the node *knows* — refs, reviews, the
 //! attestation, health. It shows nothing of what the repositories
 //! *contain*, which is the thing a human opens a forge for. This module
-//! adds four read-only pages under `/r/`:
+//! adds read-only pages under `/r/`:
 //!
 //! ```text
 //! /r/                                     repositories you may read
@@ -11,7 +11,18 @@
 //! /r/<owner>/<repo>/blob/<rev>/<path>     one file
 //! /r/<owner>/<repo>/commits/<rev>         recent history
 //! /r/<owner>/<repo>/commit/<oid>          one commit, with its diff
+//! /r/<owner>/<repo>/reviews               reviews landing here (D34)
+//! /r/<owner>/<repo>/review/<id>           one review, with its diff
 //! ```
+//!
+//! The review pages (D34) are the pull-request-shaped surface: reviews
+//! already carried assignment, verdicts, approval weight, per-operator
+//! caps and retroactive slashing, and none of it was visible next to the
+//! change it judged. They add no state — every field comes from the same
+//! `review_json` the API serves — so there is nothing here that can
+//! disagree with `/api/view`. Comments are deliberately absent: a
+//! discussion record is a new persisted op, which is a decision of its
+//! own rather than a page.
 //!
 //! # Why this cannot collide with a git route
 //!
@@ -87,6 +98,11 @@ pub(crate) enum Page {
     Commits { repo: String, rev: String },
     /// One commit and its diff.
     Commit { repo: String, oid: String },
+    /// Every review proposing to land on this repository.
+    Reviews { repo: String },
+    /// One review: what it proposes, who was asked, what they said, and
+    /// the diff between the proposal and where it would land.
+    Review { repo: String, id: String },
 }
 
 impl Page {
@@ -99,7 +115,9 @@ impl Page {
             Page::Tree { repo, .. }
             | Page::Blob { repo, .. }
             | Page::Commits { repo, .. }
-            | Page::Commit { repo, .. } => Some(repo),
+            | Page::Commit { repo, .. }
+            | Page::Reviews { repo }
+            | Page::Review { repo, .. } => Some(repo),
         }
     }
 }
@@ -131,6 +149,24 @@ pub(crate) fn route(url: &str) -> Option<Page> {
         return None;
     }
     let repo = format!("{owner}/{name}");
+
+    // Reviews are keyed by an operator-chosen id rather than by a
+    // revision, so they take the segment where a rev would otherwise go.
+    if let Some(rest) = rest.strip_prefix(&format!("{owner}/{name}/")) {
+        if rest == "reviews" {
+            return Some(Page::Reviews { repo });
+        }
+        if let Some(id) = rest.strip_prefix("review/") {
+            let id = decode(id)?;
+            // The same rule repository and workspace names follow: an id
+            // reaches no subprocess, but it does reach a URL and a page,
+            // and one grammar for names is easier to keep right than two.
+            if !crate::provision::safe_segment(&id) {
+                return None;
+            }
+            return Some(Page::Review { repo, id });
+        }
+    }
 
     let kind = match segments.next() {
         // `/r/owner/repo` is the repository's front door: its default
@@ -295,6 +331,7 @@ pub(crate) fn render(
     root: &Path,
     page: &Page,
     readable: &dyn Fn(&str) -> bool,
+    platform: Option<&crate::platform::Platform>,
 ) -> Rendered {
     match page {
         Page::Index => index(root, readable),
@@ -302,6 +339,8 @@ pub(crate) fn render(
         Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path),
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev),
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid),
+        Page::Reviews { repo } => reviews(repo, platform),
+        Page::Review { repo, id } => review(&bare(root, repo), repo, id, platform),
     }
 }
 
@@ -562,34 +601,7 @@ fn commit(dir: &Path, repo: &str, oid: &str) -> Rendered {
     h.push_str("</p>");
 
     match git_text(dir, &["show", "--patch", "--stat", "--format=", oid]) {
-        Ok(diff) => {
-            h.push_str("<pre class=\"code diff\">");
-            for (n, line) in diff.lines().enumerate() {
-                if n >= MAX_DIFF_LINES {
-                    h.push_str("\n<span class=\"muted\">… diff truncated at ");
-                    h.push_str(&MAX_DIFF_LINES.to_string());
-                    h.push_str(" lines. Clone the repository to read the rest.</span>");
-                    break;
-                }
-                let class = match line.as_bytes().first() {
-                    Some(b'+') if !line.starts_with("+++") => "add",
-                    Some(b'-') if !line.starts_with("---") => "del",
-                    Some(b'@') => "hunk",
-                    _ => "",
-                };
-                if class.is_empty() {
-                    h.push_str(&esc(line));
-                } else {
-                    h.push_str("<span class=\"");
-                    h.push_str(class);
-                    h.push_str("\">");
-                    h.push_str(&esc(line));
-                    h.push_str("</span>");
-                }
-                h.push('\n');
-            }
-            h.push_str("</pre>");
-        }
+        Ok(diff) => patch(&mut h, &diff),
         Err(why) => {
             h.push_str("<p class=\"empty\">");
             h.push_str(&esc(&why));
@@ -598,6 +610,263 @@ fn commit(dir: &Path, repo: &str, oid: &str) -> Rendered {
     }
     h.push_str("</section>");
     Rendered { status: 200, etag: Some(tag(&id, "commit")), html: close(h) }
+}
+
+/// Renders a unified diff, coloured by line kind and bounded in length.
+///
+/// Shared by the commit page and the review page so a diff cannot come
+/// to mean two different things depending on which one a reader opened.
+fn patch(h: &mut String, diff: &str) {
+    h.push_str("<pre class=\"code diff\">");
+    for (n, line) in diff.lines().enumerate() {
+        if n >= MAX_DIFF_LINES {
+            h.push_str("\n<span class=\"muted\">… diff truncated at ");
+            h.push_str(&MAX_DIFF_LINES.to_string());
+            h.push_str(" lines. Clone the repository to read the rest.</span>");
+            break;
+        }
+        let class = match line.as_bytes().first() {
+            Some(b'+') if !line.starts_with("+++") => "add",
+            Some(b'-') if !line.starts_with("---") => "del",
+            Some(b'@') => "hunk",
+            _ => "",
+        };
+        if class.is_empty() {
+            h.push_str(&esc(line));
+        } else {
+            h.push_str("<span class=\"");
+            h.push_str(class);
+            h.push_str("\">");
+            h.push_str(&esc(line));
+            h.push_str("</span>");
+        }
+        h.push('\n');
+    }
+    h.push_str("</pre>");
+}
+
+/// Every review proposing to land on this repository.
+fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered {
+    let Some(platform) = platform else {
+        return unavailable(repo);
+    };
+    let rows = platform.reviews_for_repo(repo);
+
+    let mut h = shell(&format!("{repo}: reviews"));
+    h.push_str("<header class=\"top\"><h1><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("\">");
+    h.push_str(&esc(repo));
+    h.push_str("</a></h1><div class=\"sub\"><span class=\"pill\">");
+    h.push_str(&rows.len().to_string());
+    h.push_str(" reviews</span><span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
+    h.push_str("</div></header><main id=\"main\"><section>");
+    if rows.is_empty() {
+        h.push_str("<p class=\"empty\">No review proposes to land on this repository.</p>");
+    } else {
+        h.push_str("<table><thead><tr><th>review</th><th>onto</th><th>state</th>");
+        h.push_str("<th class=\"num\">weight</th></tr></thead><tbody>");
+        for (id, review) in &rows {
+            h.push_str("<tr><td><a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/review/");
+            h.push_str(&esc(id));
+            h.push_str("\">");
+            h.push_str(&esc(id));
+            h.push_str("</a></td><td class=\"mono muted\">");
+            h.push_str(&esc(ref_name(review)));
+            h.push_str("</td><td>");
+            state_tag(&mut h, review);
+            h.push_str("</td><td class=\"num\">");
+            h.push_str(&esc(&review["approval_weight"].to_string()));
+            h.push_str("</td></tr>");
+        }
+        h.push_str("</tbody></table>");
+    }
+    h.push_str("</section>");
+    Rendered { status: 200, etag: None, html: close(h) }
+}
+
+/// One review: the proposal, the people, and the diff between what is
+/// proposed and where it would land.
+///
+/// The diff is three-dot on purpose — what the proposal adds *since it
+/// diverged*, not every difference between two branches. A two-dot diff
+/// on a target ref that has moved shows the reviewer other people's
+/// landed work as though the author wrote it, which is the single most
+/// misleading thing a review surface can do.
+fn review(
+    dir: &Path,
+    repo: &str,
+    id: &str,
+    platform: Option<&crate::platform::Platform>,
+) -> Rendered {
+    let Some(platform) = platform else {
+        return unavailable(repo);
+    };
+    let Some(state) = platform.review_json(id) else {
+        return missing(repo, id, "no such review");
+    };
+    let commit_oid = git_oid_of(state["target"].as_str().unwrap_or("")).unwrap_or_default();
+
+    let mut h = shell(&format!("{repo}: review {id}"));
+    h.push_str("<header class=\"top\"><h1><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("\">");
+    h.push_str(&esc(repo));
+    h.push_str("</a> · review ");
+    h.push_str(&esc(id));
+    h.push_str("</h1><div class=\"sub\">");
+    state_tag(&mut h, &state);
+    h.push_str("<span class=\"pill\">weight ");
+    h.push_str(&esc(&state["approval_weight"].to_string()));
+    h.push_str("</span><span class=\"pill\"><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/reviews\">all reviews</a></span>");
+    h.push_str("</div></header><main id=\"main\">");
+
+    // The relationship: what lands where, which is the thing reviews
+    // have always carried and never shown in one place.
+    h.push_str("<section><h2>Proposal</h2><table><tbody>");
+    h.push_str("<tr><td>commit</td><td class=\"mono\"><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/commit/");
+    h.push_str(&esc(&commit_oid));
+    h.push_str("\">");
+    h.push_str(&esc(&short_oid(&commit_oid)));
+    h.push_str("</a></td></tr><tr><td>onto</td><td class=\"mono\">");
+    h.push_str(&esc(ref_name(&state)));
+    h.push_str("</td></tr>");
+    if state["re_review_required"].as_bool().unwrap_or(false) {
+        h.push_str("<tr><td>re-review</td><td><b class=\"tag warn\">required</b></td></tr>");
+    }
+    h.push_str("</tbody></table></section>");
+
+    // Who was asked, and what they said. Verdict notes are the closest
+    // thing the log has to discussion today.
+    h.push_str("<section><h2>Reviewers</h2>");
+    let reviewers = state["reviewers"].as_array().cloned().unwrap_or_default();
+    if reviewers.is_empty() {
+        h.push_str("<p class=\"empty\">Unassigned.</p>");
+    } else {
+        h.push_str("<table><thead><tr><th>reviewer</th><th>verdict</th><th>note</th>");
+        h.push_str("</tr></thead><tbody>");
+        for who in reviewers.iter().filter_map(serde_json::Value::as_str) {
+            let verdict = &state["verdicts"][who];
+            let slashed = state["slashes"].get(who).and_then(serde_json::Value::as_str);
+            h.push_str("<tr><td class=\"mono\">");
+            h.push_str(&esc(who));
+            h.push_str("</td><td>");
+            match verdict["verdict"].as_str() {
+                Some("Approve") => h.push_str("<b class=\"tag ok\">approve</b>"),
+                Some("RequestChanges") => h.push_str("<b class=\"tag danger\">changes</b>"),
+                Some(other) => h.push_str(&esc(other)),
+                None => h.push_str("<b class=\"tag pending\">waiting</b>"),
+            }
+            if let Some(reason) = slashed {
+                h.push_str(" <b class=\"tag danger\">slashed</b> <span class=\"muted\">");
+                h.push_str(&esc(reason));
+                h.push_str("</span>");
+            }
+            h.push_str("</td><td>");
+            h.push_str(&esc(verdict["note"].as_str().unwrap_or("")));
+            h.push_str("</td></tr>");
+        }
+        h.push_str("</tbody></table>");
+    }
+    h.push_str("</section>");
+
+    // The diff, against wherever the target ref points right now.
+    h.push_str("<section><h2>Changes</h2>");
+    let onto = ref_name(&state);
+    let base = onto
+        .split_once(':')
+        .map(|(_, refname)| refname.to_string())
+        .filter(|refname| !refname.is_empty());
+    match (commit_oid.is_empty(), base) {
+        (true, _) => h.push_str("<p class=\"empty\">This review names no commit.</p>"),
+        (false, None) => {
+            h.push_str("<p class=\"note\">This review names no destination ref, so there is ");
+            h.push_str("nothing to diff it against. The commit itself is linked above.</p>");
+        }
+        (false, Some(refname)) => {
+            let range = format!("{refname}...{commit_oid}");
+            match git_text(dir, &["diff", "--stat", "--patch", &range]) {
+                Ok(diff) if diff.trim().is_empty() => {
+                    h.push_str("<p class=\"empty\">Nothing to land: the destination already ");
+                    h.push_str("contains this commit.</p>");
+                }
+                Ok(diff) => patch(&mut h, &diff),
+                Err(why) => {
+                    h.push_str("<p class=\"note\">");
+                    h.push_str(&esc(&why));
+                    h.push_str("</p>");
+                }
+            }
+        }
+    }
+    h.push_str("</section>");
+    Rendered { status: 200, etag: None, html: close(h) }
+}
+
+/// The git object id inside a view hash, or `None` when the hash is not
+/// a git object at all.
+///
+/// Hashes in the log are self-describing (invariant 2), and a review may
+/// legitimately name a BLAKE3 target that git has never heard of. Reading
+/// the codec rather than stripping the prefix is what keeps such a target
+/// off a subprocess command line, and lets the page say so instead of
+/// showing git's confusion.
+fn git_oid_of(target: &str) -> Option<String> {
+    let (codec, digest) = target.split_once('-')?;
+    // 0x11 is git SHA-1 and 0x12 git SHA-256, per the multicodec table
+    // `ContentHash::from_git_oid` writes.
+    let git = matches!(codec, "11" | "12");
+    (git && matches!(digest.len(), 40 | 64) && digest.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| digest.to_ascii_lowercase())
+}
+
+/// A review's destination ref, or the empty string.
+fn ref_name(review: &serde_json::Value) -> &str {
+    review["target_ref"].as_str().unwrap_or("")
+}
+
+/// Shortens an oid for display without pretending it is a codec-tagged
+/// hash, which [`short`] would.
+///
+/// [`short`]: crate::ui
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(12).collect()
+}
+
+/// The one-word state of a review, as a tag.
+fn state_tag(h: &mut String, review: &serde_json::Value) {
+    let approved = review["approved"].as_bool().unwrap_or(false);
+    let complete = review["complete"].as_bool().unwrap_or(false);
+    let archived = review["archived"].as_bool().unwrap_or(false);
+    let (class, word) = match (archived, approved, complete) {
+        (true, true, _) => ("ok", "archived approved"),
+        (true, false, _) => ("muted", "archived"),
+        (false, true, _) => ("ok", "approved"),
+        (false, false, true) => ("danger", "changes requested"),
+        (false, false, false) => ("pending", "open"),
+    };
+    h.push_str("<b class=\"tag ");
+    h.push_str(class);
+    h.push_str("\">");
+    h.push_str(word);
+    h.push_str("</b>");
+}
+
+/// The page for a review request on a node with no platform enabled.
+fn unavailable(repo: &str) -> Rendered {
+    let mut h = shell(&format!("{repo}: unavailable"));
+    h.push_str("<header class=\"top\"><h1>");
+    h.push_str(&esc(repo));
+    h.push_str("</h1></header><main id=\"main\"><section><p class=\"note\">");
+    h.push_str("The platform API is not enabled on this node, so it holds no reviews.");
+    h.push_str("</p></section>");
+    Rendered { status: 503, etag: None, html: close(h) }
 }
 
 /// The page for a repository with no commits yet.
@@ -667,6 +936,9 @@ fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, her
         h.push_str(&esc(rev));
         h.push_str("\">history</a></span>");
     }
+    h.push_str("<span class=\"pill\"><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/reviews\">reviews</a></span>");
     h.push_str("<span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
     h.push_str("</div>");
     if !path.is_empty() {

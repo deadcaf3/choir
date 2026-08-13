@@ -3745,6 +3745,37 @@ impl Platform {
             .map(|(repo, _)| crate::acl::normalize_repo(repo))
     }
 
+    /// One review as the API renders it, or `None` when no such review
+    /// exists.
+    ///
+    /// Exposed for the D34 review page, which needs one review rather
+    /// than the whole view. Same `review_json` the API uses, so the page
+    /// and the API cannot describe a review differently.
+    pub fn review_json(&self, id: &str) -> Option<serde_json::Value> {
+        let view = self.view.lock().expect("view lock");
+        view.reviews.get(id).map(review_json)
+    }
+
+    /// Every review whose target ref names `repo`, newest id last.
+    ///
+    /// A review with no target ref belongs to no repository and is
+    /// omitted: it cannot be shown under one without asserting a
+    /// relationship the requester never signed.
+    pub fn reviews_for_repo(&self, repo: &str) -> Vec<(String, serde_json::Value)> {
+        let wanted = crate::acl::normalize_repo(repo);
+        let view = self.view.lock().expect("view lock");
+        view.reviews
+            .iter()
+            .filter(|(_, r)| {
+                r.target_ref
+                    .as_deref()
+                    .and_then(|target| target.split_once(':'))
+                    .is_some_and(|(named, _)| crate::acl::normalize_repo(named) == wanted)
+            })
+            .map(|(id, r)| (id.clone(), review_json(r)))
+            .collect()
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {

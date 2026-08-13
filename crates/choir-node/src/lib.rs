@@ -606,7 +606,14 @@ impl Node {
                 // clone URL: this cannot shadow a repository, and the
                 // check is theirs rather than this router's ordering.
                 if let Some(page) = browse::route(request.url()) {
-                    let _ = handle_browse(&root, &page, &user, acl.as_deref(), request);
+                    let _ = handle_browse(
+                        &root,
+                        &page,
+                        &user,
+                        acl.as_deref(),
+                        platform.as_deref(),
+                        request,
+                    );
                     return;
                 }
                 if request.url().starts_with("/api/") {
@@ -988,6 +995,7 @@ fn handle_browse(
     page: &browse::Page,
     user: &str,
     acl: Option<&acl::Acl>,
+    platform: Option<&Platform>,
     request: tiny_http::Request,
 ) -> std::io::Result<()> {
     let readable = |repo: &str| match acl {
@@ -1009,7 +1017,7 @@ fn handle_browse(
         }
     }
 
-    let rendered = browse::render(root, page, &readable);
+    let rendered = browse::render(root, page, &readable, platform);
     // Revalidation happens after the ACL check and before the body is
     // written, so a `304` costs the reader nothing and still cannot be
     // obtained for a repository they may not read.

@@ -358,7 +358,28 @@ fn review_table(h: &mut String, rows: &[(&String, &serde_json::Value)]) {
             h.push_str(" class=\"open\"");
         }
         h.push_str("><td><span class=\"id\">");
-        h.push_str(&esc(id));
+        // A review whose target ref names a repository links through to
+        // its D34 page, where the diff and the verdict notes live. One
+        // that names none has no repository to be shown under, so it
+        // stays plain text rather than linking somewhere that would have
+        // to guess.
+        match r
+            .get("target_ref")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|target| target.split_once(':'))
+            .map(|(repo, _)| repo.strip_suffix(".git").unwrap_or(repo))
+        {
+            Some(repo) => {
+                h.push_str("<a href=\"/r/");
+                h.push_str(&esc(repo));
+                h.push_str("/review/");
+                h.push_str(&esc(id));
+                h.push_str("\">");
+                h.push_str(&esc(id));
+                h.push_str("</a>");
+            }
+            None => h.push_str(&esc(id)),
+        }
         h.push_str("</span>");
         if approved {
             h.push_str(" <b class=\"tag ok\">approved</b>");
