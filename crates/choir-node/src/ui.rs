@@ -139,7 +139,7 @@ fn short_digest(reader: &str) -> String {
 ///
 /// Quotes are escaped too, so one function is safe in both places and
 /// no call site has to remember which kind of context it is in.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -582,7 +582,7 @@ fn row(h: &mut String, label: &str, value: &str) {
 /// raw values. `ui.css` carries the provenance note and the re-vendor
 /// rule; dark is the canonical theme and light follows the reader's
 /// system setting, both without a line of JavaScript.
-const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
+pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
 
 
 #[cfg(test)]

@@ -187,6 +187,22 @@ It is deliberately not an app. The page is server-rendered from the same `/api/v
 
 Writes are not available from the browser and are not planned without their own decision: every write still goes through the signed-operation API.
 
+### Repository browsing
+
+`/r/` lists the repositories your credential may read, and each one browses:
+
+| URL | Shows |
+|---|---|
+| `/r/<owner>/<repo>` | the default branch at the repository root |
+| `/r/<owner>/<repo>/tree/<rev>/<path>` | a directory listing |
+| `/r/<owner>/<repo>/blob/<rev>/<path>` | one file, with line numbers |
+| `/r/<owner>/<repo>/commits/<rev>` | recent history |
+| `/r/<owner>/<repo>/commit/<oid>` | one commit and its diff |
+
+Same auth wall, and the same `read` grant a clone needs — a repository you hold no grant on answers `404` here too, so browsing never confirms that one exists. Content pages revalidate on the **commit oid** rather than the view sequence, because file content lives in the bare repository and the sequence describes the op log; a `304` here means "this commit's bytes have not changed", which is true forever.
+
+Large files are described rather than dumped (512 KiB), binary files are named rather than rendered, and long diffs truncate at 2,000 lines — the clone path exists for all three. Nothing from a URL reaches `git` unvalidated: revision arithmetic (`main~3`, `HEAD@{1}`), traversal and anything option-shaped are refused at the router rather than escaped later.
+
 ### Git compatibility path
 
 ```bash

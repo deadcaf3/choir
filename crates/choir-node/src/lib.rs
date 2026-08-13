@@ -17,6 +17,7 @@ pub mod acl;
 pub mod platform;
 pub mod provision;
 pub mod reject;
+mod browse;
 mod ui;
 
 pub use platform::Platform;
@@ -599,6 +600,15 @@ impl Node {
                     );
                     return;
                 }
+                // Repository browsing (D30). Ahead of the git branch
+                // below, but `browse::route` refuses any path carrying a
+                // `.git` segment, so an owner named `r` keeps their
+                // clone URL: this cannot shadow a repository, and the
+                // check is theirs rather than this router's ordering.
+                if let Some(page) = browse::route(request.url()) {
+                    let _ = handle_browse(&root, &page, &user, acl.as_deref(), request);
+                    return;
+                }
                 if request.url().starts_with("/api/") {
                     let base_url = format!("{scheme}://127.0.0.1:{port}");
                     // A hook callback carries the loopback secret rather
@@ -964,6 +974,87 @@ fn handle_ui(
             tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
                 .expect("static header"),
         );
+    request.respond(response)
+}
+
+/// Serves one repository-browsing page (D30).
+///
+/// Authorization is the same grant a clone needs, checked here rather
+/// than in the renderer: a reader without `read` must be told the
+/// repository does not exist, and a page cannot say that convincingly
+/// after it has already started describing one.
+fn handle_browse(
+    root: &Path,
+    page: &browse::Page,
+    user: &str,
+    acl: Option<&acl::Acl>,
+    request: tiny_http::Request,
+) -> std::io::Result<()> {
+    let readable = |repo: &str| match acl {
+        Some(table) => table.allows_repo(user, repo, acl::Level::Read),
+        None => true,
+    };
+    if let Some(repo) = page.repo() {
+        if !readable(repo) {
+            let response = tiny_http::Response::from_string("no such repository\n")
+                .with_status_code(404)
+                .with_header(
+                    tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"text/plain; charset=utf-8"[..],
+                    )
+                    .expect("static header"),
+                );
+            return request.respond(response);
+        }
+    }
+
+    let rendered = browse::render(root, page, &readable);
+    // Revalidation happens after the ACL check and before the body is
+    // written, so a `304` costs the reader nothing and still cannot be
+    // obtained for a repository they may not read.
+    if let Some(tag) = rendered.etag.as_deref() {
+        if header(&request, "If-None-Match").as_deref() == Some(tag) {
+            let response = tiny_http::Response::empty(304).with_header(
+                tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+            );
+            return request.respond(response);
+        }
+    }
+
+    let mut response = tiny_http::Response::from_string(rendered.html)
+        .with_status_code(rendered.status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-cache"[..])
+                .expect("static header"),
+        )
+        // The same defence in depth the D28 page carries: file contents
+        // are attacker-supplied by definition here, so even an escaping
+        // miss must not be able to run or fetch anything.
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Security-Policy"[..],
+                &b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"[..],
+            )
+            .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    if let Some(tag) = rendered.etag {
+        response.add_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+        );
+    }
     request.respond(response)
 }
 

@@ -17,7 +17,7 @@ use crate::platform::Platform;
 
 /// Path segment allowed in repo/workspace names: no traversal, no
 /// hidden files, no separators.
-fn safe_segment(s: &str) -> bool {
+pub(crate) fn safe_segment(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('.')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
