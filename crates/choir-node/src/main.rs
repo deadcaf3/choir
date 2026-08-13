@@ -8,7 +8,10 @@
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--newcomer-audit path --newcomer-adjudications path]
 //! [--review-adjudications path]
-//! [--bind addr]
+//! [--hooks-file path]
+//! [--request-log path [--request-log-max-bytes n]]
+//! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
+//! [--bind addr] [--ssh-handoff path]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
 //!
@@ -43,11 +46,32 @@
 //! captured signature unreplayable — on this node after the state it
 //! expected returns, and on any other node at all. Off by default because
 //! it refuses clients that predate scopes, not because unscoped is safe.
+//! `--hooks-file` (D32) subscribes operator-named URLs to refs that
+//! land: one `<repo:refname pattern> <url> <secret> [allow-private]` per
+//! line, the same trailing-`*` patterns `--protected-refs` uses,
+//! reloaded on mtime. Delivery runs on its own thread and is
+//! best-effort — every attempt and every queue-full drop is recorded in
+//! `<repo-root>/.choir/hooks.jsonl` — because a receiver must never be
+//! able to delay op admission. It needs `--keys-file`, since refs reach
+//! the log through the platform sequencer.
 //! `--review-retention` keeps at most that many live reviews when
 //! completed reviews can be archived. Incomplete reviews are never killed by default;
 //! `--review-lapse-after-secs` is the explicit operator policy that lets
-//! an over-limit incomplete review lapse. `--bind` with a non-loopback
+//! an over-limit incomplete review lapse. `--request-log` (D33) records
+//! one JSON line per served request — method, path, status, response
+//! bytes, elapsed microseconds and the authenticated user — rotating to
+//! `<path>.1` past `--request-log-max-bytes` (32 MiB by default), and
+//! never writing a header, a body or a query string. `--rate-limit-api`
+//! and `--rate-limit-git` are per-user requests-per-minute ceilings, each
+//! a token bucket holding one minute's burst, answered `429` with
+//! `Retry-After`; the loopback hook callback and any holder of an `@node`
+//! grant are exempt, because a limiter that can lock out the operator is
+//! worse than no limiter. All three need `--auth-file`, since all three
+//! are per authenticated user. `--bind` with a non-loopback
 //! address is refused unless TLS is configured.
+//! `--ssh-handoff` (D31) writes this daemon's base URL and loopback
+//! secret to a 0600 file for the `choir-ssh` forced command, which is how
+//! a push arriving over SSH reaches the same sequencer an HTTP push does.
 
 use choir_node::platform::ReviewRetention;
 use choir_node::{AuthTable, Node, Platform};
@@ -103,6 +127,12 @@ fn main() -> std::io::Result<()> {
         "--newcomer-adjudications",
         "--review-adjudications",
         "--acl-file",
+        "--hooks-file",
+        "--ssh-handoff",
+        "--request-log",
+        "--request-log-max-bytes",
+        "--rate-limit-api",
+        "--rate-limit-git",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -334,6 +364,14 @@ fn main() -> std::io::Result<()> {
                 .map_err(std::io::Error::other)?;
             eprintln!("review adjudications enabled (T2 stays indeterminate)");
         }
+        // D32. Delivery records go beside the lag log, for the same
+        // reason: an attempt to notify somebody is an observation about
+        // this node, not part of the ordered history anyone replays.
+        if let Some(path) = flag_value("--hooks-file") {
+            platform = platform
+                .with_hooks(path.into(), state_dir.join("hooks.jsonl"))
+                .map_err(std::io::Error::other)?;
+        }
         if let Some(count) = review_retention_count {
             match review_lapse_after {
                 Some(age) => eprintln!(
@@ -401,6 +439,14 @@ fn main() -> std::io::Result<()> {
             std::io::ErrorKind::InvalidInput,
             "--review-retention needs --keys-file",
         ));
+    } else if flag_value("--hooks-file").is_some() {
+        // Refs reach the log through the platform sequencer, git pushes
+        // included, so without it nothing could ever fire and the flag
+        // would be decorative.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--hooks-file needs --keys-file",
+        ));
     }
     // D29. Authorization is keyed on the authenticated username, so an
     // ACL without authentication would grade everybody as `anon` and
@@ -423,6 +469,79 @@ fn main() -> std::io::Result<()> {
         None => eprintln!(
             "acl: no --acl-file, so every authenticated actor reaches every repository"
         ),
+    }
+    // D31. The SSH shim runs as a separate process with no way to learn
+    // an ephemeral port or a per-process secret, so the daemon writes
+    // both where the shim's `--handoff` points. Written on every start,
+    // because both values change on every start.
+    if let Some(path) = flag_value("--ssh-handoff") {
+        node.write_ssh_handoff(std::path::Path::new(path))?;
+        eprintln!("ssh handoff written to {path} (git-over-ssh pushes reach the sequencer)");
+    }
+    // D33. Both halves key on the authenticated username, so both need
+    // `--auth-file` for the reason `--acl-file` does: without one there is
+    // no subject to attribute a line to or to meter, and a shared `anon`
+    // bucket is a self-inflicted denial of service rather than a limit.
+    let request_log_max_bytes = flag_value("--request-log-max-bytes")
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--request-log-max-bytes needs a non-negative integer",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(choir_node::limits::DEFAULT_LOG_MAX_BYTES);
+    match flag_value("--request-log") {
+        Some(path) if auth_enabled => {
+            node.enable_request_log(path.into(), request_log_max_bytes)?;
+            eprintln!(
+                "request log enabled ({path}; rotates to <path>.1 past {request_log_max_bytes} \
+                 bytes, and never records a header, a body or a query string)"
+            );
+        }
+        Some(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--request-log needs --auth-file: the log attributes each request to a user",
+            ))
+        }
+        None => {}
+    }
+    let rate_flag = |name: &str| -> std::io::Result<Option<std::num::NonZeroU32>> {
+        flag_value(name)
+            .map(|value| {
+                value.parse::<std::num::NonZeroU32>().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{name} needs a positive integer (requests per minute)"),
+                    )
+                })
+            })
+            .transpose()
+    };
+    let api_rate = rate_flag("--rate-limit-api")?;
+    let git_rate = rate_flag("--rate-limit-git")?;
+    if (api_rate.is_some() || git_rate.is_some()) && !auth_enabled {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--rate-limit-api/--rate-limit-git need --auth-file: the bucket is per user",
+        ));
+    }
+    node.enable_rate_limit(api_rate, git_rate);
+    if let Some(per_minute) = api_rate {
+        eprintln!("rate limit: {per_minute} API requests per minute per user");
+    }
+    if let Some(per_minute) = git_rate {
+        eprintln!("rate limit: {per_minute} git requests per minute per user");
+    }
+    if api_rate.is_some() || git_rate.is_some() {
+        // Said out loud, because it is the difference between a limiter
+        // and a lockout, and an operator should know which one they have.
+        eprintln!(
+            "rate limit: the loopback hook callback and any holder of an @node grant are exempt"
+        );
     }
     let mut create_next = false;
     for a in rest {

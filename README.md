@@ -120,7 +120,7 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 
@@ -166,6 +166,74 @@ Fail closed: with the flag set, anything not granted is refused. A repository yo
 `/api/view`, `/api/reviews` and the browser page are narrowed to the repositories a credential may read, so a grant on one repository does not disclose that the others exist. Node-wide sections of the view (the ref-state attestation, key bindings, and the concentration, growth, newcomer and lag telemetry) need `@node auditor`; the log head and build stamp reach everyone, since a writer needs them to submit. A review you were assigned to still reaches you, on any repository — that is what an invitation is.
 
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
+
+### Webhooks: something landed, go run this (D32)
+
+`--hooks-file` posts to a URL you name whenever a ref you name moves. One subscription per line, `#` comments, and the same append-a-line discipline as every other policy file:
+
+```
+# <repo:refname pattern>        <url>                        <secret>   [allow-private]
+owner/demo:refs/heads/main      https://ci.example/choir      <SECRET>
+owner/demo:refs/heads/*         https://ci.example/branches   <SECRET>
+owner/notes:refs/tags/*         http://127.0.0.1:9000/hook    <SECRET>   allow-private
+```
+
+Patterns are the `--protected-refs` grammar: a trailing `*` is a prefix, anything else is exact, and the string matched is the view's `<repo>:<refname>` key. The file is re-read when its mtime moves, so adding a subscription is appending a line. It needs `--keys-file`, since refs reach the log through the platform sequencer. Delivery records go to `<repo-root>/.choir/hooks.jsonl`.
+
+The body says what moved, and nothing else:
+
+```json
+{"format_version":1,"event":"ref-landed","repo":"owner/demo","ref":"refs/heads/main",
+ "ref_key":"owner/demo:refs/heads/main","old":"<git oid>","new":"<git oid>","seq":41,
+ "entry":"<entry hash>","actor":"<channel>","key_id":"<signing key id>"}
+```
+
+`old` is null for a created ref and `new` is null for a deleted one. `entry` is the log entry's content hash: it is unique per event, so a receiver that has already acted on one can discard a repeat.
+
+**Verify the secret.** The delivery carries `X-Choir-Hook-Secret: <secret>`, the secret on that subscription's line, and a receiver should compare it before acting — otherwise anything that can reach the URL can pretend to be your node. It is a bearer secret rather than a signature over the body, so give each subscription its own (`openssl rand -hex 32`) and keep the file mode 0600. A non-loopback target must therefore be `https`; the node refuses to send the secret in clear.
+
+**Best-effort, never silent.** Three attempts per delivery, and every attempt, every refusal and every dropped event is a JSON line in `hooks.jsonl`. Deliveries are *not* at-least-once: a webhook runs on its own thread behind a bounded queue, and when a receiver is slower than the node produces refs, events are dropped and counted rather than allowed to delay op admission. A receiver that may not miss a ref polls `GET /api/log?from=N` instead, which is what agents already do for catch-up.
+
+**Targets are vetted.** This is the node's only outbound request to an address someone else chose, so it refuses loopback, private, carrier-NAT, link-local (including the `169.254.169.254` metadata service), unique-local and unspecified addresses unless the line ends in `allow-private`; it connects to the address it vetted rather than re-resolving the name; and it follows no redirects.
+
+### Request log and rate limiting (D33)
+
+Authentication says who you are and the ACL says what you may reach. Neither leaves a record of what you did, and neither bounds how much of it you do. These two flags are the rest of the floor a second credential needs, and like `--acl-file` both require `--auth-file`, since both key on the authenticated username.
+
+```bash
+cargo run -p choir-node -- /tmp/choir-repos 8417 \
+  --auth-file ~/.choir/auth \
+  --acl-file ~/.choir/acl \
+  --request-log ~/.choir/requests.jsonl \
+  --rate-limit-api 600 \
+  --rate-limit-git 120
+```
+
+**The request log** is one JSON object per served request, the same shape as the op log and the lag log:
+
+```json
+{"format_version":1,"at_unix_ms":1755100000000,"user":"alice","method":"GET","path":"/api/view","us":812,"status":200,"bytes":4310}
+```
+
+Every served request produces a line, including refusals — a `401` is recorded as `anon` (never the attempted username, which is attacker-chosen), a `429` is recorded against the user it was charged to, and a response that failed midway is recorded with `"status":0` and the write error's kind.
+
+What is never written: any header, any request body, and any query string. The path is truncated at `?` before it is captured, so `GET /api/log?from=0&token=…` is recorded as `/api/log`. A token that reaches a log file is a token that has to be rotated, and this file exists to be read during an incident by whoever is handling it.
+
+Rotation is size-bounded and single-generation. Past `--request-log-max-bytes` (32 MiB by default) the file is renamed to `<path>.1`, replacing any earlier `.1`, and a fresh one is started. Disk is therefore bounded at about twice that number with no cron entry, no timer and no logrotate config — and exactly two generations are kept, so an operator who wants deeper history copies the file out on their own schedule. Writes are unbuffered and unsynced: one `write_all` per request, no `fsync`, because a log that loses its tail to a buffer is worthless and a disk round-trip per request is not something a response path should carry.
+
+**Rate limiting** is a token bucket per user per class, in memory. Each ceiling is requests per minute; capacity is one minute's worth, so an agent may burst a minute's allowance at once and then proceeds at the sustained rate, which is the shape agent traffic actually has. An over-limit request is answered `429` with `Retry-After` in whole seconds, JSON on an API path and plain text on a git path (git shows the operator the body and nothing else).
+
+The two classes carry separate flags because their costs are unrelated. A clone is one request that streams an entire pack; a `POST /api/submit-batch` is one request carrying many operations. One shared ceiling would either throttle an ordinary fetch loop or leave the operation path effectively unmetered. Set both, or set one and leave the other unlimited. The browser page and the D30 browsing pages count against the API bucket even though they shell out to `git`, which is a reason to give that number a real value rather than a huge one.
+
+Three things are never limited, and each is a deliberate refusal to build a lockout:
+
+| Exempt | Why |
+|---|---|
+| The loopback hook callback | A push of N refs makes N `/api/git-update` calls. Throttling the fourth fails the push halfway and drives the retraction path for refs git will never create. It carries a node-minted secret over loopback and is not an untrusted caller. |
+| Any holder of an `@node` grant | That grant is already total authority over the node. Throttling the one actor who can repair it, during the incident the limiter is reporting, is worse than the flood. |
+| Every request on a node with no `--auth-file` | There is no per-user identity to meter, and a single shared `anon` bucket is a self-inflicted outage rather than a limit. The daemon refuses the flags outright in that configuration. |
+
+On a node with `--auth-file` but no `--acl-file` nobody is exempt except the hook callback, because there is no `@node` grant to hold. An operator who wants an exemption grants themselves one — which is the same two lines the ACL section already recommends.
 
 ## Use the node
 
@@ -219,6 +287,45 @@ git push origin HEAD:main
 ```
 
 Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **never force-push** over a sequencer rejection.
+
+### Git over SSH (D31)
+
+Agents are content with HTTPS and a token. People expect `git@host:owner/repo.git`. The node does not run an SSH server; the host's `sshd` does, and a forced command hands each connection to the `choir-ssh` shim, which is how Gitea and gitolite do it. There is no in-process SSH server and there is not going to be one: every Rust SSH library within reach is tokio-based, and this daemon is synchronous threads.
+
+Start the node with a handoff file. It carries the daemon's address and the loopback secret its git hooks authenticate with, both of which change on every start, which is why they cannot live in an `authorized_keys` line:
+
+```bash
+choir-node <repo-root> 8417 --auth-file <auth-file> --keys-file <keys-file> \
+  --acl-file <acl-file> --ssh-handoff <handoff-file>
+```
+
+Then give the SSH account one line per registered key, all on one line:
+
+```
+command="/usr/local/bin/choir-ssh --root <repo-root> --user <choir-user> --acl-file <acl-file> --handoff <handoff-file> --git-binary /usr/bin/git",restrict ssh-ed25519 AAAA... <user>@<host>
+```
+
+`--user` is the choir username that key belongs to, and it is the entire key-to-actor mapping. The client cannot reach it: sshd runs the forced command and puts whatever the client asked for in `SSH_ORIGINAL_COMMAND`, which is the shim's only untrusted input. `restrict` turns off pty, agent, port and X11 forwarding. `--git-binary` is worth setting explicitly, because sshd runs the forced command through a non-interactive shell whose `PATH` is often not the operator's.
+
+Clone with either spelling:
+
+```bash
+git clone ssh://<ssh-account>@<SERVER_IP>/owner/demo.git
+git clone <ssh-account>@<SERVER_IP>:owner/demo.git
+```
+
+What the shim serves:
+
+- exactly `git-upload-pack '<repo>'` and `git-receive-pack '<repo>'` (the dashless `git upload-pack` spelling too), one argument, never a shell. Anything else, `git-upload-archive` and interactive logins included, is refused with a message the client prints.
+- `owner/repo` or `owner/repo.git`, two segments, ASCII, no segment starting with a dot — so the node's own `.choir` state directory is not addressable.
+- the same `--acl-file` the HTTP path reads, demanding the same level: `read` to fetch, `write` to push. A repository you may not read is refused in the same words as one that does not exist. Leave `--acl-file` off the line and the shim uses whatever the daemon named in the handoff, so a forgotten flag is not the difference between a gated repository and an open one.
+- pushes that run the repository's `pre-receive` hook, so an SSH push is sequenced exactly like an HTTPS one and lands in the log under the same `owner/repo.git:refs/heads/...` name. A shim installed without `--handoff` serves fetches and **refuses pushes**, rather than let one through unsequenced.
+
+Before deploying it, three limits:
+
+- the handoff file holds the daemon's loopback secret at `0600`, so the SSH account and the daemon must be the same uid. If your deployment needs them separate, stay on HTTPS: do not widen who can read that secret.
+- one line per key, and revocation is deleting the line. There is no expiry, no rotation and no key registry.
+- choir does not manage `sshd`. Its port, host keys, and account are the operator's, exactly as they were before choir was installed.
 
 ### Signed-operation CLI and API (primary agent path)
 
