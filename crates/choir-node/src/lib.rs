@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 pub mod acl;
 pub mod hooks;
+pub mod limits;
 pub mod platform;
 pub mod provision;
 pub mod reject;
@@ -97,6 +98,12 @@ pub struct Node {
     /// across request threads so one render serves every reader until
     /// the state it describes changes.
     ui_cache: std::sync::Arc<ui::UiCache>,
+    /// The attributed request log (D33). `None` = no `--request-log`, so
+    /// nothing is recorded, which is the pre-D33 behaviour.
+    request_log: Option<std::sync::Arc<limits::RequestLog>>,
+    /// Per-user token buckets (D33). `None` = no ceiling was configured,
+    /// so no request is ever refused for rate.
+    rate: Option<std::sync::Arc<limits::RateLimiter>>,
 }
 
 /// A watched trusted-keys file and the mtime last folded into
@@ -197,7 +204,41 @@ impl Node {
             keys_watch: None,
             acl_watch: None,
             ui_cache: std::sync::Arc::new(ui::UiCache::new()),
+            request_log: None,
+            rate: None,
         })
+    }
+
+    /// Records every served request to `path` (D33), rotating it at
+    /// `max_bytes` — see [`limits::RequestLog`] for the line format, the
+    /// rotation rule, and what is deliberately never written.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure to open the file. Fatal by design: an operator
+    /// who asked for a record and did not get one should learn that at
+    /// startup rather than from its absence during an incident.
+    pub fn enable_request_log(&mut self, path: PathBuf, max_bytes: u64) -> std::io::Result<()> {
+        self.request_log = Some(std::sync::Arc::new(limits::RequestLog::open(
+            path, max_bytes,
+        )?));
+        Ok(())
+    }
+
+    /// Limits each authenticated user to the given requests per minute
+    /// per class (D33). `None` leaves that class unlimited.
+    ///
+    /// Never applied to the loopback hook callback, to a holder of a D29
+    /// `@node` grant, or on a node without authentication — see
+    /// [`Node::serve_forever`] for why each of those would be worse than
+    /// the flood it prevents.
+    pub fn enable_rate_limit(
+        &mut self,
+        api_per_minute: Option<std::num::NonZeroU32>,
+        git_per_minute: Option<std::num::NonZeroU32>,
+    ) {
+        let limiter = limits::RateLimiter::new(api_per_minute, git_per_minute);
+        self.rate = limiter.is_active().then(|| std::sync::Arc::new(limiter));
     }
 
     /// Enables the platform API (`/api/submit`, `/api/view`) backed by
@@ -493,6 +534,28 @@ impl Node {
     }
 
     /// Serves requests until the process exits. Run on a dedicated thread.
+    ///
+    /// # Rate limiting and who is exempt (D33)
+    ///
+    /// The check runs on the request's own thread, after authentication —
+    /// it has to be after, because the bucket is per authenticated user,
+    /// and it must not be on the accept loop, which exists to accept.
+    ///
+    /// Three exemptions, each because applying the limit would be worse
+    /// than the flood it prevents:
+    ///
+    /// 1. **The loopback hook callback.** A push of N refs makes N
+    ///    `/api/git-update` calls; refusing the fourth one fails the push
+    ///    halfway and drives the retraction path for refs git will never
+    ///    create. It carries a node-minted secret over loopback, so it is
+    ///    not an untrusted caller in the first place.
+    /// 2. **A holder of a D29 `@node` grant.** That grant is already total
+    ///    authority over the node. Throttling the one actor who can repair
+    ///    it, during the incident the limiter is reporting, is the
+    ///    lockout this feature must not cause.
+    /// 3. **Any node without `--auth-file`.** There is no per-user
+    ///    identity to bucket by, and a single shared `anon` bucket is a
+    ///    self-inflicted denial of service rather than a limit.
     pub fn serve_forever(&self) {
         for request in self.server.incoming_requests() {
             // Cheap stat between accepting a request and handling it, so
@@ -534,9 +597,17 @@ impl Node {
             let ui_cache = std::sync::Arc::clone(&self.ui_cache);
             let acl = self.acl_now();
             let internal_token = self.internal_token.clone();
+            let request_log = self.request_log.clone();
+            let rate = self.rate.clone();
+            let authenticated = self.auth.is_some();
             let port = self.port;
             let scheme = self.scheme;
             std::thread::spawn(move || {
+                // D33. Started before anything else the thread does, so
+                // the recorded duration is the node's whole cost. The
+                // query string is dropped here and never carried further.
+                let access = limits::Access::start(&request);
+                let log = request_log.as_deref();
                 // Hook callbacks authenticate with the loopback secret
                 // instead of user credentials.
                 let internal_ok = (request.url().starts_with("/api/git-update")
@@ -548,7 +619,8 @@ impl Node {
                         Some(u) => user = u,
                         None if internal_ok => {}
                         None => {
-                            let response = tiny_http::Response::from_string("unauthorized\n")
+                            let body = "unauthorized\n";
+                            let response = tiny_http::Response::from_string(body)
                                 .with_status_code(401)
                                 .with_header(
                                     tiny_http::Header::from_bytes(
@@ -557,7 +629,8 @@ impl Node {
                                     )
                                     .expect("static header"),
                                 );
-                            let _ = request.respond(response);
+                            let outcome = served(request, response, 401, body.len() as u64);
+                            access.finish(log, &user, &outcome);
                             return;
                         }
                     }
@@ -573,18 +646,39 @@ impl Node {
                     || request.url().starts_with("/api/git-abort"))
                     && !internal_ok
                 {
-                    let response =
-                        tiny_http::Response::from_string("{\"error\":\"internal endpoint\"}\n")
-                            .with_status_code(403)
-                            .with_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"Content-Type"[..],
-                                    &b"application/json"[..],
-                                )
-                                .expect("static header"),
-                            );
-                    let _ = request.respond(response);
+                    let body = "{\"error\":\"internal endpoint\"}\n";
+                    let response = tiny_http::Response::from_string(body)
+                        .with_status_code(403)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .expect("static header"),
+                        );
+                    let outcome = served(request, response, 403, body.len() as u64);
+                    access.finish(log, &user, &outcome);
                     return;
+                }
+                // D33. After authentication, because the bucket is per
+                // user; before any work, because a refused request should
+                // cost the node as little as possible. The exemptions are
+                // documented on `serve_forever`.
+                if let Some(rate) = rate.as_deref() {
+                    let node_wide = acl
+                        .as_deref()
+                        .is_some_and(|table| table.allows(&user, &acl::Scope::Node, acl::Level::Read));
+                    let exempt = internal_ok || !authenticated || node_wide;
+                    let refusal = if exempt {
+                        None
+                    } else {
+                        rate.check(&user, limits::class_of(access.path()))
+                    };
+                    if let Some(retry_after) = refusal {
+                        let outcome = respond_rate_limited(request, access.path(), retry_after);
+                        access.finish(log, &user, &outcome);
+                        return;
+                    }
                 }
                 // The surface as plain text, for an agent that has never
                 // seen choir. Behind auth like everything else; it
@@ -606,7 +700,8 @@ impl Node {
                         )
                         .expect("static header"),
                     );
-                    let _ = request.respond(response);
+                    let outcome = served(request, response, 200, text.len() as u64);
+                    access.finish(log, &user, &outcome);
                     return;
                 }
                 // The browser surface. Matched exactly so it can never
@@ -614,13 +709,14 @@ impl Node {
                 // `/owner/repo.git/...`, and `/` is the one URL that
                 // cannot name a repository.
                 if request.url() == "/" || request.url() == "/index.html" {
-                    let _ = handle_ui(
+                    let outcome = handle_ui(
                         platform.as_deref(),
                         &ui_cache,
                         &user,
                         acl.as_deref(),
                         request,
                     );
+                    access.finish(log, &user, &outcome);
                     return;
                 }
                 // Repository browsing (D30). Ahead of the git branch
@@ -629,7 +725,7 @@ impl Node {
                 // clone URL: this cannot shadow a repository, and the
                 // check is theirs rather than this router's ordering.
                 if let Some(page) = browse::route(request.url()) {
-                    let _ = handle_browse(
+                    let outcome = handle_browse(
                         &root,
                         &page,
                         &user,
@@ -637,6 +733,7 @@ impl Node {
                         platform.as_deref(),
                         request,
                     );
+                    access.finish(log, &user, &outcome);
                     return;
                 }
                 if request.url().starts_with("/api/") {
@@ -644,7 +741,7 @@ impl Node {
                     // A hook callback carries the loopback secret rather
                     // than a user's grants, so it is not an ACL subject.
                     let acl_for_api = if internal_ok { None } else { acl.as_deref() };
-                    let _ = handle_api(
+                    let outcome = handle_api(
                         platform.as_deref(),
                         &root,
                         &base_url,
@@ -652,6 +749,7 @@ impl Node {
                         acl_for_api,
                         request,
                     );
+                    access.finish(log, &user, &outcome);
                     return;
                 }
                 // Git smart-HTTP. The repository is in the URL, so this
@@ -672,7 +770,8 @@ impl Node {
                         }),
                     };
                     if let Some(denial) = denial {
-                        respond_git_denial(request, &denial);
+                        let outcome = respond_git_denial(request, &denial);
+                        access.finish(log, &user, &outcome);
                         return;
                     }
                 }
@@ -690,11 +789,12 @@ impl Node {
                             format!("{scheme}://127.0.0.1:{port}/api/git-abort"),
                         ));
                         extra_env.push(("CHOIR_REPO".to_string(), repo));
-                        extra_env.push(("CHOIR_USER".to_string(), user));
+                        extra_env.push(("CHOIR_USER".to_string(), user.clone()));
                         extra_env.push(("CHOIR_INTERNAL".to_string(), internal_token));
                     }
                 }
-                let _ = handle(root, request, &extra_env);
+                let outcome = handle(root, request, &extra_env);
+                access.finish(log, &user, &outcome);
             });
         }
     }
@@ -714,16 +814,75 @@ fn header(request: &tiny_http::Request, name: &str) -> Option<String> {
         .map(|h| h.value.as_str().to_string())
 }
 
+/// Writes `response` and reports what was served, so the caller can hand
+/// the outcome to [`limits::Access::finish`] (D33). The byte count is the
+/// body size the caller already knows; tiny_http does not expose it back.
+fn served<R: std::io::Read>(
+    request: tiny_http::Request,
+    response: tiny_http::Response<R>,
+    status: u16,
+    bytes: u64,
+) -> std::io::Result<(u16, u64)> {
+    request.respond(response).map(|()| (status, bytes))
+}
+
+/// Answers a request that exhausted its per-user allowance (D33).
+///
+/// `Retry-After` in whole seconds is the machine-readable half; the body
+/// repeats it because a git client shows the operator the body and
+/// nothing else. Plain text on a git path for that reason, JSON on an API
+/// path so a client that parses every response still can.
+fn respond_rate_limited(
+    request: tiny_http::Request,
+    path: &str,
+    retry_after: u64,
+) -> std::io::Result<(u16, u64)> {
+    let (body, content_type) = match limits::class_of(path) {
+        limits::Class::Git => (
+            format!("rate limit exceeded; retry in {retry_after}s\n"),
+            &b"text/plain; charset=utf-8"[..],
+        ),
+        limits::Class::Api => (
+            serde_json::json!({
+                "error": format!("rate limit exceeded; retry in {retry_after}s"),
+                "retry_after_secs": retry_after,
+            })
+            .to_string(),
+            &b"application/json"[..],
+        ),
+    };
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(429)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Retry-After"[..],
+                retry_after.to_string().as_bytes(),
+            )
+            .expect("retry-after header"),
+        );
+    served(request, response, 429, bytes)
+}
+
 /// Answers a git request the ACL refused. Plain text, because that is
 /// what a git client surfaces to whoever ran the command.
-fn respond_git_denial(request: tiny_http::Request, denial: &acl::Denial) {
-    let response = tiny_http::Response::from_string(format!("{}\n", denial.reason))
+fn respond_git_denial(
+    request: tiny_http::Request,
+    denial: &acl::Denial,
+) -> std::io::Result<(u16, u64)> {
+    let body = format!("{}\n", denial.reason);
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
         .with_status_code(denial.status)
         .with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
                 .expect("static header"),
         );
-    let _ = request.respond(response);
+    served(request, response, denial.status, bytes)
 }
 
 /// Extracts `owner/repo.git` from a smart-HTTP path like
@@ -938,15 +1097,13 @@ fn handle_ui(
     user: &str,
     acl: Option<&acl::Acl>,
     request: tiny_http::Request,
-) -> std::io::Result<()> {
+) -> std::io::Result<(u16, u64)> {
     let platform = match platform {
         Some(p) => p,
         None => {
-            let response = tiny_http::Response::from_string(
-                "the platform API is not enabled on this node, so there is nothing to show\n",
-            )
-            .with_status_code(503);
-            return request.respond(response);
+            let body = "the platform API is not enabled on this node, so there is nothing to show\n";
+            let response = tiny_http::Response::from_string(body).with_status_code(503);
+            return served(request, response, 503, body.len() as u64);
         }
     };
 
@@ -962,7 +1119,7 @@ fn handle_ui(
         let response = tiny_http::Response::empty(304).with_header(
             tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
         );
-        return request.respond(response);
+        return served(request, response, 304, 0);
     }
 
     let page = cache.page(seq, &reader, || {
@@ -1004,7 +1161,7 @@ fn handle_ui(
             tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
                 .expect("static header"),
         );
-    request.respond(response)
+    served(request, response, 200, page.len() as u64)
 }
 
 /// Serves one repository-browsing page (D30).
@@ -1020,14 +1177,15 @@ fn handle_browse(
     acl: Option<&acl::Acl>,
     platform: Option<&Platform>,
     request: tiny_http::Request,
-) -> std::io::Result<()> {
+) -> std::io::Result<(u16, u64)> {
     let readable = |repo: &str| match acl {
         Some(table) => table.allows_repo(user, repo, acl::Level::Read),
         None => true,
     };
     if let Some(repo) = page.repo() {
         if !readable(repo) {
-            let response = tiny_http::Response::from_string("no such repository\n")
+            let body = "no such repository\n";
+            let response = tiny_http::Response::from_string(body)
                 .with_status_code(404)
                 .with_header(
                     tiny_http::Header::from_bytes(
@@ -1036,7 +1194,7 @@ fn handle_browse(
                     )
                     .expect("static header"),
                 );
-            return request.respond(response);
+            return served(request, response, 404, body.len() as u64);
         }
     }
 
@@ -1049,10 +1207,11 @@ fn handle_browse(
             let response = tiny_http::Response::empty(304).with_header(
                 tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
             );
-            return request.respond(response);
+            return served(request, response, 304, 0);
         }
     }
 
+    let (status, bytes) = (rendered.status, rendered.html.len() as u64);
     let mut response = tiny_http::Response::from_string(rendered.html)
         .with_status_code(rendered.status)
         .with_header(
@@ -1086,7 +1245,7 @@ fn handle_browse(
             tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
         );
     }
-    request.respond(response)
+    served(request, response, status, bytes)
 }
 
 fn handle_api(
@@ -1096,7 +1255,7 @@ fn handle_api(
     user: &str,
     acl: Option<&acl::Acl>,
     mut request: tiny_http::Request,
-) -> std::io::Result<()> {
+) -> std::io::Result<(u16, u64)> {
     let (status, body) = match platform {
         Some(p) => {
             let mut req_body = Vec::new();
@@ -1142,13 +1301,14 @@ fn handle_api(
         }
         None => (503, r#"{"error":"platform API not enabled"}"#.to_string()),
     };
+    let bytes = body.len() as u64;
     let response = tiny_http::Response::from_string(body)
         .with_status_code(status)
         .with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                 .expect("static header"),
         );
-    request.respond(response)
+    served(request, response, status, bytes)
 }
 
 /// Bridges one HTTP request to `git http-backend` CGI. `extra_env` is
@@ -1157,7 +1317,7 @@ fn handle(
     root: PathBuf,
     mut request: tiny_http::Request,
     extra_env: &[(String, String)],
-) -> std::io::Result<()> {
+) -> std::io::Result<(u16, u64)> {
     let url = request.url().to_string();
     let (path, query) = match url.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
@@ -1234,10 +1394,10 @@ fn handle(
         }
     }
 
+    let bytes = rest.len() as u64;
     let mut response = tiny_http::Response::from_data(rest.to_vec()).with_status_code(status);
     for h in headers {
         response.add_header(h);
     }
-    request.respond(response)?;
-    Ok(())
+    served(request, response, status, bytes)
 }

@@ -9,6 +9,8 @@
 //! [--newcomer-audit path --newcomer-adjudications path]
 //! [--review-adjudications path]
 //! [--hooks-file path]
+//! [--request-log path [--request-log-max-bytes n]]
+//! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--bind addr] [--ssh-handoff path]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
@@ -55,7 +57,17 @@
 //! `--review-retention` keeps at most that many live reviews when
 //! completed reviews can be archived. Incomplete reviews are never killed by default;
 //! `--review-lapse-after-secs` is the explicit operator policy that lets
-//! an over-limit incomplete review lapse. `--bind` with a non-loopback
+//! an over-limit incomplete review lapse. `--request-log` (D33) records
+//! one JSON line per served request — method, path, status, response
+//! bytes, elapsed microseconds and the authenticated user — rotating to
+//! `<path>.1` past `--request-log-max-bytes` (32 MiB by default), and
+//! never writing a header, a body or a query string. `--rate-limit-api`
+//! and `--rate-limit-git` are per-user requests-per-minute ceilings, each
+//! a token bucket holding one minute's burst, answered `429` with
+//! `Retry-After`; the loopback hook callback and any holder of an `@node`
+//! grant are exempt, because a limiter that can lock out the operator is
+//! worse than no limiter. All three need `--auth-file`, since all three
+//! are per authenticated user. `--bind` with a non-loopback
 //! address is refused unless TLS is configured.
 //! `--ssh-handoff` (D31) writes this daemon's base URL and loopback
 //! secret to a 0600 file for the `choir-ssh` forced command, which is how
@@ -117,6 +129,10 @@ fn main() -> std::io::Result<()> {
         "--acl-file",
         "--hooks-file",
         "--ssh-handoff",
+        "--request-log",
+        "--request-log-max-bytes",
+        "--rate-limit-api",
+        "--rate-limit-git",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -461,6 +477,71 @@ fn main() -> std::io::Result<()> {
     if let Some(path) = flag_value("--ssh-handoff") {
         node.write_ssh_handoff(std::path::Path::new(path))?;
         eprintln!("ssh handoff written to {path} (git-over-ssh pushes reach the sequencer)");
+    }
+    // D33. Both halves key on the authenticated username, so both need
+    // `--auth-file` for the reason `--acl-file` does: without one there is
+    // no subject to attribute a line to or to meter, and a shared `anon`
+    // bucket is a self-inflicted denial of service rather than a limit.
+    let request_log_max_bytes = flag_value("--request-log-max-bytes")
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--request-log-max-bytes needs a non-negative integer",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(choir_node::limits::DEFAULT_LOG_MAX_BYTES);
+    match flag_value("--request-log") {
+        Some(path) if auth_enabled => {
+            node.enable_request_log(path.into(), request_log_max_bytes)?;
+            eprintln!(
+                "request log enabled ({path}; rotates to <path>.1 past {request_log_max_bytes} \
+                 bytes, and never records a header, a body or a query string)"
+            );
+        }
+        Some(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--request-log needs --auth-file: the log attributes each request to a user",
+            ))
+        }
+        None => {}
+    }
+    let rate_flag = |name: &str| -> std::io::Result<Option<std::num::NonZeroU32>> {
+        flag_value(name)
+            .map(|value| {
+                value.parse::<std::num::NonZeroU32>().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{name} needs a positive integer (requests per minute)"),
+                    )
+                })
+            })
+            .transpose()
+    };
+    let api_rate = rate_flag("--rate-limit-api")?;
+    let git_rate = rate_flag("--rate-limit-git")?;
+    if (api_rate.is_some() || git_rate.is_some()) && !auth_enabled {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--rate-limit-api/--rate-limit-git need --auth-file: the bucket is per user",
+        ));
+    }
+    node.enable_rate_limit(api_rate, git_rate);
+    if let Some(per_minute) = api_rate {
+        eprintln!("rate limit: {per_minute} API requests per minute per user");
+    }
+    if let Some(per_minute) = git_rate {
+        eprintln!("rate limit: {per_minute} git requests per minute per user");
+    }
+    if api_rate.is_some() || git_rate.is_some() {
+        // Said out loud, because it is the difference between a limiter
+        // and a lockout, and an operator should know which one they have.
+        eprintln!(
+            "rate limit: the loopback hook callback and any holder of an @node grant are exempt"
+        );
     }
     let mut create_next = false;
     for a in rest {
