@@ -160,6 +160,50 @@ impl Acl {
         self.allows(user, &Scope::Repo(normalize_repo(repo)), level)
     }
 
+    /// A key identifying everything a filtered response depends on:
+    /// the reader and the grants they hold, rendered canonically.
+    ///
+    /// Two requests with the same key produce the same filtered payload,
+    /// which is what makes the browser page cacheable per reader. Editing
+    /// the ACL file changes the key, so a hot reload invalidates the
+    /// cached page without anything having to notice the reload happened.
+    ///
+    /// The username is part of the key rather than the grants alone,
+    /// because [`filter_response`] also keeps reviews the reader is
+    /// assigned to. Two readers holding identical grants can therefore
+    /// see different pages, and a key covering only the grants would
+    /// serve one of them the other's assignments.
+    #[must_use]
+    pub fn cache_key(&self, user: &str) -> String {
+        let mut held: Vec<String> = self
+            .grants
+            .get(user)
+            .map(|grants| {
+                grants
+                    .iter()
+                    .map(|(scope, level)| {
+                        let target = match scope {
+                            Scope::Repo(repo) => repo.as_str(),
+                            Scope::AllRepos => "*",
+                            Scope::Node => "@node",
+                        };
+                        let level = match level {
+                            Level::Read => "r",
+                            Level::Write => "w",
+                        };
+                        format!("{target}={level}")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        held.sort();
+        held.dedup();
+        // A unit separator cannot occur in a username the auth file can
+        // express, so the two halves of the key cannot be confused for
+        // one another however they are spelled.
+        format!("{user}\u{1f}{}", held.join(","))
+    }
+
     /// The [`Denial`] for `user` over `scope` at `level`, or `None` when
     /// the request is allowed.
     #[must_use]
@@ -465,6 +509,121 @@ pub fn api_denial(
         .find_map(|(scope, level)| acl.check(user, &scope, level))
 }
 
+/// Sections of `/api/view` that describe the node rather than any one
+/// repository, and so cannot be narrowed to a reader's repositories.
+///
+/// `snapshot` and `bindings` are the D25 attestation and the key
+/// bindings; the rest is node-wide telemetry that counts, attributes or
+/// times events across every repository at once. Each is served whole to
+/// a reader holding [`Scope::Node`] and omitted from everyone else,
+/// which is the same "gate, never filter" rule `/api/log` and
+/// `/api/ref-agreement` follow, applied one level down.
+const NODE_SECTIONS: [&str; 7] = [
+    "snapshot",
+    "bindings",
+    "concentration",
+    "view_growth",
+    "newcomer_harm",
+    "new_actor_review_outcomes",
+    "sequencer_lag",
+];
+
+/// A read response narrowed to what `user` may see (D29 phase B).
+///
+/// `/api/view` and `/api/reviews` are the two endpoints that answer with
+/// other repositories' contents, so they are the two this rewrites; every
+/// other path is already gated by [`api_denial`] and passes through. A
+/// body that is not the JSON object this expects is returned untouched
+/// rather than emptied, because a filter that silently blanks an
+/// unrecognized payload hides the mismatch instead of showing it.
+///
+/// `log` and `build` survive for every reader: they name the node, its
+/// log head and the binary serving them. A writer needs the head to bind
+/// a scoped submission, and neither says anything about a repository.
+#[must_use]
+pub fn filter_response(acl: &Acl, user: &str, path: &str, body: &str) -> String {
+    if !(path.starts_with("/api/view") || path.starts_with("/api/reviews")) {
+        return body.to_string();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body.to_string();
+    };
+    let node_wide = acl.allows(user, &Scope::Node, Level::Read);
+    let readable = |repo: Option<String>| -> bool {
+        // A key naming no repository is node-scoped by the same rule that
+        // sends a repo-less op to `Scope::Node`: fail closed, and let a
+        // node-wide grant see it.
+        match repo {
+            Some(repo) => acl.allows(user, &Scope::Repo(repo), Level::Read),
+            None => node_wide,
+        }
+    };
+    if !node_wide {
+        for section in NODE_SECTIONS {
+            object.remove(section);
+        }
+    }
+    retain_keys(object.get_mut("refs"), |key| readable(ref_repo(key)));
+    for section in ["workspaces", "provenance"] {
+        retain_keys(object.get_mut(section), |key| readable(subject_repo(key)));
+    }
+    for section in ["reviews", "pending"] {
+        retain_entries(object.get_mut(section), |_, review| {
+            readable(review_repo_of(review)) || assigned_to(user, review)
+        });
+    }
+    value.to_string()
+}
+
+/// Repository a serialized review names through its target ref, if any.
+fn review_repo_of(review: &serde_json::Value) -> Option<String> {
+    review
+        .get("target_ref")
+        .and_then(serde_json::Value::as_str)
+        .and_then(ref_repo)
+}
+
+/// Whether `user` is one of a review's assigned reviewers.
+///
+/// A reviewer is a channel name, so both the bare name and the operator
+/// half of `operator/agent` count: `reviewer_operator` is what the review
+/// rules themselves treat as one actor, and matching only the full string
+/// would drop a reader's own assignments the moment they run two agents.
+/// Without this the ACL would silently break the review fan-out — the
+/// reviews a reader most needs are exactly the ones on repositories they
+/// were invited into rather than granted.
+fn assigned_to(user: &str, review: &serde_json::Value) -> bool {
+    review
+        .get("reviewers")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|reviewers| {
+            reviewers
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|name| name == user || choir_view::reviewer_operator(name) == user)
+        })
+}
+
+/// Drops map entries whose key fails `keep`. A non-map is left alone.
+fn retain_keys(section: Option<&mut serde_json::Value>, keep: impl Fn(&str) -> bool) {
+    retain_entries(section, |key, _| keep(key));
+}
+
+/// Drops map entries whose key and value fail `keep`. A non-map is left
+/// alone: every section this is applied to is a JSON object, and one that
+/// is not has already stopped meaning what the filter thinks it means.
+fn retain_entries(
+    section: Option<&mut serde_json::Value>,
+    keep: impl Fn(&str, &serde_json::Value) -> bool,
+) {
+    if let Some(map) = section.and_then(serde_json::Value::as_object_mut) {
+        map.retain(|key, value| keep(key, value));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +791,150 @@ mod tests {
             prev: None,
         };
         assert_eq!(op_scopes(&op, none), vec![Scope::Repo("owner/project".into())]);
+    }
+
+    /// A view payload shaped like the one `/api/view` serves: two
+    /// repositories in every per-repository section, plus the node-wide
+    /// sections and the two that survive for everybody.
+    fn sample_view() -> String {
+        serde_json::json!({
+            "log": { "node": "b3-node", "head": "b3-head", "scope_required": false },
+            "build": { "commit": "abc" },
+            "refs": {
+                "owner/mine.git:refs/heads/main": "git-1111",
+                "owner/theirs.git:refs/heads/main": "git-2222",
+            },
+            "workspaces": {
+                "owner/mine/feature-a": "git-3333",
+                "owner/theirs/feature-b": "git-4444",
+            },
+            "provenance": {
+                "owner/mine/feature-a": { "plan": "mine" },
+                "owner/theirs/feature-b": { "plan": "theirs" },
+            },
+            "reviews": {
+                "r-mine": { "target_ref": "owner/mine.git:refs/heads/main", "reviewers": [] },
+                "r-theirs": { "target_ref": "owner/theirs.git:refs/heads/main", "reviewers": [] },
+                "r-invited": {
+                    "target_ref": "owner/theirs.git:refs/heads/main",
+                    "reviewers": ["alice/bot"],
+                },
+                "r-unbound": { "target_ref": null, "reviewers": [] },
+            },
+            "snapshot": { "id": "b3-snap" },
+            "bindings": { "k1": { "operator": "someone" } },
+            "concentration": { "as_of_seq": 9 },
+            "view_growth": { "entries": 9 },
+            "newcomer_harm": {},
+            "new_actor_review_outcomes": {},
+            "sequencer_lag": {},
+        })
+        .to_string()
+    }
+
+    /// The whole point of phase B: a reader granted one repository sees
+    /// that repository, and cannot enumerate the other one through any
+    /// of the four sections that name it.
+    #[test]
+    fn a_reader_granted_one_repository_sees_only_that_repository() {
+        let acl = Acl::parse("alice owner/mine read").expect("parses");
+        let filtered = filter_response(&acl, "alice", "/api/view", &sample_view());
+        let value: serde_json::Value = serde_json::from_str(&filtered).expect("json");
+        let keys = |section: &str| -> Vec<String> {
+            value[section]
+                .as_object()
+                .unwrap_or_else(|| panic!("{section} object"))
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(keys("refs"), ["owner/mine.git:refs/heads/main"]);
+        assert_eq!(keys("workspaces"), ["owner/mine/feature-a"]);
+        assert_eq!(keys("provenance"), ["owner/mine/feature-a"]);
+        // `r-invited` targets the ungranted repository and still reaches
+        // this reader, because they were asked to review it: an invitation
+        // discloses the ref it is about, and withholding it would silently
+        // break the fan-out. `r-unbound` names no repository at all, so it
+        // is node-scoped and fails closed like every repo-less subject.
+        assert_eq!(keys("reviews"), ["r-invited", "r-mine"]);
+    }
+
+    /// Node-wide sections are gated, not narrowed, and the two a writer
+    /// needs to keep working are not gated at all.
+    #[test]
+    fn the_node_sections_need_the_node_grant_and_the_log_head_never_does() {
+        let repo_only = Acl::parse("alice owner/mine write").expect("parses");
+        let narrowed = filter_response(&repo_only, "alice", "/api/view", &sample_view());
+        for section in NODE_SECTIONS {
+            assert!(
+                !narrowed.contains(section),
+                "{section} reached a reader with no node grant"
+            );
+        }
+        // Without these a writer cannot bind a scoped submission, and
+        // neither says anything about a repository.
+        assert!(narrowed.contains("b3-head") && narrowed.contains("\"build\""));
+
+        let auditor = Acl::parse("carol @node auditor").expect("parses");
+        let whole = filter_response(&auditor, "carol", "/api/view", &sample_view());
+        for section in NODE_SECTIONS {
+            assert!(whole.contains(section), "{section} was withheld from an auditor");
+        }
+        // An auditor holds no repository grant, so the repository
+        // sections are empty for them — `@node` is not a way around `*`.
+        let value: serde_json::Value = serde_json::from_str(&whole).expect("json");
+        assert!(value["refs"].as_object().expect("refs").is_empty());
+    }
+
+    /// The pending-review queue is the same data reached by a different
+    /// path, so it is filtered by the same rule. Asking for somebody
+    /// else's queue must not become a way to read the reviews the view
+    /// would have withheld.
+    #[test]
+    fn the_pending_queue_is_filtered_like_the_view() {
+        let acl = Acl::parse("alice owner/mine read").expect("parses");
+        let body = serde_json::json!({
+            "pending": {
+                "r-mine": { "target_ref": "owner/mine.git:refs/heads/main", "reviewers": ["x"] },
+                "r-theirs": { "target_ref": "owner/theirs.git:refs/heads/main", "reviewers": ["x"] },
+            }
+        })
+        .to_string();
+        let filtered = filter_response(&acl, "alice", "/api/reviews?reviewer=x", &body);
+        assert!(filtered.contains("r-mine"));
+        assert!(!filtered.contains("r-theirs"), "{filtered}");
+    }
+
+    /// Two readers with the same grants share a rendered page only if
+    /// their keys match; a grant edit and a different reader must both
+    /// change the key, or a stale page outlives the reload that should
+    /// have invalidated it.
+    #[test]
+    fn the_cache_key_moves_with_the_reader_and_with_their_grants() {
+        let before = Acl::parse("alice owner/mine read\nbob owner/mine read").expect("parses");
+        assert_ne!(before.cache_key("alice"), before.cache_key("bob"));
+        let after = Acl::parse("alice owner/mine write\nbob owner/mine read").expect("parses");
+        assert_ne!(
+            before.cache_key("alice"),
+            after.cache_key("alice"),
+            "an ACL edit left the cache key unchanged"
+        );
+        // Order in the file is not identity: the same grants written the
+        // other way round are the same key.
+        let reordered = Acl::parse("alice owner/b read\nalice owner/a read").expect("parses");
+        let forward = Acl::parse("alice owner/a read\nalice owner/b read").expect("parses");
+        assert_eq!(reordered.cache_key("alice"), forward.cache_key("alice"));
+    }
+
+    /// A body the filter does not recognize is passed through rather than
+    /// blanked: an empty response would read as "nothing here" and hide
+    /// the mismatch that produced it.
+    #[test]
+    fn an_unrecognized_body_or_path_is_left_alone() {
+        let acl = Acl::parse("alice owner/mine read").expect("parses");
+        assert_eq!(filter_response(&acl, "alice", "/api/view", "not json"), "not json");
+        assert_eq!(filter_response(&acl, "alice", "/api/view", "[1,2]"), "[1,2]");
+        let other = r#"{"refs":{"owner/theirs.git:refs/heads/main":"git-2222"}}"#;
+        assert_eq!(filter_response(&acl, "alice", "/api/submit", other), other);
     }
 }

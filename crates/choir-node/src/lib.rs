@@ -590,7 +590,13 @@ impl Node {
                 // `/owner/repo.git/...`, and `/` is the one URL that
                 // cannot name a repository.
                 if request.url() == "/" || request.url() == "/index.html" {
-                    let _ = handle_ui(platform.as_deref(), &ui_cache, request);
+                    let _ = handle_ui(
+                        platform.as_deref(),
+                        &ui_cache,
+                        &user,
+                        acl.as_deref(),
+                        request,
+                    );
                     return;
                 }
                 if request.url().starts_with("/api/") {
@@ -889,6 +895,8 @@ const SYNC_MD: &str = include_str!("../../../SYNC.md");
 fn handle_ui(
     platform: Option<&Platform>,
     cache: &ui::UiCache,
+    user: &str,
+    acl: Option<&acl::Acl>,
     request: tiny_http::Request,
 ) -> std::io::Result<()> {
     let platform = match platform {
@@ -902,8 +910,14 @@ fn handle_ui(
         }
     };
 
+    // Without an ACL every reader sees one page, so the reader key is
+    // empty and both the cache and the `ETag` behave exactly as they did
+    // before D29 phase B. With one, the key carries the grants, so an
+    // edit to the ACL file invalidates a browser's copy of the page as
+    // surely as a new op does.
+    let reader = acl.map(|table| table.cache_key(user)).unwrap_or_default();
     let seq = platform.view_seq();
-    let tag = ui::etag(seq);
+    let tag = ui::etag(seq, &reader);
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
         let response = tiny_http::Response::empty(304).with_header(
             tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
@@ -911,7 +925,13 @@ fn handle_ui(
         return request.respond(response);
     }
 
-    let page = cache.page(seq, || platform.handle_api("GET", "/api/view", &[]).1);
+    let page = cache.page(seq, &reader, || {
+        let body = platform.handle_api("GET", "/api/view", &[]).1;
+        match acl {
+            Some(table) => acl::filter_response(table, user, "/api/view", &body),
+            None => body,
+        }
+    });
     let response = tiny_http::Response::from_string(page.as_str())
         .with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
@@ -983,7 +1003,19 @@ fn handle_api(
                 });
                 (200, body.to_string())
             } else {
-                p.handle_api(&method, &path, &req_body)
+                let (status, body) = p.handle_api(&method, &path, &req_body);
+                // Phase B: the aggregate reads are narrowed rather than
+                // refused, because a reader granted one repository still
+                // has a legitimate view — of that repository. Applied to
+                // the response rather than inside the handler so the
+                // platform keeps answering one question, and the ACL
+                // stays the only thing that knows about grants.
+                match acl {
+                    Some(table) if status == 200 => {
+                        (status, acl::filter_response(table, user, &path, &body))
+                    }
+                    _ => (status, body),
+                }
             }
         }
         None => (503, r#"{"error":"platform API not enabled"}"#.to_string()),

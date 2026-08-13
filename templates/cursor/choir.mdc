@@ -32,8 +32,8 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir reviews <api> <reviewer>` — your pending review queue
 - `choir view <api>` — the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
 <!-- /generated -->
-- `GET $CHOIR_API/api/view` shows where every workspace and ref points;
-  prefer it over guessing. `GET $CHOIR_API/api/log?from=N` is the
+- `GET $CHOIR_API/api/view` shows where every workspace and ref you can
+  read points; prefer it over guessing. `GET $CHOIR_API/api/log?from=N` is the
   ordered signed history — use it to catch up.
 - `POST $CHOIR_API/api/workspace` (`{"repo":"owner/repo","name":"<you>"}`)
   provisions your own instant CoW working copy; push from it with a full
