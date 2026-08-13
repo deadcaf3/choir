@@ -681,13 +681,12 @@ impl Node {
                     }
                 }
                 // The surface as plain text, for an agent that has never
-                // seen choir. Behind auth like everything else; it
-                // describes the node rather than exposing its contents.
-                // The surface as plain text, and the sync contract it
-                // points at. `llms.txt` naming a file only a cloner can
-                // read would be worse than not naming it, so the
-                // document a remote agent is told to follow is served
-                // from the same place it is told about.
+                // seen choir, and the sync contract it points at. Behind
+                // auth like everything else; it describes the node
+                // rather than exposing its contents. `llms.txt` naming a
+                // file only a cloner can read would be worse than not
+                // naming it, so the document a remote agent is told to
+                // follow is served from the same place it is told about.
                 if let Some(text) = match request.url() {
                     "/llms.txt" => Some(LLMS_TXT),
                     "/sync.md" => Some(SYNC_MD),
