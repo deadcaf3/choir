@@ -396,3 +396,16 @@ details{margin-top:var(--sp-3)}
 summary{cursor:pointer;color:var(--muted);font-size:var(--fs-200);
   padding:var(--sp-2) 0}
 summary:hover{color:var(--accent-ink)}
+
+/* Repository browsing (D30). Code and diffs reuse the design system's
+   own syntax tokens rather than inventing a second palette for them. */
+nav.crumbs{margin-top:var(--sp-3);font-size:var(--fs-200);color:var(--muted);
+  font-family:var(--font-mono)}
+pre.code{background:var(--sunken);border:var(--border);border-radius:var(--r-md);
+  padding:var(--sp-3);overflow-x:auto;font-family:var(--font-mono);
+  font-size:var(--fs-200);line-height:var(--lh-code);color:var(--syn-plain)}
+pre.code .ln{display:inline-block;width:var(--sp-10);
+  color:var(--syn-gutter);-webkit-user-select:none;user-select:none}
+pre.diff .add{color:var(--syn-added)}
+pre.diff .del{color:var(--syn-removed)}
+pre.diff .hunk{color:var(--syn-comment)}

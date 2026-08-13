@@ -139,7 +139,7 @@ fn short_digest(reader: &str) -> String {
 ///
 /// Quotes are escaped too, so one function is safe in both places and
 /// no call site has to remember which kind of context it is in.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -358,7 +358,28 @@ fn review_table(h: &mut String, rows: &[(&String, &serde_json::Value)]) {
             h.push_str(" class=\"open\"");
         }
         h.push_str("><td><span class=\"id\">");
-        h.push_str(&esc(id));
+        // A review whose target ref names a repository links through to
+        // its D34 page, where the diff and the verdict notes live. One
+        // that names none has no repository to be shown under, so it
+        // stays plain text rather than linking somewhere that would have
+        // to guess.
+        match r
+            .get("target_ref")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|target| target.split_once(':'))
+            .map(|(repo, _)| repo.strip_suffix(".git").unwrap_or(repo))
+        {
+            Some(repo) => {
+                h.push_str("<a href=\"/r/");
+                h.push_str(&esc(repo));
+                h.push_str("/review/");
+                h.push_str(&esc(id));
+                h.push_str("\">");
+                h.push_str(&esc(id));
+                h.push_str("</a>");
+            }
+            None => h.push_str(&esc(id)),
+        }
         h.push_str("</span>");
         if approved {
             h.push_str(" <b class=\"tag ok\">approved</b>");
@@ -582,7 +603,7 @@ fn row(h: &mut String, label: &str, value: &str) {
 /// raw values. `ui.css` carries the provenance note and the re-vendor
 /// rule; dark is the canonical theme and light follows the reader's
 /// system setting, both without a line of JavaScript.
-const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
+pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
 
 
 #[cfg(test)]

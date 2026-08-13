@@ -438,5 +438,34 @@ fn workspace_provisioning_end_to_end() {
     times.sort_by(f64::total_cmp);
     println!("workspace copy p50: {:.2} ms (n=9)", times[4]);
 
+    // The template must have git's own housekeeping switched off. It is
+    // the directory `cp` walks, and auto-gc or `maintenance run --auto`
+    // deleting a lock file mid-walk is a hard `cp` error and a spurious
+    // `500` for whoever asked for the workspace. Observed once as a
+    // flake; the config is what stops it happening again.
+    let template = root.join(".choir/checkouts/agents/demo");
+    for (key, want) in [("gc.auto", "0"), ("maintenance.auto", "false")] {
+        let got = String::from_utf8_lossy(
+            &git(&template, &["config", "--local", "--get", key]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(got, want, "template has {key} unset, so housekeeping can race the copy");
+    }
+
+    // ...and a template created before that config existed must still
+    // provision, because the protection also rides on the command line
+    // of every git this module runs against a template. Stripping the
+    // persisted keys is exactly what an older template looks like.
+    for key in ["gc.auto", "maintenance.auto"] {
+        assert!(
+            git(&template, &["config", "--local", "--unset", key]).status.success(),
+            "could not strip {key} to simulate an older template"
+        );
+    }
+    let (code, resp) = api(port, "POST", "/api/workspace",
+        Some(r#"{"repo":"agents/demo","name":"legacy-template"}"#));
+    assert_eq!(code, 200, "a template without the persisted config failed to provision: {resp}");
+
     node.unblock();
 }

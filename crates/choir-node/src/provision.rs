@@ -12,6 +12,28 @@
 //! The workspace's `origin` is rewritten to the daemon's own HTTP URL:
 //! pushes from a workspace go through the sequenced smart-HTTP path,
 //! never straight at the bare repo on disk.
+//!
+//! # Why the template has maintenance switched off
+//!
+//! The copy source is a real git repository, and git runs housekeeping
+//! on its own initiative: a `fetch` or `checkout` can trigger auto-gc or
+//! `git maintenance run --auto`, which creates and deletes files under
+//! `.git/objects` — `maintenance.lock` and `gc.pid` among them. `cp`
+//! walks a directory by stating entries and then opening them, so a file
+//! that vanishes between those two steps is a hard error, and the caller
+//! sees a `500` for a workspace that was never at fault. It was observed
+//! once as a test flake (`cp: …/.git/objects/maintenance.lock: No such
+//! file or directory`) and is a real user-facing race, not a test
+//! artifact.
+//!
+//! So every git command this module runs against the template carries
+//! `gc.auto=0` and `maintenance.auto=false`, which turn both mechanisms
+//! off (see the private `TEMPLATE_CONFIG`). The template is
+//! a disposable internal artifact — re-fetched constantly, never served,
+//! recreated by deleting it — so housekeeping buys nothing there and
+//! costs a race. The alternative, tolerating `ENOENT` from `cp`, means
+//! parsing a localized subprocess error to guess which vanished files
+//! were harmless, and would leave the race in place.
 
 use std::path::{Path, PathBuf};
 
@@ -20,9 +42,19 @@ use choir_oplog::ContentHash;
 use crate::platform::{AuthorizedChangeCreate, Platform};
 use crate::reject::{Code, Rejection};
 
+/// Command-line config making git's own housekeeping stay out of a
+/// template while it is being copied.
+///
+/// Passed per command rather than only persisted at clone time, so it
+/// also covers templates created before this existed: nothing else on
+/// the node touches a template, so these four arguments are the whole
+/// exposure. They are *also* written into new templates at clone time,
+/// so anything that reaches one later inherits the same rule.
+const TEMPLATE_CONFIG: [&str; 4] = ["-c", "gc.auto=0", "-c", "maintenance.auto=false"];
+
 /// Path segment allowed in repo/workspace names: no traversal, no
 /// hidden files, no separators.
-fn safe_segment(s: &str) -> bool {
+pub(crate) fn safe_segment(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('.')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
@@ -652,17 +684,40 @@ fn provision(
     base_url: &str,
 ) -> Result<f64, String> {
     let template: PathBuf = root.join(".choir").join("checkouts").join(repo);
+    // `TEMPLATE_CONFIG` leads every one of these: a `fetch` or `checkout`
+    // is exactly what triggers the housekeeping that races the copy
+    // below, and `clone -c` persists the same rule into a new template.
+    let with_config = |rest: &[&str]| -> Vec<String> {
+        TEMPLATE_CONFIG
+            .iter()
+            .chain(rest.iter())
+            .map(|a| (*a).to_string())
+            .collect()
+    };
+    let run = |args: Vec<String>, dir: Option<&Path>| -> Result<String, String> {
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        git(&borrowed, dir)
+    };
     if template.join(".git").exists() {
-        git(&["fetch", "-q", "origin"], Some(&template))?;
+        run(with_config(&["fetch", "-q", "origin"]), Some(&template))?;
     } else {
         std::fs::create_dir_all(template.parent().expect("has parent"))
             .map_err(|e| format!("create template dir: {e}"))?;
-        git(
-            &["clone", "-q", bare.to_str().expect("utf8"), template.to_str().expect("utf8")],
+        run(
+            with_config(&[
+                "clone",
+                "-q",
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                bare.to_str().expect("utf8"),
+                template.to_str().expect("utf8"),
+            ]),
             None,
         )?;
     }
-    git(&["checkout", "-q", "--detach", head], Some(&template))?;
+    run(with_config(&["checkout", "-q", "--detach", head]), Some(&template))?;
 
     std::fs::create_dir_all(ws_dir.parent().expect("has parent"))
         .map_err(|e| format!("create workspace dir: {e}"))?;

@@ -20,6 +20,7 @@ mod api;
 mod assignment;
 mod auth;
 mod batch_barriers;
+mod browse;
 mod concentration;
 mod git_ordering_trace;
 mod git_partial_push;
