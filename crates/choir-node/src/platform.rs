@@ -1930,6 +1930,11 @@ struct ChoirPolicy {
     /// after the view fold on the same writer thread, so its FIFO order
     /// matches the sequencer order exactly.
     review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
+    /// Webhook delivery handle (D32), shared with [`Platform`] so the
+    /// operator's `--hooks-file` can be attached after the writer thread
+    /// is already running. Offering an event to it never blocks: see
+    /// [`crate::hooks`] for why invariant 5 forbids anything else here.
+    hooks: Arc<Mutex<Option<crate::hooks::Hooks>>>,
 }
 
 impl ChoirPolicy {
@@ -2442,6 +2447,50 @@ impl SubmitPolicy for ChoirPolicy {
             .lock()
             .expect("entries lock")
             .push(entry.clone(), hash.clone());
+        self.offer_hook(entry, hash, &op);
+    }
+}
+
+/// A ref value as a receiver wants to read it: the git oid when the
+/// value is one, and the self-describing content hash otherwise (the
+/// platform API can point a ref at something that is not a git object).
+fn oid_text(hash: &ContentHash) -> String {
+    hash.git_oid().unwrap_or_else(|| hash.to_hex())
+}
+
+impl ChoirPolicy {
+    /// Hands a landed ref to the webhook delivery thread (D32).
+    ///
+    /// This runs on the writer thread, which is why it does nothing but
+    /// build a small struct and `try_send` it. Matching, config reload,
+    /// address vetting and `curl` all happen on the delivery thread; a
+    /// full queue drops the event and counts it. Invariant 5 is the
+    /// reason, and it is not a stylistic one: the target address belongs
+    /// to somebody else, so a receiver that stops answering would
+    /// otherwise stall op admission for everyone.
+    fn offer_hook(&self, entry: &OpEntry, hash: &ContentHash, op: &ViewOp) {
+        let guard = self.hooks.lock().expect("hooks lock");
+        let Some(hooks) = guard.as_ref() else {
+            return;
+        };
+        let (name, old, new) = match &op.kind {
+            OpKind::SetRef { name, commit, prev } => (
+                name,
+                prev.as_ref().map(oid_text),
+                Some(oid_text(commit)),
+            ),
+            OpKind::DeleteRef { name, prev } => (name, prev.as_ref().map(oid_text), None),
+            _ => return,
+        };
+        hooks.offer(crate::hooks::RefEvent {
+            key: name.clone(),
+            old,
+            new,
+            seq: entry.seq,
+            entry: hash.to_hex(),
+            actor: entry.channel.clone(),
+            key_id: entry.author_sig.as_ref().map(|sig| sig.key_id.clone()),
+        });
     }
 }
 
@@ -2496,6 +2545,9 @@ pub struct Platform {
     /// race normally through the sequencer; only duplicate pruning scans
     /// and archive batches are coalesced.
     review_prune_lock: Mutex<()>,
+    /// Shared with the policy: the webhook delivery handle (D32), or
+    /// `None` when the operator passed no `--hooks-file`.
+    hooks: Arc<Mutex<Option<crate::hooks::Hooks>>>,
     /// The writer's own latency record for the traffic this node is
     /// serving, so the Phase-0 decision-latency gate is checked in
     /// production and not only by the test suite.
@@ -2653,6 +2705,7 @@ impl Platform {
         let protected_refs = Arc::new(Mutex::new(None));
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let require_scope = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hooks = Arc::new(Mutex::new(None));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
@@ -2670,6 +2723,7 @@ impl Platform {
                 key_names: key_names.clone(),
                 concentration: concentration.clone(),
                 review_retention: review_retention.clone(),
+                hooks: hooks.clone(),
             }),
         );
         let platform = Self {
@@ -2693,6 +2747,7 @@ impl Platform {
             newcomer_audit: None,
             review_adjudications: None,
             review_prune_lock: Mutex::new(()),
+            hooks,
             _sequencer: sequencer,
         };
         // Enabling a bound applies it at startup, not only after some
@@ -3612,6 +3667,40 @@ impl Platform {
     pub fn with_lag_log(mut self, path: std::path::PathBuf) -> Self {
         self.lag_log = Some(path);
         self
+    }
+
+    /// Enables outbound ref-landed webhooks (D32) from the subscription
+    /// file `config`, recording every delivery attempt in `log`.
+    ///
+    /// Starts one delivery thread. The sequencer's writer thread never
+    /// waits on it: it offers events to a bounded queue and drops
+    /// (counted, and written to `log`) when that queue is full, because
+    /// a receiver this node does not control must not be able to delay
+    /// op admission. See [`crate::hooks`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the subscription file cannot be read or
+    /// does not parse, or when the delivery thread cannot be started.
+    pub fn with_hooks(
+        self,
+        config: std::path::PathBuf,
+        log: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        let hooks = crate::hooks::Hooks::start(config, log)?;
+        *self.hooks.lock().expect("hooks lock") = Some(hooks);
+        Ok(self)
+    }
+
+    /// Events the webhook queue dropped because it was full. Zero when
+    /// no `--hooks-file` is configured.
+    #[must_use]
+    pub fn hook_drops(&self) -> u64 {
+        self.hooks
+            .lock()
+            .expect("hooks lock")
+            .as_ref()
+            .map_or(0, crate::hooks::Hooks::dropped)
     }
 
     /// The live latency record, for a caller that wants to tighten the

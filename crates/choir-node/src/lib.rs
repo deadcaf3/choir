@@ -14,6 +14,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub mod acl;
+pub mod hooks;
 pub mod platform;
 pub mod provision;
 pub mod reject;
