@@ -99,7 +99,7 @@ Auth stays mandatory when public: anonymous requests get **401** on both the API
 printf 'alice:%s\n' "$(openssl rand -hex 32)" >> ~/.choir/auth   # hand the token over out of band
 ```
 
-That token grants read and write on **every** repository the node serves (see the warning under file formats). Until per-repo authorization exists, only hand one to someone you would give full node access.
+On its own that token grants read and write on **every** repository the node serves (see the warning under file formats). Pair it with an `--acl-file` line before handing it over, or you are giving full node access.
 
 Operator scripts follow the public name automatically if you put it in an untracked `~/.choir-public-url`; without that file they use the loopback tunnel. Details and the operator checklist: `scripts/flip/RUNBOOK.md`.
 
@@ -163,7 +163,7 @@ myself     @node  write
 
 Fail closed: with the flag set, anything not granted is refused. A repository you cannot read answers `404` rather than `403`, so a denial never confirms that it exists. The flag requires `--auth-file` — an ACL over anonymous requests would grade everyone the same. A malformed file refuses to start; a malformed *edit* keeps the previous table and complains, so a typo cannot silently revoke access.
 
-> **Phase A.** `/api/view` and the browser page are not yet filtered: any authenticated credential can still read every repository's ref names, oids, workspaces and reviews. Repository *contents* are gated; the inventory is not.
+`/api/view`, `/api/reviews` and the browser page are narrowed to the repositories a credential may read, so a grant on one repository does not disclose that the others exist. Node-wide sections of the view (the ref-state attestation, key bindings, and the concentration, growth, newcomer and lag telemetry) need `@node auditor`; the log head and build stamp reach everyone, since a writer needs them to submit. A review you were assigned to still reaches you, on any repository — that is what an invitation is.
 
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
@@ -210,7 +210,7 @@ Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **ne
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
 | `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
-| `GET /api/view` | The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate |
+| `GET /api/view` | The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone |
 | `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
 | `POST /api/workspace` | Provision a CoW workspace; optional exact base/change binding makes retries idempotent |

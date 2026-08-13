@@ -357,10 +357,12 @@ identity: protected refs, the review requirement, and the sequencer's
 ordering — so a new user cannot land on a gated `main` without a
 node-assigned review reaching approval weight two.
 
-One gap survives phase A: `/api/view` and the browser page are not yet
-filtered, so any credential can read every repository's ref names,
-oids, workspaces and reviews. Contents are gated; the inventory is not.
-Say that to whoever you hand the token to.
+With the flag set, the inventory is gated too: `/api/view`, `/api/reviews`
+and the browser page show only the repositories that credential may
+read. The node-wide sections of the view need `@node auditor`, and a
+review the holder was assigned to still reaches them wherever it lives.
+Without the flag none of that applies — one credential still sees
+everything, which is the line the node prints at startup.
 
 After the flip, the operator's own tooling must switch schemes too: a
 plaintext `http://` through the tunnel now hits a TLS listener and gets

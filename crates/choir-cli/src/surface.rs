@@ -326,7 +326,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "GET",
         path: "/api/view",
-        purpose: "The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate",
+        purpose: "The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone",
         mcp: Some(McpTool {
             name: "choir_view",
             input_schema: EMPTY_MCP_SCHEMA,

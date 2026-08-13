@@ -23,10 +23,12 @@
 //! Three properties, in the order they matter:
 //!
 //! 1. **The page is rendered on state change, not per request.**
-//!    [`UiCache`] keys a finished `String` by the view's `next_seq`.
-//!    Between two ops, every request in the world serves the same
-//!    prebuilt buffer, and the work per request is a clone of an
-//!    `Arc` plus a socket write.
+//!    [`UiCache`] keys a finished `String` by the view's `next_seq`
+//!    and, under a D29 ACL, by which reader asked. Between two ops,
+//!    every request from readers who see the same thing serves the
+//!    same prebuilt buffer, and the work per request is a clone of an
+//!    `Arc` plus a socket write. Without an ACL there is one reader
+//!    key, so the map holds exactly the single slot it used to be.
 //! 2. **Unchanged state costs zero bytes.** The cache key is also the
 //!    `ETag`, so a browser that already has the page gets `304` with
 //!    an empty body. A poll loop on an idle node transfers nothing.
@@ -50,51 +52,87 @@
 //! visible placeholder, and an unexpected payload yields a page that
 //! says less rather than a panic that serves nothing.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// A rendered page and the view sequence it describes.
+/// The rendered pages for one view sequence, one per distinct reader.
 ///
 /// The sequence doubles as the `ETag`, so "is the cache valid" and "is
-/// the client's copy valid" are the same question asked twice.
+/// the client's copy valid" are the same question asked twice. Under a
+/// D29 ACL two readers are shown different pages, so the `ETag` carries
+/// the reader key too and the map holds an entry per key.
+///
+/// Advancing the sequence clears the map rather than growing it: every
+/// page it held describes a state the node has left, so the bound on
+/// what this can hold is the number of distinct readers between two ops.
 pub(crate) struct UiCache {
-    inner: Mutex<Option<(u64, Arc<String>)>>,
+    inner: Mutex<(u64, HashMap<String, Arc<String>>)>,
 }
 
 impl UiCache {
     /// A cache holding nothing, which is the state after every restart.
     pub(crate) fn new() -> Self {
         UiCache {
-            inner: Mutex::new(None),
+            inner: Mutex::new((0, HashMap::new())),
         }
     }
 
-    /// The page for view sequence `seq`, rendering it only if the copy
-    /// on hand describes some other sequence.
+    /// The page for view sequence `seq` as `reader` may see it,
+    /// rendering it only if the copy on hand describes some other
+    /// sequence or was built for a reader who sees something else.
     ///
     /// `build_json` is called only on a miss. It is a closure rather
     /// than a value so a hit never pays for the JSON it would not use.
-    pub(crate) fn page<F>(&self, seq: u64, build_json: F) -> Arc<String>
+    pub(crate) fn page<F>(&self, seq: u64, reader: &str, build_json: F) -> Arc<String>
     where
         F: FnOnce() -> String,
     {
         let mut slot = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_seq, page)) = slot.as_ref() {
-            if *cached_seq == seq {
-                return Arc::clone(page);
-            }
+        let (cached_seq, pages) = &mut *slot;
+        if *cached_seq != seq {
+            pages.clear();
+            *cached_seq = seq;
+        }
+        if let Some(page) = pages.get(reader) {
+            return Arc::clone(page);
         }
         let page = Arc::new(render(&build_json(), seq));
-        *slot = Some((seq, Arc::clone(&page)));
+        pages.insert(reader.to_string(), Arc::clone(&page));
         page
     }
 }
 
-/// The `ETag` for a view sequence.
+/// The `ETag` for a view sequence as one reader sees it.
 ///
 /// Weak (`W/`) because two renders of the same sequence are equivalent
 /// for a reader's purposes without being guaranteed byte-identical.
-pub(crate) fn etag(seq: u64) -> String {
-    format!("W/\"{seq}\"")
+///
+/// The reader key is hashed into the tag rather than appended, so an
+/// `ETag` never carries a username back to whatever logs it, and it is
+/// omitted entirely when no ACL is configured — that node serves one
+/// page to everybody, and its tags stay the bare sequence numbers they
+/// have always been.
+pub(crate) fn etag(seq: u64, reader: &str) -> String {
+    if reader.is_empty() {
+        return format!("W/\"{seq}\"");
+    }
+    format!("W/\"{seq}-{}\"", short_digest(reader))
+}
+
+/// A short, stable, non-reversing tag for a reader key.
+///
+/// FNV-1a rather than anything from `choir-hash`: this decides cache
+/// identity for one process's lifetime, never signs or addresses
+/// anything, and a collision costs a reader a page rebuilt too often —
+/// never a page built for somebody else, because the map is keyed on the
+/// full string and only the `ETag` is abbreviated.
+fn short_digest(reader: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in reader.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// HTML-escapes text for element and attribute context alike.
@@ -700,8 +738,8 @@ mod tests {
     #[test]
     fn a_cache_hit_does_not_rebuild_the_page() {
         let cache = UiCache::new();
-        let first = cache.page(3, || r#"{"refs":{}}"#.to_string());
-        let second = cache.page(3, || panic!("rebuilt an unchanged page"));
+        let first = cache.page(3, "", || r#"{"refs":{}}"#.to_string());
+        let second = cache.page(3, "", || panic!("rebuilt an unchanged page"));
         assert!(Arc::ptr_eq(&first, &second), "same seq served a new page");
     }
 
@@ -710,10 +748,49 @@ mod tests {
     #[test]
     fn a_new_sequence_rebuilds_and_shows_the_new_state() {
         let cache = UiCache::new();
-        let before = cache.page(1, || r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string());
-        let after = cache.page(2, || r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string());
+        let before =
+            cache.page(1, "", || r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string());
+        let after =
+            cache.page(2, "", || r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string());
         assert!(before.contains("11-aaa"));
         assert!(after.contains("11-bbb"));
-        assert_ne!(etag(1), etag(2));
+        assert_ne!(etag(1, ""), etag(2, ""));
+    }
+
+    /// Two readers at one sequence are two pages, and each is reused.
+    /// Serving one reader's page to the other is exactly the leak phase
+    /// B exists to close, so a hit must match on the reader as well.
+    #[test]
+    fn readers_seeing_different_things_get_different_pages() {
+        let cache = UiCache::new();
+        let alice = cache.page(4, "alice", || r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string());
+        let bob = cache.page(4, "bob", || r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string());
+        assert!(alice.contains("o/a.git") && !alice.contains("o/b.git"));
+        assert!(bob.contains("o/b.git") && !bob.contains("o/a.git"));
+        let again = cache.page(4, "alice", || panic!("rebuilt a cached reader's page"));
+        assert!(Arc::ptr_eq(&alice, &again), "the reader's own page was dropped");
+        assert_ne!(etag(4, "alice"), etag(4, "bob"), "one ETag for two pages");
+    }
+
+    /// A new sequence must drop every reader's page, not only the one
+    /// asking: that is what bounds the map to the readers active between
+    /// two ops rather than every reader since the process started.
+    #[test]
+    fn advancing_the_sequence_clears_every_readers_page() {
+        let cache = UiCache::new();
+        let stale = cache.page(5, "alice", || r#"{"refs":{}}"#.to_string());
+        let _ = cache.page(6, "bob", || r#"{"refs":{}}"#.to_string());
+        let fresh = cache.page(6, "alice", || r#"{"refs":{}}"#.to_string());
+        assert!(!Arc::ptr_eq(&stale, &fresh), "a page from an older sequence survived");
+    }
+
+    /// An ACL-less node's tags must stay what they were, and no tag may
+    /// carry a username to whatever logs it.
+    #[test]
+    fn the_etag_hides_the_reader_and_is_unchanged_without_an_acl() {
+        assert_eq!(etag(7, ""), "W/\"7\"");
+        let tagged = etag(7, "alice\u{1f}*=r");
+        assert!(!tagged.contains("alice"), "the ETag carried the username: {tagged}");
+        assert_ne!(tagged, etag(7, "bob\u{1f}*=r"));
     }
 }

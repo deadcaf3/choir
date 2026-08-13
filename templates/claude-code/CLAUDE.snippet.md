@@ -59,8 +59,8 @@ the part that matters:
 
 ## Platform API (curl, JSON)
 
-- `GET  $CHOIR_API/api/view` — where every workspace and ref points
-  right now. Prefer this over ref-guessing.
+- `GET  $CHOIR_API/api/view` — where every workspace and ref you can
+  read points right now. Prefer this over ref-guessing.
 - `GET  $CHOIR_API/api/log?from=N` — the ordered, signed operation log
   (who moved what, in what order). Use it to catch up after being away.
 - `POST $CHOIR_API/api/submit` — submit a signed op (workspace head or

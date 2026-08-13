@@ -80,6 +80,26 @@ fn served(
     (format!("http://127.0.0.1:{port}"), node_key, work, acl_path)
 }
 
+/// One request for the browser page, as `(status, headers, body)`.
+///
+/// `support::curl` parses JSON, and the page deliberately is not JSON;
+/// the phase-B tests also need the `ETag`, which that helper drops.
+fn page_get(url: &str, args: &[&str]) -> (u16, String, String) {
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-i", "-w", "\n%{http_code}"])
+        .args(args)
+        .arg(url)
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (rest, code) = text.rsplit_once('\n').unwrap_or((text.as_str(), "0"));
+    let (headers, body) = match rest.split_once("\r\n\r\n") {
+        Some((h, b)) => (h.to_string(), b.to_string()),
+        None => (rest.to_string(), String::new()),
+    };
+    (code.trim().parse().unwrap_or(0), headers, body)
+}
+
 /// Rewrites the ACL and forces a distinct mtime, so the reload cannot be
 /// missed because two writes landed inside one timestamp tick.
 fn rewrite(path: &std::path::Path, text: &str) {
@@ -365,4 +385,136 @@ fn provisioning_a_workspace_needs_write_on_that_repository() {
 
     let (status, response) = curl(&["-u", "alice:a", "-d", &body, &url]);
     assert_eq!(status, 200, "a write grant was refused: {response}");
+}
+
+/// Phase B: contents were gated in phase A, and this is the inventory.
+/// A reader granted one repository must not be able to enumerate the
+/// other one's refs through the aggregate view or the page rendered from
+/// it — which is the whole difference between "cannot clone it" and
+/// "does not know it is there".
+#[test]
+fn the_view_and_the_page_show_only_the_repositories_a_reader_holds() {
+    let (base, _, work, acl) = served(
+        "view-filter",
+        "alice  agents/one  write\n\
+         bob    agents/two  write\n\
+         carol  *           read\n",
+        &["agents/one.git", "agents/two.git"],
+    );
+    // Both repositories are seeded over HTTP, so both refs reach the view
+    // through the pre-receive hook the way every real ref does. Pushing
+    // straight at a bare directory leaves the view empty, and the filter
+    // would then pass by having nothing to hide — which is how this test
+    // first went green against a leak it could not have seen.
+    seed(&work, &base, "alice:a", "agents/one.git");
+    std::fs::remove_dir_all(work.join("seed")).expect("clear the first seed clone");
+    seed(&work, &base, "bob:b", "agents/two.git");
+
+    let view = |creds: &str| -> serde_json::Value {
+        let (status, body) = curl(&["-u", creds, &format!("{base}/api/view")]);
+        assert_eq!(status, 200, "view refused for {creds}: {body}");
+        body
+    };
+
+    let alice = view("alice:a");
+    let refs = alice["refs"].as_object().expect("refs object");
+    assert!(
+        refs.keys().any(|k| k.starts_with("agents/one.git:")),
+        "a granted repository's refs went missing: {refs:?}"
+    );
+    assert!(
+        !refs.keys().any(|k| k.starts_with("agents/two.git:")),
+        "an ungranted repository's refs were served: {refs:?}"
+    );
+    // The node-wide sections are gated, not narrowed.
+    for section in ["bindings", "concentration", "view_growth", "sequencer_lag"] {
+        assert!(
+            alice.get(section).is_none(),
+            "{section} reached a reader with no node-wide grant"
+        );
+    }
+    // ...and what a writer needs to keep submitting survives.
+    assert!(alice["log"]["node"].is_string(), "the log scope was withheld from a writer");
+
+    // The wildcard sees both, which is what makes the assertion above a
+    // statement about the grant rather than about the seeding.
+    let carol = view("carol:c");
+    let carol_refs = carol["refs"].as_object().expect("refs object");
+    assert!(
+        carol_refs.keys().any(|k| k.starts_with("agents/two.git:")),
+        "the wildcard grant could not see the second repository: {carol_refs:?}"
+    );
+
+    // The page is rendered from the same filtered payload, so the name
+    // must not survive in the HTML either.
+    let (status, _, page) = page_get(&format!("{base}/"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "the page was refused");
+    assert!(page.contains("agents/one"), "the granted repository is missing from the page");
+    assert!(
+        !page.contains("agents/two"),
+        "the page named a repository its reader cannot read"
+    );
+
+    // The mutation: move the grant to the other repository and the same
+    // request must flip. A filter checked only against the file this test
+    // wrote first would pass while filtering nothing.
+    rewrite(&acl, "alice  agents/two  read\ncarol  *  read\n");
+    let flipped = view("alice:a");
+    let refs = flipped["refs"].as_object().expect("refs object");
+    assert!(
+        refs.keys().any(|k| k.starts_with("agents/two.git:")),
+        "the moved grant did not take effect: {refs:?}"
+    );
+    assert!(
+        !refs.keys().any(|k| k.starts_with("agents/one.git:")),
+        "the removed grant still served its repository: {refs:?}"
+    );
+    let (_, _, page) = page_get(&format!("{base}/"), &["-u", "alice:a"]);
+    assert!(
+        page.contains("agents/two") && !page.contains("agents/one"),
+        "the cached page outlived the grant that built it"
+    );
+}
+
+/// The page cache is keyed per reader, so one reader's `ETag` must not
+/// hand another reader a `304` for a page they were never shown — and a
+/// reader's own repeat visit must still cost nothing.
+#[test]
+fn a_conditional_request_is_answered_per_reader() {
+    let (base, _, work, _) = served(
+        "view-etag",
+        "alice  agents/one  write\ncarol  *  read\n",
+        &["agents/one.git", "agents/two.git"],
+    );
+    seed(&work, &base, "alice:a", "agents/one.git");
+
+    let tag_of = |creds: &str| -> String {
+        let (status, headers, _) = page_get(&format!("{base}/"), &["-u", creds]);
+        assert_eq!(status, 200, "the page was refused for {creds}");
+        headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim().eq_ignore_ascii_case("ETag").then(|| value.trim().to_string())
+            })
+            .expect("the page carries an ETag")
+    };
+
+    let alice = tag_of("alice:a");
+    let carol = tag_of("carol:c");
+    assert_ne!(alice, carol, "two readers of different pages share one ETag");
+
+    // The reader's own tag still short-circuits.
+    let (status, _, _) = page_get(
+        &format!("{base}/"),
+        &["-u", "alice:a", "-H", &format!("If-None-Match: {alice}")],
+    );
+    assert_eq!(status, 304, "a reader's own ETag did not produce a 304");
+
+    // Somebody else's tag must not.
+    let (status, _, _) = page_get(
+        &format!("{base}/"),
+        &["-u", "alice:a", "-H", &format!("If-None-Match: {carol}")],
+    );
+    assert_eq!(status, 200, "another reader's ETag produced a 304");
 }
