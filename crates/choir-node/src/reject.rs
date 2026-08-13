@@ -35,7 +35,9 @@
 /// `ERRORS.md` with the action a client should take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Code {
-    /// The submission was not signed by a key this node trusts.
+    /// The signature names a key id this node has no record of. Says
+    /// nothing about the signature itself, which is not checked once the
+    /// key is missing.
     UnknownKey,
     /// The payload did not decode as a `ViewOp`.
     MalformedOp,
@@ -66,11 +68,28 @@ pub enum Code {
     ChangeState,
     /// A workspace lifecycle request conflicted with its durable binding.
     WorkspaceState,
+    /// A key-binding precondition failed (a key already bound to another
+    /// operator, a revoked or unbound key, a channel naming a different
+    /// operator).
+    IdentityState,
     /// The operator's protected-ref list could not be read, so the gate
     /// failed closed.
     PolicyUnavailable,
     /// Requested log entries are older than anything this node can serve.
     LogEvicted,
+    /// These exact signed bytes have already been admitted.
+    DuplicateSubmission,
+    /// This node requires a signed scope and the op carried none.
+    ScopeRequired,
+    /// The op was signed for a different node's log.
+    ForeignScope,
+    /// The scoped head is no longer recent enough to admit.
+    StaleScope,
+    /// The signature does not verify under the key it names, which this
+    /// node does trust. Distinct from [`Code::UnknownKey`] because the
+    /// repairs are opposites: that one widens the trusted set, this one
+    /// must not.
+    BadSignature,
     /// Anything that did not originate as a structured rejection.
     Unclassified,
 }
@@ -97,8 +116,14 @@ impl Code {
             Self::ProvenanceState => "provenance_state",
             Self::ChangeState => "change_state",
             Self::WorkspaceState => "workspace_state",
+            Self::IdentityState => "identity_state",
             Self::PolicyUnavailable => "policy_unavailable",
             Self::LogEvicted => "log_evicted",
+            Self::DuplicateSubmission => "duplicate_submission",
+            Self::ScopeRequired => "scope_required",
+            Self::ForeignScope => "foreign_scope",
+            Self::StaleScope => "stale_scope",
+            Self::BadSignature => "bad_signature",
             Self::Unclassified => "unclassified",
         }
     }
@@ -122,8 +147,14 @@ impl Code {
             Self::ProvenanceState,
             Self::ChangeState,
             Self::WorkspaceState,
+            Self::IdentityState,
             Self::PolicyUnavailable,
             Self::LogEvicted,
+            Self::DuplicateSubmission,
+            Self::ScopeRequired,
+            Self::ForeignScope,
+            Self::StaleScope,
+            Self::BadSignature,
             Self::Unclassified,
         ]
     }
@@ -276,6 +307,12 @@ pub fn from_view_error(e: &choir_view::ViewError) -> Rejection {
             "read GET /api/view `changes` for the current owner, workspace and revision; use a \
              new change id or checkpoint from the reported revision",
         ),
+        ViewError::Identity(msg) => Rejection::new(
+            Code::IdentityState,
+            msg.clone(),
+            "not a retry: a key belongs to one operator for its lifetime and a revoked key is \
+             never rebindable, so bind a fresh key instead",
+        ),
         ViewError::Decode(msg) => Rejection::new(
             Code::MalformedOp,
             format!("decode failed: {msg}"),
@@ -294,7 +331,7 @@ impl Code {
     #[must_use]
     pub fn meaning(self) -> &'static str {
         match self {
-            Self::UnknownKey => "The submission was not signed by a key this node trusts",
+            Self::UnknownKey => "The signature names a key id this node has no record of",
             Self::MalformedOp => "The payload did not decode as a `ViewOp`",
             Self::MalformedRequest => "The request body was missing fields or badly encoded",
             Self::ReviewerMismatch => "A verdict claimed a reviewer other than the signed channel",
@@ -309,8 +346,14 @@ impl Code {
             Self::ProvenanceState => "A provenance record was missing a subject or kind",
             Self::ChangeState => "A stable change was unknown, duplicated, archived, or mismatched",
             Self::WorkspaceState => "A workspace lifecycle request conflicted with its durable binding",
+            Self::IdentityState => "A key-binding precondition failed (key already bound to another operator, revoked or unbound key, channel naming a different operator)",
             Self::PolicyUnavailable => "The operator's protected-ref list could not be read, so the gate failed closed",
             Self::LogEvicted => "Requested log entries are older than anything this node can serve",
+            Self::DuplicateSubmission => "These exact signed bytes already landed; a signature is admissible once",
+            Self::ScopeRequired => "This node admits only ops signed for its own log and a recent head, and this op carried no scope",
+            Self::ForeignScope => "The op was signed for another node's log",
+            Self::StaleScope => "The head the op was signed against is no longer in the node's recent window",
+            Self::BadSignature => "The signature does not verify over these bytes, under a key this node does trust",
             Self::Unclassified => "A rejection that did not originate as a structured one",
         }
     }
@@ -334,8 +377,14 @@ impl Code {
             Self::ProvenanceState => "Resubmit with a non-empty subject and kind.",
             Self::ChangeState => "Read `changes` in `GET /api/view`, then use its owner, workspace and revision or choose a new change id.",
             Self::WorkspaceState => "Read `changes` and `workspaces` in `GET /api/view`; retry only with the exact existing binding, or choose a new workspace name.",
+            Self::IdentityState => "Read `bindings` in `GET /api/view` for this key. Not a retry:                 a key belongs to one operator for the life of the key, and a revoked key is                 never rebindable. Bind a fresh key instead. `error` names which of the two                 applies.",
             Self::PolicyUnavailable => "Operator problem, not a client one: the gate fails                 closed rather than guessing. Retry once the file is restored.",
             Self::LogEvicted => "Resync from the sequence in `window_base`; entries before it                 are gone from this node.",
+            Self::DuplicateSubmission => "If you are retrying, this is your op: read `seq`.                 A submission that already landed answers 200 with `already_applied`, and                 only reaches you as a rejection if the window moved underneath the retry.                 If you meant a second, distinct change, sign a new op — two otherwise                 byte-identical ops are told apart by their scope.",
+            Self::ScopeRequired => "Read `log.node` and `log.head` from `GET /api/view`,                 put them in the op's `scope`, and sign that. `choir submit` does this                 automatically. An unscoped op cannot be admitted here because nothing in it                 says which log it was meant for or that it has not run before.",
+            Self::ForeignScope => "Nothing to retry against this node: the op names another                 node's id in `expected`. Sign a scope naming this node, whose id is in                 `actual` and in `log.node` of `GET /api/view`.",
+            Self::StaleScope => "Re-read `log.head` from `GET /api/view` and sign a fresh op                 against it. A signature is only admissible while the head it names is still                 in the node's window, which is what stops a captured op from being replayed                 later.",
+            Self::BadSignature => "Re-sign the exact bytes you are submitting: a signature covers                 one `(channel, payload)` pair and does not carry to another. Registering a key                 does not help here, the key this names is already trusted. If you did not send                 this, a signature of yours was replayed onto bytes you never signed, and the                 operator wants to know.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",
         }
     }

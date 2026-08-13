@@ -8,7 +8,7 @@ Every rejection body carries `code`, `error` and `next`. `expected` and `actual`
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `unknown_key` | The submission was not signed by a key this node trusts | Ask the operator to register your public key. `choir key <file> <you>` prints the line; it takes effect on the next request. |
+| `unknown_key` | The signature names a key id this node has no record of | Ask the operator to register your public key. `choir key <file> <you>` prints the line; it takes effect on the next request. |
 | `malformed_op` | The payload did not decode as a `ViewOp` | Serialize a `ViewOp` and sign its bytes. `choir submit` does this correctly; `GET /llms.txt` lists the operations. |
 | `malformed_request` | The request body was missing fields or badly encoded | Send a JSON object with the fields the endpoint wants. `GET /llms.txt` lists them. |
 | `reviewer_mismatch` | A verdict claimed a reviewer other than the signed channel | Resubmit on your own channel. `choir verdict` signs on the reviewer name by construction, so use it rather than hand-rolling. |
@@ -23,8 +23,14 @@ Every rejection body carries `code`, `error` and `next`. `expected` and `actual`
 | `provenance_state` | A provenance record was missing a subject or kind | Resubmit with a non-empty subject and kind. |
 | `change_state` | A stable change was unknown, duplicated, archived, or mismatched | Read `changes` in `GET /api/view`, then use its owner, workspace and revision or choose a new change id. |
 | `workspace_state` | A workspace lifecycle request conflicted with its durable binding | Read `changes` and `workspaces` in `GET /api/view`; retry only with the exact existing binding, or choose a new workspace name. |
+| `identity_state` | A key-binding precondition failed (key already bound to another operator, revoked or unbound key, channel naming a different operator) | Read `bindings` in `GET /api/view` for this key. Not a retry: a key belongs to one operator for the life of the key, and a revoked key is never rebindable. Bind a fresh key instead. `error` names which of the two applies. |
 | `policy_unavailable` | The operator's protected-ref list could not be read, so the gate failed closed | Operator problem, not a client one: the gate fails closed rather than guessing. Retry once the file is restored. |
 | `log_evicted` | Requested log entries are older than anything this node can serve | Resync from the sequence in `window_base`; entries before it are gone from this node. |
+| `duplicate_submission` | These exact signed bytes already landed; a signature is admissible once | If you are retrying, this is your op: read `seq`. A submission that already landed answers 200 with `already_applied`, and only reaches you as a rejection if the window moved underneath the retry. If you meant a second, distinct change, sign a new op — two otherwise byte-identical ops are told apart by their scope. |
+| `scope_required` | This node admits only ops signed for its own log and a recent head, and this op carried no scope | Read `log.node` and `log.head` from `GET /api/view`, put them in the op's `scope`, and sign that. `choir submit` does this automatically. An unscoped op cannot be admitted here because nothing in it says which log it was meant for or that it has not run before. |
+| `foreign_scope` | The op was signed for another node's log | Nothing to retry against this node: the op names another node's id in `expected`. Sign a scope naming this node, whose id is in `actual` and in `log.node` of `GET /api/view`. |
+| `stale_scope` | The head the op was signed against is no longer in the node's recent window | Re-read `log.head` from `GET /api/view` and sign a fresh op against it. A signature is only admissible while the head it names is still in the node's window, which is what stops a captured op from being replayed later. |
+| `bad_signature` | The signature does not verify over these bytes, under a key this node does trust | Re-sign the exact bytes you are submitting: a signature covers one `(channel, payload)` pair and does not carry to another. Registering a key does not help here, the key this names is already trusted. If you did not send this, a signature of yours was replayed onto bytes you never signed, and the operator wants to know. |
 | `unclassified` | A rejection that did not originate as a structured one | Read `error`. This path does not name a repair yet — that is a gap, and worth reporting. |
 
 ## Retrying a submission whose response you lost

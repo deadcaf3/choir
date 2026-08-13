@@ -19,7 +19,10 @@
 //! assert_eq!(log.len(), 1);
 //! ```
 
+pub mod lag;
+
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness, FORMAT_VERSION};
+use lag::LagMeter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -52,7 +55,13 @@ pub trait SubmitPolicy: Send {
 
     /// Observes an entry that was just appended (for cached-state
     /// policies to fold). Default: ignore.
-    fn accepted(&mut self, _entry: &OpEntry) {}
+    ///
+    /// `hash` is the entry's content hash, which the sequencer has just
+    /// computed to answer the submitter. It is passed rather than left
+    /// to the policy to recompute: a policy that indexes entries by hash
+    /// would otherwise re-serialize every entry on the write path, which
+    /// the allocation budget already caught once.
+    fn accepted(&mut self, _entry: &OpEntry, _hash: &ContentHash) {}
 }
 
 /// The default policy: everything is admitted (localhost/dev shape).
@@ -84,6 +93,11 @@ pub struct Accepted {
 /// far under the 100 ms decision-latency gate at the measured per-op cost,
 /// not a tuned value.
 const MAX_BATCH: usize = 256;
+
+/// One admitted op waiting on the batch's durability barrier: where to
+/// answer, what to answer with, and when it was dequeued (so the ack can
+/// be measured through the barrier, not just up to the append).
+type PendingAck = (mpsc::Sender<Result<Accepted, String>>, Accepted, Instant);
 
 enum Command {
     Submit(Submission, mpsc::Sender<Result<Accepted, String>>),
@@ -215,6 +229,9 @@ pub struct Sequencer {
     /// Set by the writer when a durability barrier fails; read by the
     /// daemon through [`SequencerHandle::durability_failed`].
     poisoned: Arc<AtomicBool>,
+    /// Written by the writer for every accepted op; read and drained by
+    /// the daemon through [`Sequencer::lag`].
+    lag: Arc<LagMeter>,
     thread: Option<JoinHandle<Box<dyn OpLog>>>,
 }
 
@@ -230,12 +247,14 @@ impl Sequencer {
         let (tx, rx) = mpsc::channel::<Command>();
         let poisoned = Arc::new(AtomicBool::new(false));
         let writer_flag = poisoned.clone();
+        let lag = Arc::new(LagMeter::new());
+        let writer_lag = lag.clone();
         let thread = std::thread::spawn(move || {
             // Ordered, then made durable, then acknowledged. Everything
             // admitted in one pass through the loop shares a single
             // `sync`, so the fsync cost is paid once per batch rather
             // than once per op.
-            let mut acks: Vec<(mpsc::Sender<Result<Accepted, String>>, Accepted)> = Vec::new();
+            let mut acks: Vec<PendingAck> = Vec::new();
             let mut stopping = false;
             // Set by a failed durability barrier and never cleared. See
             // the refusal in the admit path below for why this is
@@ -302,7 +321,7 @@ impl Sequencer {
                                         author_sig: sub.author_sig,
                                     };
                                     let hash = entry.content_hash();
-                                    policy.accepted(&entry);
+                                    policy.accepted(&entry, &hash);
                                     log.append(entry)
                                         .expect("single writer never sees a stale head");
                                     acks.push((
@@ -312,6 +331,7 @@ impl Sequencer {
                                             hash,
                                             decision_latency: started.elapsed(),
                                         },
+                                        started,
                                     ));
                                 }
                             }
@@ -343,7 +363,20 @@ impl Sequencer {
                     // on a client's error already sees the cause.
                     writer_flag.store(true, Ordering::Relaxed);
                 }
-                for (reply, accepted) in acks.drain(..) {
+                // Measured here, once the batch is durable, so every
+                // accepted op is recorded at the one point every accepted
+                // op passes through. A submit path added later cannot
+                // forget to instrument itself.
+                let batch = acks.len();
+                for (reply, accepted, started) in acks.drain(..) {
+                    if durable.is_ok() {
+                        writer_lag.record(
+                            accepted.seq,
+                            accepted.decision_latency,
+                            started.elapsed(),
+                            batch,
+                        );
+                    }
                     let answer = match &durable {
                         Ok(()) => Ok(accepted),
                         // Ordered but not durable is not an acceptance.
@@ -374,8 +407,17 @@ impl Sequencer {
         Self {
             tx,
             poisoned,
+            lag,
             thread: Some(thread),
         }
+    }
+
+    /// The writer's latency record, for a daemon that wants to know
+    /// whether the decision-latency gate is being met by the traffic it is
+    /// actually serving rather than by the test suite.
+    #[must_use]
+    pub fn lag(&self) -> Arc<LagMeter> {
+        self.lag.clone()
     }
 
     /// Creates a new client handle for a workspace.

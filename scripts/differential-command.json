@@ -1,0 +1,1 @@
+{"format_version":1,"program":"cargo","args":["test","--workspace","--target-dir","target/d23-calibration"]}

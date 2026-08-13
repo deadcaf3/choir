@@ -26,11 +26,19 @@ REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 # The URL carries them, so it is built here and never written to .git/config.
 USER_NAME=$(head -1 "$AUTH" | cut -d: -f1)
 TOKEN=$(head -1 "$AUTH" | cut -d: -f2-)
-URL="http://$USER_NAME:$TOKEN@127.0.0.1:$PORT/$REPO"
+# Public TLS, when enabled, moves every HTTP leg to the public name;
+# the untracked ~/.choir-public-url holds the base and its absence
+# means the pre-flip world: plaintext over the loopback tunnel.
+if [ -f "$HOME/.choir-public-url" ]; then
+  BASE=$(cat "$HOME/.choir-public-url")
+else
+  BASE="http://127.0.0.1:$PORT"
+fi
+URL=$(printf '%s' "$BASE/$REPO" | sed "s|://|://$USER_NAME:$TOKEN@|")
 
 # The bare repo must exist on the node; creating it installs the
 # pre-receive hook that turns pushes into signed ops.
-if ! curl -sf -u "$USER_NAME:$TOKEN" "http://127.0.0.1:$PORT/$REPO/info/refs?service=git-upload-pack" > /dev/null; then
+if ! curl -sf -u "$USER_NAME:$TOKEN" "$BASE/$REPO/info/refs?service=git-upload-pack" > /dev/null; then
   echo "no such repo on the node: $REPO" >&2
   echo "create it with: choir-node ... --create $REPO   (or restart the agent with that flag)" >&2
   exit 1
@@ -45,4 +53,4 @@ fi
 git push "$URL" "$BRANCH"
 git push --tags "$URL"
 echo "canonical: $(git log --oneline -1)"
-echo "verify:    curl -s -u $USER_NAME:<token> http://127.0.0.1:$PORT/api/view"
+echo "verify:    curl -s -u $USER_NAME:<token> $BASE/api/view"

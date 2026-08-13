@@ -195,6 +195,15 @@ const REVIEWS_MCP_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
+const APPEAL_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "attempt_id": { "type": "integer", "minimum": 0, "description": "Newcomer attempt id returned with the rejection" }
+  },
+  "required": ["attempt_id"],
+  "additionalProperties": false
+}"#;
+
 /// Every `choir` subcommand, in help order.
 pub const COMMANDS: &[Command] = &[
     Command {
@@ -241,6 +250,37 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "slash",
+        args: "<api> <node-key-file> <id> <reviewer> '<reason>'",
+        summary: "invalidate one reviewer's approval; operator-only and never moves a ref",
+        agent_facing: false,
+    },
+    Command {
+        name: "abandon",
+        args: "<api> <node-key-file> <id>",
+        summary: "archive a stale incomplete review as lapsed, settling it unapproved; \
+                  operator-only and never moves a ref",
+        agent_facing: false,
+    },
+    Command {
+        name: "bind",
+        args: "<api> <node-key-file> <operator> <key-hex> [channel]",
+        summary: "record in the log that a key belongs to an operator; operator-only and never moves a ref",
+        agent_facing: false,
+    },
+    Command {
+        name: "revoke",
+        args: "<api> <node-key-file> <key-hex> '<reason>'",
+        summary: "withdraw a key binding; terminal, and the attribution row survives",
+        agent_facing: false,
+    },
+    Command {
+        name: "appeal",
+        args: "<api> <attempt-id>",
+        summary: "appeal a rejected newcomer attempt for operator adjudication; never grants privilege",
+        agent_facing: true,
+    },
+    Command {
         name: "intent",
         args: "<api> <key-file> <channel> <subject> <kind> '<body>'",
         summary: "publish a task spec or plan so other agents can see intent",
@@ -255,7 +295,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "view",
         args: "<api>",
-        summary: "the materialized view: changes, workspace heads, refs, reviews, provenance",
+        summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate",
         agent_facing: true,
     },
 ];
@@ -286,11 +326,21 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "GET",
         path: "/api/view",
-        purpose: "The materialized view: changes, workspace heads, refs, reviews, provenance",
+        purpose: "The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate",
         mcp: Some(McpTool {
             name: "choir_view",
             input_schema: EMPTY_MCP_SCHEMA,
             arguments: McpArguments::Empty,
+        }),
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/appeal",
+        purpose: "Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege",
+        mcp: Some(McpTool {
+            name: "choir_appeal",
+            input_schema: APPEAL_MCP_SCHEMA,
+            arguments: McpArguments::Body,
         }),
     },
     Endpoint {
@@ -354,9 +404,21 @@ pub const ENDPOINTS: &[Endpoint] = &[
         mcp: None,
     },
     Endpoint {
+        method: "GET",
+        path: "/api/ref-agreement",
+        purpose: "Where the op log and the bare repos disagree about a ref, read-only",
+        mcp: None,
+    },
+    Endpoint {
         method: "POST",
         path: "/api/git-update",
         purpose: "Internal: the pre-receive hook callback",
+        mcp: None,
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/git-abort",
+        purpose: "Internal: retracts a refused push's already-accepted refs",
         mcp: None,
     },
 ];
@@ -487,6 +549,16 @@ pub fn llms_txt() -> String {
     for e in ENDPOINTS {
         out.push_str(&format!("{} {} - {}\n", e.method, e.path, e.purpose));
     }
+    // What a denial means, because the two statuses carry different
+    // instructions and neither is worth retrying (D29).
+    out.push_str(
+        "\n## Access\n\
+         A node may enforce per-repository grants. 404 on a repository means you hold no \
+         read grant on it, and says nothing about whether it exists; 403 means you can read \
+         it but not write it, or the operation needs a node-wide grant (the op log, the \
+         ref-state attestation, and ops naming no repository). Neither is retryable — ask \
+         the operator for a grant line.\n",
+    );
     out.push_str("\n## CLI\n");
     out.push_str(&format!(
         "For authenticated nodes: choir {AUTH_OPTIONS} <command> ...\n"

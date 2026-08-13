@@ -22,7 +22,7 @@
 use choir_bridge::github;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use choir_hash::ContentHash;
 use choir_identity::ActorKey;
@@ -113,6 +113,42 @@ fn view_refs(api_base: &str, label: &str) -> BTreeMap<String, ContentHash> {
         .unwrap_or_default()
 }
 
+/// A `<codec>-<digest>` content hash as the node serves it.
+fn parse_hash(hex: &str) -> Option<ContentHash> {
+    let (codec, digest) = hex.split_once('-')?;
+    Some(ContentHash {
+        codec: u8::from_str_radix(codec, 16).ok()?,
+        digest: (0..digest.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(digest.get(i..i + 2)?, 16).ok())
+            .collect::<Option<Vec<u8>>>()?,
+    })
+}
+
+/// The log identity every op of this round is signed for: `(node, head)`.
+///
+/// A whole batch may share one head — a scope is admissible while the
+/// head it names is still in the node's window, not only while it is the
+/// tip — so this is one read per sync round, not one per op.
+///
+/// # Panics
+///
+/// Panics when the node serves no `log.node`, which means it predates op
+/// scopes. Mirroring into a log that cannot bind a signature to itself is
+/// the situation this exists to prevent, so it fails loudly rather than
+/// signing unscoped ops.
+fn view_scope(api_base: &str) -> (ContentHash, Option<ContentHash>) {
+    let (status, body) = api("GET", &format!("{api_base}/api/view"), None);
+    assert_eq!(status, 200, "view: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("view json");
+    let node = v["log"]["node"]
+        .as_str()
+        .and_then(parse_hash)
+        .expect("node serves log.node; one that does not predates op scopes");
+    let head = v["log"]["head"].as_str().and_then(parse_hash);
+    (node, head)
+}
+
 /// Ops per `/api/submit-batch` request; keeps request bodies well under
 /// a megabyte.
 const BATCH: usize = 500;
@@ -186,6 +222,7 @@ fn sync_once(
 
     let upstream_refs = mirror_refs(mirror)?;
     let choir_refs = view_refs(api_base, label);
+    let (node, head) = view_scope(api_base);
     let workspace = format!("bridge/{label}");
 
     let mut sets = Vec::new();
@@ -204,7 +241,8 @@ fn sync_once(
             name: format!("{label}:{name}"),
             commit,
             prev: prev.cloned(),
-        });
+        })
+        .in_scope(node.clone(), head.clone());
         sets.push(signed_op(key, &workspace, op));
     }
     let mut deletes = Vec::new();
@@ -213,7 +251,8 @@ fn sync_once(
             let op = ViewOp::new(OpKind::DeleteRef {
                 name: format!("{label}:{name}"),
                 prev: Some(prev.clone()),
-            });
+            })
+            .in_scope(node.clone(), head.clone());
             deletes.push(signed_op(key, &workspace, op));
         }
     }
@@ -230,6 +269,91 @@ const CI_POLL: std::time::Duration = std::time::Duration::from_secs(15);
 /// is necessary, never sufficient — the default-branch push can trigger
 /// branch-conditional workflows the train branch never ran).
 const POST_LAND_WATCH: std::time::Duration = std::time::Duration::from_secs(180);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DifferentialConfig {
+    runner: PathBuf,
+    command: PathBuf,
+    state: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueArgs {
+    positional: Vec<String>,
+    land: bool,
+    watch: Option<u64>,
+    differential: Option<DifferentialConfig>,
+}
+
+fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
+    let mut land = false;
+    let mut watch = None;
+    let mut runner = None;
+    let mut command = None;
+    let mut state = None;
+    let mut positional = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let next_path = |value: Option<&String>, flag: &str| {
+            value
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| format!("{flag} needs a path"))
+        };
+        match arg.as_str() {
+            "--land" => land = true,
+            "--watch" => {
+                watch = Some(
+                    it.next()
+                        .ok_or("--watch needs an interval in seconds")?
+                        .parse()
+                        .map_err(|_| "--watch needs an interval in seconds")?,
+                );
+            }
+            "--differential-runner" => {
+                if runner.is_some() {
+                    return Err("--differential-runner may be supplied only once".to_string());
+                }
+                runner = Some(next_path(it.next(), "--differential-runner")?);
+            }
+            "--differential-command" => {
+                if command.is_some() {
+                    return Err("--differential-command may be supplied only once".to_string());
+                }
+                command = Some(next_path(it.next(), "--differential-command")?);
+            }
+            "--differential-state" => {
+                if state.is_some() {
+                    return Err("--differential-state may be supplied only once".to_string());
+                }
+                state = Some(next_path(it.next(), "--differential-state")?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unknown queue option {value}"));
+            }
+            value => positional.push(value.to_string()),
+        }
+    }
+    let differential = match (runner, command, state) {
+        (None, None, None) => None,
+        (Some(runner), Some(command), Some(state)) => Some(DifferentialConfig {
+            runner,
+            command,
+            state,
+        }),
+        _ => {
+            return Err(
+                "differential mode needs runner, command, and state paths together".to_string(),
+            );
+        }
+    };
+    Ok(QueueArgs {
+        positional,
+        land,
+        watch,
+        differential,
+    })
+}
 
 /// One queue-as-bot round (D21 queue stage, verdict-only): fetch the
 /// open PRs, build the speculative train locally, publish it as the
@@ -253,6 +377,7 @@ fn queue_round(
     repo: &str,
     workdir: &Path,
     land: bool,
+    differential: Option<&DifferentialConfig>,
 ) -> Result<(), String> {
     let token = github::app_jwt(app_id, pem).and_then(|jwt| github::installation_token(&jwt))?;
     let base_branch = github::default_branch(&token, repo)?;
@@ -282,6 +407,29 @@ fn queue_round(
     let heads: Vec<(u64, String)> =
         prs.iter().map(|p| (p.number, format!("refs/choirq/pr/{}", p.number))).collect();
     let train = choir_bridge::queue::build_train(workdir, &base, &heads)?;
+    if let Some(config) = differential {
+        for (entry_id, result) in choir_bridge::queue::run_train_differentials(
+                workdir,
+                &train,
+                &config.runner,
+                &config.command,
+                &config.state,
+            ) {
+            match result {
+                Ok(outcome) => println!(
+                    "queue: PR #{}: advisory differential {} (observation {}, pending {})",
+                    entry_id,
+                    outcome.verdict.as_str(),
+                    outcome.observation_id,
+                    outcome.pending_interactions,
+                ),
+                Err(error) => eprintln!(
+                    "queue: PR #{}: advisory differential unavailable: {error}",
+                    entry_id
+                ),
+            }
+        }
+    }
     if train.tip == base {
         println!("queue: no PR merged cleanly; train == base, skipping CI");
     } else {
@@ -455,49 +603,337 @@ fn main() {
         }
         return;
     }
+    // `choir-bridge calibrate <repo> <runner> <command> <state> <rounds> <merge>...`
+    // Replays already-existing real merge commits through the same advisory
+    // three-worktree adapter used by queue mode. It never contacts a forge or
+    // consumes a landing decision.
+    if args.first().map(String::as_str) == Some("calibrate") {
+        const CALIBRATE_USAGE: &str = "usage: choir-bridge calibrate [--fresh-worktrees] <repo> <runner> <command-file> <state-dir> <rounds> <merge>...";
+        // One flag, recognised anywhere among the arguments: the positionals
+        // are paths, a round count and hex merge ids, so none of them can
+        // collide with it.
+        let mut fresh_worktrees = false;
+        let mut positional: Vec<&String> = Vec::new();
+        for arg in &args[1..] {
+            if arg == "--fresh-worktrees" {
+                fresh_worktrees = true;
+            } else {
+                positional.push(arg);
+            }
+        }
+        let [repo, runner, command_file, state_dir, rounds, merges @ ..] = positional.as_slice()
+        else {
+            eprintln!("{CALIBRATE_USAGE}");
+            std::process::exit(2);
+        };
+        if merges.is_empty() {
+            eprintln!("{CALIBRATE_USAGE}");
+            std::process::exit(2);
+        }
+        let rounds = rounds.parse::<u64>().unwrap_or_else(|_| {
+            eprintln!("calibration rounds must be a positive integer");
+            std::process::exit(2);
+        });
+        if rounds == 0 {
+            eprintln!("calibration rounds must be a positive integer");
+            std::process::exit(2);
+        }
+        let repo = Path::new(repo.as_str());
+        // One session for the whole run, so the build directories inside the
+        // three worktrees survive from one observation to the next.
+        // `--fresh-worktrees` opts back into a worktree pair-up per
+        // observation, which is what an operator wants when re-checking a
+        // flagged interaction against a pristine tree.
+        let mut session =
+            (!fresh_worktrees).then(|| choir_bridge::queue::DifferentialSession::open(repo));
+        let mut failure = None;
+        'rounds: for round in 1..=rounds {
+            for merge in merges {
+                let result = match session.as_mut() {
+                    Some(session) => choir_bridge::queue::run_differential_in(
+                        session,
+                        merge.as_str(),
+                        Path::new(runner.as_str()),
+                        Path::new(command_file.as_str()),
+                        Path::new(state_dir.as_str()),
+                    ),
+                    None => choir_bridge::queue::run_differential(
+                        repo,
+                        merge.as_str(),
+                        Path::new(runner.as_str()),
+                        Path::new(command_file.as_str()),
+                        Path::new(state_dir.as_str()),
+                    ),
+                };
+                match result {
+                    Ok(outcome) => println!(
+                        "calibration: round {round}: {merge}: {} (observation {}, pending {})",
+                        outcome.verdict.as_str(),
+                        outcome.observation_id,
+                        outcome.pending_interactions
+                    ),
+                    Err(error) => {
+                        failure = Some(format!("calibration failed for {merge}: {error}"));
+                        break 'rounds;
+                    }
+                }
+            }
+        }
+        // Close before exiting: `std::process::exit` skips `Drop`, so exiting
+        // straight from the error arm would leave the worktrees behind.
+        let cleanup = session.map_or(Ok(()), choir_bridge::queue::DifferentialSession::close);
+        if let Some(error) = failure {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        if let Err(error) = cleanup {
+            eprintln!("calibration cleanup failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // `choir-bridge harvest [--fresh-worktrees] [--limit <n>] <repo> <runner> <command-file> <state-dir>`
+    // D27: calibrate without the hand-picked merge list — enumerate every
+    // two-parent merge on the first-parent mainline and replay each one
+    // through the same advisory adapter. Unlike calibrate, a per-merge
+    // failure is reported and the loop continues: a foreign history is
+    // expected to hold revisions that no longer build, and one of them
+    // must not cost the rest of the corpus. Merges already in the state
+    // directory's ledger are skipped (incremental re-runs), and a first
+    // interaction_failure verdict triggers reproduction runs that are
+    // packaged as a specimen under <state-dir>/specimens/.
+    if args.first().map(String::as_str) == Some("harvest") {
+        const HARVEST_USAGE: &str =
+            "usage: choir-bridge harvest [--fresh-worktrees] [--limit <n>] [--skip-inert] [--stop-after-inconclusive <n>] <repo> <runner> <command-file> <state-dir>";
+        let mut fresh_worktrees = false;
+        let mut limit = 0usize;
+        let mut skip_inert = false;
+        let mut stop_after_inconclusive = 0usize;
+        let mut positional: Vec<&String> = Vec::new();
+        let mut rest = args[1..].iter();
+        while let Some(arg) = rest.next() {
+            if arg == "--fresh-worktrees" {
+                fresh_worktrees = true;
+            } else if arg == "--skip-inert" {
+                skip_inert = true;
+            } else if arg == "--limit" || arg == "--stop-after-inconclusive" {
+                let value = rest.next().unwrap_or_else(|| {
+                    eprintln!("{HARVEST_USAGE}");
+                    std::process::exit(2);
+                });
+                let parsed = value.parse().unwrap_or_else(|_| {
+                    eprintln!("{arg} must be a non-negative integer; 0 disables it");
+                    std::process::exit(2);
+                });
+                if arg == "--limit" {
+                    limit = parsed;
+                } else {
+                    stop_after_inconclusive = parsed;
+                }
+            } else {
+                positional.push(arg);
+            }
+        }
+        let [repo, runner, command_file, state_dir] = positional.as_slice() else {
+            eprintln!("{HARVEST_USAGE}");
+            std::process::exit(2);
+        };
+        let repo = Path::new(repo.as_str());
+        let merges = choir_bridge::queue::harvestable_merges(repo, limit).unwrap_or_else(|error| {
+            eprintln!("harvest: {error}");
+            std::process::exit(1);
+        });
+        if merges.is_empty() {
+            println!("harvest: no two-parent merges in first-parent history");
+            return;
+        }
+        let total = merges.len();
+        let state = Path::new(state_dir.as_str());
+        // Incremental: a merge whose oid is already a `revisions.merged`
+        // in this state directory's ledger was harvested by an earlier
+        // run; replay only the rest.
+        let known = choir_bridge::queue::observed_merges(state);
+        let mut session =
+            (!fresh_worktrees).then(|| choir_bridge::queue::DifferentialSession::open(repo));
+        let run_once = |session: &mut Option<choir_bridge::queue::DifferentialSession>,
+                            merge: &str| match session.as_mut() {
+            Some(session) => choir_bridge::queue::run_differential_in(
+                session,
+                merge,
+                Path::new(runner.as_str()),
+                Path::new(command_file.as_str()),
+                state,
+            ),
+            None => choir_bridge::queue::run_differential(
+                repo,
+                merge,
+                Path::new(runner.as_str()),
+                Path::new(command_file.as_str()),
+                state,
+            ),
+        };
+        let mut observed = 0usize;
+        let mut failed = 0usize;
+        let mut skipped = 0usize;
+        let mut inert = Vec::new();
+        let mut consecutive_inconclusive = 0usize;
+        let mut stopped_early = false;
+        // Oldest first: along a first-parent corpus the next merge's parent a
+        // is often the previous observation's merge, so a held session's
+        // parent-a checkout is a no-op (see DifferentialSession).
+        for (index, merge) in merges.iter().rev().enumerate() {
+            let number = index + 1;
+            if known.contains(merge) {
+                skipped += 1;
+                continue;
+            }
+            // A merge whose whole union diff is documentation cannot fail a
+            // build-and-test command its parents pass. Restricting the
+            // population is recorded below, never silent.
+            if skip_inert
+                && choir_bridge::queue::merge_changes_only_inert_paths(repo, merge.as_str())
+                    .unwrap_or(false)
+            {
+                inert.push(merge.clone());
+                println!("harvest: {number}/{total}: {merge}: inert, not observed");
+                continue;
+            }
+            match run_once(&mut session, merge.as_str()) {
+                Ok(outcome) => {
+                    observed += 1;
+                    println!(
+                        "harvest: {number}/{total}: {merge}: {} (observation {}, pending {})",
+                        outcome.verdict.as_str(),
+                        outcome.observation_id,
+                        outcome.pending_interactions
+                    );
+                    // The buildability horizon: a run of consecutive
+                    // inconclusive verdicts at the old end of a history is a
+                    // toolchain that cannot build those trees at all, and each
+                    // one still costs three build attempts. Any conclusive
+                    // verdict resets the run, so this stops a band, never a
+                    // scattered few.
+                    if outcome.verdict
+                        == choir_bridge::queue::DifferentialVerdict::InconclusiveParentFailure
+                    {
+                        consecutive_inconclusive += 1;
+                        if stop_after_inconclusive > 0
+                            && consecutive_inconclusive >= stop_after_inconclusive
+                        {
+                            println!(
+                                "harvest: stopping: {consecutive_inconclusive} consecutive inconclusive verdicts"
+                            );
+                            stopped_early = true;
+                            break;
+                        }
+                    } else {
+                        consecutive_inconclusive = 0;
+                    }
+                    // A first interaction_failure verdict earns reproduction
+                    // runs, each in a FRESH worktree triple regardless of the
+                    // walk's session mode: a held tree carries the previous
+                    // run's untracked build output, so a stale-artifact flake
+                    // would "reproduce" perfectly in it. Independent trees are
+                    // what make a specimen's 6/6 mean semantic conflict rather
+                    // than shared state.
+                    if outcome.verdict == choir_bridge::queue::DifferentialVerdict::InteractionFailure
+                    {
+                        let mut runs = vec![Ok(outcome)];
+                        for _ in 0..choir_bridge::queue::SPECIMEN_REPRODUCTION_RUNS {
+                            runs.push(choir_bridge::queue::run_differential(
+                                repo,
+                                merge.as_str(),
+                                Path::new(runner.as_str()),
+                                Path::new(command_file.as_str()),
+                                state,
+                            ));
+                        }
+                        match choir_bridge::queue::write_specimen(repo, merge, &runs, state) {
+                            Ok(path) => println!(
+                                "harvest: specimen recorded at {} ({} runs)",
+                                path.display(),
+                                runs.len()
+                            ),
+                            Err(error) => {
+                                eprintln!("harvest: specimen for {merge} not recorded: {error}");
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    failed += 1;
+                    eprintln!("harvest: {number}/{total}: {merge}: failed: {error}");
+                }
+            }
+        }
+        let cleanup = session.map_or(Ok(()), choir_bridge::queue::DifferentialSession::close);
+        // Whatever narrowed the population is written down beside the ledger,
+        // because both levers change which merges the denominator counts and
+        // a reader of the corpus must be able to see that without inferring
+        // it from a missing oid.
+        if let Err(error) = choir_bridge::queue::record_population_restrictions(
+            state,
+            &inert,
+            stopped_early.then_some(consecutive_inconclusive),
+        ) {
+            eprintln!("harvest: population restrictions not recorded: {error}");
+        }
+        println!(
+            "harvest: {observed} observed, {failed} failed, {skipped} skipped, {} inert, {total} enumerated",
+            inert.len()
+        );
+        if let Err(error) = cleanup {
+            eprintln!("harvest cleanup failed: {error}");
+            std::process::exit(1);
+        }
+        // Nothing observed out of a non-empty corpus is a failed harvest,
+        // not a quiet one — unless every merge was already in the ledger or
+        // restricted out of the population, which are working outcomes.
+        if observed == 0 && skipped == 0 && inert.is_empty() {
+            std::process::exit(1);
+        }
+        return;
+    }
     // `choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]`
     // Queue-as-bot: speculative-train rounds. Verdict-only by default;
     // --land fast-forwards the default branch on a green train (and
     // auto-reverts if post-land CI goes red); --watch repeats rounds
     // forever, sleeping <secs> between them.
     if args.first().map(String::as_str) == Some("queue") {
-        let mut land = false;
-        let mut watch: Option<u64> = None;
-        let mut rest: Vec<&String> = Vec::new();
-        let mut it = args[1..].iter();
-        while let Some(a) = it.next() {
-            match a.as_str() {
-                "--land" => land = true,
-                "--watch" => {
-                    watch = Some(it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-                        eprintln!("--watch needs an interval in seconds");
-                        std::process::exit(2);
-                    }));
-                }
-                _ => rest.push(a),
-            }
-        }
-        let [app_id, pem, repo, workdir] = match rest.as_slice() {
-            [a, b, c, d] => [*a, *b, *c, *d],
+        let queue_args = parse_queue_args(&args[1..]).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
+        let [app_id, pem, repo, workdir] = match queue_args.positional.as_slice() {
+            [a, b, c, d] => [a, b, c, d],
             _ => {
                 eprintln!(
-                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>]"
+                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>] [--differential-runner <path> --differential-command <path> --differential-state <dir>]"
                 );
                 std::process::exit(2);
             }
         };
         loop {
-            match queue_round(app_id, Path::new(pem), repo, Path::new(workdir), land) {
+            match queue_round(
+                app_id,
+                Path::new(pem),
+                repo,
+                Path::new(workdir),
+                queue_args.land,
+                queue_args.differential.as_ref(),
+            ) {
                 Ok(()) => {}
                 // In watch mode a failed round (network, rate limit) is
                 // logged and retried; one-shot mode exits nonzero.
-                Err(e) if watch.is_some() => eprintln!("queue round failed (will retry): {e}"),
+                Err(e) if queue_args.watch.is_some() => {
+                    eprintln!("queue round failed (will retry): {e}")
+                }
                 Err(e) => {
                     eprintln!("queue round failed: {e}");
                     std::process::exit(1);
                 }
             }
-            match watch {
+            match queue_args.watch {
                 Some(secs) => std::thread::sleep(std::time::Duration::from_secs(secs)),
                 None => break,
             }
@@ -553,5 +989,32 @@ mod tests {
 
         assert_eq!(body["channel"], "operator/bridge");
         assert_eq!(body["workspace"], body["channel"]);
+    }
+
+    #[test]
+    fn differential_queue_mode_requires_all_explicit_paths() {
+        let base = ["1", "key", "owner/repo", "work"].map(str::to_string);
+        let mut complete = base.to_vec();
+        complete.extend(
+            [
+                "--differential-runner",
+                "runner",
+                "--differential-command",
+                "command.json",
+                "--differential-state",
+                "state",
+            ]
+            .map(str::to_string),
+        );
+        let parsed = parse_queue_args(&complete).expect("complete differential options");
+        assert_eq!(parsed.positional, base);
+        assert_eq!(parsed.differential.unwrap().runner, PathBuf::from("runner"));
+
+        let mut incomplete = base.to_vec();
+        incomplete.extend(
+            ["--differential-runner", "runner", "--differential-state", "state"]
+                .map(str::to_string),
+        );
+        assert!(parse_queue_args(&incomplete).is_err());
     }
 }

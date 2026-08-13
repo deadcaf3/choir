@@ -56,6 +56,20 @@ impl ContentHash {
         })
     }
 
+    /// The git object id this envelope carries, or `None` if it is not a
+    /// git hash. The inverse of [`ContentHash::from_git_oid`], for the
+    /// paths that have to hand an oid back to git itself.
+    pub fn git_oid(&self) -> Option<String> {
+        if self.codec != 0x11 && self.codec != 0x12 {
+            return None;
+        }
+        let mut s = String::with_capacity(self.digest.len() * 2);
+        for b in &self.digest {
+            s.push_str(&format!("{b:02x}"));
+        }
+        Some(s)
+    }
+
     /// Lowercase hex of the digest, prefixed with the codec byte
     /// (e.g. `1e-ab12…`); used for filesystem sharding and display.
     pub fn to_hex(&self) -> String {

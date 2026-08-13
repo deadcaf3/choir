@@ -161,7 +161,16 @@ impl HttpClient {
             .map_err(|_| "could not wait for curl".to_string())?;
         drop(body_file);
         if !output.status.success() {
-            return Err("curl could not reach the choir node".to_string());
+            // Name the likeliest fix, not just the failure: on a
+            // tunnelled operator machine the usual cause is an expired
+            // SSH forward, and the operator retyping the same command
+            // at a dead port three times was measured, not imagined.
+            return Err(
+                "curl could not reach the choir node (if the node is remote, \
+                 the tunnel may have expired: run `sh scripts/choirctl status` \
+                 and retry)"
+                    .to_string(),
+            );
         }
         let output = String::from_utf8(output.stdout)
             .map_err(|_| "the choir node returned non-UTF-8 data".to_string())?;

@@ -1,0 +1,398 @@
+/* choir node browser surface — vendored the design system tokens + choir components.
+   =========================================================================
+   PROVENANCE. Everything above the CHOIR COMPONENTS marker is copied
+   verbatim from the design system's `tokens.css`, minus its
+   `@font-face` rules (we ship no font files, and the stacks fall back to
+   system faces by design). The design system's own `tool-chrome.css` sets
+   the precedent for this: a single-file page repeats the token subset it
+   needs, and that copy is kept byte-identical to the source.
+
+   THE RULE THAT COMES WITH IT: no colour, size, radius, shadow or duration
+   is authored below. The component block uses tokens only. If a value is
+   missing, it gets added to the design system first, then re-vendored here.
+   `ui::the_component_sheet_authors_no_raw_values` enforces this in tests.
+   ========================================================================= */
+
+:root{
+  /* ---- type -------------------------------------------------------- */
+  --font-sans:"System Sans","Helvetica Neue",Helvetica,"Segoe UI",system-ui,sans-serif;
+  --font-mono:"System Mono",ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+
+  --fs-100:0.6875rem;  /* 11.7px — micro labels, table eyebrows */
+  --fs-200:0.75rem;    /* 12.8px — kbd, pills, captions */
+  --fs-300:0.8125rem;  /* 13.8px — code, dense UI, sidebar */
+  --fs-400:0.9375rem;  /* 16.0px — UI default */
+  --fs-500:1rem;       /* 17.0px — body copy */
+  --fs-600:1.125rem;   /* 19.1px — lede */
+  --fs-700:1.375rem;   /* 23.4px — h3 */
+  --fs-800:1.75rem;    /* 29.8px — h2 */
+  --fs-900:2.375rem;   /* 40.4px — h1 */
+  --fs-1000:3.25rem;   /* 55.3px — landing display */
+  --fs-1100:4.25rem;   /* 72.3px — hero display, wide only */
+
+  --lh-tight:1.06;
+  --lh-snug:1.24;
+  --lh-normal:1.5;
+  --lh-copy:1.68;   /* roomy: docs body */
+  --lh-code:1.6;
+
+  --fw-regular:400;
+  --fw-medium:500;
+  --fw-bold:700;
+
+  --tr-display:-0.024em;
+  --tr-heading:-0.014em;
+  --tr-body:-0.006em;
+  --tr-mono:0;
+  --tr-caps:0.09em;   /* eyebrows, small-caps labels */
+
+  /* ---- space (4px grid at 17px root) ------------------------------- */
+  --sp-0:0;
+  --sp-1:0.235rem;   /* 4  */
+  --sp-2:0.47rem;    /* 8  */
+  --sp-3:0.705rem;   /* 12 */
+  --sp-4:0.94rem;    /* 16 */
+  --sp-5:1.176rem;   /* 20 */
+  --sp-6:1.41rem;    /* 24 */
+  --sp-8:1.88rem;    /* 32 */
+  --sp-10:2.35rem;   /* 40 */
+  --sp-12:2.82rem;   /* 48 */
+  --sp-16:3.76rem;   /* 64 */
+  --sp-20:4.7rem;    /* 80 */
+  --sp-28:6.58rem;   /* 112 */
+  --sp-40:9.4rem;    /* 160 */
+
+  /* ---- radii ------------------------------------------------------- */
+  --r-xs:2px;
+  --r-sm:4px;
+  --r-md:7px;
+  --r-lg:11px;
+  --r-xl:16px;
+  --r-pill:999px;
+
+  /* ---- borders ----------------------------------------------------- */
+  --bw-hair:1px;
+  --bw-1:1px;
+  --bw-2:2px;
+  --bw-rule:3px;      /* accent rule on section heads / callouts */
+  --border:var(--bw-1) solid var(--line);
+  --border-hair:var(--bw-hair) solid var(--hairline);
+  --border-accent:var(--bw-1) solid var(--accent-line);
+
+  /* ---- motion ------------------------------------------------------ */
+  --dur-1:80ms;    /* state flips: hover, focus */
+  --dur-2:150ms;   /* small transforms, dropdowns */
+  --dur-3:240ms;   /* panels, dialogs */
+  --dur-4:420ms;   /* progress sweeps, page-scale */
+  --ease-out:cubic-bezier(.22,.61,.36,1);
+  --ease-in-out:cubic-bezier(.45,.05,.55,.95);
+  --ease-emphatic:cubic-bezier(.16,.84,.24,1);
+  --ease-linear:linear;
+
+  /* ---- layout ------------------------------------------------------ */
+  --measure:46rem;      /* docs prose column */
+  --article:48rem;      /* legacy alias, same intent */
+  --side:17.5rem;       /* docs sidebar */
+  --toc:14rem;
+  --topbar-h:3.35rem;
+  --page-max:80rem;
+  --tool-header-h:2.9rem; /* twin / flasher / graph chrome */
+
+  /* ---- z ----------------------------------------------------------- */
+  --z-base:0;
+  --z-sticky:10;
+  --z-header:20;
+  --z-dropdown:30;
+  --z-scrim:40;
+  --z-palette:50;
+}
+
+/* =========================================================================
+   DARK — the canonical theme. Ground is a cool near-black with a faint blue
+   cast; accent is "signal cyan", the colour of an impulse-radio trace.
+   ====================================================================== */
+:root,
+:root[data-theme="dark"]{
+  color-scheme:dark;
+
+  --ground:#07090b;          /* page */
+  --surface:#0b0e12;         /* nav, sidebar, footer */
+  --card:#0f1319;            /* cards, code blocks */
+  --raise:#161b22;           /* hover / active fills, inputs */
+  --sunken:#040608;          /* terminal, wells */
+
+  --ink:#c8d1da;             /* body copy        — 12.9:1 on ground */
+  --strong:#f3f7fa;          /* headings         — 18.5:1 */
+  --muted:#8d99a5;           /* secondary        —  6.9:1 */
+  --faint:#7b8792;           /* tertiary, meta   —  5.4:1 (4.7:1 on --raise) */
+  --inverse:#05080a;         /* text on accent fills */
+
+  --line:rgba(200,216,232,.145);
+  --hairline:rgba(200,216,232,.075);
+  --line-strong:rgba(200,216,232,.30);
+
+  --accent:#2fd0e6;          /* fills, rules, active states */
+  --accent-ink:#63e0f0;      /* accent as text/links — 12.8:1 on ground */
+  --accent-hover:#8ceaf6;
+  --accent-tint:rgba(47,208,230,.11);
+  --accent-line:rgba(47,208,230,.42);
+  --accent-glow:0 0 0 1px rgba(47,208,230,.35),0 6px 26px -10px rgba(47,208,230,.5);
+
+  --ok:#41c98a;      --ok-tint:rgba(65,201,138,.12);   --ok-line:rgba(65,201,138,.4);
+  --warn:#e0b341;    --warn-tint:rgba(224,179,65,.12); --warn-line:rgba(224,179,65,.4);
+  --danger:#f2717a;  --danger-tint:rgba(242,113,122,.12); --danger-line:rgba(242,113,122,.4);
+  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+  --focus:#7fe6f5;
+  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 4px var(--focus);
+  --selection:rgba(47,208,230,.28);
+
+  --shadow-1:0 1px 1px rgba(0,0,0,.6);
+  --shadow-2:0 1px 2px rgba(0,0,0,.6),0 10px 24px -14px rgba(0,0,0,.75);
+  --shadow-3:0 2px 4px rgba(0,0,0,.55),0 26px 60px -22px rgba(0,0,0,.85);
+  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.035);
+
+  /* syntax — one hue family plus three signals, so code reads as instrument
+     output rather than confetti. All ≥ 4.5:1 on --card. */
+  --syn-plain:#c8d1da;
+  --syn-comment:#7b8792;
+  --syn-keyword:#7fb8ff;
+  --syn-type:#63e0f0;
+  --syn-func:#a9d6ff;
+  --syn-string:#8fd6a8;
+  --syn-number:#e6c069;
+  --syn-const:#d5a8f0;
+  --syn-macro:#e59a76;
+  --syn-punct:#8d99a5;
+  --syn-added:rgba(65,201,138,.14);
+  --syn-removed:rgba(242,113,122,.14);
+  --syn-gutter:#7b8792;
+}
+
+/* =========================================================================
+   LIGHT — paper-white with the same cool cast; accent darkens to hold AA
+   against white (4.9:1 as text).
+   ====================================================================== */
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){
+    color-scheme:light;
+
+    --ground:#f6f8fa;
+    --surface:#ffffff;
+    --card:#ffffff;
+    --raise:#eef1f5;
+    --sunken:#e7ebf0;
+
+    --ink:#242a31;           /* 13.6:1 on ground */
+    --strong:#0d1116;        /* 17.8:1 */
+    --muted:#525c66;         /*  6.4:1 */
+    --faint:#646e78;         /*  4.9:1 (4.6:1 on --raise) */
+    --inverse:#ffffff;
+
+    --line:rgba(16,26,36,.14);
+    --hairline:rgba(16,26,36,.075);
+    --line-strong:rgba(16,26,36,.28);
+
+    --accent:#0f7c8f;
+    --accent-ink:#0b6675;    /*  6.2:1 on ground */
+    --accent-hover:#084f5c;
+    --accent-tint:rgba(15,124,143,.09);
+    --accent-line:rgba(15,124,143,.32);
+    --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
+
+    --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
+    --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
+    --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
+    --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+    --focus:#0b6675;
+    --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
+    --selection:rgba(15,124,143,.2);
+
+    --shadow-1:0 1px 1px rgba(13,26,38,.06);
+    --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
+    --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
+    --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+
+    --syn-plain:#242a31;
+    --syn-comment:#6d7883;
+    --syn-keyword:#1c4fbd;
+    --syn-type:#0b6675;
+    --syn-func:#2a4a86;
+    --syn-string:#1c6b41;
+    --syn-number:#8a5b06;
+    --syn-const:#6b3a9c;
+    --syn-macro:#9c4a1e;
+    --syn-punct:#525c66;
+    --syn-added:rgba(13,122,77,.1);
+    --syn-removed:rgba(189,47,58,.09);
+    --syn-gutter:#6d7883;
+  }
+}
+
+/* Manual override — duplicated rather than @extend'd because plain CSS has no
+   mixins and the attribute must beat the media query above. */
+:root[data-theme="light"]{
+  color-scheme:light;
+
+  --ground:#f6f8fa;
+  --surface:#ffffff;
+  --card:#ffffff;
+  --raise:#eef1f5;
+  --sunken:#e7ebf0;
+
+  --ink:#242a31;
+  --strong:#0d1116;
+  --muted:#525c66;
+  --faint:#646e78;
+  --inverse:#ffffff;
+
+  --line:rgba(16,26,36,.14);
+  --hairline:rgba(16,26,36,.075);
+  --line-strong:rgba(16,26,36,.28);
+
+  --accent:#0f7c8f;
+  --accent-ink:#0b6675;
+  --accent-hover:#084f5c;
+  --accent-tint:rgba(15,124,143,.09);
+  --accent-line:rgba(15,124,143,.32);
+  --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
+
+  --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
+  --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
+  --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
+  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+  --focus:#0b6675;
+  --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
+  --selection:rgba(15,124,143,.2);
+
+  --shadow-1:0 1px 1px rgba(13,26,38,.06);
+  --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
+  --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
+  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+
+  --syn-plain:#242a31;
+  --syn-comment:#6d7883;
+  --syn-keyword:#1c4fbd;
+  --syn-type:#0b6675;
+  --syn-func:#2a4a86;
+  --syn-string:#1c6b41;
+  --syn-number:#8a5b06;
+  --syn-const:#6b3a9c;
+  --syn-macro:#9c4a1e;
+  --syn-punct:#525c66;
+  --syn-added:rgba(13,122,77,.1);
+  --syn-removed:rgba(189,47,58,.09);
+  --syn-gutter:#6d7883;
+}
+
+/* --- legacy aliases -----------------------------------------------------
+   The v0.3.0 sheet and the documate-owned shell markup reference these
+   names. Keep them so generated HTML keeps rendering during migration;
+   author nothing new against them.
+   ----------------------------------------------------------------------- */
+:root{
+  --sans:var(--font-sans);
+  --mono:var(--font-mono);
+  --serif:var(--font-sans);
+  --tint:var(--accent-tint);
+  --tint-line:var(--accent-line);
+  --shadow:var(--shadow-2);
+  --shadow-lg:var(--shadow-3);
+}
+
+/* --- global reset (token-only) ------------------------------------------ */
+*,*::before,*::after{box-sizing:border-box}
+html{font-size:17px;-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:var(--ground);
+  color:var(--ink);
+  font-family:var(--font-sans);
+  font-size:var(--fs-500);
+  line-height:var(--lh-copy);
+  letter-spacing:var(--tr-body);
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  text-wrap:pretty;
+}
+::selection{background:var(--selection);color:var(--strong)}
+code,kbd,pre,samp,.mono{font-family:var(--font-mono);letter-spacing:var(--tr-mono)}
+a{color:var(--accent-ink);text-decoration-color:var(--accent-line);text-underline-offset:.18em}
+a:hover{color:var(--accent-hover);text-decoration-color:currentColor}
+:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--r-sm)}
+hr{border:0;border-top:var(--border);margin:var(--sp-10) 0}
+img,svg,canvas{max-width:100%}
+
+@media (prefers-reduced-motion:reduce){
+  :root{--dur-1:0ms;--dur-2:0ms;--dur-3:0ms;--dur-4:0ms}
+  *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
+}
+
+/* =========================================================================
+   CHOIR COMPONENTS — tokens only, no raw values below this line.
+   ====================================================================== */
+
+body{background:var(--ground);color:var(--ink);margin:0 auto;
+  padding:var(--sp-10) var(--sp-6) var(--sp-20);max-width:var(--page-max)}
+
+/* skip link — lifted verbatim from the design system's components.css */
+.skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
+  z-index:var(--z-palette);padding:var(--sp-2) var(--sp-4);
+  background:var(--accent);color:var(--inverse);border-radius:var(--r-sm);
+  text-decoration:none;font-weight:var(--fw-medium)}
+.skip:focus{top:var(--sp-3);color:var(--inverse)}
+
+header.top{border-bottom:var(--border);padding-bottom:var(--sp-5);
+  margin-bottom:var(--sp-8)}
+h1{font-size:var(--fs-800);line-height:var(--lh-tight);letter-spacing:var(--tr-display);
+  color:var(--strong);margin:0;font-weight:var(--fw-bold)}
+h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps);
+  color:var(--faint);margin:var(--sp-10) 0 var(--sp-3);font-weight:var(--fw-medium);
+  border-left:var(--bw-rule) solid var(--accent);padding-left:var(--sp-3)}
+.count{text-transform:none;letter-spacing:var(--tr-body);font-weight:var(--fw-regular);
+  color:var(--faint)}
+
+.sub{margin-top:var(--sp-3);display:flex;flex-wrap:wrap;gap:var(--sp-2)}
+.pill{background:var(--card);border:var(--border);border-radius:var(--r-pill);
+  padding:var(--sp-1) var(--sp-3);font-size:var(--fs-200);color:var(--muted);
+  font-family:var(--font-mono)}
+.pill.on{color:var(--accent-ink);border-color:var(--accent-line);
+  background:var(--accent-tint)}
+
+section{margin-bottom:var(--sp-8)}
+table{width:100%;border-collapse:collapse;font-size:var(--fs-300)}
+td,th{text-align:left;padding:var(--sp-2) var(--sp-3);
+  border-bottom:var(--border-hair);vertical-align:top}
+thead th{font-size:var(--fs-100);text-transform:uppercase;
+  letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium)}
+tbody tr:hover{background:var(--raise)}
+tr.group th{background:var(--surface);color:var(--muted);
+  font-family:var(--font-mono);font-size:var(--fs-200);text-transform:none;
+  letter-spacing:var(--tr-mono)}
+tr.open{background:var(--accent-tint)}
+tr.open td{border-left:var(--bw-2) solid var(--accent)}
+
+.mono,.id{font-family:var(--font-mono);font-size:var(--fs-300)}
+.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
+.muted{color:var(--faint)}
+b.tag{font-size:var(--fs-100);font-weight:var(--fw-medium);
+  text-transform:uppercase;letter-spacing:var(--tr-caps);
+  border-radius:var(--r-sm);padding:var(--sp-0) var(--sp-2);
+  border:var(--bw-1) solid transparent}
+b.ok{color:var(--ok);background:var(--ok-tint);border-color:var(--ok-line)}
+b.warn{color:var(--warn);background:var(--warn-tint);border-color:var(--warn-line)}
+b.pending{color:var(--accent-ink);background:var(--accent-tint);
+  border-color:var(--accent-line)}
+b.danger{color:var(--danger);background:var(--danger-tint);
+  border-color:var(--danger-line)}
+.v{padding:var(--sp-0) 0;font-size:var(--fs-200)}
+.empty,.note{color:var(--faint);font-size:var(--fs-200);margin:var(--sp-2) 0}
+.note{border-left:var(--border-accent);padding-left:var(--sp-3)}
+footer{margin-top:var(--sp-12);padding-top:var(--sp-4);border-top:var(--border);
+  color:var(--faint);font-size:var(--fs-200)}
+details{margin-top:var(--sp-3)}
+summary{cursor:pointer;color:var(--muted);font-size:var(--fs-200);
+  padding:var(--sp-2) 0}
+summary:hover{color:var(--accent-ink)}

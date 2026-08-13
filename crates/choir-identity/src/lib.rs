@@ -159,14 +159,30 @@ impl Registry {
         payload: &[u8],
         sig: &Witness,
     ) -> Result<ContentHash, IdentityError> {
+        self.verify_signing_hash(&choir_oplog::signing_hash(channel, payload), sig)
+    }
+
+    /// Same check, for a caller that has already computed the submission's
+    /// [`choir_oplog::signing_hash`] — an admission policy that indexes
+    /// submissions by it, for instance. Hashing the same bytes twice per
+    /// op is measurable on the write path, and the node's allocation
+    /// budget is the test that says so.
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Registry::verify_submission`].
+    pub fn verify_signing_hash(
+        &self,
+        signing: &ContentHash,
+        sig: &Witness,
+    ) -> Result<ContentHash, IdentityError> {
         let key = self
             .keys
             .get(&sig.key_id)
             .ok_or_else(|| IdentityError::UnknownKey(sig.key_id.clone()))?;
         let signature = Signature::from_slice(&sig.signature)
             .map_err(|_| IdentityError::BadSignature)?;
-        let hash = choir_oplog::signing_hash(channel, payload);
-        key.verify(hash.to_hex().as_bytes(), &signature)
+        key.verify(signing.to_hex().as_bytes(), &signature)
             .map_err(|_| IdentityError::BadSignature)?;
         Ok(ContentHash::blake3(&key.to_bytes()))
     }

@@ -17,6 +17,8 @@
 
 pub mod blast;
 pub mod corpus;
+pub mod differential;
+pub mod differential_ledger;
 pub mod envelope;
 
 use choir_merge::{MergeOutcome, Pipeline};

@@ -1,16 +1,26 @@
 //! choir-node daemon entry point.
 //!
 //! Configured usage: `choir-node <repo-root> <port> [--create owner/name.git]...
-//! [--auth-file path] [--keys-file path] [--reviewers-file path]
+//! [--auth-file path] [--acl-file path] [--keys-file path] [--reviewers-file path]
 //! [--require-assignment] [--protected-refs path] [--require-review]
+//! [--require-scope]
+//! [--reviewer-conflict-graph path --reviewer-conflict-distance hops]
 //! [--review-retention count] [--review-lapse-after-secs seconds]
+//! [--newcomer-audit path --newcomer-adjudications path]
+//! [--review-adjudications path]
 //! [--bind addr]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
 //!
 //! Binds 127.0.0.1 by default. `--auth-file` points at a
 //! `user:token`-per-line file (0600; never in-repo) and turns on
-//! mandatory basic auth. `--keys-file` turns on the platform API; each
+//! mandatory basic auth. It authenticates and nothing more: without
+//! `--acl-file` every credential reaches every repository, which the
+//! node says out loud at startup. `--acl-file` (D29) adds the
+//! per-repository decision — `<user> <repo|*|@node> <level>` per line,
+//! `read` < `write`, `auditor` on `@node`, fail closed, reloaded on
+//! mtime — and requires `--auth-file`, since it grades authenticated
+//! users. `--keys-file` turns on the platform API; each
 //! line is `<64-char hex>` or `<name> <64-char hex>`, where the optional
 //! name binds that key to one review channel (a key with no name is
 //! unconstrained, as every key was before the column existed). The op log
@@ -21,9 +31,18 @@
 //! their own reviewers, and `--protected-refs` (one
 //! `<repo>:<refname>` pattern per line, trailing `*` allowed) refuses
 //! them only for reviews landing on a matching ref.
+//! `--reviewer-conflict-graph` carries undirected `<operator> <operator>`
+//! edges and, with the explicitly chosen `--reviewer-conflict-distance`,
+//! excludes nearby operators from future draws. The graph is re-read per
+//! draw and an unusable graph leaves the review unassigned.
 //! `--require-review` additionally refuses to move a protected ref to
 //! any commit without approval weight from two distinct operators, and
 //! refuses to delete one at all — including for this daemon's own pushes.
+//! `--require-scope` admits only ops whose author signed a scope naming
+//! this node and a log head still in the window, which is what makes a
+//! captured signature unreplayable — on this node after the state it
+//! expected returns, and on any other node at all. Off by default because
+//! it refuses clients that predate scopes, not because unscoped is safe.
 //! `--review-retention` keeps at most that many live reviews when
 //! completed reviews can be archived. Incomplete reviews are never killed by default;
 //! `--review-lapse-after-secs` is the explicit operator policy that lets
@@ -75,7 +94,16 @@ fn main() -> std::io::Result<()> {
     let bind = flag_value("--bind")
         .cloned()
         .unwrap_or_else(|| "127.0.0.1".into());
-    for flag in ["--review-retention", "--review-lapse-after-secs"] {
+    for flag in [
+        "--review-retention",
+        "--review-lapse-after-secs",
+        "--reviewer-conflict-graph",
+        "--reviewer-conflict-distance",
+        "--newcomer-audit",
+        "--newcomer-adjudications",
+        "--review-adjudications",
+        "--acl-file",
+    ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -106,6 +134,44 @@ fn main() -> std::io::Result<()> {
                 })
         })
         .transpose()?;
+    let reviewer_conflict_graph = flag_value("--reviewer-conflict-graph");
+    let reviewer_conflict_distance = flag_value("--reviewer-conflict-distance")
+        .map(|value| {
+            value.parse::<usize>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--reviewer-conflict-distance needs a non-negative integer",
+                )
+            })
+        })
+        .transpose()?;
+    let reviewer_conflict_policy = match (reviewer_conflict_graph, reviewer_conflict_distance) {
+        (Some(path), Some(distance)) => Some((std::path::PathBuf::from(path), distance)),
+        (None, None) => None,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--reviewer-conflict-graph and --reviewer-conflict-distance must be given together",
+            ));
+        }
+    };
+    let newcomer_policy = match (
+        flag_value("--newcomer-audit"),
+        flag_value("--newcomer-adjudications"),
+    ) {
+        (Some(audit), Some(adjudications)) => Some((
+            std::path::PathBuf::from(audit),
+            std::path::PathBuf::from(adjudications),
+        )),
+        (None, None) => None,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--newcomer-audit and --newcomer-adjudications must be given together",
+            ));
+        }
+    };
+    let review_adjudications = flag_value("--review-adjudications").map(std::path::PathBuf::from);
     if review_lapse_after.is_some() && review_retention_count.is_none() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -128,6 +194,14 @@ fn main() -> std::io::Result<()> {
     };
     let tls_on = tls.is_some();
 
+    if newcomer_policy.is_some() && !rest.iter().any(|arg| arg == "--keys-file") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "newcomer instrumentation needs --keys-file",
+        ));
+    }
+
+    let auth_enabled = auth.is_some();
     let mut node = Node::bind_full(&root, &bind, port, auth, tls)?;
     if let Some(i) = rest.iter().position(|a| a == "--keys-file") {
         let path = rest.get(i + 1).ok_or_else(|| {
@@ -165,13 +239,67 @@ fn main() -> std::io::Result<()> {
             }
             key
         };
+        // The node's identity is pinned to the log it writes into. The
+        // branch above mints a fresh key whenever the key file is absent,
+        // which is correct on a first start and catastrophic on a
+        // migration: copy `ops.jsonl` without the key and the daemon comes
+        // up happily, signing every subsequent git-derived op as a
+        // different actor than the entries already in the log. Nothing
+        // downstream notices, because both identities are individually
+        // valid — the log simply changes author mid-stream.
+        //
+        // So the fingerprint (the actor id, a hash of the public key —
+        // public, never the secret) is recorded beside the log on first
+        // start and compared on every start after. A mismatch is refused
+        // rather than warned about: a node that has already lost its
+        // identity should not be allowed to append under a new one.
+        // Borrowed from radicle-node's fingerprint.rs, which exists for
+        // the same reason. See internal/heartwood-inspiration.md.
+        let fingerprint_path = state_dir.join("node.fingerprint");
+        let fingerprint = node_key.actor_id().to_hex();
+        match std::fs::read_to_string(&fingerprint_path) {
+            Ok(pinned) if pinned.trim() != fingerprint => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "node identity changed: {} pins {}, but the loaded key is {}. \
+                         The op log was almost certainly moved without its key. \
+                         Restore the original key, or if the change is intended, \
+                         delete {} and accept that the log changes author here.",
+                        fingerprint_path.display(),
+                        pinned.trim(),
+                        fingerprint,
+                        fingerprint_path.display(),
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::write(&fingerprint_path, format!("{fingerprint}\n"))?;
+            }
+            Err(e) => return Err(e),
+        }
+
         let log_path = state_dir.join("ops.jsonl");
         let log = choir_oplog::FileLog::open(&log_path)
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        // Hot-reload, all three halves: appending a key line takes effect
-        // on the next failed signature check for submissions, and on the
-        // next request for push-certificate verification and for channel
-        // name bindings (a tightening, so it must not wait for a failure).
+        // An unclean stop is a fact the operator has to be told, even
+        // though recovery already succeeded: these bytes were never
+        // acknowledged to a submitter, so nothing downstream is missing,
+        // but a power cut that leaves no trace reads as a clean restart.
+        if log.torn_tail_bytes() > 0 {
+            eprintln!(
+                "choir: recovered {} from an unclean stop: {} byte(s) of a partly written \
+                 trailing op were discarded. They were never acknowledged to a submitter, \
+                 so no accepted operation was lost.",
+                log_path.display(),
+                log.torn_tail_bytes(),
+            );
+        }
+        // Hot-reload, all three halves: appending or removing a key line
+        // takes effect before the next submission signature check, and on
+        // the next request for push-certificate verification and channel
+        // name bindings.
         node.watch_keys_file(path.into());
         // Same file the sequencer appends to: readers that fall behind
         // the in-memory /api/log window resync from it.
@@ -186,7 +314,26 @@ fn main() -> std::io::Result<()> {
             None => Platform::start_reloading(registry, Box::new(log), node_key, Some(path.into())),
         }
         .map_err(std::io::Error::other)?
-        .with_log_path(log_path);
+        .with_log_path(log_path)
+        // On by default, not behind a flag: the point of measuring the
+        // latency gate in production is that nobody has to remember to
+        // turn it on before the node is slow. Separate from ops.jsonl
+        // because a breach is an observation about this node, not part of
+        // the ordered history anyone else replays.
+        .with_lag_log(state_dir.join("lag.jsonl"));
+        if let Some((audit, adjudications)) = newcomer_policy {
+            let incumbents = signers.iter().map(|signer| signer.actor_id.clone()).collect();
+            platform = platform
+                .with_newcomer_audit(audit, adjudications, incumbents)
+                .map_err(std::io::Error::other)?;
+            eprintln!("newcomer harm audit enabled");
+        }
+        if let Some(path) = review_adjudications {
+            platform = platform
+                .with_review_adjudications(path)
+                .map_err(std::io::Error::other)?;
+            eprintln!("review adjudications enabled (T2 stays indeterminate)");
+        }
         if let Some(count) = review_retention_count {
             match review_lapse_after {
                 Some(age) => eprintln!(
@@ -201,9 +348,20 @@ fn main() -> std::io::Result<()> {
         if let Some(pool) = flag_value("--reviewers-file") {
             platform = platform.with_reviewer_pool(pool.into());
             eprintln!("reviewer assignment enabled ({pool})");
+            if let Some((graph, distance)) = reviewer_conflict_policy {
+                platform = platform.with_reviewer_conflict_graph(graph, distance);
+                eprintln!("reviewer conflict graph enabled (distance {distance})");
+            }
             if rest.iter().any(|a| a == "--require-assignment") {
                 platform = platform.with_required_assignment();
                 eprintln!("reviewer assignment required (self-named reviewers refused)");
+            }
+            if rest.iter().any(|a| a == "--require-scope") {
+                platform = platform.with_required_scope();
+                eprintln!(
+                    "signed op scopes required (a signature is admissible on this log \
+                     once, and on no other node)"
+                );
             }
             if let Some(refs) = flag_value("--protected-refs") {
                 platform = platform.with_protected_refs(refs.into());
@@ -226,13 +384,14 @@ fn main() -> std::io::Result<()> {
             }
         } else if rest.iter().any(|a| a == "--require-assignment")
             || flag_value("--protected-refs").is_some()
+            || reviewer_conflict_policy.is_some()
         {
             // Without a pool nothing can ever be assigned, so every
             // review would stall unassigned. Refuse the combination
             // rather than serve a review system that cannot finish.
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "--require-assignment and --protected-refs need --reviewers-file",
+                "review assignment policy needs --reviewers-file",
             ));
         }
         node.enable_platform(platform);
@@ -242,6 +401,28 @@ fn main() -> std::io::Result<()> {
             std::io::ErrorKind::InvalidInput,
             "--review-retention needs --keys-file",
         ));
+    }
+    // D29. Authorization is keyed on the authenticated username, so an
+    // ACL without authentication would grade everybody as `anon` and
+    // grant them whatever `anon` holds. Refusing the combination is the
+    // difference between a fail-closed table and a decorative one.
+    match flag_value("--acl-file") {
+        Some(path) if auth_enabled => {
+            node.watch_acl_file(path.into())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        }
+        Some(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--acl-file needs --auth-file: authorization is per authenticated user",
+            ))
+        }
+        // Said out loud rather than assumed. Every operator running
+        // without an ACL should know that one credential reaches
+        // everything, especially before issuing a second one.
+        None => eprintln!(
+            "acl: no --acl-file, so every authenticated actor reaches every repository"
+        ),
     }
     let mut create_next = false;
     for a in rest {
@@ -255,6 +436,25 @@ fn main() -> std::io::Result<()> {
         } else if a == "--create" {
             create_next = true;
         }
+    }
+    // First line of every start, so the log says which build produced
+    // everything below it.
+    eprintln!("choir-node {}", choir_node::build_line());
+    // Before the first request, so nothing races the repair. Silent when
+    // the log and the repos already agree, which is every ordinary start.
+    let repair = node.reconcile_refs();
+    for name in &repair.applied {
+        eprintln!("choir: reconciled {name} — git was behind the log and has been moved to it");
+    }
+    for name in &repair.retracted {
+        eprintln!(
+            "choir: retracted {name} — the log named a commit this repo does not have, so the \
+             log now agrees with git"
+        );
+    }
+    for note in &repair.unreconciled {
+        eprintln!("choir: UNRECONCILED {note} — the log and this repo disagree and only an \
+             operator can say which is right");
     }
     eprintln!(
         "choir-node serving {} on {}://{}:{}",

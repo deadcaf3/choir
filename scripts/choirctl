@@ -14,28 +14,223 @@ PORT=${CHOIR_PORT:-8417}
 auth_user() { head -1 "$STATE/auth" | cut -d: -f1; }
 auth_pass() { head -1 "$STATE/auth" | cut -d: -f2-; }
 
+# The operator-side CLI, built by `choirctl install`. The review and
+# verdict passthroughs refuse rather than guess when it is missing: a
+# wrong path found via PATH could be a stale binary signing real ops.
+choir_bin() {
+  local bin="$HERE/../target/release/choir"
+  [ -x "$bin" ] || { echo "choirctl: no CLI at $bin — build it: cargo build --release -p choir-cli" >&2; exit 1; }
+  echo "$bin"
+}
+
+# After the D20 host move the canonical node lives on the mirror VM and
+# every 127.0.0.1:$PORT below reaches it through an SSH -L forward. The
+# marker is what says which world this machine is in; the scripts that
+# only make sense in one of them check it and refuse in the other.
+remote_node() { [ -f "$STATE/node-remote" ]; }
+
+# Once the node serves TLS publicly, ~/.choir-public-url holds the base
+# (e.g. https://<domain>:<port>) and every HTTP leg goes straight to it
+# — the cert verifies, the hairpin from the node host to its own public
+# name works, and the tunnel stops being load-bearing for HTTP. The
+# file is untracked on purpose: hostnames stay out of the repo. Without
+# it, everything reaches the node as plaintext over the tunnel exactly
+# as before the flip.
+api_base() {
+  if [ -f "$HOME/.choir-public-url" ]; then
+    cat "$HOME/.choir-public-url"
+  else
+    echo "http://127.0.0.1:$PORT"
+  fi
+}
+
+# Idempotent: -O check asks the existing master, and only a missing one
+# opens a new forward. ControlPersist outlives the command so the next
+# one is instant, same reasoning as the mirror scripts' socket.
+tunnel_up() {
+  local ip ctl key
+  # Public TLS makes the HTTP forward unnecessary; ssh legs (node_ssh,
+  # pulls, mirrors) hold their own connections and never needed it.
+  [ -f "$HOME/.choir-public-url" ] && return 0
+  ip=$(cat "$HOME/.choir-mirror-ip")
+  key=$HOME/.ssh/choir_bench_ed25519
+  ctl=$HOME/.ssh/cm-choir-tunnel.sock
+  if ! ssh -o ControlPath="$ctl" -O check "choir@$ip" 2>/dev/null; then
+    ssh -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
+        -o ControlMaster=auto -o ControlPath="$ctl" -o ControlPersist=600 \
+        -f -N -L "$PORT:127.0.0.1:$PORT" "choir@$ip"
+  fi
+}
+
+# One ssh for the remote-node cases below, same options as the tunnel.
+node_ssh() {
+  local ip
+  ip=$(cat "$HOME/.choir-mirror-ip")
+  ssh -i "$HOME/.ssh/choir_bench_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o ConnectTimeout=10 -o ControlMaster=auto \
+      -o ControlPath="$HOME/.ssh/cm-choir-mirror.sock" -o ControlPersist=600 \
+      "choir@$ip" "$@"
+}
+
+# The follower is fed on-box from the node's own bare repos, so it can
+# never hold a commit the canonical node has not sequenced (D21). Every
+# repo in the node host's ~/.choir/repos.list is pushed, not just the
+# canonical one: after the design-tokens import the node was the only
+# holder of that repo's git objects, and a follower that mirrors one
+# repo reads like a follower that mirrors all of them. A repo whose
+# bare has no `forgejo` remote is named on every run rather than
+# silently skipped — unconfigured means "no second copy yet", and that
+# should stay annoying until an operator configures it on the node
+# host. Exit is nonzero only when a configured push fails.
+follower_feed() {
+  node_ssh '
+    [ -f "$HOME/.choir/repos.list" ] || { echo "follower: no repos.list on the node host" >&2; exit 1; }
+    failed=
+    while IFS= read -r repo; do
+      case $repo in ""|"#"*) continue ;; esac
+      bare=$HOME/.choir/repos/$repo
+      if ! git --git-dir "$bare" remote get-url forgejo >/dev/null 2>&1; then
+        echo "follower: $repo has NO forgejo remote — its objects have no second copy yet" >&2
+        continue
+      fi
+      if git --git-dir "$bare" push -q forgejo "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"; then
+        echo "follower updated: $repo"
+      else
+        echo "follower: push FAILED for $repo" >&2
+        failed=1
+      fi
+    done < "$HOME/.choir/repos.list"
+    [ -z "$failed" ]
+  '
+}
+
+# The mirror leg runs detached, so its result has to be written down and
+# then actually read somewhere an operator looks. A receipt nobody reads
+# is the same as no receipt: before this, a mirror push could fail and
+# the only evidence was that no error scrolled past during a sync.
+RECEIPT=$STATE/mirror.receipt
+
+# OK | FAILED | RUNNING | NONE. The lock, not the receipt, distinguishes
+# "still going" from "died halfway" — a run killed mid-flight leaves a
+# truncated receipt that is indistinguishable from a slow one otherwise.
+mirror_outcome() {
+  if [ ! -f "$RECEIPT" ]; then echo NONE; return; fi
+  if [ -d "$STATE/mirror.lock" ]; then echo RUNNING; return; fi
+  if tail -1 "$RECEIPT" | grep -q '^mirror updated$'; then echo OK; else echo FAILED; fi
+}
+
+mirror_line() {
+  case "$(mirror_outcome)" in
+    NONE)    echo "mirror: no receipt yet" ;;
+    RUNNING) echo "mirror: still running (started $(date -r "$(awk 'NR==1{print $2}' "$RECEIPT")" '+%H:%M:%S' 2>/dev/null))" ;;
+    OK)      echo "mirror: last run OK — $(grep '^mirror:' "$RECEIPT" | tail -1 | sed 's/^mirror: //')" ;;
+    FAILED)  echo "mirror: LAST RUN FAILED — $(tail -1 "$RECEIPT")" ;;
+  esac
+}
+
 case "${1:-}" in
 
 install)
   # Build, mint secrets, load the supervised LaunchAgent. Idempotent.
+  if remote_node; then
+    echo "the node lives on the VM now (~/.choir/node-remote); install there:" >&2
+    echo "  ssh in, then:" >&2
+    echo "    git -C ~/choir-build fetch ~/.choir/repos/choir/choir.git main && git -C ~/choir-build merge --ff-only FETCH_HEAD" >&2
+    # CHOIR_GIT_HEAD is the stamp's sound path (build.rs source 1); the
+    # git fallback happens to be right in a clean checkout, but the env
+    # var is the one cargo is guaranteed to rebuild on.
+    echo "    CHOIR_GIT_HEAD=\$(git -C ~/choir-build rev-parse HEAD) cargo build --release --manifest-path ~/choir-build/Cargo.toml -p choir-node -p choir-cli" >&2
+    echo "    sh ~/choir-build/scripts/flip/install_node_linux.sh $PORT <repo> ~/bin ~/choir-build/target/release" >&2
+    exit 1
+  fi
   sh "$HERE/flip/install_node.sh" "$PORT" "${2:-choir/choir.git}"
   ;;
 
 status)
-  if launchctl print "gui/$(id -u)/$LABEL" > /dev/null 2>&1; then
+  if remote_node; then
+    tunnel_up
+    echo "agent:  remote ($(node_ssh 'systemctl --user is-active choir-node.service') on the node host, via tunnel)"
+  elif launchctl print "gui/$(id -u)/$LABEL" > /dev/null 2>&1; then
     echo "agent:  loaded ($LABEL)"
   else
     echo "agent:  not loaded — run: sh scripts/choirctl install"
     exit 1
   fi
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/view" || true)
+  # Which binary is actually serving, not merely whether something is.
+  # `launchctl kickstart -k` restarts the job from launchd's cached job
+  # definition, so a plist whose ProgramArguments changed can lint clean,
+  # restart cleanly, and still run the old binary. An API-shaped check
+  # cannot catch that when both binaries have the feature you are testing
+  # for; only the path can. Reloading properly is bootout then bootstrap.
+  if remote_node; then
+    echo "binary: $(node_ssh 'ps -eo args | grep "[c]hoir-node" | head -1' | awk '{print $1}') (on the node host)"
+  else
+    echo "binary: $(ps -eo args | grep "[c]hoir-node" | head -1 | awk '{print $1}')"
+  fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$(api_base)/api/view" || true)
   echo "auth:   $code on an unauthenticated /api/view (401 = auth is on)"
-  echo "view:   $(curl -s -u "$(auth_user):$(auth_pass)" "http://127.0.0.1:$PORT/api/view")"
+  view=$(curl -s -u "$(auth_user):$(auth_pass)" "$(api_base)/api/view")
+  # The path above says which file is serving. This says what that file
+  # was built from, which is the question "did my rebuild reach the
+  # running process" actually asks. A stamp of `unknown` means the binary
+  # was built without one, not that the commit is unknowable.
+  built=$(printf '%s' "$view" | python3 -c 'import json,sys; b=json.load(sys.stdin).get("build",{}); print(b.get("commit","unknown"), b.get("source","?"), "dirty" if b.get("dirty") else "clean")' 2>/dev/null || echo "unknown ? ?")
+  head_now=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
+  build_commit=${built%% *}
+  build_tail=${built#* }
+  echo "build:  $build_commit (stamp ${build_tail%% *}, tree ${built##* })"
+  if [ "$build_commit" = unknown ]; then
+    echo "build:  UNSTAMPED — rebuild with sh scripts/choirctl install to make this checkable"
+  elif [ "$build_commit" != "$head_now" ]; then
+    echo "build:  STALE — serving $(printf '%.12s' "$build_commit"), checkout is $(printf '%.12s' "$head_now")"
+  fi
+  # Is the sequencer meeting the Phase-0 gate on real traffic, not in the
+  # test suite. Percentiles are microseconds.
+  printf '%s' "$view" | python3 -c '
+import json, sys
+lag = json.load(sys.stdin).get("sequencer_lag")
+if not lag:
+    print("lag:    not reported by this node")
+    sys.exit()
+ops = lag["observed_ops"]
+if not ops:
+    print("lag:    no ops measured since start (nothing to say yet)")
+    sys.exit()
+d, k = lag["durable"], lag["decision"]
+print("lag:    %d ops, durable p50 %.1f ms p99 %.1f ms max %.1f ms; decision p99 %.1f ms; gate %.0f ms"
+      % (ops, d["p50_us"]/1000, d["p99_us"]/1000, d["max_us"]/1000, k["p99_us"]/1000, lag["gate_us"]/1000))
+if d["breaches"]:
+    print("lag:    %d BREACHES over the gate — see ~/.choir/repos/.choir/lag.jsonl" % d["breaches"])
+if lag["log_write_failures"]:
+    print("lag:    lag log unwritable (%s)" % lag["log_error"])
+' 2>/dev/null || echo "lag:    unreadable"
+  echo "view:   $view"
+  if remote_node; then
+    # The backup relation is inverted: this machine holds the pull.
+    if [ -f "$HOME/choir-oplog/ops.jsonl" ]; then
+      echo "backup: $(wc -l < "$HOME/choir-oplog/ops.jsonl" | tr -d ' ') ops pulled, last $(date -r "$HOME/choir-oplog/ops.jsonl" '+%F %H:%M')"
+    else
+      echo "backup: NEVER PULLED — run: sh scripts/choirctl pull-backup"
+    fi
+  else
+    mirror_line
+    # Outcome is not currency: a run can succeed and still leave the mirror
+    # a commit behind if it was started before the last commit landed.
+    if [ -f "$RECEIPT" ]; then
+      mirrored=$(awk 'NR==1{print $3}' "$RECEIPT")
+      head=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
+      [ "$mirrored" = "$head" ] || echo "mirror: BEHIND — mirrored $mirrored, HEAD is $head"
+    fi
+  fi
   ;;
 
 stop)
   # Unloads for this boot only: the plist stays in LaunchAgents, so
   # launchd starts it again at next login. Use uninstall to end it.
+  if remote_node; then
+    echo "the node lives on the VM now; stop it there: systemctl --user stop choir-node" >&2
+    exit 1
+  fi
   launchctl bootout "gui/$(id -u)/$LABEL"
   echo "stopped $LABEL — but it returns at next login"
   echo "to end it for good: sh scripts/choirctl uninstall"
@@ -44,6 +239,10 @@ stop)
 uninstall)
   # Stop it and remove the plist, so it does not come back. Data is
   # deliberately kept: $STATE holds the keys, the repos, and the op log.
+  if remote_node; then
+    echo "the node lives on the VM now; nothing to uninstall here" >&2
+    exit 1
+  fi
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
   echo "uninstalled $LABEL (agent unloaded, plist removed)"
@@ -53,29 +252,133 @@ uninstall)
 
 push)
   # Local repo -> the choir node, as the canonical remote (--all + --tags).
+  remote_node && tunnel_up
   sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
   ;;
 
 mirror)
   # Repo -> the private Forgejo follower on the mirror VM.
+  if remote_node; then
+    follower_feed
+    exit 0
+  fi
   sh "$HERE/push_mirror.sh"
   ;;
 
+review)
+  # First seat of a landing round: open a review naming the exact oid a
+  # landing will move a protected ref to. Tunnel-aware, because the raw
+  # CLI command at a dead forward burned three retries in one afternoon
+  # — the command was right every time, the port was not listening.
+  #   choirctl review <id> <oid> [repo:ref]
+  [ $# -ge 3 ] || { echo "usage: choirctl review <id> <oid> [repo:ref]" >&2; exit 2; }
+  remote_node && tunnel_up
+  "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+    review "$(api_base)" "$STATE/agent.key" \
+    "${CHOIR_REVIEW_CHANNEL:-op/codex}" "$2" "$3" \
+    --ref "${4:-choir/choir.git:refs/heads/main}"
+  ;;
+
+verdict)
+  # A reviewer seat of the round. The reviewer key stays operator-held
+  # and operator-invoked; this only removes the boilerplate around it,
+  # not the second pair of hands D24 actually wants.
+  #   choirctl verdict <reviewer> <id> <approve|request-changes> [note]
+  [ $# -ge 4 ] || { echo "usage: choirctl verdict <reviewer> <id> <approve|request-changes> [note]" >&2; exit 2; }
+  remote_node && tunnel_up
+  # No array for the optional note: this script is documented to run as
+  # `sh scripts/choirctl`, and macOS sh is bash 3.2, where expanding an
+  # empty array under `set -u` dies with `note[@]: unbound variable` —
+  # which killed both verdict seats of a real landing round.
+  if [ $# -ge 5 ]; then
+    "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+      verdict "$(api_base)" "$STATE/review-$2.key" "$2/reviewer" \
+      "$3" "$4" "$5"
+  else
+    "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+      verdict "$(api_base)" "$STATE/review-$2.key" "$2/reviewer" \
+      "$3" "$4"
+  fi
+  ;;
+
+abandon)
+  # Operator retention: settle a stale, incomplete review as lapsed and
+  # unapproved. The node key signs it and the node key never leaves the
+  # node host, so in remote mode the CLI runs there, on-box.
+  #   choirctl abandon <id>
+  [ $# -ge 2 ] || { echo "usage: choirctl abandon <id>" >&2; exit 2; }
+  if remote_node; then
+    node_ssh "\$HOME/bin/choir --auth-file \$HOME/.choir/auth --auth-user choir abandon $(api_base) \$HOME/.choir/repos/.choir/node.key '$2'"
+    exit 0
+  fi
+  "$(choir_bin)" --auth-file "$STATE/auth" --auth-user "$(auth_user)" \
+    abandon "$(api_base)" "$STATE/repos/.choir/node.key" "$2"
+  ;;
+
 sync)
+  if remote_node; then
+    # Same D21 order, new topology: canonical first (through the
+    # tunnel), follower second (on-box, node repo -> Forgejo), then the
+    # offsite copy of the log — which is now this machine, pulling.
+    tunnel_up
+    sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
+    # A follower failure is reported but does not block the backup pull:
+    # the log copy matters more than the ref mirror, and the failure is
+    # already loud on this run's own output.
+    follower_feed || echo "sync: follower leg failed — continuing to the backup pull" >&2
+    sh "$HERE/pull_backup.sh"
+    exit 0
+  fi
   # The post-flip order, in one command: canonical first, follower
   # second. `set -e` stops here if the canonical push fails, so the
   # mirror can never get ahead of the node (D21 single-canonical).
   sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
-  sh "$HERE/push_mirror.sh"
+
+  # Whatever the previous run did, before starting another one over it.
+  mirror_line
+
+  # The follower runs detached. Ordering is preserved for free: this line
+  # is only reached after the canonical push returned, and `set -e` means
+  # a failed canonical push never gets here, so the mirror still cannot
+  # get ahead of the node (D21 single-canonical). What backgrounding
+  # changes is only who waits, and nothing waits on a follower.
+  printf 'started %s %s\n' "$(date +%s)" "$(git -C "$HERE/.." rev-parse HEAD)" > "$RECEIPT"
+  nohup sh "$HERE/push_mirror.sh" >> "$RECEIPT" 2>&1 &
+  echo "mirror: running in background -> $RECEIPT (see: sh scripts/choirctl status)"
+  ;;
+
+verify-backup)
+  # Pull the offsite copy back and check it. The mirror leg reports that
+  # it wrote a backup; this is the only thing that reports the backup is
+  # restorable.
+  sh "$HERE/verify_backup.sh" "${2:-}"
+  ;;
+
+pull-backup)
+  # Node host -> this machine: the offsite copy of the live log, after
+  # the host move. Self-verifying (checksum, prefix, seq contiguity).
+  sh "$HERE/pull_backup.sh" "${2:-}"
+  ;;
+
+schedule-backup)
+  # Load a LaunchAgent that runs pull-backup on an interval (default
+  # hourly), so the offsite copy stops depending on manual syncs.
+  sh "$HERE/flip/install_pull_timer.sh" "${2:-}"
   ;;
 
 logs)
+  if remote_node; then
+    node_ssh "tail -n ${2:-30} '.choir/node.log'"
+    exit 0
+  fi
   tail -n "${2:-30}" "$STATE/node.log"
   ;;
 
 url)
-  # Clone/push URL with credentials, for pasting into git or curl.
-  echo "http://$(auth_user):$(auth_pass)@127.0.0.1:$PORT/${2:-choir/choir.git}"
+  # Clone/push URL with credentials, for pasting into git or curl. In
+  # remote mode 127.0.0.1 is the tunnel, so the URL is unchanged.
+  remote_node && tunnel_up
+  echo "$(api_base)/${2:-choir/choir.git}" | sed "s|://|://$(auth_user):$(auth_pass)@|"
   ;;
 
 *)
@@ -92,6 +395,13 @@ sh scripts/choirctl <command>
   push [repo]      push this repo to the node only (--all and --tags)
   mirror           push to the private Forgejo follower only
   url [repo]       clone/push URL including credentials
+
+  review <id> <oid> [repo:ref]                   open a landing review
+  verdict <reviewer> <id> <verdict> [note]       cast a reviewer verdict
+  abandon <id>     settle a stale incomplete review as lapsed-unapproved
+  verify-backup    pull the offsite copy back and check all five ways
+  pull-backup      fetch the log copy from the node host (remote mode)
+  schedule-backup [secs]   pull-backup on a launchd interval (default 3600)
 
 Port is $PORT (override with CHOIR_PORT). Runbook: scripts/flip/RUNBOOK.md
 USAGE

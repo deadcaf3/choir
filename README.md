@@ -82,6 +82,27 @@ sh scripts/choirctl logs
 
 Override port with `CHOIR_PORT`. Full flip procedure: `scripts/flip/RUNBOOK.md`.
 
+### Option A2 — serving beyond loopback (TLS)
+
+A non-loopback bind requires TLS (invariant 9), so going public is a certificate step, not a flag you can just add. On a Linux node host:
+
+```bash
+sh scripts/flip/setup_tls.sh <your.domain> [port]   # certbot + renewal hook + marker
+sh scripts/flip/install_node_linux.sh <port> '' ~/bin   # re-render the unit
+```
+
+`setup_tls.sh` writes `~/.choir/tls.enabled` (cert path, then key path). That marker is what flips the rendered unit to `--bind 0.0.0.0 --tls-cert … --tls-key …`; delete it and reinstall to go back to loopback. Keep inbound **80** open permanently — renewals rebind it — and your serving port open too.
+
+Auth stays mandatory when public: anonymous requests get **401** on both the API and git, and a browser opening the URL gets a login prompt. That is the expected state, not a misconfiguration. Give each additional person their own line in `~/.choir/auth`:
+
+```bash
+printf 'alice:%s\n' "$(openssl rand -hex 32)" >> ~/.choir/auth   # hand the token over out of band
+```
+
+That token grants read and write on **every** repository the node serves (see the warning under file formats). Until per-repo authorization exists, only hand one to someone you would give full node access.
+
+Operator scripts follow the public name automatically if you put it in an untracked `~/.choir-public-url`; without that file they use the loopback tunnel. Details and the operator checklist: `scripts/flip/RUNBOOK.md`.
+
 ### Option B — any Unix (foreground)
 
 ```bash
@@ -99,18 +120,50 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 
 | File | Format |
 |---|---|
-| `--auth-file` | `user:token` per line |
+| `--auth-file` | `user:token` per line — authentication only; pair with `--acl-file` |
+| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `write`, and `auditor` on `@node` |
 | `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
+| `--reviewer-conflict-graph` | undirected `operator operator` edges; pair with an explicit maximum hop distance |
 
-Hot-reload: trusted keys, channel bindings, push-certificate signers, and reviewers take effect on the next request.
+Hot-reload: trusted keys, channel bindings, push-certificate signers, reviewers, and ACL grants take effect on the next request.
+
+> **Without `--acl-file`, every credential reaches every repository.** The auth file authenticates and nothing else; the node prints a line saying so at startup. A second `user:token` line can then clone every repo, push to any unprotected ref, and provision workspaces anywhere. Protected refs and the review requirement still hold, so it cannot land on a gated `main` unreviewed. **Do not issue a second credential without an ACL.**
+
+### Per-repository authorization (D29)
+
+`--acl-file` gates each repository per user. Three whitespace-separated columns, `#` comments, and the same append-a-line discipline as the keys file:
+
+```
+# <user>   <repo|*|@node>   <level>
+alice      owner/demo       write
+bob        owner/demo       read
+bob        owner/notes      write
+carol      *                read
+dave       @node            auditor
+```
+
+`read` clones and fetches; `write` adds push, workspace provisioning, and submitting ops that touch that repository. There is no `admin`: no endpoint performs a repository-scoped administrative action, since repo creation and ref protection are operator-side flags.
+
+The operator's own credential usually wants two lines, since neither covers the other:
+
+```
+myself     *      write
+myself     @node  write
+```
+
+`*` covers every repository and never covers `@node`. `@node` is the node itself: `auditor` reads `/api/log` and `/api/ref-agreement`, which are gated rather than filtered because the log is a hash chain and the attestation covers the complete ref state. `@node write` is needed for ops that name no repository, such as key bindings.
+
+Fail closed: with the flag set, anything not granted is refused. A repository you cannot read answers `404` rather than `403`, so a denial never confirms that it exists. The flag requires `--auth-file` — an ACL over anonymous requests would grade everyone the same. A malformed file refuses to start; a malformed *edit* keeps the previous table and complains, so a typo cannot silently revoke access.
+
+> **Phase A.** `/api/view` and the browser page are not yet filtered: any authenticated credential can still read every repository's ref names, oids, workspaces and reviews. Repository *contents* are gated; the inventory is not.
 
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
@@ -125,6 +178,14 @@ choir --auth-file ~/.choir/auth --auth-user choir <command> ...
 Exit codes: **0** accepted, **1** rejected (JSON body printed — see `ERRORS.md`), **2** usage.
 
 The signed-operation API is the primary agent path: it carries actor identity and batches many operations behind one durability barrier. `git push` remains the compatibility and bulk-transfer path.
+
+### Browser surface
+
+Open the node's base URL (`/`) in a browser and it serves one read-only page: refs grouped by repository, the review queue with approval weights and verdicts, the latest ref-state attestation, workspaces, and sequencer health against the 100 ms gate. It is behind the same auth wall as everything else, so a browser prompts for a `--auth-file` user and token — anonymous readers get `401`, on the page exactly as on the API.
+
+It is deliberately not an app. The page is server-rendered from the same `/api/view` payload the API serves (so it cannot drift from the API), cached by view sequence, and revalidated with an `ETag` — a repeat visit on unchanged state returns `304` with no body, so refreshing or polling it costs the node nothing. No JavaScript, no build step, no external fetch, so it works offline and inside networks with no route to the internet.
+
+Writes are not available from the browser and are not planned without their own decision: every write still goes through the signed-operation API.
 
 ### Git compatibility path
 
@@ -149,14 +210,17 @@ Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again — **ne
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
 | `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
-| `GET /api/view` | The materialized view: changes, workspace heads, refs, reviews, provenance |
+| `GET /api/view` | The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate |
+| `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
 | `POST /api/workspace` | Provision a CoW workspace; optional exact base/change binding makes retries idempotent |
 | `POST /api/workspace/archive` | Recoverably archive a change-bound workspace and remove it from the active view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
+| `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
+| `POST /api/git-abort` | Internal: retracts a refused push's already-accepted refs |
 
 #### The `choir` CLI
 
@@ -172,6 +236,11 @@ commands:
   choir submit <api> <key-file> <channel> '<op-json>'
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+  choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
+  choir abandon <api> <node-key-file> <id>
+  choir bind <api> <node-key-file> <operator> <key-hex> [channel]
+  choir revoke <api> <node-key-file> <key-hex> '<reason>'
+  choir appeal <api> <attempt-id>
   choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
   choir reviews <api> <reviewer>
   choir view <api>
@@ -230,11 +299,16 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 - Channel names: `operator/agent`. Same-operator agents cannot review each other.
 - Bind keys when registering: `choir key ~/.choir/agent.key myop/agent >> ~/.choir/keys`.
 - Protected landing with `--require-review` needs approval weight **2** (two distinct operators). See `scripts/flip/RUNBOOK.md` to enable gates on the dogfood node.
+- Operators can invalidate a bad approval with `choir slash`; it lowers future approval weight and marks re-review required, but never rewrites an already-landed ref.
+- An optional reviewer conflict graph excludes operators within the configured hop distance from the requester. It is re-read per draw and fails closed by leaving the review unassigned.
+- `choir view` reports T3 concentration using exact counts and integer shares. Active branches mean last attributable mover, and protected updates mean admitted ref updates under the current policy; unknown and ambiguous attribution stay visible and make the overall status `indeterminate` rather than a pass.
+- `choir view` also reports `view_growth`: record counts and compact JSON bytes for workspaces, refs, reviews, and provenance. `total_authoritative_view` covers exactly those four sections and excludes runtime projections. This measures complete-view growth; it does not prune or expire anything.
+- `choir view` reports `newcomer_harm` when the operator enables the two 0600 audit files. A rejected signed-API newcomer can run `choir appeal <api> <attempt-id>`; the appeal requests separate operator adjudication and never grants privilege. Thresholds stay unset until the first real adoption-gate measurement.
 - Prefer `POST /api/submit-batch` for multiple ops (one durability barrier).
 
 Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).
 
-Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), and exercise one commit-status write (`post-status`). Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
+Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), exercise one commit-status write (`post-status`), replay existing merge commits for offline D23 calibration (`calibrate`), and mine a mirrored foreign history for real semantic-conflict specimens (`harvest`, D27 — offline, no forge access, landing policy untouched). Queue mode can optionally run the advisory three-worktree D23 detector documented in `internal/design.md`; it never changes the landing condition. Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
 
 ### Agent templates
 
@@ -255,8 +329,10 @@ source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key
 | `choir-actor` ignored test fails / download broken | rivetkit 2.3.10 auto-download | Workarounds in `PHASE0.md`. Run: `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored` |
 | Node refuses bind address | Non-loopback without TLS | Add `--tls-cert` / `--tls-key`, or stay on `127.0.0.1` / SSH tunnel |
 | `/api/view` → 401 | Auth enabled (expected) | Pass `-u user:token` or `--auth-file` / `--auth-user` |
+| Browser asks for a username/password | Auth is mandatory on every endpoint, including public TLS binds | Enter a user and token from `--auth-file`. Nothing is served anonymously by design |
 | Push not in `/api/view` | Repo created without `--create` | Recreate via node/`choirctl` so `pre-receive` exists |
 | `unknown_key` | Key not in `--keys-file` | `choir key … [channel] >> keys-file` (hot-reloaded) |
+| `bad_signature` | Signature does not cover the bytes sent; key **is** trusted | Re-sign the exact `(channel, payload)`. Registering a key does not help. Unexpected → someone replayed a signature |
 | `stale_head` | CAS lost the race | Re-read `/api/view`, rebase on `actual`, resubmit |
 | `assignment_error` / empty reviewers | Empty `--reviewers-file` | Add at least two `operator/…` channels for meaningful review |
 | `review_required` | Protected ref, insufficient weight | Node-drawn review + two operators approve, then push |

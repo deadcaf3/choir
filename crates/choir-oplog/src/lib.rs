@@ -113,7 +113,7 @@ pub enum LogError {
     Corrupt(String),
 }
 
-/// The log-backend seam (D16). Conformance suite: `tests/conformance.rs`,
+/// The log-backend seam (D16). Conformance suite: `tests/it/conformance.rs`,
 /// run against every implementation.
 ///
 /// Implementations must reject appends whose `parent` is not the current
@@ -244,16 +244,43 @@ pub struct FileLog {
     /// Bounded by the sequencer's batch size, which syncs once per batch.
     pending: std::collections::VecDeque<OpEntry>,
     head: Option<ContentHash>,
+    /// Bytes of unterminated tail discarded by [`FileLog::open`]; see
+    /// [`FileLog::torn_tail_bytes`]. Zero for a cleanly closed log.
+    torn_tail_bytes: u64,
 }
 
 impl FileLog {
     /// Opens (creating if absent) the log file at `path` and replays it to
     /// rebuild the in-memory index and head.
     ///
+    /// # Torn tails
+    ///
+    /// A power cut can leave the file ending in a record that was only
+    /// partly written, or — under delayed allocation — in a run of NUL
+    /// bytes. Any final record with no terminating newline is treated as
+    /// such a torn write and truncated away, whether or not it happens to
+    /// decode: a complete record whose newline never landed would
+    /// otherwise be concatenated with the next append into one line that
+    /// never parses again.
+    ///
+    /// Discarding it cannot lose an acknowledged op. The sequencer
+    /// acknowledges only after [`OpLog::sync`] returns, and that call
+    /// returns only once every byte before it is on the platter, so
+    /// anything in an unterminated tail was never acknowledged to anyone.
+    /// The truncation is reported by [`FileLog::torn_tail_bytes`] rather
+    /// than performed silently.
+    ///
+    /// A decode failure in a *newline-terminated* record is not a torn
+    /// write — it is damage to a record that was once written whole — and
+    /// still fails as [`LogError::Corrupt`]. That includes a NUL-filled
+    /// gap followed by further records: refusing to start is the right
+    /// answer there, because the alternative is silently dropping ops from
+    /// the middle of the log.
+    ///
     /// # Errors
     ///
     /// Returns [`LogError::Io`] on filesystem failure and
-    /// [`LogError::Corrupt`] when an existing line fails to decode.
+    /// [`LogError::Corrupt`] when a terminated line fails to decode.
     pub fn open(path: &std::path::Path) -> Result<Self, LogError> {
         use std::io::{BufRead, BufReader};
         let file = std::fs::OpenOptions::new()
@@ -268,6 +295,7 @@ impl FileLog {
         let mut offsets = Vec::new();
         let mut head = None;
         let mut write_pos = 0u64;
+        let mut torn_tail_bytes = 0u64;
         let mut reader = BufReader::new(&file);
         let mut line = Vec::new();
         loop {
@@ -276,7 +304,13 @@ impl FileLog {
             if n == 0 {
                 break;
             }
-            let body = line.strip_suffix(b"\n").unwrap_or(&line);
+            let Some(body) = line.strip_suffix(b"\n") else {
+                // No newline means `read_until` hit EOF mid-record: a torn
+                // tail. `write_pos` is already the offset of its first
+                // byte, which is where the file has to end.
+                torn_tail_bytes = n as u64;
+                break;
+            };
             let entry: OpEntry =
                 serde_json::from_slice(body).map_err(|e| LogError::Corrupt(e.to_string()))?;
             head = Some(entry.content_hash());
@@ -284,6 +318,18 @@ impl FileLog {
             write_pos += n as u64;
         }
         drop(reader);
+        if torn_tail_bytes > 0 {
+            // Cut it off before the writer can append behind it. `sync_all`
+            // rather than `sync_data` because it is the file's *length*
+            // that has to survive here.
+            file.set_len(write_pos).map_err(LogError::Io)?;
+            file.sync_all().map_err(LogError::Io)?;
+        }
+        // The file's own bytes are synced by `sync`, but a fresh file (or a
+        // just-truncated one) is only reachable through its directory
+        // entry, and that is a separate write. Once per open, so the cost
+        // does not appear on the submit path.
+        sync_parent_dir(path)?;
         let read_handle = std::fs::File::open(path).map_err(LogError::Io)?;
         Ok(Self {
             file: std::io::BufWriter::new(file),
@@ -292,8 +338,33 @@ impl FileLog {
             write_pos,
             pending: std::collections::VecDeque::new(),
             head,
+            torn_tail_bytes,
         })
     }
+
+    /// Bytes of partly written tail that [`FileLog::open`] truncated away,
+    /// or 0 if the log ended on a record boundary.
+    ///
+    /// Non-zero means this process started after an unclean stop. The
+    /// discarded bytes were never acknowledged (see [`FileLog::open`]), so
+    /// this is a fact worth reporting, not a fault — but a caller that
+    /// never reports it turns a crash into a silent one.
+    pub fn torn_tail_bytes(&self) -> u64 {
+        self.torn_tail_bytes
+    }
+}
+
+/// Fsyncs the directory holding `path`, so the file's name survives power
+/// loss and not just its contents.
+fn sync_parent_dir(path: &std::path::Path) -> Result<(), LogError> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        // A bare filename lives in the process's working directory.
+        _ => std::path::Path::new("."),
+    };
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(LogError::Io)
 }
 
 impl Drop for FileLog {

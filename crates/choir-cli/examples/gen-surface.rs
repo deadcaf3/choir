@@ -5,7 +5,7 @@
 //! ```
 //!
 //! The table in `surface.rs` is the source; this only puts it on disk.
-//! `tests/surface.rs` re-renders and compares, so a stale artifact fails
+//! `tests/it/surface.rs` re-renders and compares, so a stale artifact fails
 //! the suite rather than being noticed by a reader months later.
 
 fn main() {

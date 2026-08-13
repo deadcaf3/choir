@@ -150,7 +150,26 @@ them tells you that another reader was shown the same chain. A node
 that forks its history and serves two self-consistent versions passes
 all three.
 
-That is what the `witnesses` field is reserved for (D16, Phase 2):
+One piece of the answer exists already, and it is worth using even
+though it does not close the gap. The node emits a **ref-state
+attestation** after every accepted ref update: a signed op carrying the
+complete namespaced ref map, the seq it describes, and a pointer to the
+previous attestation. `/api/view` projects the latest one as
+`snapshot: {id, at_seq, prev_snapshot}`. Because the pointer lives
+inside the signed payload, the attestations form their own chain that
+survives being copied out of the log, and a stale one cannot be served
+forever as current.
+
+What that buys a client: something small and comparable. Two readers
+can exchange `snapshot.id` at a given `at_seq` and find out whether
+they were shown the same ref state, without either of them shipping a
+log. A mirror or backup can carry the detached attestation beside its
+bundles and check the bundles against something other than themselves.
+It is still the node's own signature — a forking node signs both forks
+happily — so this is a comparison primitive, not proof.
+
+Closing it for real is what the `witnesses` field is reserved for
+(D16, Phase 2):
 independent cosignatures over entry hashes, so two readers can compare
 what they were told. Until then, treat a single node's ordering as
 trusted-by-configuration, and say so out loud in anything you build on

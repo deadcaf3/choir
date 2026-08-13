@@ -12,22 +12,27 @@
 //!   legacy v1 alias for `channel`. Payload bytes are a serialized
 //!   [`ViewOp`]. Admitted ops answer `{"seq", "hash"}`; rejections are
 //!   HTTP 400 with the policy's reason.
-//! - `GET /api/view` — the current materialized view as
-//!   `{"workspaces": {name: id}, "refs": {name: id}}`.
+//! - `GET /api/view` — the current materialized state plus runtime-only
+//!   projections for D24 T3 concentration and complete-view growth. They
+//!   derive from the same coherent snapshot and never enter persisted ops
+//!   or hash input.
 //!
 //! Hex (not JSON-embedding) carries the payload because the signature
 //! covers the exact bytes the author serialized; re-encoding through a
 //! JSON tree could legally reorder/respace them and break verification.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
+use choir_sequencer::lag::LagMeter;
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
 use choir_view::{
-    reviewer_operator, ArchiveAuthorization, ChangeState, CreateAuthorization, OpKind, View, ViewOp,
+    reviewer_operator, ArchiveAuthorization, ChangeState, CreateAuthorization, OpKind, ReviewStatus,
+    Verdict, View, ViewOp,
 };
 
 use crate::reject::{Code, Rejection};
@@ -203,6 +208,13 @@ pub struct LogWindow {
     /// it here would re-serialize every entry on the write path — the
     /// allocation budget caught exactly that.
     by_signing: std::collections::HashMap<ContentHash, u64>,
+    /// Entry hash → seq, for the heads a scoped op may name.
+    ///
+    /// Same bound, same reason, and it costs no hashing at all: the
+    /// sequencer hands `push` the hash it already computed, and eviction
+    /// reads the dropped entry's hash out of the next entry's `parent`
+    /// rather than re-deriving it.
+    by_hash: std::collections::HashMap<ContentHash, u64>,
 }
 
 /// Entries retained in memory for `/api/log`; older reads are served from
@@ -217,6 +229,1547 @@ const LOG_PAGE: usize = 500;
 /// return fewer; under-assignment stays visible and cannot lower this
 /// landing threshold (D24 layer 5).
 const REQUIRED_APPROVAL_WEIGHT: usize = 2;
+
+/// D24 T3 fires above these bounds. Shares use exact integer arithmetic;
+/// basis points are presentation only and never drive the decision.
+const T3_MAX_AGENT_KEYS_PER_OPERATOR: usize = 100;
+const T3_MAX_SHARE_PERCENT: usize = 1;
+
+/// D24 T2's declared bounds, recorded so the projection can state exactly
+/// which question it is *not* answering. Nothing is ever compared against
+/// them: choir persists no validity classification, so the numerator of a
+/// slop rate does not exist. See [`new_actor_review_outcomes_json`].
+const T2_MAX_INVALID_OR_SLOP_PERCENT: usize = 20;
+const T2_MIN_VALID_PERCENT: usize = 5;
+
+/// Version of the append-only newcomer audit and operator adjudication rows.
+/// These files are not part of the signed op log, but they are persisted
+/// measurement inputs and therefore carry the same explicit-version discipline.
+const NEWCOMER_AUDIT_FORMAT_VERSION: u64 = 1;
+
+#[derive(Debug, Clone)]
+struct NewcomerAttempt {
+    started_at_unix_ms: u64,
+    first_outcome: &'static str,
+    first_rejection_code: Option<String>,
+    first_accepted_at_unix_ms: Option<u64>,
+}
+
+/// Sparse, durable T4 evidence. Incumbents are the keys present when the
+/// operator enables the audit; only keys first admitted after that boundary are
+/// newcomers. At most two outcome records are written per actor (first attempt,
+/// then first acceptance after a rejection), so instrumentation cost scales with
+/// newcomers rather than submissions.
+struct NewcomerAudit {
+    file: std::fs::File,
+    adjudications_path: std::path::PathBuf,
+    activated: bool,
+    incumbents: BTreeSet<String>,
+    attempts: BTreeMap<u64, NewcomerAttempt>,
+    by_actor: BTreeMap<String, u64>,
+    appeals: BTreeSet<u64>,
+    next_attempt_id: u64,
+    available: bool,
+}
+
+impl NewcomerAudit {
+    fn open(
+        audit_path: &std::path::Path,
+        adjudications_path: std::path::PathBuf,
+        incumbents: BTreeSet<String>,
+    ) -> Result<Self, String> {
+        if let Some(parent) = audit_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create newcomer audit directory: {e}"))?;
+        }
+        let existing = match std::fs::read_to_string(audit_path) {
+            Ok(existing) => existing,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("read newcomer audit: {error}")),
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(audit_path)
+            .map_err(|e| format!("open newcomer audit: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(audit_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("chmod newcomer audit: {e}"))?;
+        }
+        let mut audit = Self {
+            file,
+            adjudications_path,
+            activated: false,
+            incumbents: BTreeSet::new(),
+            attempts: BTreeMap::new(),
+            by_actor: BTreeMap::new(),
+            appeals: BTreeSet::new(),
+            next_attempt_id: 0,
+            available: true,
+        };
+        for (index, line) in existing.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| format!("newcomer audit line {}: {e}", index + 1))?;
+            audit.replay(&value).map_err(|e| {
+                format!("newcomer audit line {}: {e}", index + 1)
+            })?;
+        }
+        if audit.activated {
+            return Ok(audit);
+        }
+        if existing.lines().any(|line| !line.trim().is_empty()) {
+            return Err("newcomer audit has rows before its activation boundary".to_string());
+        }
+        let record = serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "kind": "activation",
+            "observed_at_unix_ms": unix_ms(),
+            "incumbent_actor_keys": incumbents,
+        });
+        audit.append(&record)?;
+        audit.replay(&record)?;
+        Ok(audit)
+    }
+
+    fn replay(&mut self, value: &serde_json::Value) -> Result<(), String> {
+        if value["format_version"].as_u64() != Some(NEWCOMER_AUDIT_FORMAT_VERSION) {
+            return Err("unsupported format_version".to_string());
+        }
+        let kind = value["kind"].as_str().ok_or("missing kind")?;
+        match kind {
+            "activation" => {
+                if self.activated || !self.attempts.is_empty() || !self.appeals.is_empty() {
+                    return Err("duplicate or late activation boundary".to_string());
+                }
+                value["observed_at_unix_ms"]
+                    .as_u64()
+                    .ok_or("activation needs observed_at_unix_ms")?;
+                let incumbent_actor_keys = value["incumbent_actor_keys"]
+                    .as_array()
+                    .ok_or("activation needs incumbent_actor_keys")?;
+                for actor_key in incumbent_actor_keys {
+                    let actor_key = actor_key
+                        .as_str()
+                        .filter(|actor_key| !actor_key.is_empty())
+                        .ok_or("incumbent actor keys must be non-empty strings")?;
+                    if !self.incumbents.insert(actor_key.to_string()) {
+                        return Err("activation has a duplicate incumbent actor key".to_string());
+                    }
+                }
+                self.activated = true;
+            }
+            "first_attempt" => {
+                if !self.activated {
+                    return Err("first_attempt precedes activation".to_string());
+                }
+                let attempt_id = value["attempt_id"]
+                    .as_u64()
+                    .ok_or("missing attempt_id")?;
+                if self.attempts.contains_key(&attempt_id) {
+                    return Err("duplicate first_attempt".to_string());
+                }
+                let actor_key = value["actor_key"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or("missing actor_key")?
+                    .to_string();
+                if self.incumbents.contains(&actor_key) {
+                    return Err("first_attempt belongs to an incumbent actor key".to_string());
+                }
+                if self.by_actor.contains_key(&actor_key) {
+                    return Err("actor has more than one first_attempt".to_string());
+                }
+                let started_at_unix_ms = value["started_at_unix_ms"]
+                    .as_u64()
+                    .ok_or("missing started_at_unix_ms")?;
+                let first_outcome = match value["outcome"].as_str() {
+                    Some("accepted") => "accepted",
+                    Some("rejected") => "rejected",
+                    _ => return Err("outcome must be accepted or rejected".to_string()),
+                };
+                let first_rejection_code = value["rejection_code"]
+                    .as_str()
+                    .map(str::to_string);
+                if (first_outcome == "rejected") != first_rejection_code.is_some() {
+                    return Err("rejected first attempts need one rejection_code".to_string());
+                }
+                let first_accepted_at_unix_ms = (first_outcome == "accepted")
+                    .then_some(
+                        value["completed_at_unix_ms"]
+                            .as_u64()
+                            .ok_or("accepted attempt needs completed_at_unix_ms")?,
+                    );
+                self.by_actor.insert(actor_key, attempt_id);
+                self.attempts.insert(
+                    attempt_id,
+                    NewcomerAttempt {
+                        started_at_unix_ms,
+                        first_outcome,
+                        first_rejection_code,
+                        first_accepted_at_unix_ms,
+                    },
+                );
+                self.next_attempt_id = self.next_attempt_id.max(attempt_id.saturating_add(1));
+            }
+            "first_accept" => {
+                let attempt_id = value["attempt_id"]
+                    .as_u64()
+                    .ok_or("missing attempt_id")?;
+                let completed = value["completed_at_unix_ms"]
+                    .as_u64()
+                    .ok_or("first_accept needs completed_at_unix_ms")?;
+                let attempt = self
+                    .attempts
+                    .get_mut(&attempt_id)
+                    .ok_or("first_accept precedes first_attempt")?;
+                if attempt.first_outcome != "rejected" {
+                    return Err("first_accept follows an accepted first attempt".to_string());
+                }
+                if attempt.first_accepted_at_unix_ms.replace(completed).is_some() {
+                    return Err("duplicate first_accept".to_string());
+                }
+            }
+            "appeal" => {
+                let attempt_id = value["attempt_id"]
+                    .as_u64()
+                    .ok_or("missing attempt_id")?;
+                if !self.attempts.contains_key(&attempt_id) {
+                    return Err("appeal references an unknown attempt".to_string());
+                }
+                if self.attempts[&attempt_id].first_outcome != "rejected" {
+                    return Err("appeal references an accepted first attempt".to_string());
+                }
+                if !self.appeals.insert(attempt_id) {
+                    return Err("duplicate appeal".to_string());
+                }
+            }
+            _ => return Err("unknown kind".to_string()),
+        }
+        Ok(())
+    }
+
+    fn append(&mut self, value: &serde_json::Value) -> Result<(), String> {
+        serde_json::to_writer(&mut self.file, value)
+            .map_err(|e| format!("write newcomer audit: {e}"))?;
+        self.file
+            .write_all(b"\n")
+            .and_then(|_| self.file.sync_data())
+            .map_err(|e| format!("sync newcomer audit: {e}"))
+    }
+
+    fn observe(
+        &mut self,
+        actor_key: &str,
+        started_at_unix_ms: u64,
+        accepted: bool,
+        rejection_code: Option<&str>,
+    ) -> Result<Option<u64>, String> {
+        // `actor_key` is the *claimed* key id, straight off an
+        // unverified signature, so nothing may be recorded under it
+        // until a signature check has vouched for it. Both signature
+        // failures have to be listed: this read `== Some("unknown_key")`
+        // while that code covered every verification failure, and
+        // splitting `bad_signature` out of it would otherwise have let
+        // anyone who knows a trusted key id append audit rows in that
+        // actor's name by sending deliberate garbage.
+        if self.incumbents.contains(actor_key)
+            || matches!(rejection_code, Some("unknown_key" | "bad_signature"))
+        {
+            return Ok(None);
+        }
+        let completed_at_unix_ms = unix_ms();
+        if let Some(attempt_id) = self.by_actor.get(actor_key).copied() {
+            let needs_accept = accepted
+                && self.attempts[&attempt_id]
+                    .first_accepted_at_unix_ms
+                    .is_none();
+            if needs_accept {
+                let record = serde_json::json!({
+                    "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+                    "kind": "first_accept",
+                    "attempt_id": attempt_id,
+                    "completed_at_unix_ms": completed_at_unix_ms,
+                });
+                if let Err(error) = self.append(&record) {
+                    self.available = false;
+                    return Err(error);
+                }
+                self.attempts
+                    .get_mut(&attempt_id)
+                    .expect("attempt exists")
+                    .first_accepted_at_unix_ms = Some(completed_at_unix_ms);
+            }
+            return Ok(Some(attempt_id));
+        }
+
+        let attempt_id = self.next_attempt_id;
+        let outcome = if accepted { "accepted" } else { "rejected" };
+        let mut record = serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "kind": "first_attempt",
+            "attempt_id": attempt_id,
+            "actor_key": actor_key,
+            "started_at_unix_ms": started_at_unix_ms,
+            "completed_at_unix_ms": completed_at_unix_ms,
+            "outcome": outcome,
+        });
+        if let Some(code) = rejection_code {
+            record["rejection_code"] = serde_json::json!(code);
+        }
+        if let Err(error) = self.append(&record) {
+            self.available = false;
+            return Err(error);
+        }
+        self.replay(&record)?;
+        Ok(Some(attempt_id))
+    }
+
+    fn appeal(&mut self, attempt_id: u64) -> Result<(), String> {
+        let Some(attempt) = self.attempts.get(&attempt_id) else {
+            return Err("no such newcomer attempt".to_string());
+        };
+        if attempt.first_outcome != "rejected" {
+            return Err("only a rejected first attempt can be appealed".to_string());
+        }
+        if self.appeals.contains(&attempt_id) {
+            return Ok(());
+        }
+        let record = serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "kind": "appeal",
+            "attempt_id": attempt_id,
+            "observed_at_unix_ms": unix_ms(),
+        });
+        if let Err(error) = self.append(&record) {
+            self.available = false;
+            return Err(error);
+        }
+        self.replay(&record)
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn median_u64(values: &mut [u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    if values.len() % 2 == 1 {
+        Some(values[middle])
+    } else {
+        Some(((u128::from(values[middle - 1]) + u128::from(values[middle])) / 2) as u64)
+    }
+}
+
+fn read_newcomer_adjudications(
+    path: &std::path::Path,
+    attempts: &BTreeMap<u64, NewcomerAttempt>,
+) -> Result<(BTreeMap<u64, bool>, String), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read adjudications: {e}"))?;
+    let snapshot_hash = ContentHash::blake3(&bytes).to_hex();
+    let text = String::from_utf8(bytes).map_err(|_| "adjudications are not UTF-8".to_string())?;
+    let mut rows = BTreeMap::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("adjudication line {}: {e}", index + 1))?;
+        if value["format_version"].as_u64() != Some(NEWCOMER_AUDIT_FORMAT_VERSION) {
+            return Err(format!(
+                "adjudication line {} has unsupported format_version",
+                index + 1
+            ));
+        }
+        let attempt_id = value["attempt_id"]
+            .as_u64()
+            .ok_or_else(|| format!("adjudication line {} needs attempt_id", index + 1))?;
+        let legitimate = value["legitimate"]
+            .as_bool()
+            .ok_or_else(|| format!("adjudication line {} needs legitimate", index + 1))?;
+        if !attempts.contains_key(&attempt_id) {
+            return Err(format!(
+                "adjudication line {} references an unknown attempt",
+                index + 1
+            ));
+        }
+        if rows.insert(attempt_id, legitimate).is_some() {
+            return Err(format!(
+                "adjudication line {} duplicates an attempt",
+                index + 1
+            ));
+        }
+    }
+    Ok((rows, snapshot_hash))
+}
+
+fn newcomer_harm_json(audit: Option<&Arc<Mutex<NewcomerAudit>>>) -> serde_json::Value {
+    let Some(audit) = audit else {
+        return serde_json::json!({
+            "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+            "configured": false,
+            "available": false,
+            "tripwire_status": "indeterminate",
+            "evaluation_complete": false,
+        });
+    };
+    let audit = audit.lock().expect("newcomer audit lock");
+    let adjudications = read_newcomer_adjudications(&audit.adjudications_path, &audit.attempts);
+    let (rows, snapshot_hash, adjudications_available, adjudications_error) = match adjudications {
+        Ok((rows, hash)) => (rows, Some(hash), true, None),
+        Err(error) => (BTreeMap::new(), None, false, Some(error)),
+    };
+
+    let mut first_accepted = 0usize;
+    let mut first_rejected = 0usize;
+    let mut rejection_codes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut legitimate = 0usize;
+    let mut legitimate_first_rejected = 0usize;
+    let mut legitimate_pending_acceptance = 0usize;
+    let mut accepted_latencies = Vec::new();
+    for (attempt_id, attempt) in &audit.attempts {
+        if attempt.first_outcome == "accepted" {
+            first_accepted += 1;
+        } else {
+            first_rejected += 1;
+            *rejection_codes
+                .entry(
+                    attempt
+                        .first_rejection_code
+                        .clone()
+                        .expect("rejected attempts carry a code"),
+                )
+                .or_default() += 1;
+        }
+        if rows.get(attempt_id) != Some(&true) {
+            continue;
+        }
+        legitimate += 1;
+        legitimate_first_rejected += usize::from(attempt.first_outcome == "rejected");
+        match attempt.first_accepted_at_unix_ms {
+            Some(accepted) => accepted_latencies.push(
+                accepted.saturating_sub(attempt.started_at_unix_ms),
+            ),
+            None => legitimate_pending_acceptance += 1,
+        }
+    }
+    let median_time_to_first_accepted_ms = median_u64(&mut accepted_latencies);
+    let adjudicated = rows.len();
+    let total = audit.attempts.len();
+    let unresolved_appeals = audit
+        .appeals
+        .iter()
+        .filter(|attempt_id| !rows.contains_key(attempt_id))
+        .count();
+    let false_reject_rate_basis_points = (legitimate != 0).then(|| {
+        share_basis_points(legitimate_first_rejected, legitimate)
+    });
+    let measurement_complete = audit.available
+        && adjudications_available
+        && legitimate != 0
+        && adjudicated == total
+        && legitimate_pending_acceptance == 0;
+    serde_json::json!({
+        "format_version": NEWCOMER_AUDIT_FORMAT_VERSION,
+        "configured": true,
+        "available": audit.available && adjudications_available,
+        "scope": "post-activation cryptographically verified signed-API actor keys",
+        "thresholds": {
+            "false_reject_rate_basis_points": null,
+            "median_time_to_first_accepted_ms": null,
+            "status": "unset_pending_first_measurement",
+        },
+        "audit": {
+            "available": audit.available,
+            "incumbent_actor_keys_excluded": audit.incumbents.len(),
+            "first_attempts": total,
+            "first_attempts_accepted": first_accepted,
+            "first_attempts_rejected": first_rejected,
+            "first_rejections_by_code": rejection_codes,
+        },
+        "appeals": {
+            "submitted": audit.appeals.len(),
+            "unresolved": unresolved_appeals,
+        },
+        "adjudications": {
+            "available": adjudications_available,
+            "snapshot_hash": snapshot_hash,
+            "error": adjudications_error,
+            "attempts": adjudicated,
+            "coverage_basis_points": share_basis_points(adjudicated, total),
+            "legitimate_attempts": legitimate,
+        },
+        "measurements": {
+            "legitimate_first_attempts_rejected": legitimate_first_rejected,
+            "false_reject_rate_basis_points": false_reject_rate_basis_points,
+            "accepted_legitimate_newcomers": accepted_latencies.len(),
+            "legitimate_newcomers_pending_acceptance": legitimate_pending_acceptance,
+            "median_time_to_first_accepted_ms": median_time_to_first_accepted_ms,
+        },
+        "measurement_complete": measurement_complete,
+        "tripwire_status": "indeterminate",
+        "evaluation_complete": false,
+        "semantics": {
+            "false_reject": "an operator-adjudicated legitimate actor whose first verified signed-API attempt was rejected",
+            "time_to_first_accepted": "elapsed wall time from that actor's first verified signed-API attempt to its first accepted signed operation",
+            "excluded": "unverified unknown-key claims, incumbent keys, Git/Basic-auth pushes, and HTTP-only workspace provisioning",
+        },
+    })
+}
+
+/// One log author's signed identity claim. Resolution is delayed until a
+/// report is read so a hot-reloaded binding file changes the whole current
+/// projection consistently, including entries replayed before the reload.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ActorEvidence {
+    key_id: Option<String>,
+    channel: String,
+}
+
+impl ActorEvidence {
+    fn from_entry(entry: &OpEntry) -> Self {
+        Self {
+            key_id: entry.author_sig.as_ref().map(|sig| sig.key_id.clone()),
+            channel: entry.channel.clone(),
+        }
+    }
+}
+
+/// Evidence available for one ref move. A directly bound signer wins. A
+/// node-signed Git move may instead be attributed to the unique bound
+/// operator whose approved review named the exact `(ref, target)` pair.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RefAttribution {
+    direct: ActorEvidence,
+    approved_requesters: Vec<ActorEvidence>,
+}
+
+/// Which source a binding snapshot was built from.
+///
+/// D24 T3 attribution and channel admission read *different* sources on
+/// purpose, so the snapshot has to say which one it is rather than leaving
+/// a reader to infer it from the call site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum BindingSource {
+    /// The operator-written trusted-keys file. Mutable, unsequenced, and
+    /// therefore usable for admission but not as attribution evidence.
+    #[default]
+    KeysFile,
+    /// [`View::bindings`]: sequenced `BindKey` ops, replayable from the log.
+    DurableLog,
+}
+
+impl BindingSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::KeysFile => "keys_file",
+            Self::DurableLog => "durable_log",
+        }
+    }
+}
+
+/// Current binding snapshot. The effective map preserves admission's
+/// existing one-name-per-actor behaviour; the deterministic records retain
+/// enough information to report duplicate cross-operator bindings as
+/// ambiguous rather than choosing whichever row happened to come last.
+#[derive(Default)]
+struct KeyBindings {
+    effective: std::collections::HashMap<ContentHash, String>,
+    operators_by_actor: BTreeMap<String, BTreeSet<String>>,
+    names_by_actor: BTreeMap<String, BTreeSet<String>>,
+    unbound_actors: BTreeSet<String>,
+    configured: bool,
+    available: bool,
+    source: BindingSource,
+}
+
+impl KeyBindings {
+    fn unavailable(configured: bool) -> Self {
+        Self {
+            configured,
+            ..Self::default()
+        }
+    }
+
+    /// Builds the attribution snapshot from the durable record instead of
+    /// the keys file.
+    ///
+    /// `population` supplies *who is trusted*, which the log cannot answer:
+    /// a `BindKey` names a key, but only the keys file says which keys the
+    /// node accepts at all. So the two compose rather than compete — the
+    /// file decides the denominator, the log decides attribution, and a
+    /// trusted key with no sequenced binding lands in `unbound_actors` and
+    /// holds `evaluation_complete` at false.
+    ///
+    /// Without a readable population there is no denominator, so the
+    /// snapshot is unavailable rather than reporting completeness over
+    /// whatever subset happens to be bound.
+    fn from_view(view: &View, population: &Self) -> Self {
+        if !population.available {
+            return Self {
+                source: BindingSource::DurableLog,
+                ..Self::unavailable(population.configured)
+            };
+        }
+        let trusted: BTreeSet<&String> = population
+            .names_by_actor
+            .keys()
+            .chain(population.unbound_actors.iter())
+            .collect();
+
+        let mut operators_by_actor: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut names_by_actor: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (key_id, binding) in &view.bindings {
+            if !trusted.contains(key_id) {
+                continue;
+            }
+            // Revoked keys keep their operator. Attribution must survive
+            // withdrawal, or an operator could shed a concentration count
+            // by revoking the key that earned it.
+            operators_by_actor
+                .entry(key_id.clone())
+                .or_default()
+                .insert(binding.operator.clone());
+            // Only a bound channel attributes activity, mirroring the keys
+            // file, where a key with no name attributes nothing. The
+            // operator is known; which channel it speaks as is not.
+            if let Some(channel) = &binding.channel {
+                names_by_actor
+                    .entry(key_id.clone())
+                    .or_default()
+                    .insert(channel.clone());
+            }
+        }
+        let unbound_actors = trusted
+            .into_iter()
+            .filter(|actor| !names_by_actor.contains_key(*actor))
+            .cloned()
+            .collect();
+        Self {
+            // Admission is not served from this snapshot; leaving the map
+            // empty keeps it structurally unable to answer `bound_name`.
+            effective: std::collections::HashMap::new(),
+            operators_by_actor,
+            names_by_actor,
+            unbound_actors,
+            configured: population.configured,
+            available: true,
+            source: BindingSource::DurableLog,
+        }
+    }
+
+    fn from_signers(signers: &[crate::TrustedKey]) -> Self {
+        let mut effective = std::collections::HashMap::new();
+        let mut names_by_actor: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut all_actors = BTreeSet::new();
+        for signer in signers {
+            all_actors.insert(signer.actor_id.clone());
+            if let Some(name) = &signer.name {
+                effective.insert(ContentHash::blake3(&signer.key), name.clone());
+                names_by_actor
+                    .entry(signer.actor_id.clone())
+                    .or_default()
+                    .insert(name.clone());
+            }
+        }
+        let operators_by_actor = names_by_actor
+            .iter()
+            .map(|(actor, names)| {
+                (
+                    actor.clone(),
+                    names
+                        .iter()
+                        .map(|name| reviewer_operator(name).to_string())
+                        .collect(),
+                )
+            })
+            .collect();
+        let unbound_actors = all_actors
+            .iter()
+            .filter(|actor| !names_by_actor.contains_key(*actor))
+            .cloned()
+            .collect();
+        Self {
+            effective,
+            operators_by_actor,
+            names_by_actor,
+            unbound_actors,
+            configured: true,
+            available: true,
+            source: BindingSource::KeysFile,
+        }
+    }
+
+    fn bound_name(&self, actor_id: &ContentHash) -> Option<&str> {
+        self.effective.get(actor_id).map(String::as_str)
+    }
+
+    fn resolve_evidence(&self, evidence: &ActorEvidence) -> AttributionResolution {
+        let Some(key_id) = evidence.key_id.as_ref() else {
+            return AttributionResolution::Unknown;
+        };
+        let Some(names) = self.names_by_actor.get(key_id) else {
+            return AttributionResolution::Unknown;
+        };
+        if !names.contains(&evidence.channel) {
+            return AttributionResolution::Unknown;
+        }
+        let Some(operators) = self.operators_by_actor.get(key_id) else {
+            return AttributionResolution::Unknown;
+        };
+        match operators.len() {
+            0 => AttributionResolution::Unknown,
+            1 => AttributionResolution::Operator(
+                operators.first().expect("one operator").clone(),
+            ),
+            _ => AttributionResolution::Ambiguous,
+        }
+    }
+
+    fn snapshot_hash(&self) -> Option<String> {
+        self.available.then(|| {
+            let mut records = self.names_by_actor.clone();
+            for actor in &self.unbound_actors {
+                records.entry(actor.clone()).or_default();
+            }
+            let bytes = serde_json::to_vec(&records)
+                .expect("binding snapshot is always serializable");
+            ContentHash::blake3(&bytes).to_hex()
+        })
+    }
+}
+
+/// D24 T2 load evidence: objective counts folded straight from the log.
+///
+/// These answer "how much reviewer work did this cohort create, and how much
+/// of it landed" without any human calling anything slop. That matters
+/// because a classifier-based slop rate goes blind exactly when it is needed:
+/// a flood collapses adjudication coverage, and incomplete coverage must
+/// report `indeterminate`. These counts keep working during the flood, and
+/// no contributor can suppress them by declining to request a review.
+#[derive(Default)]
+struct NewActorLoadState {
+    /// Accepted entries per signing key. The unit is a *contribution
+    /// offered*, not a review: `RequestReview` is authored by the
+    /// contributor, so a review-based denominator lets an actor choose
+    /// whether to be measured.
+    submissions: BTreeMap<String, usize>,
+    /// `PostVerdict` ops per review id: reviewer rounds actually consumed.
+    /// Re-review after changes is the cost signal, so it is counted rather
+    /// than collapsed into a final verdict.
+    verdict_rounds: BTreeMap<String, usize>,
+    /// Reviews whose exact `(target_ref, target)` was observed live in
+    /// [`View::refs`]. Landing is *observed*; approval is not landing.
+    landed: BTreeSet<String>,
+}
+
+impl NewActorLoadState {
+    fn observe(&mut self, entry: &OpEntry, op: &ViewOp, view: &View) {
+        if let Some(signature) = &entry.author_sig {
+            // Only clone the key the first time it is seen. `entry()` would
+            // allocate on every accepted op, and a repeat submitter is the
+            // common case: the allocation budget caught exactly that.
+            if let Some(count) = self.submissions.get_mut(&signature.key_id) {
+                *count += 1;
+            } else {
+                self.submissions.insert(signature.key_id.clone(), 1);
+            }
+        }
+        match &op.kind {
+            OpKind::PostVerdict { id, .. } => {
+                *self.verdict_rounds.entry(id.clone()).or_default() += 1;
+            }
+            OpKind::SetRef { name, commit, .. } => {
+                for (id, review) in &view.reviews {
+                    if review.target_ref.as_deref() == Some(name)
+                        && review.target.as_ref() == Some(commit)
+                    {
+                        self.landed.insert(id.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct ConcentrationState {
+    review_requesters: BTreeMap<String, ActorEvidence>,
+    active_branches: BTreeMap<String, RefAttribution>,
+    ref_updates: BTreeMap<String, BTreeMap<RefAttribution, usize>>,
+    /// T2's load evidence, folded here rather than behind a second mutex:
+    /// it needs the same `(entry, op, view)` triple at the same point of the
+    /// same single-writer fold, and a parallel tracker would add plumbing
+    /// plus a second chance for the two to disagree about `as_of_seq`.
+    new_actor_load: NewActorLoadState,
+    as_of_seq: Option<u64>,
+}
+
+impl ConcentrationState {
+    fn observe(&mut self, entry: &OpEntry, op: &ViewOp, view: &View) {
+        self.as_of_seq = Some(entry.seq);
+        self.new_actor_load.observe(entry, op, view);
+        match &op.kind {
+            OpKind::RequestReview { id, .. } => {
+                self.review_requesters
+                    .insert(id.clone(), ActorEvidence::from_entry(entry));
+            }
+            OpKind::SetRef {
+                name,
+                commit,
+                prev,
+            } => {
+                let mut approved_requesters: Vec<_> = view
+                    .reviews
+                    .iter()
+                    .filter(|(_, review)| {
+                        review.target_ref.as_deref() == Some(name)
+                            && review.target.as_ref() == Some(commit)
+                            && review.approved()
+                    })
+                    .filter_map(|(id, _)| self.review_requesters.get(id).cloned())
+                    .collect();
+                approved_requesters.sort();
+                approved_requesters.dedup();
+                let attribution = RefAttribution {
+                    direct: ActorEvidence::from_entry(entry),
+                    approved_requesters,
+                };
+                if is_branch_ref(name) {
+                    self.active_branches
+                        .insert(name.clone(), attribution.clone());
+                }
+                if prev.is_some() {
+                    *self
+                        .ref_updates
+                        .entry(name.clone())
+                        .or_default()
+                        .entry(attribution)
+                        .or_default() += 1;
+                }
+            }
+            OpKind::DeleteRef { name, .. } => {
+                self.active_branches.remove(name);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_branch_ref(name: &str) -> bool {
+    name.strip_prefix("refs/heads/")
+        .or_else(|| name.split_once(":refs/heads/").map(|(_, branch)| branch))
+        .is_some_and(|branch| !branch.is_empty())
+}
+
+fn share_basis_points(part: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    ((part as u128 * 10_000) / total as u128) as usize
+}
+
+fn share_tripped(part: usize, total: usize) -> bool {
+    total != 0 && part as u128 * 100 > total as u128 * T3_MAX_SHARE_PERCENT as u128
+}
+
+enum AttributionResolution {
+    Operator(String),
+    Unknown,
+    Ambiguous,
+}
+
+fn resolve_attribution(
+    attribution: &RefAttribution,
+    bindings: &KeyBindings,
+) -> AttributionResolution {
+    match bindings.resolve_evidence(&attribution.direct) {
+        AttributionResolution::Operator(operator) => {
+            return AttributionResolution::Operator(operator);
+        }
+        AttributionResolution::Ambiguous => return AttributionResolution::Ambiguous,
+        AttributionResolution::Unknown => {}
+    }
+    let mut operators = BTreeSet::new();
+    let mut ambiguous = false;
+    let mut unknown = false;
+    for requester in &attribution.approved_requesters {
+        match bindings.resolve_evidence(requester) {
+            AttributionResolution::Operator(operator) => {
+                operators.insert(operator);
+            }
+            AttributionResolution::Ambiguous => ambiguous = true,
+            AttributionResolution::Unknown => unknown = true,
+        }
+    }
+    if ambiguous || (unknown && !operators.is_empty()) {
+        return AttributionResolution::Ambiguous;
+    }
+    if unknown {
+        return AttributionResolution::Unknown;
+    }
+    match operators.len() {
+        0 => AttributionResolution::Unknown,
+        1 => AttributionResolution::Operator(
+            operators
+                .first()
+                .expect("one requester operator")
+                .clone(),
+        ),
+        _ => AttributionResolution::Ambiguous,
+    }
+}
+
+#[derive(Default)]
+struct OperatorConcentration {
+    agent_keys: usize,
+    active_branches: usize,
+    protected_updates: usize,
+}
+
+struct ProtectedPolicySnapshot {
+    configured: bool,
+    available: bool,
+    hash: Option<String>,
+    patterns: Vec<String>,
+}
+
+impl ProtectedPolicySnapshot {
+    fn read(path: Option<&std::path::Path>) -> Self {
+        let Some(path) = path else {
+            return Self {
+                configured: false,
+                available: false,
+                hash: None,
+                patterns: Vec::new(),
+            };
+        };
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self {
+                configured: true,
+                available: true,
+                hash: Some(ContentHash::blake3(text.as_bytes()).to_hex()),
+                patterns: text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_string)
+                    .collect(),
+            },
+            Err(_) => Self {
+                configured: true,
+                available: false,
+                hash: None,
+                patterns: Vec::new(),
+            },
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        self.patterns.iter().any(|pattern| {
+            pattern
+                .strip_suffix('*')
+                .map_or(name == pattern, |prefix| name.starts_with(prefix))
+        })
+    }
+}
+
+fn concentration_json(
+    state: &ConcentrationState,
+    bindings: &KeyBindings,
+    protected: &ProtectedPolicySnapshot,
+) -> serde_json::Value {
+    let mut operators: BTreeMap<String, OperatorConcentration> = BTreeMap::new();
+    let mut ambiguous_agent_keys = 0usize;
+    // Only `KeyBindings::from_view` feeds this function, and the fold lets
+    // one key name exactly one operator for its lifetime, so today every
+    // set here has exactly one member and `ambiguous_agent_keys` is always
+    // zero. The other arms are kept deliberately, not by oversight: the
+    // keys-file shape they answer is still constructible by
+    // `from_signers`, and if a snapshot from that source is ever routed
+    // here, refusing to pick a winner is the behaviour that belongs. Note
+    // this is only the *per-key* ambiguity; ambiguity across several
+    // requester keys is live and counted in `ambiguous_active_branches`.
+    for operator_set in bindings.operators_by_actor.values() {
+        match operator_set.len() {
+            0 => {}
+            1 => {
+                operators
+                    .entry(operator_set.first().expect("one operator").clone())
+                    .or_default()
+                    .agent_keys += 1;
+            }
+            _ => ambiguous_agent_keys += 1,
+        }
+    }
+
+    let active_total = state.active_branches.len();
+    let mut unknown_active = 0usize;
+    let mut ambiguous_active = 0usize;
+    for attribution in state.active_branches.values() {
+        match resolve_attribution(attribution, bindings) {
+            AttributionResolution::Operator(operator) => {
+                operators.entry(operator).or_default().active_branches += 1;
+            }
+            AttributionResolution::Unknown => unknown_active += 1,
+            AttributionResolution::Ambiguous => ambiguous_active += 1,
+        }
+    }
+
+    let mut protected_total = 0usize;
+    let mut unknown_protected = 0usize;
+    let mut ambiguous_protected = 0usize;
+    if protected.available {
+        for (name, by_attribution) in &state.ref_updates {
+            if !protected.matches(name) {
+                continue;
+            }
+            for (attribution, count) in by_attribution {
+                protected_total += count;
+                match resolve_attribution(attribution, bindings) {
+                    AttributionResolution::Operator(operator) => {
+                        operators
+                            .entry(operator)
+                            .or_default()
+                            .protected_updates += count;
+                    }
+                    AttributionResolution::Unknown => unknown_protected += count,
+                    AttributionResolution::Ambiguous => ambiguous_protected += count,
+                }
+            }
+        }
+    }
+
+    let mut any_tripwire = false;
+    let operator_rows: BTreeMap<String, serde_json::Value> = operators
+        .into_iter()
+        .map(|(operator, row)| {
+            let agent_keys_tripped = row.agent_keys > T3_MAX_AGENT_KEYS_PER_OPERATOR;
+            let active_tripped = share_tripped(row.active_branches, active_total);
+            let protected_tripped = protected
+                .available
+                .then(|| share_tripped(row.protected_updates, protected_total));
+            any_tripwire |=
+                agent_keys_tripped || active_tripped || protected_tripped.unwrap_or(false);
+            let protected_updates = protected.available.then_some(row.protected_updates);
+            let protected_share = protected
+                .available
+                .then(|| share_basis_points(row.protected_updates, protected_total));
+            (
+                operator,
+                serde_json::json!({
+                    "agent_keys": row.agent_keys,
+                    "active_branches": row.active_branches,
+                    "active_branch_share_basis_points":
+                        share_basis_points(row.active_branches, active_total),
+                    "protected_updates": protected_updates,
+                    "protected_update_share_basis_points": protected_share,
+                    "tripwires": {
+                        "agent_keys": agent_keys_tripped,
+                        "active_branch_share": active_tripped,
+                        "protected_update_share": protected_tripped,
+                    },
+                }),
+            )
+        })
+        .collect();
+
+    let attributed_active = active_total - unknown_active - ambiguous_active;
+    let attributed_protected = protected_total - unknown_protected - ambiguous_protected;
+    let evaluation_complete = bindings.available
+        && bindings.unbound_actors.is_empty()
+        && ambiguous_agent_keys == 0
+        && unknown_active == 0
+        && ambiguous_active == 0
+        && protected.available
+        && unknown_protected == 0
+        && ambiguous_protected == 0;
+    let tripwire_status = if any_tripwire {
+        "observed"
+    } else if evaluation_complete {
+        "not_observed"
+    } else {
+        "indeterminate"
+    };
+    serde_json::json!({
+        "format_version": 1,
+        "as_of_seq": state.as_of_seq,
+        "thresholds": {
+            "max_agent_keys_per_operator": T3_MAX_AGENT_KEYS_PER_OPERATOR,
+            "max_share_basis_points": T3_MAX_SHARE_PERCENT * 100,
+            "comparison": "strictly_greater_than",
+        },
+        "bindings": {
+            "configured": bindings.configured,
+            "available": bindings.available,
+            "snapshot_hash": bindings.snapshot_hash(),
+            // Two sources feed this block and one name for both would read
+            // as more precise than it is. Attribution is what has to be
+            // replayable: `durable_log` means every operator name below
+            // came from a sequenced `BindKey`, not from whatever the keys
+            // file happened to say at read time. The population — which
+            // keys the node trusts at all — is not in the log and stays
+            // with the file, which is why coverage can be incomplete even
+            // when attribution is sound.
+            "attribution_source": bindings.source.as_str(),
+            "population_source": "keys_file",
+        },
+        "protected_policy": {
+            "configured": protected.configured,
+            "available": protected.available,
+            "snapshot_hash": protected.hash.as_deref(),
+            "classification": "current_policy",
+        },
+        "totals": {
+            "bound_agent_keys": bindings.available.then_some(bindings.names_by_actor.len()),
+            "unbound_agent_keys": bindings.available.then_some(bindings.unbound_actors.len()),
+            "ambiguous_agent_keys": bindings.available.then_some(ambiguous_agent_keys),
+            "active_branches": active_total,
+            "attributed_active_branches": attributed_active,
+            "unattributed_active_branches": unknown_active + ambiguous_active,
+            "unknown_active_branches": unknown_active,
+            "ambiguous_active_branches": ambiguous_active,
+            "active_branch_attribution_coverage_basis_points":
+                share_basis_points(attributed_active, active_total),
+            "protected_updates": protected.available.then_some(protected_total),
+            "attributed_protected_updates":
+                protected.available.then_some(attributed_protected),
+            "unattributed_protected_updates": protected
+                .available
+                .then_some(unknown_protected + ambiguous_protected),
+            "unknown_protected_updates": protected.available.then_some(unknown_protected),
+            "ambiguous_protected_updates":
+                protected.available.then_some(ambiguous_protected),
+            "protected_update_attribution_coverage_basis_points": protected
+                .available
+                .then(|| share_basis_points(attributed_protected, protected_total)),
+        },
+        "operators": operator_rows,
+        "tripwire_observed": any_tripwire,
+        "tripwire_status": tripwire_status,
+        "evaluation_complete": evaluation_complete,
+        "semantics": {
+            "active_branches": "current branch refs grouped by last attributable mover, not ownership",
+            "protected_updates": "admitted non-creation ref updates matching the current protected policy, not proof of Git publication or merge commits",
+        },
+    })
+}
+
+/// Version of the operator-written review adjudication rows. Like the
+/// newcomer adjudications, this file is not part of the signed op log but is
+/// a persisted measurement input, so it carries the same explicit version.
+const REVIEW_ADJUDICATION_FORMAT_VERSION: u64 = 1;
+
+/// One operator judgement about a cohort contribution.
+///
+/// `Invalid` and `Slop` are deliberately distinct. Invalid is good-faith and
+/// wrong, which is what newcomers do constantly and must not by itself trip a
+/// Sybil wire. Slop is unresponsive work that burns reviewer time, which is
+/// what the cited curl bands are actually about. Collapsing them is how a
+/// competent newcomer having a bad week reads as an attack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Classification {
+    Valid,
+    Invalid,
+    Slop,
+    Unclear,
+}
+
+impl Classification {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "valid" => Some(Self::Valid),
+            "invalid" => Some(Self::Invalid),
+            "slop" => Some(Self::Slop),
+            "unclear" => Some(Self::Unclear),
+            _ => None,
+        }
+    }
+}
+
+/// Reads the operator's review classifications. Keyed by review id, so a
+/// classification survives archiving even though the verdict bulk does not.
+///
+/// A row naming an unknown review is an error rather than a skipped line: a
+/// typo that silently vanished would quietly shrink measured coverage.
+fn read_review_adjudications(
+    path: &std::path::Path,
+    reviews: &BTreeMap<String, choir_view::ReviewState>,
+) -> Result<(BTreeMap<String, Classification>, String), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read review adjudications: {e}"))?;
+    let snapshot_hash = ContentHash::blake3(&bytes).to_hex();
+    let text =
+        String::from_utf8(bytes).map_err(|_| "review adjudications are not UTF-8".to_string())?;
+    let mut rows = BTreeMap::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("review adjudication line {}: {e}", index + 1))?;
+        if value["format_version"].as_u64() != Some(REVIEW_ADJUDICATION_FORMAT_VERSION) {
+            return Err(format!(
+                "review adjudication line {} has unsupported format_version",
+                index + 1
+            ));
+        }
+        let review_id = value["review_id"]
+            .as_str()
+            .ok_or_else(|| format!("review adjudication line {} needs review_id", index + 1))?;
+        let classification = value["classification"]
+            .as_str()
+            .and_then(Classification::parse)
+            .ok_or_else(|| {
+                format!(
+                    "review adjudication line {} needs classification valid|invalid|slop|unclear",
+                    index + 1
+                )
+            })?;
+        if !reviews.contains_key(review_id) {
+            return Err(format!(
+                "review adjudication line {} references an unknown review",
+                index + 1
+            ));
+        }
+        if rows.insert(review_id.to_string(), classification).is_some() {
+            return Err(format!(
+                "review adjudication line {} duplicates a review",
+                index + 1
+            ));
+        }
+    }
+    Ok((rows, snapshot_hash))
+}
+
+/// The T2 cohort: durable, post-activation, non-incumbent actor keys, read
+/// from the same T4 audit that defines "newcomer" everywhere else.
+///
+/// `None` means no cohort is defined — the audit is off, unreadable, or was
+/// never activated — which is deliberately different from an empty cohort.
+/// An empty cohort is the honest statement "no newcomers yet"; `None` is
+/// "this node cannot tell you who is new".
+fn new_actor_cohort(audit: Option<&Arc<Mutex<NewcomerAudit>>>) -> Option<BTreeSet<String>> {
+    let audit = audit?.lock().expect("newcomer audit lock");
+    (audit.available && audit.activated).then(|| audit.by_actor.keys().cloned().collect())
+}
+
+/// D24 T2 evidence for the new-actor cohort, and an explicit statement that
+/// the tripwire itself is **not evaluable here**.
+///
+/// T2 asks for an invalid/slop rate. Choir persists no such judgement.
+/// [`choir_view::Verdict::Approve`] means "may land" and
+/// [`choir_view::Verdict::RequestChanges`] means "needs work", the latter is
+/// overwritable by the former, and neither proves a contribution valid,
+/// invalid, or slop. Relabelling one as "slop" would manufacture evidence the
+/// model does not contain.
+///
+/// The unit is a **contribution offered**, not a completed review. A review is
+/// opened by its own contributor, so a review-shaped denominator lets an actor
+/// choose whether to be measured: submit a hundred slop changes, request
+/// review on the three good ones, and a review-based rate reads zero. Reviews
+/// remain a reported sub-metric.
+///
+/// Three counting rules exist to close laundering paths rather than to be
+/// tidy. An archived review with no classification can never enter the
+/// numerator or the denominator, because `--review-lapse-after-secs` turns an
+/// unanswered review into `Archived { approved: false }` on a wall clock and
+/// that must not become evidence. Pending reviews are reported, never counted.
+/// And `load` needs no adjudication at all, so it keeps measuring during the
+/// flood in which a classifier's coverage would collapse to `indeterminate`.
+///
+/// Requester attribution is joined from the `RequestReview` log entry's author
+/// signature, never from the rendered review: archiving discards reviewer and
+/// verdict detail, so a rendered row cannot supply historical evidence.
+/// A `RequestReview` author is also not proven to have authored the commit
+/// under review; that limitation ships in the response.
+fn new_actor_review_outcomes_json(
+    state: &ConcentrationState,
+    view: &View,
+    cohort: Option<&BTreeSet<String>>,
+    adjudications_path: Option<&std::path::Path>,
+) -> serde_json::Value {
+    let adjudications = adjudications_path.map(|path| read_review_adjudications(path, &view.reviews));
+    let (classifications, snapshot_hash, adjudications_available, adjudications_error) =
+        match &adjudications {
+            None => (BTreeMap::new(), None, false, None),
+            Some(Ok((rows, hash))) => (rows.clone(), Some(hash.clone()), true, None),
+            Some(Err(error)) => (BTreeMap::new(), None, false, Some(error.clone())),
+        };
+
+    let mut unknown_requester = 0usize;
+    let mut unsigned_author = 0usize;
+    let mut signed = 0usize;
+    let mut attributed = 0usize;
+    let mut approved = 0usize;
+    let mut request_changes = 0usize;
+    let mut pending = 0usize;
+    let mut archived_classified = 0usize;
+    let mut archived_evidence_lost = 0usize;
+    let mut slashed = 0usize;
+    let mut eligible = 0usize;
+    let mut classified: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut review_rounds = 0usize;
+    let mut review_rounds_unlanded = 0usize;
+    let mut landed = 0usize;
+    for (id, review) in &view.reviews {
+        let Some(evidence) = state.review_requesters.get(id) else {
+            unknown_requester += 1;
+            continue;
+        };
+        let Some(key_id) = evidence.key_id.as_deref() else {
+            unsigned_author += 1;
+            continue;
+        };
+        signed += 1;
+        let Some(cohort) = cohort else { continue };
+        if !cohort.contains(key_id) {
+            continue;
+        }
+        attributed += 1;
+        if review.re_review_required() {
+            slashed += 1;
+        }
+        let rounds = state
+            .new_actor_load
+            .verdict_rounds
+            .get(id)
+            .copied()
+            .unwrap_or_default();
+        review_rounds += rounds;
+        if state.new_actor_load.landed.contains(id) {
+            landed += 1;
+        } else {
+            review_rounds_unlanded += rounds;
+        }
+        let classification = classifications.get(id).copied();
+        let counts_toward_rate = if matches!(review.status, ReviewStatus::Archived { .. }) {
+            // Archiving destroys the verdicts an adjudicator needs, and a
+            // lapse archives a review nobody ever answered. Without a
+            // standing classification such a row is evidence of nothing.
+            if classification.is_some() {
+                archived_classified += 1;
+                true
+            } else {
+                archived_evidence_lost += 1;
+                false
+            }
+        } else if !review.complete() {
+            pending += 1;
+            false
+        } else if review
+            .verdicts
+            .values()
+            .any(|(verdict, _)| *verdict == Verdict::RequestChanges)
+        {
+            request_changes += 1;
+            true
+        } else {
+            approved += 1;
+            true
+        };
+        if counts_toward_rate {
+            eligible += 1;
+            if let Some(classification) = classification {
+                *classified
+                    .entry(match classification {
+                        Classification::Valid => "valid",
+                        Classification::Invalid => "invalid",
+                        Classification::Slop => "slop",
+                        Classification::Unclear => "unclear",
+                    })
+                    .or_default() += 1;
+            }
+        }
+    }
+
+    let available = cohort.is_some();
+    let submissions: usize = cohort
+        .map(|cohort| {
+            cohort
+                .iter()
+                .filter_map(|key| state.new_actor_load.submissions.get(key))
+                .sum()
+        })
+        .unwrap_or_default();
+    let adjudicated: usize = classified.values().sum();
+    let classified_rows: BTreeMap<String, usize> = ["valid", "invalid", "slop", "unclear"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                classified.get(name).copied().unwrap_or_default(),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "format_version": 2,
+        "as_of_seq": state.as_of_seq,
+        "unit": "contribution_offered",
+        "cohort": {
+            "definition": "post_activation_non_incumbent_actor_keys",
+            "source": "newcomer_harm audit",
+            "available": available,
+            "actor_keys": cohort.map(BTreeSet::len),
+        },
+        "policy": {
+            "graduation": null,
+            "trailing_window": null,
+            "tripwire_subject": null,
+            "sampling": "census",
+            "status": "unset_pending_operator_decision",
+        },
+        "load": available.then(|| serde_json::json!({
+            "accepted_operations": submissions,
+            "reviews_requested": attributed,
+            "review_rounds": review_rounds,
+            "review_rounds_on_unlanded": review_rounds_unlanded,
+            "reviews_landed": landed,
+            "reviews_never_landed": attributed - landed,
+        })),
+        "declared_tripwire": {
+            "max_invalid_or_slop_percent": T2_MAX_INVALID_OR_SLOP_PERCENT,
+            "min_valid_percent": T2_MIN_VALID_PERCENT,
+            "evaluable": false,
+            "blocked_on": "cohort exit, observation window and tripwire subject are unset, and census adjudication cannot survive a flood",
+        },
+        "totals": {
+            "reviews": view.reviews.len(),
+            "attributed_to_cohort": available.then_some(attributed),
+            "excluded_outside_cohort": available.then(|| signed - attributed),
+            "excluded_unsigned_author": unsigned_author,
+            "excluded_unknown_requester": unknown_requester,
+        },
+        "review_outcomes": available.then(|| serde_json::json!({
+            "approved": approved,
+            "request_changes": request_changes,
+            "pending": pending,
+            "archived_classified": archived_classified,
+            "archived_evidence_lost": archived_evidence_lost,
+            "re_review_required": slashed,
+        })),
+        "adjudication": {
+            "configured": adjudications_path.is_some(),
+            "available": adjudications_available,
+            "snapshot_hash": snapshot_hash,
+            "error": adjudications_error,
+            "eligible": available.then_some(eligible),
+            "adjudicated": available.then_some(adjudicated),
+            "coverage_basis_points": available.then(|| share_basis_points(adjudicated, eligible)),
+            "classified": available.then_some(classified_rows),
+            "independent": false,
+        },
+        "tripwire_observed": null,
+        "tripwire_status": "indeterminate",
+        "evaluation_complete": false,
+        "semantics": {
+            "unit": "a contribution offered by a cohort key; reviews are a sub-metric because the contributor opens their own review and can decline to",
+            "accepted_operations": "every accepted signed operation authored by a cohort key, review participation included; counted because work that never reaches review is invisible to a review-shaped denominator",
+            "load": "objective and adjudication-free, so it keeps measuring when a classifier's coverage collapses; a rate alone cannot see a flood",
+            "approved": "live, every listed reviewer answered, and no verdict is RequestChanges — not a validity judgement",
+            "request_changes": "live, every listed reviewer answered, and at least one standing verdict is RequestChanges — 'needs work', overwritable, not slop",
+            "pending": "live and unassigned or not yet answered by every listed reviewer; reported, never counted",
+            "archived_evidence_lost": "archived with no standing classification; a lapse archives an unanswered review on a wall clock, so it is excluded from both numerator and denominator",
+            "re_review_required": "overlaps the buckets above; counts cohort reviews carrying a retroactive approval slash",
+            "attribution": "the RequestReview log entry's signing key; that author is not proven to have authored the commit under review",
+            "independent": "a single-operator node classifies contributions its own reviewers approved; this is self-adjudication, not an independent judgement",
+            "indeterminate": "structural: the cohort has no exit, the window and tripwire subject are unset, and census adjudication goes blind in the flood it should detect",
+        },
+    })
+}
+
+/// Deterministic read-time measurement of the complete authoritative view.
+///
+/// The serialized total deliberately contains only the four sections owned by
+/// `View`. Runtime projections are excluded so adding this report cannot make
+/// its own byte count grow recursively, and adding another projection later
+/// cannot rewrite the historical meaning of the measurement.
+fn view_growth_json(
+    counts: serde_json::Value,
+    workspaces: &serde_json::Value,
+    refs: &serde_json::Value,
+    reviews: &serde_json::Value,
+    provenance: &serde_json::Value,
+    bindings: &serde_json::Value,
+    as_of_seq: Option<u64>,
+) -> serde_json::Value {
+    let serialized_bytes = |value: &serde_json::Value| {
+        serde_json::to_vec(value)
+            .expect("materialized view JSON is always serializable")
+            .len()
+    };
+    // `bindings` is deliberately absent here. The four sections below are
+    // the authoritative view and `total_authoritative_view` is a tracked
+    // series; folding a fifth section in would move every past reading and
+    // destroy comparability. It is still *measured* — see the sibling byte
+    // count — because an append-only map nobody counts is how a view grows
+    // without anyone noticing.
+    let authoritative = serde_json::json!({
+        "workspaces": workspaces,
+        "refs": refs,
+        "reviews": reviews,
+        "provenance": provenance,
+    });
+    serde_json::json!({
+        "format_version": 1,
+        "as_of_seq": as_of_seq,
+        "counts": counts,
+        "serialized_bytes": {
+            "workspaces": serialized_bytes(workspaces),
+            "refs": serialized_bytes(refs),
+            "reviews": serialized_bytes(reviews),
+            "provenance": serialized_bytes(provenance),
+            "total_authoritative_view": serialized_bytes(&authoritative),
+            "bindings": serialized_bytes(bindings),
+        },
+    })
+}
+
+fn view_growth_counts(view: &View) -> serde_json::Value {
+    let live_reviews = view
+        .reviews
+        .values()
+        .filter(|review| matches!(review.status, ReviewStatus::Live))
+        .count();
+    let provenance_records = view.provenance.values().map(BTreeMap::len).sum::<usize>();
+    // Revoked bindings are counted, never subtracted: the row survives
+    // revocation, so a `bindings` count that dropped on revoke would
+    // understate the map it is meant to size.
+    let revoked_bindings = view
+        .bindings
+        .values()
+        .filter(|binding| binding.is_revoked())
+        .count();
+    serde_json::json!({
+        "workspaces": view.workspaces.len(),
+        "refs": view.refs.len(),
+        "reviews": view.reviews.len(),
+        "live_reviews": live_reviews,
+        "archived_reviews": view.reviews.len() - live_reviews,
+        "provenance_subjects": view.provenance.len(),
+        "provenance_records": provenance_records,
+        "bindings": view.bindings.len(),
+        "revoked_bindings": revoked_bindings,
+    })
+}
 
 /// Nanosecond clock reading, as a nonzero xorshift seed.
 fn seed_from_clock() -> u64 {
@@ -234,12 +1787,38 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 impl LogWindow {
-    fn push(&mut self, entry: OpEntry) {
+    fn push(&mut self, entry: OpEntry, hash: ContentHash) {
         // `signing_hash` covers only (channel, payload); `content_hash`
-        // would serialize the whole entry, and this runs per admitted op.
+        // would serialize the whole entry, and this runs per admitted op
+        // -- which is why `hash` is passed in by the sequencer that
+        // already computed it rather than derived here.
         self.by_signing.insert(entry.signing_hash(), entry.seq);
+        self.by_hash.insert(hash, entry.seq);
         self.entries.push_back(entry);
         self.trim();
+    }
+
+    /// Whether `head` is an entry still inside the window, which is what
+    /// makes an op signed against it admissible.
+    fn holds_head(&self, head: &ContentHash) -> bool {
+        self.by_hash.contains_key(head)
+    }
+
+    /// The head a client should sign its next scope against.
+    ///
+    /// Derived rather than stored: keeping it would mean cloning a hash
+    /// on every admitted op to serve a value only read by `/api/view`
+    /// and by the ops the daemon signs itself. `None` for an empty
+    /// window, which is also a window that would admit no head.
+    fn head_hash(&self) -> Option<ContentHash> {
+        self.entries.back().map(OpEntry::content_hash)
+    }
+
+    /// The seq an identical submission already landed as, if any. The
+    /// caller has usually just computed the signing hash for the
+    /// signature check, so it is taken rather than recomputed.
+    fn seq_for_signing(&self, signing: &ContentHash) -> Option<u64> {
+        self.by_signing.get(signing).copied()
     }
 
     /// The `(seq, hash)` an identical submission already landed as.
@@ -268,32 +1847,50 @@ impl LogWindow {
                 // Evict from the index with the entry, or the map becomes
                 // the unbounded thing the window exists to avoid.
                 self.by_signing.remove(&dropped.signing_hash());
+                // The dropped entry's own hash is the new front's
+                // `parent`, so its eviction costs a lookup instead of a
+                // re-serialization. An emptied window holds no heads at
+                // all, which is the only case with no successor to ask.
+                match self.entries.front().and_then(|e| e.parent.as_ref()) {
+                    Some(parent) => {
+                        self.by_hash.remove(parent);
+                    }
+                    None => self.by_hash.clear(),
+                }
             }
             self.base += 1;
         }
     }
 }
 
-/// Replays once while recovering the request order needed by retention.
-/// The ordinary, retention-disabled startup keeps using `View::materialize`
-/// and pays for no tracker or extra work.
-fn materialize_with_review_retention(
+/// Replays the platform's runtime projections in one pass. Concentration
+/// attribution needs the entry author as well as the typed payload, while
+/// review retention additionally needs request order. Neither belongs in
+/// the persisted `ViewOp` format, and neither justifies a second log scan.
+fn materialize_platform_state(
     log: &dyn OpLog,
-    config: ReviewRetention,
-) -> Result<(View, ReviewRetentionState), choir_view::ViewError> {
+    retention_config: Option<ReviewRetention>,
+) -> Result<
+    (View, Option<ReviewRetentionState>, ConcentrationState),
+    choir_view::ViewError,
+> {
     let mut view = View::default();
-    let mut retention = ReviewRetentionState::new(config);
+    let mut retention = retention_config.map(ReviewRetentionState::new);
+    let mut concentration = ConcentrationState::default();
     // Stored entries have no timestamp. Giving every pre-existing live
     // review `now` starts a fresh grace period after restart, which can
     // delay an incomplete-review lapse but can never trigger one early.
-    let observed_at = config.lapse_after.map(|_| Instant::now());
+    let observed_at = retention_config.and_then(|config| config.lapse_after.map(|_| Instant::now()));
     for seq in 0..log.len() {
         let entry = log.get(seq).expect("seq < len");
         let op = ViewOp::from_payload(&entry.payload)?;
         view.apply(&op)?;
-        retention.observe(&op, observed_at);
+        concentration.observe(&entry, &op, &view);
+        if let Some(retention) = &mut retention {
+            retention.observe(&op, observed_at);
+        }
     }
-    Ok((view, retention))
+    Ok((view, retention, concentration))
 }
 
 /// Verify author signature, then CAS against the shared view. Runs on
@@ -302,9 +1899,8 @@ struct ChoirPolicy {
     registry: Registry,
     view: Arc<Mutex<View>>,
     entries: Arc<Mutex<LogWindow>>,
-    /// When set, the trusted-keys file is re-read after a failed
-    /// signature check if its mtime moved — registering a key becomes
-    /// "append a line", no daemon restart.
+    /// When set, the trusted-keys file is checked before every signature;
+    /// registering or removing a key takes effect on its next submission.
     keys_file: Option<std::path::PathBuf>,
     keys_mtime: Option<std::time::SystemTime>,
     node_pub: Vec<u8>,
@@ -320,6 +1916,10 @@ struct ChoirPolicy {
     /// When set, a protected ref only moves to a commit some approved
     /// review already named — the landing half of the gate.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// When set, every submission must carry a [`choir_view::OpScope`]
+    /// naming this node and a head still in the window. Shared with
+    /// [`Platform`], like the other gates.
+    require_scope: Arc<std::sync::atomic::AtomicBool>,
     /// Actor id → the channel name that key is bound to,
     /// for keys whose trusted-keys line carries a name. Keys absent from
     /// this map are unconstrained, which is what every key was before the
@@ -327,8 +1927,11 @@ struct ChoirPolicy {
     ///
     /// Shared with [`Platform`], because a *tightening* must not wait for
     /// an unrelated event: the accept loop refreshes it on mtime change,
-    /// while the failed-signature path below refreshes it too.
-    key_names: Arc<Mutex<std::collections::HashMap<ContentHash, String>>>,
+    /// while submission admission refreshes the signature registry too.
+    key_names: Arc<Mutex<KeyBindings>>,
+    /// Entry-author-aware runtime projection for D24 T3. Updated on the
+    /// writer thread immediately after the ordinary view fold.
+    concentration: Arc<Mutex<ConcentrationState>>,
     /// Present only when the operator enabled review retention. Updated
     /// after the view fold on the same writer thread, so its FIFO order
     /// matches the sequencer order exactly.
@@ -357,14 +1960,11 @@ impl ChoirPolicy {
         if let Ok(node_pub) = <[u8; 32]>::try_from(self.node_pub.as_slice()) {
             registry.register(&node_pub).ok();
         }
-        let mut key_names = std::collections::HashMap::new();
         for signer in &signers {
-            if let (Ok(actor_id), Some(name)) = (registry.register(&signer.key), &signer.name) {
-                key_names.insert(actor_id, name.clone());
-            }
+            registry.register(&signer.key).ok();
         }
         self.registry = registry;
-        *self.key_names.lock().expect("key names lock") = key_names;
+        *self.key_names.lock().expect("key names lock") = KeyBindings::from_signers(&signers);
         self.keys_mtime = mtime;
         true
     }
@@ -384,14 +1984,14 @@ impl ChoirPolicy {
     /// node, and the operator opts in one line at a time.
     fn channel_is_owned(&self, actor_id: &ContentHash, channel: &str) -> Result<(), String> {
         let names = self.key_names.lock().expect("key names lock");
-        match names.get(actor_id) {
+        match names.bound_name(actor_id) {
             Some(bound) if bound != channel => Err(Rejection::new(
                 Code::ChannelNotOwned,
                 "this key is bound to a different channel",
                 "submit on the channel your key is bound to, or ask the operator to bind a \
                  key to the channel you want",
             )
-            .with_states(Some(bound.clone()), Some(channel.to_string()))
+            .with_states(Some(bound.to_string()), Some(channel.to_string()))
             .encode()),
             _ => Ok(()),
         }
@@ -457,26 +2057,163 @@ impl ChoirPolicy {
             .max()
             .unwrap_or(0)
     }
+
+    /// Refuses a submission that has already been admitted, and one whose
+    /// author never bound it to this log at all.
+    ///
+    /// Together these are the replay defence, and they compose into
+    /// at-most-once permanently even though both indexes are bounded by
+    /// the window. The argument is short enough to check: a scoped op is
+    /// admissible only while the head it names is still in the window;
+    /// its own signing hash entered the window at a *later* sequence
+    /// than that head, so whenever the head is still there the signing
+    /// hash is too and the duplicate check refuses it. Once the head is
+    /// gone the scope check refuses it. There is no sequence at which
+    /// neither fires.
+    ///
+    /// Without a scope only the duplicate half applies, which bounds a
+    /// replay to the window instead of refusing it outright — the reason
+    /// `--require-scope` exists.
+    fn admit_once(&self, signing: &ContentHash, op: &ViewOp) -> Result<(), String> {
+        // Nothing is cloned out of the window here. Every admitted op runs
+        // this, while only a refused one needs the head to explain itself,
+        // so the head is read again on the rejection path instead of
+        // copied on the hot one -- one allocation per op, which the
+        // allocation budget notices.
+        let (already, holds_head, nothing_evicted) = {
+            let window = self.entries.lock().expect("entries lock");
+            (
+                window.seq_for_signing(signing),
+                op.scope
+                    .as_ref()
+                    .and_then(|s| s.head.as_ref())
+                    .is_some_and(|h| window.holds_head(h)),
+                window.base == 0,
+            )
+        };
+        let window_head = || {
+            self.entries
+                .lock()
+                .expect("entries lock")
+                .head_hash()
+                .as_ref()
+                .map(ContentHash::to_hex)
+        };
+        // A signature is admissible once. `prev` cannot enforce that: it
+        // compares state, and state recurs — land a commit, revert it,
+        // and the reverted-away op's CAS matches again. The HTTP layer
+        // answers any rejection whose submission already landed as 200
+        // `already_applied` with the original seq, so a lost-response
+        // retry still reads as success while a replay becomes a no-op.
+        if let Some(seq) = already {
+            return Err(Rejection::new(
+                Code::DuplicateSubmission,
+                format!("these exact signed bytes already landed at seq {seq}"),
+                "if you are retrying, read `seq` from this response — it names the op you \
+                 already have. If you meant a second, distinct change, sign a new op: two \
+                 otherwise byte-identical ops are told apart by their scope.",
+            )
+            .with_states(Some(seq.to_string()), None)
+            .encode());
+        }
+        let Some(scope) = &op.scope else {
+            if self.require_scope.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Rejection::new(
+                    Code::ScopeRequired,
+                    "this node admits only ops signed for its own log and a recent head",
+                    "read `log.node` and `log.head` from GET /api/view, put them in the \
+                     op's `scope`, and sign that; `choir submit` does it for you",
+                )
+                .with_states(None, window_head())
+                .encode());
+            }
+            return Ok(());
+        };
+        if scope.node != self.node_id {
+            return Err(Rejection::new(
+                Code::ForeignScope,
+                "this op was signed for another node's log",
+                "sign a scope naming this node; its id is in `actual` and in `log.node` \
+                 of GET /api/view",
+            )
+            .with_states(Some(scope.node.to_hex()), Some(self.node_id.to_hex()))
+            .encode());
+        }
+        match &scope.head {
+            Some(_) if holds_head => Ok(()),
+            // The op names no head, which is what a client signs when it
+            // read an empty log — including every op of a batch it signed
+            // in one go, since only the first of those lands against a
+            // log that is still empty.
+            //
+            // Admissible while this window has evicted nothing, because
+            // that is exactly the span the duplicate index above covers
+            // in full: an unevicted window holds every entry, so a replay
+            // of a headless op cannot slip past it. The moment the first
+            // entry is evicted the guarantee would thin out, and the op
+            // stops being admissible instead.
+            None if nothing_evicted => Ok(()),
+            None => Err(Rejection::new(
+                Code::StaleScope,
+                "the op names no head, and this log has evicted entries since",
+                "re-read `log.head` from GET /api/view and sign a fresh op against it",
+            )
+            .with_states(Some("a log with nothing evicted".to_string()), window_head())
+            .encode()),
+            Some(head) => Err(Rejection::new(
+                Code::StaleScope,
+                "the head this op was signed against is no longer in the window",
+                "re-read `log.head` from GET /api/view and sign a fresh op against it; a \
+                 signature stays admissible only as long as the head it names does",
+            )
+            .with_states(Some(head.to_hex()), window_head())
+            .encode()),
+        }
+    }
 }
 
 impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
-        let mut verified_actor = self
-            .registry
-            .verify_submission(&sub.channel, &sub.payload, sig);
-        // Unknown/failed key: maybe the operator just registered it.
+        // Refresh before verification so removing a trusted key takes
+        // effect on that key's very next request. A failed verification
+        // cannot trigger this tightening: a removed key is still present
+        // in the stale registry and would verify successfully.
+        self.reload_keys();
+        let signing = choir_oplog::signing_hash(&sub.channel, &sub.payload);
+        let mut verified_actor = self.registry.verify_signing_hash(&signing, sig);
+        // Retry a failed signature in case the file changed between the
+        // pre-verification metadata check and this verification.
         if verified_actor.is_err() && self.reload_keys() {
-            verified_actor = self
-                .registry
-                .verify_submission(&sub.channel, &sub.payload, sig);
+            verified_actor = self.registry.verify_signing_hash(&signing, sig);
         }
         let actor_id = verified_actor.map_err(|e| {
-            Rejection::new(
-                Code::UnknownKey,
-                format!("signature check failed: {e:?}"),
-                "ask the operator to add your public key to the node's trusted-keys file                  (`choir key <file> <you>` prints the line); it takes effect on the next request",
-            )
+            // Two failures with opposite repairs, and one of them is an
+            // attack signal, so they cannot share a code. A key id the
+            // node has no record of is a trust gap the operator closes.
+            // A signature that does not verify under a key the node
+            // already trusts is either corruption or a lifted signature
+            // replayed onto other bytes -- and answering that with "ask
+            // the operator to register your public key" hands the party
+            // being impersonated the one repair that helps the attacker.
+            // Anything else is reported as the bad signature too: of the
+            // two directions to be wrong in, refusing is the safe one.
+            let detail = format!("signature check failed: {e:?}");
+            match &e {
+                choir_identity::IdentityError::UnknownKey(_) => Rejection::new(
+                    Code::UnknownKey,
+                    detail,
+                    "ask the operator to add your public key to the node's trusted-keys file                  (`choir key <file> <you>` prints the line); it takes effect on the next request",
+                ),
+                _ => Rejection::new(
+                    Code::BadSignature,
+                    detail,
+                    "re-sign the exact bytes you are submitting; a signature covers one \
+                     (channel, payload) pair and does not carry to another. Registering a key \
+                     does not help here, the key this names is already trusted -- if you did not \
+                     send this, a signature of yours was replayed onto bytes you never signed",
+                ),
+            }
             .encode()
         })?;
         let op = ViewOp::from_payload(&sub.payload).map_err(|e| {
@@ -487,6 +2224,10 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode()
         })?;
+        // Before any policy that asks what the op *does*: has this
+        // signature already been spent, and was it ever meant for this
+        // log at all.
+        self.admit_once(&signing, &op)?;
         // A verdict's claimed reviewer must be the signature-covered
         // submission channel: the log's author attribution and the
         // view's verdict attribution can never diverge.
@@ -661,6 +2402,56 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode());
         }
+        // A slash can withdraw authorization from a review whose detail
+        // has already been compacted. Only the node key may make that
+        // durable attestation; otherwise any trusted author could erase
+        // another operator's approval weight.
+        if matches!(op.kind, OpKind::SlashApproval { .. }) && actor_id != self.node_id {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may slash approvals",
+                "ask the operator to run `choir slash` with the node key",
+            )
+            .encode());
+        }
+        // A ref snapshot is the node's own attestation of its complete
+        // ref-state (D25): the unit a witness will cosign and the thing
+        // two readers compare to detect equivocation. The fold already
+        // refuses an untruthful one; this guard is about authorship —
+        // signed by anyone else it attests nothing about the node while
+        // reading as though it did.
+        if matches!(op.kind, OpKind::RecordRefSnapshot { .. }) && actor_id != self.node_id {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may record ref snapshots",
+                "read the latest snapshot from the view; the node attests its own ref-state",
+            )
+            .encode());
+        }
+        // Key bindings are the durable operator record that T3 attribution
+        // and T1's ordering primitive read, so a binding any trusted key
+        // could author is evidence forgeable by the actors it is meant to
+        // weigh -- worse than no record, because it reads as sequenced
+        // proof. `check` is a series of per-variant guards with a
+        // fall-through to `validate`, i.e. admit-by-default, so these
+        // variants have to name themselves here to be refused.
+        //
+        // This also supplies the second condition on re-binding: the fold
+        // lets a binding correct its channel (keeping `bound_at` pinned),
+        // and that correction is only safe while the node is the one
+        // making it.
+        if matches!(
+            op.kind,
+            OpKind::BindKey { .. } | OpKind::RevokeKey { .. }
+        ) && actor_id != self.node_id
+        {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may bind or revoke operator keys",
+                "ask the operator to record this binding with the node key",
+            )
+            .encode());
+        }
         // Required-assignment closes the other half of the same loop:
         // naming your own reviewers is refused, so the node's draw is the
         // only way a review gets reviewers. Two ways to switch it on —
@@ -766,13 +2557,16 @@ impl SubmitPolicy for ChoirPolicy {
             .map_err(|e| crate::reject::from_view_error(&e).encode())
     }
 
-    fn accepted(&mut self, entry: &OpEntry) {
+    fn accepted(&mut self, entry: &OpEntry, hash: &ContentHash) {
         let op = ViewOp::from_payload(&entry.payload).expect("checked in check()");
-        self.view
-            .lock()
-            .expect("view lock")
-            .apply(&op)
-            .expect("checked in check()");
+        {
+            let mut view = self.view.lock().expect("view lock");
+            view.apply(&op).expect("checked in check()");
+            self.concentration
+                .lock()
+                .expect("concentration lock")
+                .observe(entry, &op, &view);
+        }
         if let Some(retention) = &self.review_retention {
             let mut retention = retention.lock().expect("review retention lock");
             let observed_at = retention.config.lapse_after.map(|_| Instant::now());
@@ -781,7 +2575,7 @@ impl SubmitPolicy for ChoirPolicy {
         self.entries
             .lock()
             .expect("entries lock")
-            .push(entry.clone());
+            .push(entry.clone(), hash.clone());
     }
 }
 
@@ -799,6 +2593,10 @@ pub struct Platform {
     /// Read fresh on every draw, so editing it takes effect at once.
     /// `None` = no pool, and unassigned reviews stay unassigned.
     reviewer_pool: Option<std::path::PathBuf>,
+    /// Optional operator conflict graph plus the maximum graph distance
+    /// excluded from a review draw. The file is read fresh on every draw,
+    /// like the reviewer pool. Edges are undirected operator pairs.
+    reviewer_conflict_graph: Option<(std::path::PathBuf, usize)>,
     /// The persisted op log, for readers that have fallen behind the
     /// in-memory window. `None` (an in-memory log) means such a reader
     /// gets a loud gap error instead of a resync.
@@ -812,15 +2610,40 @@ pub struct Platform {
     /// Shared with the policy: when set, a protected ref only moves to a
     /// commit an approved review already named.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with the policy: when set, only scoped ops are admitted.
+    require_scope: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the policy: actor id → bound channel name.
-    key_names: Arc<Mutex<std::collections::HashMap<ContentHash, String>>>,
+    key_names: Arc<Mutex<KeyBindings>>,
+    /// D24 T3 runtime projection, replayed from the signed log at startup.
+    concentration: Arc<Mutex<ConcentrationState>>,
     /// Sequence-ordered live reviews, allocated only under an explicit
     /// retention configuration.
     review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
+    /// Opt-in D24 T4 audit. Sparse and separate from the signed op log:
+    /// rejected requests never enter that log, while this evidence must.
+    newcomer_audit: Option<Arc<Mutex<NewcomerAudit>>>,
+    /// Opt-in D24 T2 operator classifications, re-read on every report so a
+    /// fresh judgement lands without a restart. Absent means uncounted, not
+    /// unclassified: coverage simply stays zero.
+    review_adjudications: Option<std::path::PathBuf>,
     /// Serializes concurrent maintenance passes. User submissions still
     /// race normally through the sequencer; only duplicate pruning scans
     /// and archive batches are coalesced.
     review_prune_lock: Mutex<()>,
+    /// The writer's own latency record for the traffic this node is
+    /// serving, so the Phase-0 decision-latency gate is checked in
+    /// production and not only by the test suite.
+    lag: Arc<LagMeter>,
+    /// Where drained gate breaches are appended, one JSON object per
+    /// line. `None` keeps them in memory only, where the ring eventually
+    /// drops the oldest (reported, never silent).
+    lag_log: Option<std::path::PathBuf>,
+    /// Last failure to write the lag log and how many writes have failed,
+    /// surfaced in the report. A breach record that could not be written
+    /// is itself an operational fact; swallowing it would make the lag log
+    /// a check that cannot fail. The count does not reset on a later
+    /// success, so a transient failure is still visible afterwards.
+    lag_log_error: Mutex<(Option<String>, u64)>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -879,9 +2702,9 @@ impl Platform {
     }
 
     /// [`Platform::start`] with a trusted-keys file that is hot-reloaded
-    /// (on mtime change) whenever a signature check fails: registering a
-    /// key is appending a line, no restart. The file's contents replace
-    /// the whole registry on reload, so key *removal* also takes effect.
+    /// (on mtime change) before signature verification: registering a key
+    /// is appending a line, no restart, and removing one refuses its next
+    /// submission. The file's contents replace the whole registry.
     ///
     /// # Errors
     ///
@@ -920,18 +2743,12 @@ impl Platform {
         registry
             .register(&node_key.public_key_bytes())
             .map_err(|e| format!("register node key: {e:?}"))?;
-        let (view, review_retention) = match retention {
-            Some(config) => {
-                let (view, state) = materialize_with_review_retention(log.as_ref(), config)
-                    .map_err(|e| format!("replay: {e:?}"))?;
-                (view, Some(Arc::new(Mutex::new(state))))
-            }
-            None => (
-                View::materialize(log.as_ref()).map_err(|e| format!("replay: {e:?}"))?,
-                None,
-            ),
-        };
+        let (view, review_retention, concentration) =
+            materialize_platform_state(log.as_ref(), retention)
+                .map_err(|e| format!("replay: {e:?}"))?;
+        let review_retention = review_retention.map(|state| Arc::new(Mutex::new(state)));
         let view = Arc::new(Mutex::new(view));
+        let concentration = Arc::new(Mutex::new(concentration));
         // Fill the window from the tail only. Materialising the whole log
         // into a Vec and pushing each entry through the window cloned
         // every entry twice at startup and held a second full copy of the
@@ -946,11 +2763,28 @@ impl Platform {
             ),
             cap: LOG_WINDOW_CAP,
             by_signing: std::collections::HashMap::new(),
+            by_hash: std::collections::HashMap::new(),
         };
+        // Seeding needs each entry's hash, and the log stores it already:
+        // every entry's `parent` is its predecessor's hash, and the last
+        // one's is the log head. So a restart re-indexes the window
+        // without hashing anything, and a scope signed just before the
+        // restart is still admissible just after it.
+        let mut pending: Option<OpEntry> = None;
         for i in start..len {
-            if let Some(e) = log.get(i) {
-                window.push(e);
+            let current = log.get(i);
+            if let (Some(previous), Some(current)) = (pending.take(), current.as_ref()) {
+                let hash = current
+                    .parent
+                    .clone()
+                    .unwrap_or_else(|| previous.content_hash());
+                window.push(previous, hash);
             }
+            pending = current;
+        }
+        if let Some(last) = pending {
+            let hash = log.head().unwrap_or_else(|| last.content_hash());
+            window.push(last, hash);
         }
         let entries = Arc::new(Mutex::new(window));
         let keys_mtime = keys_file
@@ -959,30 +2793,24 @@ impl Platform {
         // Name bindings are read from the same file at startup; a
         // malformed file here is not fatal because `start_reloading`
         // already accepted the caller's registry.
-        let key_names = Arc::new(Mutex::new(
-            keys_file
-                .as_ref()
-                .and_then(|p| crate::parse_keys_file(p).ok())
-                .map(|signers| {
-                    signers
-                        .into_iter()
-                        .filter_map(|s| {
-                            s.name
-                                .map(|name| (ContentHash::blake3(&s.key), name))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ));
+        let key_names = Arc::new(Mutex::new(match keys_file.as_ref() {
+            Some(path) => crate::parse_keys_file(path).map_or_else(
+                |_| KeyBindings::unavailable(true),
+                |signers| KeyBindings::from_signers(&signers),
+            ),
+            None => KeyBindings::unavailable(false),
+        }));
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let require_scope = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
                 require_assignment: require_assignment.clone(),
                 protected_refs: protected_refs.clone(),
                 require_review: require_review.clone(),
+                require_scope: require_scope.clone(),
                 registry,
                 view: view.clone(),
                 entries: entries.clone(),
@@ -991,21 +2819,30 @@ impl Platform {
                 node_pub: node_key.public_key_bytes().to_vec(),
                 node_id: node_key.actor_id(),
                 key_names: key_names.clone(),
+                concentration: concentration.clone(),
                 review_retention: review_retention.clone(),
             }),
         );
         let platform = Self {
             handle: sequencer.handle(),
+            lag: sequencer.lag(),
+            lag_log: None,
+            lag_log_error: Mutex::new((None, 0)),
             view,
             node_key,
             entries,
             reviewer_pool: None,
+            reviewer_conflict_graph: None,
             log_path: None,
             require_assignment,
             protected_refs,
             require_review,
+            require_scope,
             key_names,
+            concentration,
             review_retention,
+            newcomer_audit: None,
+            review_adjudications: None,
             review_prune_lock: Mutex::new(()),
             _sequencer: sequencer,
         };
@@ -1022,6 +2859,104 @@ impl Platform {
             }
         }
         Ok(platform)
+    }
+
+    /// Enables sparse, durable D24 T4 newcomer measurement.
+    ///
+    /// `incumbent_actor_keys` is the trusted-key snapshot at activation;
+    /// those actors are excluded because the audit cannot reconstruct their
+    /// first attempt or time-to-first-acceptance. The audit records only a
+    /// later actor's first verified signed-API attempt, its first eventual
+    /// acceptance, and an optional appeal. Operator adjudications are JSONL
+    /// rows in the separate file and are re-read for every report.
+    ///
+    /// Both files are created mode 0600. Neither changes the signed op log or
+    /// any hash input.
+    ///
+    /// # Errors
+    ///
+    /// Unusable paths or an invalid existing audit file.
+    pub fn with_newcomer_audit(
+        mut self,
+        audit_path: std::path::PathBuf,
+        adjudications_path: std::path::PathBuf,
+        incumbent_actor_keys: Vec<String>,
+    ) -> Result<Self, String> {
+        if let Some(parent) = adjudications_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create adjudications directory: {e}"))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&adjudications_path)
+            .map_err(|e| format!("open adjudications: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &adjudications_path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .map_err(|e| format!("chmod adjudications: {e}"))?;
+        }
+        let audit = NewcomerAudit::open(
+            &audit_path,
+            adjudications_path,
+            incumbent_actor_keys.into_iter().collect(),
+        )?;
+        self.newcomer_audit = Some(Arc::new(Mutex::new(audit)));
+        Ok(self)
+    }
+
+    /// Enables the D24 T2 operator classification file: versioned 0600 JSONL
+    /// rows of `{"format_version":1,"review_id":…,"classification":…}` where
+    /// classification is `valid`, `invalid`, `slop` or `unclear`.
+    ///
+    /// Separate from the signed op log on purpose, exactly like the T4
+    /// adjudications: a judgement about a contribution is the operator's
+    /// opinion, not a sequenced claim any actor can make. Keying it by review
+    /// id rather than by verdict is what lets a classification outlive
+    /// archiving, which discards the verdict bulk.
+    ///
+    /// Enabling it does not make T2 evaluable. The cohort still has no exit
+    /// rule, the observation window and tripwire subject are unset, and census
+    /// adjudication cannot survive the flood it would need to detect.
+    ///
+    /// # Errors
+    ///
+    /// The file or its directory cannot be created.
+    pub fn with_review_adjudications(
+        mut self,
+        path: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create review adjudications directory: {e}"))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&path)
+            .map_err(|e| format!("open review adjudications: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("chmod review adjudications: {e}"))?;
+        }
+        self.review_adjudications = Some(path);
+        Ok(self)
     }
 
     /// Refuses any `RequestReview` that names its own reviewers, so the
@@ -1096,6 +3031,31 @@ impl Platform {
         self
     }
 
+    /// Admits only ops whose author bound them to this log and a head
+    /// still in the window — the replay defence, turned on.
+    ///
+    /// Off by default because it is a wire-compatibility break, not
+    /// because unscoped is safe: an unscoped signature is admissible on
+    /// any node that trusts the key, and admissible again on the node it
+    /// came from as soon as CAS state returns to what it expected. Every
+    /// client in this repository always sends a scope, so turning this
+    /// on costs them nothing; a client that predates scopes stops
+    /// working, which is the whole reason for the flag.
+    #[must_use]
+    pub fn with_required_scope(self) -> Self {
+        self.require_scope
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// The log identity a client signs a scope against: this node's
+    /// actor id and the head it should name.
+    #[must_use]
+    pub fn scope_now(&self) -> (ContentHash, Option<ContentHash>) {
+        let head = self.entries.lock().expect("entries lock").head_hash();
+        (self.node_key.actor_id(), head)
+    }
+
     /// Points the platform at the JSON-lines file its op log persists to,
     /// so `/api/log?from=` can serve entries that have already been
     /// evicted from the in-memory window. Without it, a reader that has
@@ -1119,15 +3079,7 @@ impl Platform {
     /// That matters because a binding is a *tightening*: a gate that
     /// applies at an unpredictable future moment is not a gate.
     pub fn set_key_names(&self, signers: &[crate::TrustedKey]) {
-        let map = signers
-            .iter()
-            .filter_map(|s| {
-                s.name
-                    .clone()
-                    .map(|name| (ContentHash::blake3(&s.key), name))
-            })
-            .collect();
-        *self.key_names.lock().expect("key names lock") = map;
+        *self.key_names.lock().expect("key names lock") = KeyBindings::from_signers(signers);
     }
 
     /// Shrinks the in-memory `/api/log` window. Exists so tests can
@@ -1158,6 +3110,26 @@ impl Platform {
         self
     }
 
+    /// Excludes reviewer operators whose shortest path from the requester
+    /// in `path` is at most `max_distance`. Each non-comment line is one
+    /// undirected `<operator> <operator>` edge. Operator names, not full
+    /// `operator/agent` channels, belong in the graph.
+    ///
+    /// The graph is operator-supplied runtime policy rather than op-log
+    /// state: changing it affects future draws without changing persisted
+    /// operations or replay. It is read for every draw and fails closed;
+    /// an unreadable or malformed graph leaves the review unassigned.
+    /// Distance zero retains the existing same-operator exclusion.
+    #[must_use]
+    pub fn with_reviewer_conflict_graph(
+        mut self,
+        path: std::path::PathBuf,
+        max_distance: usize,
+    ) -> Self {
+        self.reviewer_conflict_graph = Some((path, max_distance));
+        self
+    }
+
     /// Routes one git ref update (from a repo's `update` hook) through
     /// the sequencer: CAS against the view, node-signed, totally ordered
     /// with API ops. Refs are namespaced `<repo>:<refname>`; git oids
@@ -1176,15 +3148,13 @@ impl Platform {
         user: &str,
         cert: Option<(&str, &str)>,
     ) -> Result<(), String> {
-        const ZERO: [char; 2] = ['0', '0'];
-        let is_zero = |h: &str| !h.is_empty() && h.chars().all(|c| c == ZERO[0]);
         let name = format!("{repo}:{refname}");
-        let prev = if is_zero(old_hex) {
+        let prev = if is_zero_oid(old_hex) {
             None
         } else {
             Some(ContentHash::from_git_oid(old_hex).ok_or("bad old oid")?)
         };
-        let kind = if is_zero(new_hex) {
+        let kind = if is_zero_oid(new_hex) {
             OpKind::DeleteRef { name, prev }
         } else {
             OpKind::SetRef {
@@ -1193,7 +3163,255 @@ impl Platform {
                 prev,
             }
         };
-        let payload = ViewOp::new(kind).to_payload();
+        self.submit_ref_op(kind, user, cert)
+    }
+
+    /// Retracts a ref op this push already had accepted, because the push
+    /// as a whole is being refused and git will apply none of it.
+    ///
+    /// `pre-receive` submits one op per ref but git applies no ref until
+    /// the hook exits zero, so a push whose third ref is refused has
+    /// already put two ops in the durable log. Without this the view keeps
+    /// refs git never created — and they cannot be pushed afterwards
+    /// either, because the pusher's `old` is git's (absent) value while
+    /// the view holds the stranded one, so every retry loses the CAS. The
+    /// ref becomes permanently unpushable.
+    ///
+    /// The log is append-only, so the repair is a compensating op, not an
+    /// erasure: the abort is part of the history rather than hidden from
+    /// it. `old`/`new` are the same values the accepted op carried, so the
+    /// inverse restores exactly what git still has.
+    ///
+    /// # Errors
+    ///
+    /// The policy's rejection reason — most likely a lost CAS, meaning
+    /// something else moved the ref between the accept and this retraction
+    /// and the stranded value is no longer what would be undone.
+    pub fn git_abort(
+        &self,
+        repo: &str,
+        refname: &str,
+        old_hex: &str,
+        new_hex: &str,
+        user: &str,
+        cert: Option<(&str, &str)>,
+    ) -> Result<(), String> {
+        let name = format!("{repo}:{refname}");
+        // CAS on what the accepted op set, so a retraction that races a
+        // real update loses instead of clobbering it.
+        let prev = Some(ContentHash::from_git_oid(new_hex).ok_or("bad new oid")?);
+        let kind = if is_zero_oid(old_hex) {
+            // The push was creating the ref, so undoing it removes it.
+            OpKind::DeleteRef { name, prev }
+        } else {
+            // It existed before: put it back where git still has it.
+            OpKind::SetRef {
+                name,
+                commit: ContentHash::from_git_oid(old_hex).ok_or("bad old oid")?,
+                prev,
+            }
+        };
+        self.submit_ref_op(kind, user, cert)
+    }
+
+    /// Brings every bare repo under `root` back into agreement with the
+    /// view, which is the source of truth. Run at startup, before the
+    /// node serves anything, so nothing races the repair.
+    ///
+    /// The hook's retraction path handles a push that is refused while
+    /// the daemon is alive. This handles the rest, and it does so without
+    /// needing to know which of them happened: power loss between the
+    /// hook's 200 and git writing the ref, a per-ref failure *after*
+    /// `pre-receive` passed (`receive.deny*`, an `update` hook, a write
+    /// error), or a retraction that could not be delivered. All of them
+    /// leave the same state, and it is the state this reads.
+    ///
+    /// Two repairs, chosen by whether git can honour the view:
+    ///
+    /// - the commit exists in the repo, so git is simply behind: the ref
+    ///   is written. Git is the follower (D21 single-canonical), so
+    ///   moving it is the defined direction.
+    /// - the commit is absent — a refused push has its objects discarded
+    ///   from the quarantine — so the view names something git can never
+    ///   have: a compensating op puts the view back to git's value.
+    ///
+    /// A ref git holds and the view does not is **reported, never
+    /// adopted**. Appending an op for it would launder an out-of-band
+    /// `update-ref` into the signed log as though it had been submitted.
+    pub fn reconcile_git_refs(&self, root: &std::path::Path) -> RefReconciliation {
+        let mut report = RefReconciliation::default();
+        for finding in self.survey_git_refs(root) {
+            let full = finding.name();
+            match finding.state {
+                // Git is behind on a commit it already has, so move it.
+                RefState::GitBehind => {
+                    let Some(want) = &finding.log_oid else { continue };
+                    let path = root.join(&finding.repo);
+                    match write_git_ref(&path, &finding.refname, want, finding.git_oid.as_deref()) {
+                        Ok(()) => report.applied.push(full),
+                        Err(e) => report.unreconciled.push(format!("{full}: {e}")),
+                    }
+                }
+                // Git can never hold this value, so the log gives way.
+                // `git_abort` builds exactly this inverse: back to git's
+                // value, or gone if git has none.
+                RefState::LogUnbackable => {
+                    let Some(want) = &finding.log_oid else { continue };
+                    let old = finding
+                        .git_oid
+                        .clone()
+                        .unwrap_or_else(|| "0".repeat(want.len()));
+                    match self.git_abort(&finding.repo, &finding.refname, &old, want, "node", None)
+                    {
+                        Ok(()) => report.retracted.push(full),
+                        Err(e) => report.unreconciled.push(format!("{full}: {e}")),
+                    }
+                }
+                RefState::GitOnly | RefState::Unreadable => report
+                    .unreconciled
+                    .push(format!("{full}: {}", finding.reason)),
+            }
+        }
+        report
+    }
+
+    /// Every way the repos under `root` and the view currently disagree,
+    /// with nothing written and no op appended.
+    ///
+    /// This is the half of [`Platform::reconcile_git_refs`] that can be
+    /// run against a live node. The repair deliberately cannot: it writes
+    /// refs, so it belongs before the first request, where nothing races
+    /// it. Reading is safe at any time, and without it a divergence that
+    /// appears while the daemon is up is invisible until the next
+    /// restart — which is the difference between a monitor and an
+    /// autopsy.
+    ///
+    /// Served by `GET /api/ref-agreement`, which is deliberately its own
+    /// endpoint rather than a field on `/api/view`: this shells out to
+    /// git once per repo, and `/api/view` is on the hot path.
+    ///
+    /// Scope, stated because [`RefState::GitOnly`] reads like a stronger
+    /// claim than it is: only repos the log already names are compared.
+    /// A repo with refs and no log entry at all is not surveyed, so this
+    /// finds an out-of-band ref beside logged ones, not an entire
+    /// smuggled repo.
+    pub fn survey_git_refs(&self, root: &std::path::Path) -> Vec<RefFinding> {
+        let mut findings = Vec::new();
+        let view_refs: Vec<(String, ContentHash)> = self
+            .view
+            .lock()
+            .expect("view lock")
+            .refs
+            .iter()
+            .map(|(name, hash)| (name.clone(), hash.clone()))
+            .collect();
+
+        // One `for-each-ref` per repo rather than one `rev-parse` per
+        // ref: a view with thousands of refs would otherwise start the
+        // daemon with thousands of subprocesses.
+        let mut repos: BTreeMap<String, Vec<(String, ContentHash)>> = BTreeMap::new();
+        for (name, hash) in view_refs {
+            match name.split_once(':') {
+                Some((repo, refname)) => repos
+                    .entry(repo.to_string())
+                    .or_default()
+                    .push((refname.to_string(), hash)),
+                // Not a git-derived ref (the API can set any name), so
+                // there is no repo to compare it against.
+                None => continue,
+            }
+        }
+
+        for (repo, refs) in repos {
+            // Ref names come out of the log, which anyone admitted can
+            // write to, so they get the same traversal guard as a repo
+            // name off the wire.
+            if repo.split('/').any(|c| c == ".." || c.is_empty()) || repo.starts_with('/') {
+                findings.push(RefFinding::unreadable(&repo, "", "refused as a repo path"));
+                continue;
+            }
+            let path = root.join(&repo);
+            let Some(in_git) = read_git_refs(&path) else {
+                findings.push(RefFinding::unreadable(
+                    &repo,
+                    "",
+                    &format!(
+                        "the log holds {} ref(s) for a repo that cannot be read here",
+                        refs.len()
+                    ),
+                ));
+                continue;
+            };
+            let wanted: BTreeSet<String> = refs.iter().map(|(name, _)| name.clone()).collect();
+            for (refname, want) in refs {
+                let Some(want_oid) = want.git_oid() else {
+                    findings.push(RefFinding::unreadable(
+                        &repo,
+                        &refname,
+                        "log value is not a git oid",
+                    ));
+                    continue;
+                };
+                let have = in_git.get(&refname).cloned();
+                if have.as_deref() == Some(want_oid.as_str()) {
+                    continue;
+                }
+                // Whether git *can* be moved to the log is the whole
+                // difference between the two repairs, so it is decided
+                // here, while reading, and not again while writing.
+                let state = if object_exists(&path, &want_oid) {
+                    RefState::GitBehind
+                } else {
+                    RefState::LogUnbackable
+                };
+                findings.push(RefFinding {
+                    repo: repo.clone(),
+                    refname,
+                    log_oid: Some(want_oid),
+                    git_oid: have,
+                    reason: match state {
+                        RefState::GitBehind => "git is behind a commit it already has".into(),
+                        _ => "the log names a commit this repo does not have".into(),
+                    },
+                    state,
+                });
+            }
+            for (refname, oid) in &in_git {
+                if !wanted.contains(refname) {
+                    // A remote-tracking ref is this repo's own record of
+                    // what it pushed elsewhere — the on-box follower feed
+                    // writes refs/remotes/<follower>/* on every push — not
+                    // canonical state, so its absence from the log is not a
+                    // divergence. Skipped only on this side: a log that
+                    // *does* name one is still compared above, and still
+                    // retracted if git cannot back it.
+                    if refname.starts_with("refs/remotes/") {
+                        continue;
+                    }
+                    findings.push(RefFinding {
+                        repo: repo.clone(),
+                        refname: refname.clone(),
+                        log_oid: None,
+                        git_oid: Some(oid.clone()),
+                        state: RefState::GitOnly,
+                        reason: "in git, not in the log".into(),
+                    });
+                }
+            }
+        }
+        findings
+    }
+
+    /// Signs a git-derived ref op as the node and submits it, attributing
+    /// it to the pusher's own key when the push certificate verified.
+    fn submit_ref_op(
+        &self,
+        kind: OpKind,
+        user: &str,
+        cert: Option<(&str, &str)>,
+    ) -> Result<(), String> {
+        let (node, head) = self.scope_now();
+        let payload = ViewOp::new(kind).in_scope(node, head).to_payload();
         // Verified push certificate ("G" = good signature) attributes
         // the op to the pusher's own key; otherwise the transport user.
         let workspace = match cert {
@@ -1203,7 +3421,53 @@ impl Platform {
         let sig = self.node_key.sign_submission(&workspace, &payload);
         self.handle
             .try_submit(&workspace, payload, Some(sig))
-            .map(|_| ())
+            .map(|_| ())?;
+        // Every ref movement the node authors ends in an attestation of
+        // where the refs now stand. Per accepted ref rather than per
+        // push, because the pre-receive protocol has no end-of-push
+        // signal to hang a single emission on.
+        self.record_snapshot();
+        Ok(())
+    }
+
+    /// Attests the current ref-state (D25): submits a node-signed
+    /// [`OpKind::RecordRefSnapshot`] of the view as it stands, and on
+    /// admission projects the snapshot's canonical bytes to
+    /// `refs.snapshot` beside the op log — the detached copy a backup
+    /// pulls with the log, byte-identical to the payload in it.
+    ///
+    /// Best-effort on both legs. A lost submission race means another
+    /// writer moved the view between read and submit, and that writer's
+    /// own ref op ends in another attestation, so the chain catches up
+    /// without retries here. The file write is tmp-plus-rename with a
+    /// per-call tmp name: concurrent admissions cannot tear the file,
+    /// and if their renames land out of order it briefly holds the older
+    /// of two valid snapshots until the next attestation replaces it.
+    fn record_snapshot(&self) {
+        let snapshot = self.view.lock().expect("view lock").snapshot();
+        let bytes = snapshot.canonical_bytes();
+        let (node, head) = self.scope_now();
+        let payload = ViewOp::new(OpKind::RecordRefSnapshot { snapshot })
+            .in_scope(node, head)
+            .to_payload();
+        let channel = "node/snapshot";
+        let sig = self.node_key.sign_submission(channel, &payload);
+        if self.handle.try_submit(channel, payload, Some(sig)).is_err() {
+            return;
+        }
+        let Some(log) = &self.log_path else { return };
+        static TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = log.with_file_name(format!("refs.snapshot.{n}.tmp"));
+        if std::fs::write(&tmp, &bytes)
+            .and_then(|()| std::fs::rename(&tmp, log.with_file_name("refs.snapshot")))
+            .is_err()
+        {
+            // The attestation is in the log either way; a missing
+            // detached copy fails the next backup pull loudly, which is
+            // the reader that cares.
+            std::fs::remove_file(&tmp).ok();
+        }
     }
 
     /// Points `workspace` at git oid `head_hex` with a node-signed op,
@@ -1228,11 +3492,13 @@ impl Platform {
             .workspaces
             .get(workspace)
             .cloned();
+        let (node, head) = self.scope_now();
         let payload = ViewOp::new(OpKind::SetWorkspaceHead {
             workspace: workspace.to_string(),
             commit,
             prev,
         })
+        .in_scope(node, head)
         .to_payload();
         let sig = self.node_key.sign_submission(attribution, &payload);
         self.handle.try_submit(attribution, payload, Some(sig)).map(|_| ())
@@ -1448,9 +3714,10 @@ impl Platform {
     /// a node-signed op.
     ///
     /// Candidates are the pool minus everyone sharing the requester's
-    /// **operator**, and the draw takes at most one reviewer per operator
-    /// so [`REQUIRED_APPROVAL_WEIGHT`] reviewers means that many *independent*
-    /// ones.
+    /// **operator** and, when configured, every operator within the chosen
+    /// conflict-graph distance. The draw takes at most one reviewer per
+    /// operator so `REQUIRED_APPROVAL_WEIGHT` reviewers means that many
+    /// *independent* ones under the configured policy.
     ///
     /// Excluding only the requester's own name was the original rule and
     /// it does not survive the multi-operator case, which is the normal
@@ -1460,28 +3727,39 @@ impl Platform {
     /// says must be blocked at the operator level, so the exclusion has
     /// to be at that level too.
     ///
-    /// A pool that cannot supply [`REQUIRED_APPROVAL_WEIGHT`] distinct operators
+    /// A pool that cannot supply `REQUIRED_APPROVAL_WEIGHT` distinct operators
     /// draws fewer rather than doubling up — a visibly under-assigned
     /// review beats one that looks independent and is not.
     ///
     /// # Errors
     ///
-    /// No pool configured, an unreadable pool, no candidate from another
-    /// operator, or the sequencer's rejection reason (e.g. the review was
-    /// assigned by a concurrent request).
+    /// No pool configured, an unreadable pool or conflict graph, malformed
+    /// graph data, no candidate outside the conflict distance, or the
+    /// sequencer's rejection reason (e.g. the review was assigned by a
+    /// concurrent request).
     pub fn assign_reviewers(&self, id: &str, requester: &str) -> Result<Vec<String>, String> {
         let path = self.reviewer_pool.as_ref().ok_or("no reviewer pool configured")?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("read reviewer pool: {e}"))?;
         let mine = reviewer_operator(requester);
+        let excluded_operators = match &self.reviewer_conflict_graph {
+            Some((path, max_distance)) => {
+                operators_within_distance(path, mine, *max_distance)?
+            }
+            None => BTreeSet::from([mine.to_string()]),
+        };
         let mut pool: Vec<String> = text
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#') && reviewer_operator(l) != mine)
+            .filter(|l| {
+                !l.is_empty()
+                    && !l.starts_with('#')
+                    && !excluded_operators.contains(reviewer_operator(l))
+            })
             .map(String::from)
             .collect();
         if pool.is_empty() {
             return Err(format!(
-                "reviewer pool has nobody outside {mine:?}, the requester's operator"
+                "reviewer pool has nobody outside the configured conflict distance from {mine:?}"
             ));
         }
         // Partial Fisher-Yates with a hand-rolled xorshift (no rand
@@ -1510,10 +3788,12 @@ impl Platform {
         let mut pool = drawn;
         pool.sort();
 
+        let (node, head) = self.scope_now();
         let payload = ViewOp::new(OpKind::AssignReviewers {
             id: id.to_string(),
             reviewers: pool.clone(),
         })
+        .in_scope(node, head)
         .to_payload();
         let channel = "node/assign";
         let sig = self.node_key.sign_submission(channel, &payload);
@@ -1594,6 +3874,7 @@ impl Platform {
         }
 
         let channel = "node/archive";
+        let (node, head) = self.scope_now();
         let submissions: Vec<Submission> = candidates
             .iter()
             .map(|(id, lapsed)| {
@@ -1601,6 +3882,7 @@ impl Platform {
                     id: id.clone(),
                     lapsed: *lapsed,
                 })
+                .in_scope(node.clone(), head.clone())
                 .to_payload();
                 Submission {
                     channel: channel.to_string(),
@@ -1634,6 +3916,37 @@ impl Platform {
         }
     }
 
+    fn add_newcomer_outcome(
+        &self,
+        response: &mut serde_json::Value,
+        sub: &DecodedSubmission,
+        started_at_unix_ms: u64,
+        accepted: bool,
+        rejection_code: Option<&str>,
+    ) {
+        let Some(audit) = &self.newcomer_audit else {
+            return;
+        };
+        let Some(actor_key) = sub.author_sig.as_ref().map(|signature| signature.key_id.as_str())
+        else {
+            return;
+        };
+        match audit.lock().expect("newcomer audit lock").observe(
+            actor_key,
+            started_at_unix_ms,
+            accepted,
+            rejection_code,
+        ) {
+            Ok(Some(attempt_id)) => {
+                response["newcomer_attempt_id"] = serde_json::json!(attempt_id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                response["newcomer_audit_error"] = serde_json::json!(error);
+            }
+        }
+    }
+
     /// Whether the sequencer has failed a durability barrier and stopped
     /// accepting.
     ///
@@ -1647,19 +3960,182 @@ impl Platform {
         self.handle.durability_failed()
     }
 
+    /// Appends gate breaches to `path`, one JSON object per line.
+    ///
+    /// Separate from the op log on purpose: a breach is an observation
+    /// about this node's storage and load, not a fact about the ordered
+    /// history, and it must not change a hash anyone else replays.
+    #[must_use]
+    pub fn with_lag_log(mut self, path: std::path::PathBuf) -> Self {
+        self.lag_log = Some(path);
+        self
+    }
+
+    /// The live latency record, for a caller that wants to tighten the
+    /// gate or read it without going through the API.
+    #[must_use]
+    pub fn lag(&self) -> Arc<LagMeter> {
+        self.lag.clone()
+    }
+
+    /// Writes any breaches recorded since the last drain to the lag log.
+    ///
+    /// Called by the daemon's accept loop, which is the same place it
+    /// polls for a failed durability barrier: both are things the writer
+    /// thread can only report, never act on. No traffic means no drain,
+    /// which is harmless because no traffic also means no breaches.
+    pub fn drain_lag_log(&self) {
+        let Some(path) = self.lag_log.as_ref() else {
+            return;
+        };
+        let (breaches, dropped) = self.lag.drain();
+        if breaches.is_empty() && dropped == 0 {
+            return;
+        }
+        let gate_us = u64::try_from(self.lag.gate().as_micros()).unwrap_or(u64::MAX);
+        let mut lines = String::new();
+        if dropped > 0 {
+            // The gap is written into the log rather than only counted,
+            // so a reader of the file alone can see that it is not the
+            // whole story.
+            lines.push_str(
+                &serde_json::json!({
+                    "format_version": 1,
+                    "event": "breaches_dropped",
+                    "count": dropped,
+                })
+                .to_string(),
+            );
+            lines.push('\n');
+        }
+        for breach in breaches {
+            lines.push_str(
+                &serde_json::json!({
+                    "format_version": 1,
+                    "event": "gate_breach",
+                    "seq": breach.seq,
+                    "at_unix_ms": breach.at_unix_ms,
+                    "gate_us": gate_us,
+                    "decision_us": breach.decision_us,
+                    "durable_us": breach.durable_us,
+                    "batch": breach.batch,
+                })
+                .to_string(),
+            );
+            lines.push('\n');
+        }
+        let write = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, lines.as_bytes()));
+        if let Err(e) = write {
+            // The reason, not the path: this string is served over the
+            // API, and the path names the operator's home directory.
+            let mut last = self.lag_log_error.lock().expect("lag log error lock");
+            last.0 = Some(e.to_string());
+            last.1 += 1;
+        }
+    }
+
+    /// The latency report as served under `/api/view`.
+    fn lag_json(&self) -> serde_json::Value {
+        let report = self.lag.report();
+        let last_error = self.lag_log_error.lock().expect("lag log error lock").clone();
+        serde_json::json!({
+            "format_version": 1,
+            "gate_us": report.gate_us,
+            "gate_basis": "dequeue to acknowledgement, durability barrier included",
+            "observed_ops": report.observed_ops,
+            "decision": {
+                "basis": "dequeue to append; the Phase-0 gate as written",
+                "p50_us": report.decision_p50_us,
+                "p99_us": report.decision_p99_us,
+                "max_us": report.decision_max_us,
+                "breaches": report.decision_breaches,
+            },
+            "durable": {
+                "basis": "dequeue to acknowledgement; what a submitter waits out",
+                "p50_us": report.durable_p50_us,
+                "p99_us": report.durable_p99_us,
+                "max_us": report.durable_max_us,
+                "breaches": report.durable_breaches,
+            },
+            "percentile_basis": "power-of-two bucket upper bound capped at the observed maximum: over-estimates by at most 2x, never under-estimates",
+            "since": "process start; not replayed from the log",
+            // Whether, not where. An API client learning the daemon's
+            // filesystem layout (which carries the operator's home
+            // directory) buys nothing it can act on; the operator already
+            // knows the path from the runbook.
+            "log_configured": self.lag_log.is_some(),
+            "log_error": last_error.0,
+            "log_write_failures": last_error.1,
+            "pending_breaches": report.pending_breaches,
+        })
+    }
+
+    /// The sequence the next admitted op will occupy, which is the
+    /// cheapest complete description of "what state is this node in".
+    ///
+    /// Exposed for the browser surface's cache: it asks this before
+    /// deciding whether to rebuild a page, so an unchanged node costs
+    /// one `u64` read rather than a full view serialization.
+    pub fn view_seq(&self) -> u64 {
+        self.view.lock().expect("view lock").next_seq
+    }
+
+    /// Repository the review `id` proposes to land on, in the canonical
+    /// D29 spelling, or `None` when the review is unknown or unbound.
+    ///
+    /// Exposed for per-repository authorization: it is what lets posting
+    /// a verdict require write on the repository under review, instead
+    /// of the node-wide grant every review op would otherwise need.
+    pub fn review_repo(&self, id: &str) -> Option<String> {
+        self.view
+            .lock()
+            .expect("view lock")
+            .reviews
+            .get(id)?
+            .target_ref
+            .as_deref()
+            .and_then(|target| target.split_once(':'))
+            .map(|(repo, _)| crate::acl::normalize_repo(repo))
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {
             ("GET", "/api/view") => {
+                let protected_path = self
+                    .protected_refs
+                    .lock()
+                    .expect("protected refs lock")
+                    .clone();
+                let protected = ProtectedPolicySnapshot::read(protected_path.as_deref());
+                // Read before the view guard: the audit mutex is taken
+                // under the view lock nowhere else, and this keeps it
+                // that way.
+                let cohort = new_actor_cohort(self.newcomer_audit.as_ref());
+                // Writer order is view -> concentration. Holding both
+                // through snapshot construction prevents a response whose
+                // heads include op N while `as_of_seq` and attribution stop
+                // at N-1. The guards are dropped before byte measurement
+                // and final response serialization.
                 let view = self.view.lock().expect("view lock");
-                let ws: std::collections::BTreeMap<_, _> = view
+                let concentration_state =
+                    self.concentration.lock().expect("concentration lock");
+                let key_names = self.key_names.lock().expect("key names lock");
+                let ws: BTreeMap<_, _> = view
                     .workspaces
                     .iter()
                     .map(|(k, v)| (k.clone(), v.to_hex()))
                     .collect();
-                let refs: std::collections::BTreeMap<_, _> =
-                    view.refs.iter().map(|(k, v)| (k.clone(), v.to_hex())).collect();
-                let reviews: std::collections::BTreeMap<_, _> = view
+                let refs: BTreeMap<_, _> = view
+                    .refs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_hex()))
+                    .collect();
+                let reviews: BTreeMap<_, _> = view
                     .reviews
                     .iter()
                     .map(|(id, r)| (id.clone(), review_json(r)))
@@ -1680,12 +4156,88 @@ impl Platform {
                         )
                     })
                     .collect();
+                let bindings: BTreeMap<_, _> = view
+                    .bindings
+                    .iter()
+                    .map(|(key_id, binding)| (key_id.clone(), binding_json(binding)))
+                    .collect();
+                // The latest admitted ref-state attestation (D25), as a
+                // summary: `refs` above already carries the full map, so
+                // repeating it here would double the hot-path response
+                // for no reader.
+                let snapshot = view.latest_snapshot.as_ref().map(|s| {
+                    serde_json::json!({
+                        "id": s.id().to_hex(),
+                        "at_seq": s.at_seq,
+                        "prev_snapshot": s.prev_snapshot.as_ref().map(ContentHash::to_hex),
+                    })
+                });
+                let ws = serde_json::json!(ws);
+                let refs = serde_json::json!(refs);
+                let reviews = serde_json::json!(reviews);
+                let provenance = serde_json::json!(&view.provenance);
+                let bindings = serde_json::json!(bindings);
+                let counts = view_growth_counts(&view);
+                let as_of_seq = concentration_state.as_of_seq;
+                // T3 attribution reads the durable record, not the keys
+                // file: a tripwire whose evidence the operator can edit in
+                // place measures the operator's honesty, not concentration.
+                // `key_names` still supplies the trusted population, which
+                // no op in the log can answer.
+                let durable_bindings = KeyBindings::from_view(&view, &key_names);
+                let concentration = concentration_json(
+                    &concentration_state,
+                    &durable_bindings,
+                    &protected,
+                );
+                let new_actor_review_outcomes = new_actor_review_outcomes_json(
+                    &concentration_state,
+                    &view,
+                    cohort.as_ref(),
+                    self.review_adjudications.as_deref(),
+                );
+                drop(key_names);
+                drop(concentration_state);
+                drop(view);
+                let view_growth = view_growth_json(
+                    counts,
+                    &ws,
+                    &refs,
+                    &reviews,
+                    &provenance,
+                    &bindings,
+                    as_of_seq,
+                );
+                let newcomer_harm = newcomer_harm_json(self.newcomer_audit.as_ref());
+                // What a client needs to bind its next signature to this
+                // log: which node, which head, and whether that head is
+                // being enforced. Read here rather than under the view
+                // guard above — an op that lands in between only makes
+                // `head` one entry stale, and a scope naming any head
+                // still in the window is admissible.
+                let (node, head) = self.scope_now();
+                let log = serde_json::json!({
+                    "node": node.to_hex(),
+                    "head": head.as_ref().map(ContentHash::to_hex),
+                    "scope_required": self
+                        .require_scope
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                });
                 let body = serde_json::json!({
+                    "log": log,
+                    "snapshot": snapshot,
                     "workspaces": ws,
                     "changes": changes,
                     "refs": refs,
                     "reviews": reviews,
-                    "provenance": view.provenance,
+                    "provenance": provenance,
+                    "bindings": bindings,
+                    "concentration": concentration,
+                    "view_growth": view_growth,
+                    "newcomer_harm": newcomer_harm,
+                    "new_actor_review_outcomes": new_actor_review_outcomes,
+                    "sequencer_lag": self.lag_json(),
+                    "build": crate::build_json(),
                 });
                 (200, body.to_string())
             }
@@ -1707,6 +4259,61 @@ impl Platform {
                     .map(|(id, r)| (id.clone(), review_json(r)))
                     .collect();
                 (200, serde_json::json!({ "pending": pending }).to_string())
+            }
+            ("POST", "/api/appeal") => {
+                let req: serde_json::Value = match serde_json::from_slice(body) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return (
+                            400,
+                            Rejection::new(
+                                Code::MalformedRequest,
+                                format!("request body is not valid JSON: {error}"),
+                                "send {\"attempt_id\": N} using the newcomer_attempt_id from \
+                                 the rejected response",
+                            )
+                            .body(),
+                        );
+                    }
+                };
+                let Some(attempt_id) = req.get("attempt_id").and_then(serde_json::Value::as_u64)
+                else {
+                    return (
+                        400,
+                        Rejection::new(
+                            Code::MalformedRequest,
+                            "appeal needs an integer attempt_id",
+                            "send the newcomer_attempt_id from the rejected response",
+                        )
+                        .body(),
+                    );
+                };
+                let Some(audit) = &self.newcomer_audit else {
+                    return (
+                        503,
+                        Rejection::new(
+                            Code::PolicyUnavailable,
+                            "newcomer audit is not enabled",
+                            "ask the operator to enable the newcomer audit before filing appeals",
+                        )
+                        .body(),
+                    );
+                };
+                match audit.lock().expect("newcomer audit lock").appeal(attempt_id) {
+                    Ok(()) => (
+                        200,
+                        serde_json::json!({ "appealed": attempt_id }).to_string(),
+                    ),
+                    Err(error) => (
+                        400,
+                        Rejection::new(
+                            Code::MalformedRequest,
+                            error,
+                            "use the attempt id from a rejected first-attempt response",
+                        )
+                        .body(),
+                    ),
+                }
             }
             ("POST", "/api/submit") => self.submit(body),
             ("POST", "/api/submit-batch") => {
@@ -1737,6 +4344,8 @@ impl Platform {
                 for op in ops {
                     decoded.push(decode_submission(op));
                 }
+                let started_at_unix_ms: Vec<u64> =
+                    decoded.iter().map(|_| unix_ms()).collect();
                 // Malformed ops never reach the sequencer. Well-formed
                 // ones are pushed in request order, so pulling one
                 // outcome per `Ok` below keeps results aligned with the
@@ -1755,7 +4364,7 @@ impl Platform {
                 let mut accepted = 0u64;
                 let mut rejected = 0u64;
                 let mut results: Vec<serde_json::Value> = Vec::with_capacity(decoded.len());
-                for d in &decoded {
+                for (index, d) in decoded.iter().enumerate() {
                     let value = match d {
                         Err(reason) => {
                             rejected += 1;
@@ -1764,11 +4373,29 @@ impl Platform {
                         Ok(sub) => match outcomes.next().expect("one outcome per submitted op") {
                             Ok(acc) => {
                                 accepted += 1;
-                                self.batch_result(acc, sub)
+                                let mut value = self.batch_result(acc, sub);
+                                self.add_newcomer_outcome(
+                                    &mut value,
+                                    sub,
+                                    started_at_unix_ms[index],
+                                    true,
+                                    None,
+                                );
+                                value
                             }
                             Err(reason) => {
                                 rejected += 1;
-                                serde_json::json!({ "error": reason })
+                                let rejection = Rejection::decode(&reason).to_json();
+                                let code = rejection["code"].as_str().map(str::to_string);
+                                let mut value = serde_json::json!({ "error": reason });
+                                self.add_newcomer_outcome(
+                                    &mut value,
+                                    sub,
+                                    started_at_unix_ms[index],
+                                    false,
+                                    code.as_deref(),
+                                );
+                                value
                             }
                         },
                     };
@@ -1801,6 +4428,32 @@ impl Platform {
                 let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let (status, signer) = (f("cert_status"), f("signer"));
                 match self.git_update(
+                    &f("repo"),
+                    &f("refname"),
+                    &f("old"),
+                    &f("new"),
+                    &f("user"),
+                    Some((status.as_str(), signer.as_str())),
+                ) {
+                    Ok(()) => (200, r#"{"ok":true}"#.to_string()),
+                    Err(reason) => (400, Rejection::decode(&reason).body()),
+                }
+            }
+            // The other half of the same hook: the push is being refused,
+            // so every ref already accepted for it has to be put back.
+            ("POST", "/api/git-abort") => {
+                let req: serde_json::Value = match serde_json::from_slice(body) {
+                    Ok(v) => v,
+                    Err(e) => return (400, Rejection::new(
+                            Code::MalformedRequest,
+                            format!("request body is not valid JSON: {e}"),
+                            "send a JSON object; GET /llms.txt lists the fields each endpoint wants",
+                        )
+                        .body()),
+                };
+                let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let (status, signer) = (f("cert_status"), f("signer"));
+                match self.git_abort(
                     &f("repo"),
                     &f("refname"),
                     &f("old"),
@@ -1901,6 +4554,7 @@ impl Platform {
             Ok(sub) => sub,
             Err(reason) => return (400, Rejection::decode(&reason).body()),
         };
+        let started_at_unix_ms = unix_ms();
         match self.handle.try_submit(
             &sub.channel,
             sub.payload.clone(),
@@ -1909,6 +4563,13 @@ impl Platform {
             Ok(acc) => {
                 let mut response = self.batch_result(acc, &sub);
                 self.add_retention_outcome(&mut response);
+                self.add_newcomer_outcome(
+                    &mut response,
+                    &sub,
+                    started_at_unix_ms,
+                    true,
+                    None,
+                );
                 (200, response.to_string())
             }
             Err(reason) => {
@@ -1918,23 +4579,48 @@ impl Platform {
                 // versus re-read and rebase -- so an agent that cannot
                 // tell them apart either retries a completed write or
                 // abandons a successful one.
-                if let Some((seq, hash)) = self
-                    .entries
-                    .lock()
-                    .expect("entries lock")
-                    .already_applied(&sub.channel, &sub.payload)
-                {
-                    return (
-                        200,
-                        serde_json::json!({
+                //
+                // Only the policy's own duplicate refusal is converted,
+                // and that is load-bearing. This lookup used to run for
+                // *any* rejection, which meant a submission carrying a
+                // corrupted signature over an already-applied payload was
+                // answered 200 `already_applied`: the signature check had
+                // failed, and the response said success. It changed no
+                // state, but a check whose failure is reported as a
+                // success is not a check. `duplicate_submission` is
+                // raised only after the signature verifies.
+                if Rejection::decode(&reason).code == Code::DuplicateSubmission.as_str() {
+                    if let Some((seq, hash)) = self
+                        .entries
+                        .lock()
+                        .expect("entries lock")
+                        .already_applied(&sub.channel, &sub.payload)
+                    {
+                        let mut response = serde_json::json!({
                             "seq": seq,
                             "hash": hash.to_hex(),
                             "already_applied": true,
-                        })
-                        .to_string(),
-                    );
+                        });
+                        self.add_newcomer_outcome(
+                            &mut response,
+                            &sub,
+                            started_at_unix_ms,
+                            true,
+                            None,
+                        );
+                        return (200, response.to_string());
+                    }
                 }
-                (400, Rejection::decode(&reason).body())
+                let mut response = Rejection::decode(&reason).to_json();
+                let code = response["code"].as_str().map(str::to_string);
+                self.add_newcomer_outcome(
+                    &mut response,
+                    &sub,
+                    started_at_unix_ms,
+                    false,
+                    code.as_deref(),
+                );
+                (400, response.to_string())
             }
         }
     }
@@ -1958,6 +4644,228 @@ impl Platform {
         }
         resp
     }
+}
+
+/// How one ref disagrees between the log and a bare repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefState {
+    /// The log names a commit the repo has but is not pointing at. Git is
+    /// the follower, so this is repaired by moving git.
+    GitBehind,
+    /// The log names a commit the repo does not have and cannot get — a
+    /// refused push's objects go out with the quarantine. Repaired by the
+    /// log giving way, through a compensating op.
+    LogUnbackable,
+    /// Git holds a ref the log has never seen. Reported only: adopting it
+    /// would launder an out-of-band `update-ref` into the signed log.
+    GitOnly,
+    /// The comparison could not be made at all.
+    Unreadable,
+}
+
+impl RefState {
+    /// Stable wire name, so a monitor can match on it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefState::GitBehind => "git_behind",
+            RefState::LogUnbackable => "log_unbackable",
+            RefState::GitOnly => "git_only",
+            RefState::Unreadable => "unreadable",
+        }
+    }
+}
+
+/// One disagreement found by [`Platform::survey_git_refs`].
+#[derive(Debug, Clone)]
+pub struct RefFinding {
+    /// Repo the ref lives in, as it appears in the namespaced log name.
+    pub repo: String,
+    /// Ref name inside that repo; empty when the whole repo is the
+    /// problem.
+    pub refname: String,
+    /// What the log says, as a git oid.
+    pub log_oid: Option<String>,
+    /// What the repo says.
+    pub git_oid: Option<String>,
+    /// Which disagreement this is.
+    pub state: RefState,
+    /// Human-readable cause, for the startup log and the endpoint.
+    pub reason: String,
+}
+
+impl RefFinding {
+    fn unreadable(repo: &str, refname: &str, reason: &str) -> Self {
+        Self {
+            repo: repo.to_string(),
+            refname: refname.to_string(),
+            log_oid: None,
+            git_oid: None,
+            state: RefState::Unreadable,
+            reason: reason.to_string(),
+        }
+    }
+
+    /// The namespaced `<repo>:<refname>` name, as the log spells it.
+    pub fn name(&self) -> String {
+        if self.refname.is_empty() {
+            self.repo.clone()
+        } else {
+            format!("{}:{}", self.repo, self.refname)
+        }
+    }
+
+    /// The finding as it goes over the wire.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ref": self.name(),
+            "state": self.state.as_str(),
+            "log_oid": self.log_oid,
+            "git_oid": self.git_oid,
+            "reason": self.reason,
+        })
+    }
+}
+
+/// What [`Platform::reconcile_git_refs`] did, so a caller can report it.
+/// An all-empty report is the normal case and the only silent one.
+#[derive(Debug, Default)]
+pub struct RefReconciliation {
+    /// Refs written into git because the view held a commit git already
+    /// had but had not pointed at.
+    pub applied: Vec<String>,
+    /// Refs the view gave up, because git can never hold the commit they
+    /// named. Each one is a compensating op in the log.
+    pub retracted: Vec<String>,
+    /// Disagreements left standing, each with its reason. These need an
+    /// operator: repairing them automatically would either lose history
+    /// or launder an out-of-band ref into the signed log.
+    pub unreconciled: Vec<String>,
+}
+
+impl RefReconciliation {
+    /// Whether anything at all was out of agreement.
+    pub fn is_empty(&self) -> bool {
+        self.applied.is_empty() && self.retracted.is_empty() && self.unreconciled.is_empty()
+    }
+}
+
+/// Every ref in the bare repo at `path`, or `None` if it cannot be read
+/// (no such repo, or not a repo).
+fn read_git_refs(path: &std::path::Path) -> Option<BTreeMap<String, String>> {
+    let out = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (refname, oid) = line.split_once(' ')?;
+                Some((refname.to_string(), oid.to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// Whether `oid` names an object the repo actually has. A refused push
+/// leaves its objects in a discarded quarantine, so the view can name a
+/// commit that was never admitted to the repo.
+fn object_exists(path: &std::path::Path, oid: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{oid}^{{object}}")])
+        .current_dir(path)
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Points `refname` at `oid`, CAS'd on `have` so a concurrent writer
+/// loses rather than gets clobbered.
+fn write_git_ref(
+    path: &std::path::Path,
+    refname: &str,
+    oid: &str,
+    have: Option<&str>,
+) -> Result<(), String> {
+    let old = have.map_or_else(|| "0".repeat(oid.len()), str::to_string);
+    let out = std::process::Command::new("git")
+        .args(["update-ref", refname, oid, &old])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
+/// Git's "this ref does not exist" oid: all zeros, at whatever width the
+/// repo's hash function uses.
+fn is_zero_oid(hex: &str) -> bool {
+    !hex.is_empty() && hex.chars().all(|c| c == '0')
+}
+
+/// Parses an undirected operator graph and returns every operator within
+/// `max_distance` of `start`, including `start` itself at distance zero.
+fn operators_within_distance(
+    path: &std::path::Path,
+    start: &str,
+    max_distance: usize,
+) -> Result<BTreeSet<String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("read reviewer conflict graph: {e}"))?;
+    let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let left = fields.next();
+        let right = fields.next();
+        if left.is_none() || right.is_none() || fields.next().is_some() {
+            return Err(format!(
+                "reviewer conflict graph line {} must be '<operator> <operator>'",
+                index + 1
+            ));
+        }
+        let left = left.expect("checked above");
+        let right = right.expect("checked above");
+        if left.contains('/') || right.contains('/') {
+            return Err(format!(
+                "reviewer conflict graph line {} must name operators, not operator/agent channels",
+                index + 1
+            ));
+        }
+        graph
+            .entry(left.to_string())
+            .or_default()
+            .insert(right.to_string());
+        graph
+            .entry(right.to_string())
+            .or_default()
+            .insert(left.to_string());
+    }
+
+    let mut seen = BTreeSet::from([start.to_string()]);
+    let mut queue = VecDeque::from([(start.to_string(), 0usize)]);
+    while let Some((operator, distance)) = queue.pop_front() {
+        if distance == max_distance {
+            continue;
+        }
+        let Some(neighbors) = graph.get(&operator) else {
+            continue;
+        };
+        for neighbor in neighbors {
+            if seen.insert(neighbor.clone()) {
+                queue.push_back((neighbor.clone(), distance + 1));
+            }
+        }
+    }
+    Ok(seen)
 }
 
 /// One decoded `/api/submit` body: the wire fields turned into the bytes
@@ -2190,6 +5098,27 @@ fn trim_newline(line: &[u8]) -> &[u8] {
 
 /// JSON shape of one review's state (shared by /api/view and
 /// /api/reviews).
+/// One durable key binding, as `/api/view` reports it.
+///
+/// Keyed by actor id, so a client joins this against `author_sig.key_id`
+/// and the `key_id` a witness carries without deriving anything.
+///
+/// `bound_at` is the seq of the op that *first* bound the key and never
+/// moves, which is what makes it orderable; a later re-bind changes only
+/// `channel`. `revoked` is present and non-null once withdrawn, and the
+/// row survives revocation on purpose — attribution for past work must
+/// not disappear at the moment revocation makes it interesting.
+fn binding_json(binding: &choir_view::KeyBinding) -> serde_json::Value {
+    serde_json::json!({
+        "operator": binding.operator,
+        "channel": binding.channel,
+        "bound_at": binding.bound_at,
+        "revoked": binding.revoked.as_ref().map(|revocation| {
+            serde_json::json!({ "at": revocation.at, "reason": revocation.reason })
+        }),
+    })
+}
+
 fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
     let verdicts: std::collections::BTreeMap<_, _> = r
         .verdicts
@@ -2206,9 +5135,11 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
         "target_ref": r.target_ref,
         "reviewers": r.reviewers,
         "verdicts": verdicts,
+        "slashes": r.slashes,
         "complete": r.complete(),
         "approved": r.approved(),
         "approval_weight": r.approval_weight(),
+        "re_review_required": r.re_review_required(),
         // Empty reviewers on a live review means unassigned; on an
         // archived one it means emptied. A reader must be able to tell.
         "archived": matches!(r.status, choir_view::ReviewStatus::Archived { .. }),

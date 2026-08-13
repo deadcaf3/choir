@@ -13,11 +13,56 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub mod acl;
 pub mod platform;
 pub mod provision;
 pub mod reject;
+mod ui;
 
 pub use platform::Platform;
+
+/// The commit this binary was built from, or the literal `unknown` when
+/// the build had no way to find out. See `build.rs`.
+///
+/// `choirctl status` could already name the file that is serving; it
+/// could not say what that file was built from, and "the rebuild never
+/// reached the running process" is indistinguishable from "it did" until
+/// something the process itself reports says otherwise.
+pub const BUILD_COMMIT: &str = env!("CHOIR_BUILD_COMMIT");
+
+/// Where [`BUILD_COMMIT`] came from: `env` (the installer passed
+/// `CHOIR_GIT_HEAD`, the sound path), `git` (best-effort at build time),
+/// or `unavailable` (no commit could be determined).
+pub const BUILD_SOURCE: &str = env!("CHOIR_BUILD_SOURCE");
+
+/// Whether the build tree had uncommitted changes. Only meaningful under
+/// `BUILD_SOURCE == "git"`, and even then best-effort: cargo cannot rerun
+/// the build script on every source edit, so this can be stale where
+/// [`BUILD_COMMIT`] cannot.
+pub const BUILD_DIRTY: &str = env!("CHOIR_BUILD_DIRTY");
+
+/// The build stamp as served under `/api/view.build`.
+#[must_use]
+pub fn build_json() -> serde_json::Value {
+    serde_json::json!({
+        "format_version": 1,
+        "commit": BUILD_COMMIT,
+        "source": BUILD_SOURCE,
+        "dirty": BUILD_DIRTY == "true",
+        "dirty_trusted": BUILD_SOURCE == "git",
+    })
+}
+
+/// One line naming the running binary's provenance, for the startup log.
+#[must_use]
+pub fn build_line() -> String {
+    let commit = match BUILD_COMMIT.len() {
+        40 => &BUILD_COMMIT[..12],
+        _ => BUILD_COMMIT,
+    };
+    let dirty = if BUILD_DIRTY == "true" { " +dirty" } else { "" };
+    format!("build {commit}{dirty} (stamp source: {BUILD_SOURCE})")
+}
 
 /// Per-actor credentials: username → token, checked as HTTP basic auth
 /// (the standard git-over-HTTP shape; every forge client speaks it).
@@ -41,6 +86,14 @@ pub struct Node {
     /// Trusted-keys file to watch, so `allowed_signers` tracks it
     /// without a restart. `None` = generated once at startup.
     keys_watch: Option<std::sync::Arc<KeysWatch>>,
+    /// Per-repository authorization table (D29), watched like the keys
+    /// file. `None` = no `--acl-file`, so every authenticated actor
+    /// reaches every repository, which is the pre-D29 behaviour.
+    acl_watch: Option<std::sync::Arc<AclWatch>>,
+    /// The browser page, prebuilt and keyed by view sequence. Shared
+    /// across request threads so one render serves every reader until
+    /// the state it describes changes.
+    ui_cache: std::sync::Arc<ui::UiCache>,
 }
 
 /// A watched trusted-keys file and the mtime last folded into
@@ -48,6 +101,13 @@ pub struct Node {
 struct KeysWatch {
     path: PathBuf,
     mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
+}
+
+/// A watched ACL file, the mtime last parsed, and the table in force.
+struct AclWatch {
+    path: PathBuf,
+    mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
+    table: std::sync::RwLock<std::sync::Arc<acl::Acl>>,
 }
 
 impl Node {
@@ -132,6 +192,8 @@ impl Node {
             scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
             keys_watch: None,
+            acl_watch: None,
+            ui_cache: std::sync::Arc::new(ui::UiCache::new()),
         })
     }
 
@@ -139,6 +201,21 @@ impl Node {
     /// `platform`. Call before [`Node::serve_forever`].
     pub fn enable_platform(&mut self, platform: Platform) {
         self.platform = Some(std::sync::Arc::new(platform));
+    }
+
+    /// Brings the bare repos back into agreement with the view before the
+    /// node serves anything. See [`Platform::reconcile_git_refs`] for what
+    /// it repairs and what it refuses to.
+    ///
+    /// Separate from [`Node::enable_platform`] and from
+    /// [`Node::serve_forever`] so it is called deliberately: it writes git
+    /// refs and can append compensating ops, which is not something a
+    /// constructor should do behind a caller's back.
+    pub fn reconcile_refs(&self) -> crate::platform::RefReconciliation {
+        self.platform
+            .as_ref()
+            .map(|p| p.reconcile_git_refs(&self.root))
+            .unwrap_or_default()
     }
 
     /// Watches the trusted-keys file and regenerates
@@ -189,6 +266,61 @@ impl Node {
             }
             Err(e) => eprintln!("allowed_signers: keys file unusable, keeping previous: {e}"),
         }
+    }
+
+    /// Enforces per-repository authorization (D29) from `path`, reloaded
+    /// whenever its mtime moves — so granting access is "append a line",
+    /// the same discipline as the trusted-keys file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the file cannot be read or does not parse.
+    /// This is fatal by design: there is no previous table to fall back
+    /// to at startup, and an empty table under a fail-closed ACL locks
+    /// out everyone including the operator.
+    pub fn watch_acl_file(&mut self, path: PathBuf) -> Result<(), String> {
+        let table = acl::Acl::load(&path)?;
+        eprintln!("acl enabled ({} grants)", table.len());
+        self.acl_watch = Some(std::sync::Arc::new(AclWatch {
+            mtime: std::sync::Mutex::new(
+                std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+            ),
+            table: std::sync::RwLock::new(std::sync::Arc::new(table)),
+            path,
+        }));
+        Ok(())
+    }
+
+    /// Reparses the ACL file if it changed. Runs on the accept loop, so
+    /// an edit takes effect on the *next* request with no restart.
+    ///
+    /// A malformed file leaves the previous table in force and complains
+    /// once per edit — the same rule as the keys file, for the same
+    /// reason: a partially parsed ACL would silently revoke access.
+    fn refresh_acl(&self) {
+        let Some(watch) = &self.acl_watch else {
+            return;
+        };
+        let mtime = std::fs::metadata(&watch.path).and_then(|m| m.modified()).ok();
+        let mut last = watch.mtime.lock().expect("acl mtime lock");
+        if mtime.is_none() || mtime == *last {
+            return;
+        }
+        *last = mtime;
+        match acl::Acl::load(&watch.path) {
+            Ok(table) => {
+                eprintln!("acl: reloaded ({} grants)", table.len());
+                *watch.table.write().expect("acl write lock") = std::sync::Arc::new(table);
+            }
+            Err(e) => eprintln!("acl: file unusable, keeping previous: {e}"),
+        }
+    }
+
+    /// The ACL table currently in force, if one is configured.
+    fn acl_now(&self) -> Option<std::sync::Arc<acl::Acl>> {
+        self.acl_watch
+            .as_ref()
+            .map(|w| std::sync::Arc::clone(&w.table.read().expect("acl read lock")))
     }
 
     /// Port the daemon is listening on.
@@ -265,6 +397,15 @@ impl Node {
         // pre-/post-receive see GIT_PUSH_CERT_* for signed pushes, and
         // one invocation covers the whole push). Outside the daemon (no
         // CHOIR_API) it is a no-op.
+        //
+        // Git applies no ref until this hook exits zero, so a refusal on
+        // the third ref of a push has already left two ops in the durable
+        // log for refs git will never create. Those refs are then stuck:
+        // the pusher's `old` is git's absent value while the view holds
+        // the stranded one, so every retry loses the CAS. Hence the
+        // retraction pass over what this push already had accepted, which
+        // is a compensating op rather than an erasure -- the log is
+        // append-only, and an aborted push belongs in the history.
         let hook = path.join("hooks").join("pre-receive");
         std::fs::write(
             &hook,
@@ -272,15 +413,33 @@ impl Node {
                 "#!/bin/sh\n",
                 "# choir: route this push's ref updates through the platform sequencer.\n",
                 "if [ -z \"$CHOIR_API\" ]; then cat >/dev/null; exit 0; fi\n",
-                "while read old new ref; do\n",
+                "post() {\n",
                 "  payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\",\"cert_status\":\"%s\",\"signer\":\"%s\"}' \\\n",
-                "    \"$CHOIR_REPO\" \"$ref\" \"$old\" \"$new\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
-                "  if ! curl -skf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
-                "      -d \"$payload\" \"$CHOIR_API\" >/dev/null; then\n",
+                "    \"$CHOIR_REPO\" \"$3\" \"$1\" \"$2\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
+                "  curl -skf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
+                "    -d \"$payload\" \"$4\" >/dev/null\n",
+                "}\n",
+                // A file, not a shell variable: this has to survive being
+                // read back line by line, and the accepted list is the
+                // only record of what needs undoing.
+                "done_refs=$(mktemp) || exit 1\n",
+                "abort() {\n",
+                "  while read -r a_old a_new a_ref; do\n",
+                "    post \"$a_old\" \"$a_new\" \"$a_ref\" \"$CHOIR_ABORT\" ||\n",
+                "      echo \"choir: could not retract $a_ref; the node's log now holds a ref \\\n",
+                "this push did not create\" >&2\n",
+                "  done < \"$done_refs\"\n",
+                "}\n",
+                "while read old new ref; do\n",
+                "  if ! post \"$old\" \"$new\" \"$ref\" \"$CHOIR_API\"; then\n",
                 "    echo \"choir: ref update rejected by sequencer: $ref\" >&2\n",
+                "    abort\n",
+                "    rm -f \"$done_refs\"\n",
                 "    exit 1\n",
                 "  fi\n",
+                "  printf '%s %s %s\\n' \"$old\" \"$new\" \"$ref\" >> \"$done_refs\"\n",
                 "done\n",
+                "rm -f \"$done_refs\"\n",
                 "exit 0\n",
             ),
         )?;
@@ -294,7 +453,13 @@ impl Node {
 
     /// Rejects path traversal and normalizes the repo path under root.
     fn repo_path(&self, name: &str) -> std::io::Result<PathBuf> {
-        if name.split('/').any(|c| c == ".." || c.is_empty()) || name.starts_with('/') {
+        // `@` is reserved so a repository can never alias the ACL's
+        // `@node` pseudo-repository (D29); `*` likewise for its wildcard.
+        if name.split('/').any(|c| c == ".." || c.is_empty())
+            || name.starts_with('/')
+            || name.contains('@')
+            || name.contains('*')
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "bad repo name",
@@ -312,6 +477,9 @@ impl Node {
             // channel name becomes enforced, with no restart and no wait
             // for some later event.
             self.refresh_allowed_signers();
+            // Same reasoning, same cost: an appended grant takes effect
+            // on this request rather than on a restart.
+            self.refresh_acl();
             // A writer that has failed a durability barrier refuses every
             // submission from then on. Staying up in that state is worse
             // than being down: process supervision only restarts a process
@@ -329,16 +497,26 @@ impl Node {
                 // EX_TEMPFAIL: the condition may well clear on restart.
                 std::process::exit(75);
             }
+            // Same reasoning, quieter failure: the writer thread can only
+            // record that an op missed the latency gate, never decide what
+            // to do about it. Draining here puts the breach in the
+            // operator's lag log while the node keeps serving.
+            if let Some(platform) = self.platform.as_ref() {
+                platform.drain_lag_log();
+            }
             let root = self.root.clone();
             let auth = self.auth.clone();
             let platform = self.platform.clone();
+            let ui_cache = std::sync::Arc::clone(&self.ui_cache);
+            let acl = self.acl_now();
             let internal_token = self.internal_token.clone();
             let port = self.port;
             let scheme = self.scheme;
             std::thread::spawn(move || {
                 // Hook callbacks authenticate with the loopback secret
                 // instead of user credentials.
-                let internal_ok = request.url().starts_with("/api/git-update")
+                let internal_ok = (request.url().starts_with("/api/git-update")
+                    || request.url().starts_with("/api/git-abort"))
                     && header(&request, "X-Choir-Internal").as_deref() == Some(&internal_token);
                 let mut user = "anon".to_string();
                 if let Some(table) = auth.as_ref() {
@@ -359,6 +537,30 @@ impl Node {
                             return;
                         }
                     }
+                }
+                // The hook callbacks are privileged: they submit a ref op
+                // under any user's name, spending authorization that the
+                // git route which triggered them already checked.
+                // Requiring the loopback secret keeps a user credential
+                // from reaching them directly — which would otherwise
+                // forge a ref update on any repository and walk straight
+                // around the git-route check below.
+                if (request.url().starts_with("/api/git-update")
+                    || request.url().starts_with("/api/git-abort"))
+                    && !internal_ok
+                {
+                    let response =
+                        tiny_http::Response::from_string("{\"error\":\"internal endpoint\"}\n")
+                            .with_status_code(403)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .expect("static header"),
+                            );
+                    let _ = request.respond(response);
+                    return;
                 }
                 // The surface as plain text, for an agent that has never
                 // seen choir. Behind auth like everything else; it
@@ -383,10 +585,50 @@ impl Node {
                     let _ = request.respond(response);
                     return;
                 }
+                // The browser surface. Matched exactly so it can never
+                // shadow a repository path: git routes are
+                // `/owner/repo.git/...`, and `/` is the one URL that
+                // cannot name a repository.
+                if request.url() == "/" || request.url() == "/index.html" {
+                    let _ = handle_ui(platform.as_deref(), &ui_cache, request);
+                    return;
+                }
                 if request.url().starts_with("/api/") {
                     let base_url = format!("{scheme}://127.0.0.1:{port}");
-                    let _ = handle_api(platform.as_deref(), &root, &base_url, &user, request);
+                    // A hook callback carries the loopback secret rather
+                    // than a user's grants, so it is not an ACL subject.
+                    let acl_for_api = if internal_ok { None } else { acl.as_deref() };
+                    let _ = handle_api(
+                        platform.as_deref(),
+                        &root,
+                        &base_url,
+                        &user,
+                        acl_for_api,
+                        request,
+                    );
                     return;
+                }
+                // Git smart-HTTP. The repository is in the URL, so this
+                // decision needs nothing but the path — which is why it
+                // sits here, once, rather than inside the CGI bridge. A
+                // path naming no repository, or an operation outside the
+                // smart-HTTP surface, is refused rather than handed to
+                // `git http-backend`.
+                if let Some(table) = acl.as_ref() {
+                    let method = request.method().as_str().to_string();
+                    let denial = match acl::git_requirement(&method, request.url()) {
+                        Some((repo, level)) => {
+                            table.check(&user, &acl::Scope::Repo(repo), level)
+                        }
+                        None => Some(acl::Denial {
+                            status: 404,
+                            reason: "no such repository".to_string(),
+                        }),
+                    };
+                    if let Some(denial) = denial {
+                        respond_git_denial(request, &denial);
+                        return;
+                    }
                 }
                 // Platform-enabled daemons pass the sequencer callback
                 // into git's hook environment.
@@ -396,6 +638,10 @@ impl Node {
                         extra_env.push((
                             "CHOIR_API".to_string(),
                             format!("{scheme}://127.0.0.1:{port}/api/git-update"),
+                        ));
+                        extra_env.push((
+                            "CHOIR_ABORT".to_string(),
+                            format!("{scheme}://127.0.0.1:{port}/api/git-abort"),
                         ));
                         extra_env.push(("CHOIR_REPO".to_string(), repo));
                         extra_env.push(("CHOIR_USER".to_string(), user));
@@ -422,9 +668,21 @@ fn header(request: &tiny_http::Request, name: &str) -> Option<String> {
         .map(|h| h.value.as_str().to_string())
 }
 
+/// Answers a git request the ACL refused. Plain text, because that is
+/// what a git client surfaces to whoever ran the command.
+fn respond_git_denial(request: tiny_http::Request, denial: &acl::Denial) {
+    let response = tiny_http::Response::from_string(format!("{}\n", denial.reason))
+        .with_status_code(denial.status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+                .expect("static header"),
+        );
+    let _ = request.respond(response);
+}
+
 /// Extracts `owner/repo.git` from a smart-HTTP path like
 /// `/owner/repo.git/git-receive-pack`.
-fn repo_from_path(url: &str) -> Option<String> {
+pub(crate) fn repo_from_path(url: &str) -> Option<String> {
     let path = url.split('?').next().unwrap_or(url);
     let end = path.find(".git/").map(|i| i + 4).or_else(|| {
         path.ends_with(".git").then_some(path.len())
@@ -610,7 +868,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 
 /// The agent-facing surface as plain text, generated from
 /// `crates/choir-cli/src/surface.rs` and checked for staleness by
-/// `choir-cli/tests/surface.rs`. Included rather than depended on: the
+/// `choir-cli/tests/it/surface.rs`. Included rather than depended on: the
 /// node has no business linking the CLI, and a generated file with a
 /// staleness test is the cheaper coupling.
 const LLMS_TXT: &str = include_str!("llms.txt");
@@ -621,11 +879,80 @@ const LLMS_TXT: &str = include_str!("llms.txt");
 const SYNC_MD: &str = include_str!("../../../SYNC.md");
 
 /// Routes one `/api/...` request to the platform (503 when disabled).
+/// Serves the browser page from the cache, or `304` when the client
+/// already holds the current one.
+///
+/// The conditional check happens before the cache lookup and before
+/// any rendering, so a reader polling an idle node costs one integer
+/// comparison and an empty response. That is the whole reason the page
+/// can be refreshed aggressively without the node noticing.
+fn handle_ui(
+    platform: Option<&Platform>,
+    cache: &ui::UiCache,
+    request: tiny_http::Request,
+) -> std::io::Result<()> {
+    let platform = match platform {
+        Some(p) => p,
+        None => {
+            let response = tiny_http::Response::from_string(
+                "the platform API is not enabled on this node, so there is nothing to show\n",
+            )
+            .with_status_code(503);
+            return request.respond(response);
+        }
+    };
+
+    let seq = platform.view_seq();
+    let tag = ui::etag(seq);
+    if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
+        let response = tiny_http::Response::empty(304).with_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+        );
+        return request.respond(response);
+    }
+
+    let page = cache.page(seq, || platform.handle_api("GET", "/api/view", &[]).1);
+    let response = tiny_http::Response::from_string(page.as_str())
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+        )
+        // The page is private per node and changes with every op; a
+        // shared cache must never hold it, and a browser must ask.
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-cache"[..])
+                .expect("static header"),
+        )
+        // Defence in depth behind the escaper: even if a value slipped
+        // through unescaped, the page may not run scripts, load
+        // anything remote, or be framed by another origin.
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Security-Policy"[..],
+                &b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"[..],
+            )
+            .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    request.respond(response)
+}
+
 fn handle_api(
     platform: Option<&Platform>,
     root: &Path,
     base_url: &str,
     user: &str,
+    acl: Option<&acl::Acl>,
     mut request: tiny_http::Request,
 ) -> std::io::Result<()> {
     let (status, body) = match platform {
@@ -634,12 +961,29 @@ fn handle_api(
             request.as_reader().read_to_end(&mut req_body)?;
             let method = request.method().as_str().to_string();
             let path = request.url().to_string();
-            if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
+            // The body is already in hand, which is the only place the
+            // repository a submission touches can be recovered from.
+            let denial = acl.and_then(|table| {
+                acl::api_denial(table, user, &method, &path, &req_body, |id| p.review_repo(id))
+            });
+            if let Some(denial) = denial {
+                (denial.status, serde_json::json!({ "error": denial.reason }).to_string())
+            } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
                 provision::create_workspace(root, p, base_url, user, &req_body)
-            } else if (method.as_str(), path.as_str())
-                == ("POST", "/api/workspace/archive")
-            {
+            } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace/archive") {
                 provision::archive_workspace(root, p, user, &req_body)
+            } else if (method.as_str(), path.as_str()) == ("GET", "/api/ref-agreement") {
+                // Routed here rather than inside the platform for the
+                // same reason as `/api/workspace`: it needs the repo
+                // root, which the platform does not hold.
+                let findings = p.survey_git_refs(root);
+                let body = serde_json::json!({
+                    "format_version": 1,
+                    "agree": findings.is_empty(),
+                    "findings": findings.iter().map(platform::RefFinding::to_json)
+                        .collect::<Vec<_>>(),
+                });
+                (200, body.to_string())
             } else {
                 p.handle_api(&method, &path, &req_body)
             }

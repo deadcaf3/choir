@@ -7,14 +7,20 @@ Use POST /api/submit-batch for more than one change: a batch is one durability b
 ## Endpoints
 POST /api/submit - Submit one signed operation (hex payload, hex signature)
 POST /api/submit-batch - Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale)
-GET /api/view - The materialized view: changes, workspace heads, refs, reviews, provenance
+GET /api/view - The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
+POST /api/appeal - Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege
 GET /api/log?from=N - Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure
 POST /api/workspace - Provision a CoW workspace; optional exact base/change binding makes retries idempotent
 POST /api/workspace/archive - Recoverably archive a change-bound workspace and remove it from the active view
 GET /api/reviews?reviewer=X - One actor's pending review queue
 GET /llms.txt - This surface, as text, for an agent that has never seen choir
 GET /sync.md - The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them
+GET /api/ref-agreement - Where the op log and the bare repos disagree about a ref, read-only
 POST /api/git-update - Internal: the pre-receive hook callback
+POST /api/git-abort - Internal: retracts a refused push's already-accepted refs
+
+## Access
+A node may enforce per-repository grants. 404 on a repository means you hold no read grant on it, and says nothing about whether it exists; 403 means you can read it but not write it, or the operation needs a node-wide grant (the op log, the ref-state attestation, and ops naming no repository). Neither is retryable — ask the operator for a grant line.
 
 ## CLI
 For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
@@ -25,6 +31,11 @@ choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-i
 choir submit <api> <key-file> <channel> '<op-json>' - sign and submit one raw operation
 choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]... - request review on a commit; name no reviewers and the node draws them
 choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note] - answer a review you were assigned
+choir slash <api> <node-key-file> <id> <reviewer> '<reason>' - invalidate one reviewer's approval; operator-only and never moves a ref
+choir abandon <api> <node-key-file> <id> - archive a stale incomplete review as lapsed, settling it unapproved; operator-only and never moves a ref
+choir bind <api> <node-key-file> <operator> <key-hex> [channel] - record in the log that a key belongs to an operator; operator-only and never moves a ref
+choir revoke <api> <node-key-file> <key-hex> '<reason>' - withdraw a key binding; terminal, and the attribution row survives
+choir appeal <api> <attempt-id> - appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 choir intent <api> <key-file> <channel> <subject> <kind> '<body>' - publish a task spec or plan so other agents can see intent
 choir reviews <api> <reviewer> - your pending review queue
-choir view <api> - the materialized view: changes, workspace heads, refs, reviews, provenance
+choir view <api> - the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
