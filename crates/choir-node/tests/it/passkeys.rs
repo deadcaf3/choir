@@ -617,15 +617,74 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
         .to_string()
     };
 
-    // The same assertion offered on somebody else's channel finds no
-    // enrolled credential, because the lookup is keyed by account. Run
-    // first, so a later success cannot be what made this one fail.
+    // Replaying this assertion on somebody else's channel is refused at
+    // the lookup, which runs first. Kept because it is the cheap attack,
+    // but it does not isolate the lookup: a mutation that unscoped the
+    // lookup still refused this, at the challenge instead, because
+    // `signing_hash` covers the channel. The next case is the one that
+    // isolates it.
     let (status, body) = curl(&[
         "-u", &bob, "-X", "POST", "-d", &submit("alice", 2),
         &format!("{base}/api/submit"),
     ]);
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], "unknown_key", "{body}");
+
+    // The attack the account-keyed lookup actually stops: bob holds his
+    // own authenticator, so he can mint a *fresh* assertion over the
+    // signing hash of alice's channel. The challenge then matches
+    // perfectly and the signature is genuine. What refuses it is that
+    // `bobs-laptop` is enrolled on bob and the lookup asks alice.
+    //
+    // Written after a mutation showed the case above failing for the
+    // wrong reason: unscoping the lookup still produced a refusal, so
+    // that assertion could not have been testing what it claimed.
+    let alice_signing = choir_oplog::signing_hash("alice", &payload);
+    let alice_challenge = base64url(&choir_identity::webauthn_challenge(&alice_signing));
+    let alice_client =
+        format!(r#"{{"type":"webauthn.get","challenge":"{alice_challenge}","origin":"{base}"}}"#)
+            .into_bytes();
+    let acd = work.join("alice-cd.json");
+    std::fs::write(&acd, &alice_client).expect("write");
+    let ahashed = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .arg(&acd)
+        .output()
+        .expect("openssl runs");
+    let mut amessage = auth_data.clone();
+    amessage.extend_from_slice(&ahashed.stdout);
+    let amsg = work.join("alice-msg.bin");
+    let ader = work.join("alice-sig.der");
+    std::fs::write(&amsg, &amessage).expect("write");
+    assert!(std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(&secret)
+        .arg("-out")
+        .arg(&ader)
+        .arg(&amsg)
+        .output()
+        .expect("openssl runs")
+        .status
+        .success());
+    let forged = serde_json::json!({
+        "channel": "alice",
+        "payload_hex": hex_encode(&payload),
+        "key_id": "bobs-laptop",
+        "signature_hex": hex_encode(&std::fs::read(&ader).expect("sig")),
+        "scheme": 2,
+        "authenticator_data_hex": hex_encode(&auth_data),
+        "client_data_json_hex": hex_encode(&alice_client),
+    })
+    .to_string();
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "-d", &forged,
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        body["code"], "unknown_key",
+        "a genuine assertion by bob's credential was accepted on alice's channel: {body}"
+    );
 
     // A scheme the node does not implement is named rather than
     // reinterpreted as ed25519 and reported as a bad signature.
