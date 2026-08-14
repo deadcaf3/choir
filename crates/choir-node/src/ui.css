@@ -344,9 +344,13 @@ body{background:var(--ground);color:var(--ink);margin:0 auto;
   text-decoration:none;font-weight:var(--fw-medium)}
 .skip:focus{top:var(--sp-3);color:var(--inverse)}
 
-header.top{border-bottom:var(--border);padding-bottom:var(--sp-5);
-  margin-bottom:var(--sp-8)}
-h1{font-size:var(--fs-800);line-height:var(--lh-tight);letter-spacing:var(--tr-display);
+/* Density is the restyle's whole thesis: lists are the UI, so the chrome
+   around them shrinks. The h1 drops a step (fs-800 → fs-700) and the
+   header/section rhythm drops a step (sp-8 → sp-6) — a page is a tool's
+   readout, not a landing page, and nothing here earns display type. */
+header.top{border-bottom:var(--border);padding-bottom:var(--sp-4);
+  margin-bottom:var(--sp-6)}
+h1{font-size:var(--fs-700);line-height:var(--lh-tight);letter-spacing:var(--tr-heading);
   color:var(--strong);margin:0;font-weight:var(--fw-bold);overflow-wrap:break-word}
 h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps);
   color:var(--faint);margin:var(--sp-10) 0 var(--sp-3);font-weight:var(--fw-medium);
@@ -361,9 +365,13 @@ h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps
 .pill.on{color:var(--accent-ink);border-color:var(--accent-line);
   background:var(--accent-tint)}
 
-section{margin-bottom:var(--sp-8)}
-table{width:100%;border-collapse:collapse;font-size:var(--fs-300)}
-td,th{text-align:left;padding:var(--sp-2) var(--sp-3);
+section{margin-bottom:var(--sp-6)}
+/* `lh-snug` and sp-1 vertical padding: a table is scanned, not read, and
+   the tighter grid is what lets a screenful answer the reader's question
+   without a scroll. Prose outside tables keeps `lh-copy` from the reset. */
+table{width:100%;border-collapse:collapse;font-size:var(--fs-300);
+  line-height:var(--lh-snug)}
+td,th{text-align:left;padding:var(--sp-1) var(--sp-3);
   border-bottom:var(--border-hair);vertical-align:top;overflow-wrap:break-word}
 thead th{font-size:var(--fs-100);text-transform:uppercase;
   letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium)}
@@ -468,3 +476,28 @@ pre.code .ln{display:inline-block;min-width:var(--sp-10);
 pre.diff .add{color:var(--ok);background:var(--syn-added)}
 pre.diff .del{color:var(--danger);background:var(--syn-removed)}
 pre.diff .hunk{color:var(--accent-ink)}
+/* A `diff --git` header is the seam a reader scrolls for; `--strong`
+   is what lets the eye catch it inside two thousand lines of --syn-plain. */
+pre.diff .file{color:var(--strong);font-weight:var(--fw-medium)}
+/* The truncation line sits on `--sunken`, the darkest surface, where
+   `--faint` (the page-wide `.muted` colour) measures 4.3:1 in light
+   mode. One step up holds AA on this surface in both themes. */
+pre.diff .muted{color:var(--muted)}
+/* Word-level emphasis inside a changed line pair. The line wash says
+   "this line moved"; the mark says *which words*. Text goes to
+   `--strong` because the line's own signal colour (--ok/--danger) sits
+   too close in hue to the `-line` wash behind the mark to survive it. */
+pre.diff mark{color:var(--strong);border-radius:var(--r-xs);
+  padding:var(--sp-0)}
+pre.diff .add mark{background:var(--ok-line)}
+pre.diff .del mark{background:var(--danger-line)}
+/* The diffstat row above every diff: one line per file, counts in the
+   signal colours. `.plus`/`.minus` are foregrounds, so they take the
+   solid tokens, never the washes. */
+.plus{color:var(--ok)}
+.minus{color:var(--danger)}
+/* A `<details>` living inside a table row: the summary is the row's
+   own text, so it sheds the block spacing the page-level disclosure
+   above carries. */
+td details{margin:var(--sp-0)}
+td summary{padding:var(--sp-0);display:inline-block}

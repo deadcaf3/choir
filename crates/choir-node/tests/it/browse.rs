@@ -248,6 +248,15 @@ fn history_and_a_commit_diff_render() {
     assert!(commit.contains("seed the tree"), "the commit page lost its subject");
     assert!(commit.contains("README.md"), "the diff names no file: {commit}");
     assert!(commit.contains("class=\"add\""), "the diff has no added lines");
+    // The stat row, proven against git's real `--numstat` emission
+    // rather than a fixture: a parser that misreads the real shape
+    // renders no table and no anchors, and only a served node shows it.
+    assert!(commit.contains("class=\"stat\""), "the diff has no stat row: {commit}");
+    assert!(commit.contains("files changed"), "the stat row has no summary: {commit}");
+    assert!(
+        commit.contains("href=\"#f0\"") && commit.contains("id=\"f0\""),
+        "the stat row and the file headers do not link up: {commit}"
+    );
 }
 
 /// The cache identity is the commit, not the view sequence — so a
@@ -425,6 +434,10 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
     // whole difference between two branches.
     assert!(page.contains("proposed change"), "the diff is missing: {page}");
     assert!(page.contains("class=\"add\""), "the diff has no added lines");
+    assert!(
+        page.contains("class=\"stat\""),
+        "the review diff has no stat row: {page}"
+    );
     assert!(
         !page.contains("other.txt"),
         "the diff shows work that landed on the destination as part of this proposal: {page}"

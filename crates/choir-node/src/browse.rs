@@ -403,7 +403,7 @@ pub(crate) fn render(
         }
     }
     match page {
-        Page::Index => index(root, readable),
+        Page::Index => index(root, readable, platform),
         Page::Tree { repo, rev, path } => tree(&bare(root, repo), repo, rev, path),
         Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path),
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev),
@@ -419,7 +419,16 @@ fn bare(root: &Path, repo: &str) -> PathBuf {
 }
 
 /// The repository index, filtered to what the reader may see.
-fn index(root: &Path, readable: &dyn Fn(&str) -> bool) -> Rendered {
+///
+/// Each row carries its open-review count as an inline chip: the status
+/// lives on the list, because a page a reader has to remember to visit
+/// is a page nobody visits. The count comes from the same platform view
+/// the review pages render, so the two cannot disagree.
+fn index(
+    root: &Path,
+    readable: &dyn Fn(&str) -> bool,
+    platform: Option<&crate::platform::Platform>,
+) -> Rendered {
     let mut repos: Vec<String> = Vec::new();
     if let Ok(owners) = std::fs::read_dir(root) {
         for owner in owners.flatten() {
@@ -478,7 +487,29 @@ fn index(root: &Path, readable: &dyn Fn(&str) -> bool) -> Rendered {
             h.push_str(&esc(repo));
             h.push_str("\">");
             h.push_str(&esc(repo));
-            h.push_str("</a></td></tr>");
+            h.push_str("</a></td><td class=\"num\">");
+            let open = platform
+                .map(|p| {
+                    p.reviews_for_repo(repo)
+                        .iter()
+                        .filter(|(_, r)| {
+                            !r["complete"].as_bool().unwrap_or(false)
+                                && !r["archived"].as_bool().unwrap_or(false)
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            // Zero open reviews is silence, not a zero: the chip exists
+            // to pull a reader toward waiting work, and a row of grey
+            // zeros would train the eye to skip the column.
+            if open > 0 {
+                h.push_str("<a href=\"/r/");
+                h.push_str(&esc(repo));
+                h.push_str("/reviews\"><b class=\"tag pending\">");
+                h.push_str(&open.to_string());
+                h.push_str(" open</b></a>");
+            }
+            h.push_str("</td></tr>");
         }
         h.push_str("</tbody></table>");
     }
@@ -664,19 +695,24 @@ fn commits(dir: &Path, repo: &str, rev: &str) -> Rendered {
     // Unit separators rather than spaces: a subject can contain
     // anything, including whatever delimiter looked safe.
     let format = "--format=%H%x1f%an%x1f%aI%x1f%s";
+    // One more than the page shows: the extra row is how the page knows
+    // the history continues without walking all of it, so the cut can
+    // say so instead of ending mid-sentence.
     let log = match git_text(
         dir,
-        &["log", &format!("--max-count={COMMIT_PAGE}"), format, &oid],
+        &["log", &format!("--max-count={}", COMMIT_PAGE + 1), format, &oid],
     ) {
         Ok(text) => text,
         Err(why) => return missing(repo, rev, &why),
     };
+    let rows: Vec<&str> = log.lines().collect();
+    let truncated = rows.len() > COMMIT_PAGE;
 
     let mut h = shell(&format!("{repo}: commits"));
     repo_header(&mut h, repo, rev, &oid, "", "commits");
     h.push_str("<section><table><thead><tr><th>commit</th><th>subject</th>");
     h.push_str("<th>author</th><th>when</th></tr></thead><tbody>");
-    for line in log.lines() {
+    for line in rows.iter().take(COMMIT_PAGE) {
         let mut fields = line.split('\u{1f}');
         let (Some(id), Some(author), Some(when), Some(subject)) =
             (fields.next(), fields.next(), fields.next(), fields.next())
@@ -697,7 +733,15 @@ fn commits(dir: &Path, repo: &str, rev: &str) -> Rendered {
         h.push_str(&esc(when.split('T').next().unwrap_or(when)));
         h.push_str("</td></tr>");
     }
-    h.push_str("</tbody></table></section>");
+    h.push_str("</tbody></table>");
+    if truncated {
+        h.push_str("<p class=\"muted\">… only the latest ");
+        h.push_str(&COMMIT_PAGE.to_string());
+        h.push_str(" commits are shown. Clone /");
+        h.push_str(&esc(repo));
+        h.push_str(".git for the full history.</p>");
+    }
+    h.push_str("</section>");
     Rendered { status: 200, etag: Some(tag(&oid, "commits")), html: close(h) }
 }
 
@@ -724,8 +768,12 @@ fn commit(dir: &Path, repo: &str, oid: &str) -> Rendered {
     h.push_str(&esc(&when));
     h.push_str("</p>");
 
-    match git_text(dir, &["show", "--patch", "--stat", "--format=", oid]) {
-        Ok(diff) => patch(&mut h, &diff),
+    match git_text(dir, &["show", "--numstat", "--patch", "--format=", oid]) {
+        Ok(diff) => patch(
+            &mut h,
+            &diff,
+            &format!("Clone /{repo}.git and run git show {id} to read it all."),
+        ),
         Err(why) => {
             h.push_str("<p class=\"empty\">");
             h.push_str(&esc(&why));
@@ -736,35 +784,228 @@ fn commit(dir: &Path, repo: &str, oid: &str) -> Rendered {
     Rendered { status: 200, etag: Some(tag(&id, "commit")), html: close(h) }
 }
 
-/// Renders a unified diff, coloured by line kind and bounded in length.
+/// What one patch line is, decided exactly as the old renderer did:
+/// `---`/`+++` file markers stay context so they never wash as changes.
+enum LineKind {
+    Add,
+    Del,
+    Hunk,
+    File,
+    Context,
+}
+
+fn line_kind(line: &str) -> LineKind {
+    match line.as_bytes().first() {
+        Some(b'+') if !line.starts_with("+++") => LineKind::Add,
+        Some(b'-') if !line.starts_with("---") => LineKind::Del,
+        Some(b'@') => LineKind::Hunk,
+        _ if line.starts_with("diff --git") => LineKind::File,
+        _ => LineKind::Context,
+    }
+}
+
+/// One coloured patch line, escaped, class-wrapped, newline-terminated.
+fn span(h: &mut String, class: &str, line: &str) {
+    h.push_str("<span class=\"");
+    h.push_str(class);
+    h.push_str("\">");
+    h.push_str(&esc(line));
+    h.push_str("</span>\n");
+}
+
+/// Byte lengths of the common prefix and suffix of two strings, cut on
+/// character boundaries, with the suffix measured on what the prefix
+/// left — so the two can never overlap and slicing between them is safe.
+fn common_affixes(a: &str, b: &str) -> (usize, usize) {
+    let prefix = a
+        .char_indices()
+        .zip(b.char_indices())
+        .take_while(|((_, ca), (_, cb))| ca == cb)
+        .map(|((i, c), _)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let suffix = a[prefix..]
+        .chars()
+        .rev()
+        .zip(b[prefix..].chars().rev())
+        .take_while(|(ca, cb)| ca == cb)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    (prefix, suffix)
+}
+
+/// One side of a modified line pair, with the span that differs from the
+/// other side wrapped in `<mark>`.
+///
+/// The line's wash says "this line moved"; the mark says which words.
+/// A pair sharing next to nothing gets no mark — marking a whole
+/// rewritten line says nothing the wash does not, and a rewrite that
+/// happens to end in the same letter is still a rewrite, so the shared
+/// affixes must make up at least a quarter of the longer body before
+/// they count as "the same line, edited". The comparison runs on the
+/// bodies, past the `-`/`+` sigil, which always differs by design.
+fn marked(h: &mut String, class: &str, this: &str, other: &str) {
+    let (sigil, body) = this.split_at(1);
+    let (_, other_body) = other.split_at(1);
+    let (prefix, suffix) = common_affixes(body, other_body);
+    let mid = &body[prefix..body.len() - suffix];
+    if mid.is_empty() || (prefix + suffix) * 4 < body.len().max(other_body.len()) {
+        span(h, class, this);
+        return;
+    }
+    h.push_str("<span class=\"");
+    h.push_str(class);
+    h.push_str("\">");
+    h.push_str(sigil);
+    h.push_str(&esc(&body[..prefix]));
+    h.push_str("<mark>");
+    h.push_str(&esc(mid));
+    h.push_str("</mark>");
+    h.push_str(&esc(&body[body.len() - suffix..]));
+    h.push_str("</span>\n");
+}
+
+/// The per-file counts above a diff, each linking to its file header in
+/// the patch below. `-` in either column is git's spelling for binary.
+fn stat_row(h: &mut String, files: &[(&str, &str, &str)]) {
+    if files.is_empty() {
+        return;
+    }
+    let mut added: u64 = 0;
+    let mut removed: u64 = 0;
+    for (a, d, _) in files {
+        added += a.parse::<u64>().unwrap_or(0);
+        removed += d.parse::<u64>().unwrap_or(0);
+    }
+    h.push_str("<p class=\"muted\">");
+    h.push_str(&files.len().to_string());
+    h.push_str(if files.len() == 1 { " file changed, " } else { " files changed, " });
+    h.push_str("<span class=\"plus\">+");
+    h.push_str(&added.to_string());
+    h.push_str("</span> <span class=\"minus\">−");
+    h.push_str(&removed.to_string());
+    h.push_str("</span></p><table class=\"stat\"><tbody>");
+    for (n, (a, d, path)) in files.iter().enumerate() {
+        h.push_str("<tr><td class=\"mono\"><a href=\"#f");
+        h.push_str(&n.to_string());
+        h.push_str("\">");
+        h.push_str(&esc(path));
+        h.push_str("</a></td>");
+        if *a == "-" || *d == "-" {
+            h.push_str("<td class=\"num muted\" colspan=\"2\">binary</td>");
+        } else {
+            h.push_str("<td class=\"num plus\">+");
+            h.push_str(a);
+            h.push_str("</td><td class=\"num minus\">−");
+            h.push_str(d);
+            h.push_str("</td>");
+        }
+        h.push_str("</tr>");
+    }
+    h.push_str("</tbody></table>");
+}
+
+/// Renders `--numstat --patch` output: the stat block becomes the table
+/// above the diff, the diff is coloured by line kind, runs of removed
+/// lines followed by an equal run of added lines get word-level marks,
+/// and the length bound ends in a line that says what it cut.
 ///
 /// Shared by the commit page and the review page so a diff cannot come
 /// to mean two different things depending on which one a reader opened.
-fn patch(h: &mut String, diff: &str) {
+/// `where_else` names where the rest lives when the bound cuts; it
+/// carries a repository name, so it is data and is escaped here.
+fn patch(h: &mut String, output: &str, where_else: &str) {
+    let lines: Vec<&str> = output.lines().collect();
+    // The numstat block: `<added> TAB <removed> TAB <path>` per file.
+    // The first line that is not shaped like that starts the patch.
+    let mut files: Vec<(&str, &str, &str)> = Vec::new();
+    let mut body = 0;
+    while body < lines.len() {
+        let mut fields = lines[body].splitn(3, '\t');
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some(a), Some(d), Some(path))
+                if !path.is_empty()
+                    && [a, d]
+                        .iter()
+                        .all(|n| *n == "-" || (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))) =>
+            {
+                files.push((a, d, path));
+                body += 1;
+            }
+            _ => break,
+        }
+    }
+    while body < lines.len() && lines[body].is_empty() {
+        body += 1;
+    }
+    stat_row(h, &files);
+
+    let patch_lines = &lines[body..];
+    let total = patch_lines.len();
+    let shown = total.min(MAX_DIFF_LINES);
     h.push_str("<pre class=\"code diff\">");
-    for (n, line) in diff.lines().enumerate() {
-        if n >= MAX_DIFF_LINES {
-            h.push_str("\n<span class=\"muted\">… diff truncated at ");
-            h.push_str(&MAX_DIFF_LINES.to_string());
-            h.push_str(" lines. Clone the repository to read the rest.</span>");
-            break;
+    let mut file_no = 0usize;
+    let mut i = 0;
+    while i < shown {
+        let line = patch_lines[i];
+        match line_kind(line) {
+            LineKind::Del => {
+                // The run of deletions, and the run of additions
+                // directly under it. Equal runs are a modification and
+                // pair line-for-line; anything else renders plain.
+                let mut j = i;
+                while j < shown && matches!(line_kind(patch_lines[j]), LineKind::Del) {
+                    j += 1;
+                }
+                let mut k = j;
+                while k < shown && matches!(line_kind(patch_lines[k]), LineKind::Add) {
+                    k += 1;
+                }
+                if k - j == j - i {
+                    for p in 0..(j - i) {
+                        marked(h, "del", patch_lines[i + p], patch_lines[j + p]);
+                    }
+                    for p in 0..(j - i) {
+                        marked(h, "add", patch_lines[j + p], patch_lines[i + p]);
+                    }
+                } else {
+                    for line in &patch_lines[i..j] {
+                        span(h, "del", line);
+                    }
+                    for line in &patch_lines[j..k] {
+                        span(h, "add", line);
+                    }
+                }
+                i = k;
+                continue;
+            }
+            LineKind::Add => span(h, "add", line),
+            LineKind::Hunk => span(h, "hunk", line),
+            LineKind::File => {
+                // The anchor the stat row links to. Counted in patch
+                // order, which is the order numstat listed the files in.
+                h.push_str("<span class=\"file\" id=\"f");
+                h.push_str(&file_no.to_string());
+                h.push_str("\">");
+                h.push_str(&esc(line));
+                h.push_str("</span>\n");
+                file_no += 1;
+            }
+            LineKind::Context => {
+                h.push_str(&esc(line));
+                h.push('\n');
+            }
         }
-        let class = match line.as_bytes().first() {
-            Some(b'+') if !line.starts_with("+++") => "add",
-            Some(b'-') if !line.starts_with("---") => "del",
-            Some(b'@') => "hunk",
-            _ => "",
-        };
-        if class.is_empty() {
-            h.push_str(&esc(line));
-        } else {
-            h.push_str("<span class=\"");
-            h.push_str(class);
-            h.push_str("\">");
-            h.push_str(&esc(line));
-            h.push_str("</span>");
-        }
-        h.push('\n');
+        i += 1;
+    }
+    if total > shown {
+        h.push_str("\n<span class=\"muted\">… ");
+        h.push_str(&(total - shown).to_string());
+        h.push_str(" more lines not shown (");
+        h.push_str(&total.to_string());
+        h.push_str(" in full). ");
+        h.push_str(&esc(where_else));
+        h.push_str("</span>");
     }
     h.push_str("</pre>");
 }
@@ -799,7 +1040,7 @@ fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered
         );
     } else {
         h.push_str("<table><thead><tr><th>review</th><th>onto</th><th>state</th>");
-        h.push_str("<th class=\"num\">weight</th></tr></thead><tbody>");
+        h.push_str("<th class=\"num\">weight</th><th>verdicts</th></tr></thead><tbody>");
         for (id, review) in &rows {
             h.push_str("<tr><td><a href=\"/r/");
             h.push_str(&esc(repo));
@@ -813,6 +1054,28 @@ fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered
             state_tag(&mut h, review);
             h.push_str("</td><td class=\"num\">");
             h.push_str(&esc(&review["approval_weight"].to_string()));
+            h.push_str("</td><td>");
+            // Who was asked and what they said, one click away without
+            // leaving the list: a glance is not worth a page navigation.
+            // The summary is the answered/assigned count, so the closed
+            // state already says how far along the review is.
+            let assigned = review["reviewers"].as_array().cloned().unwrap_or_default();
+            if assigned.is_empty() {
+                h.push_str("<span class=\"muted\">unassigned</span>");
+            } else {
+                let answered = assigned
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|who| review["verdicts"][who]["verdict"].as_str().is_some())
+                    .count();
+                h.push_str("<details><summary>");
+                h.push_str(&answered.to_string());
+                h.push_str(" of ");
+                h.push_str(&assigned.len().to_string());
+                h.push_str("</summary>");
+                crate::ui::verdicts(&mut h, review);
+                h.push_str("</details>");
+            }
             h.push_str("</td></tr>");
         }
         h.push_str("</tbody></table>");
@@ -973,12 +1236,16 @@ fn review(
         }
         (false, Some(refname)) => {
             let range = format!("{refname}...{commit_oid}");
-            match git_text(dir, &["diff", "--stat", "--patch", &range]) {
+            match git_text(dir, &["diff", "--numstat", "--patch", &range]) {
                 Ok(diff) if diff.trim().is_empty() => {
                     h.push_str("<p class=\"empty\">Nothing to land: the destination already ");
                     h.push_str("contains this commit.</p>");
                 }
-                Ok(diff) => patch(&mut h, &diff),
+                Ok(diff) => patch(
+                    &mut h,
+                    &diff,
+                    &format!("Clone /{repo}.git and run git diff {range} to read it all."),
+                ),
                 Err(why) => {
                     h.push_str("<p class=\"note\">");
                     h.push_str(&esc(&why));
@@ -1689,6 +1956,116 @@ mod tests {
                 path: "a file.txt".into()
             })
         );
+    }
+
+    /// A modified line pair gets word-level marks: the line wash says
+    /// the line moved, the mark says which words.
+    #[test]
+    fn a_modified_line_pair_marks_the_words_that_changed() {
+        let out = "1\t1\tsrc/lib.rs\n\ndiff --git a/src/lib.rs b/src/lib.rs\n\
+                   @@ -1 +1 @@\n-let count = 4;\n+let count = 5;\n";
+        let mut h = String::new();
+        patch(&mut h, out, "clone hint");
+        assert!(
+            h.contains("<span class=\"del\">-let count = <mark>4</mark>;</span>"),
+            "the removed word is not marked: {h}"
+        );
+        assert!(
+            h.contains("<span class=\"add\">+let count = <mark>5</mark>;</span>"),
+            "the added word is not marked: {h}"
+        );
+    }
+
+    /// The changed span is file content and escapes like everything
+    /// else: a repository whose diff contains markup is a legal
+    /// repository, and the mark must not become an injection point.
+    #[test]
+    fn word_marks_escape_markup_in_the_changed_span() {
+        let out = "1\t1\tf\n\ndiff --git a/f b/f\n@@ -1 +1 @@\n\
+                   -say <script>one</script>\n+say <script>two</script>\n";
+        let mut h = String::new();
+        patch(&mut h, out, "clone hint");
+        assert!(!h.contains("<script"), "raw markup reached the page: {h}");
+        assert!(h.contains("<mark>one</mark>"), "the changed word vanished: {h}");
+        assert!(h.contains("<mark>two</mark>"), "the changed word vanished: {h}");
+        assert!(h.contains("&lt;script&gt;"), "the shared markup was dropped, not escaped: {h}");
+    }
+
+    /// Unequal runs are not a modification, and a pair sharing nothing
+    /// is a rewrite: both render with the wash alone. A mark that fires
+    /// on everything marks nothing.
+    #[test]
+    fn only_a_paired_modification_gets_marks() {
+        let unequal = "1\t2\tf\n\ndiff --git a/f b/f\n@@ -1,2 +1 @@\n-a\n-b\n+c\n";
+        let mut h = String::new();
+        patch(&mut h, unequal, "clone hint");
+        assert!(!h.contains("<mark>"), "an unpaired run was marked: {h}");
+
+        let rewrite = "1\t1\tf\n\ndiff --git a/f b/f\n@@ -1 +1 @@\n-abc\n+xyz\n";
+        let mut h = String::new();
+        patch(&mut h, rewrite, "clone hint");
+        assert!(!h.contains("<mark>"), "a total rewrite was marked: {h}");
+
+        // A rewrite that happens to end in the same letter is still a
+        // rewrite. Found by a real emission, not invented: `-base` /
+        // `+proposed change` share a trailing `e`, and the first
+        // version of this renderer marked fourteen of fifteen
+        // characters — noise wearing precision's class attribute.
+        let coincidence = "1\t1\tf\n\ndiff --git a/f b/f\n@@ -1 +1 @@\n-base\n+proposed change\n";
+        let mut h = String::new();
+        patch(&mut h, coincidence, "clone hint");
+        assert!(
+            !h.contains("<mark>"),
+            "a coincidental shared letter promoted a rewrite to an edit: {h}"
+        );
+    }
+
+    /// The stat row counts every file, says binary where git did, and
+    /// links each row to the file's header in the patch below.
+    #[test]
+    fn the_stat_row_counts_every_file_and_anchors_the_headers() {
+        let out = "10\t2\tsrc/a.rs\n-\t-\timg.png\n\n\
+                   diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n\
+                   diff --git a/img.png b/img.png\nBinary files differ\n";
+        let mut h = String::new();
+        patch(&mut h, out, "clone hint");
+        assert!(h.contains("2 files changed"), "no summary line: {h}");
+        assert!(h.contains("+10") && h.contains("−2"), "per-file counts missing: {h}");
+        assert!(h.contains("binary"), "the binary file lost its label: {h}");
+        assert!(h.contains("href=\"#f0\""), "the stat row links nowhere: {h}");
+        assert!(
+            h.contains("<span class=\"file\" id=\"f0\">") && h.contains("id=\"f1\""),
+            "the file headers carry no anchors: {h}"
+        );
+    }
+
+    /// The bound ends in a line that says what it cut and where the
+    /// rest lives — a truncation that ends mid-sentence reads as a bug,
+    /// and one that names no destination strands the reader.
+    #[test]
+    fn the_truncation_line_says_what_was_cut_and_where_the_rest_is() {
+        let mut out = String::from("1\t0\tf\n\n");
+        for n in 0..MAX_DIFF_LINES + 7 {
+            out.push_str(&format!("ctx{n}\n"));
+        }
+        let mut h = String::new();
+        patch(&mut h, &out, "Clone /o/r.git to read it all.");
+        assert!(
+            h.contains("… 7 more lines not shown"),
+            "the cut does not say how much it cut: {h}"
+        );
+        assert!(
+            h.contains(&format!("({} in full)", MAX_DIFF_LINES + 7)),
+            "the cut does not say the whole size"
+        );
+        assert!(
+            h.contains("Clone /o/r.git to read it all."),
+            "the cut names nowhere to get the rest"
+        );
+        let last_shown = format!("ctx{}", MAX_DIFF_LINES - 1);
+        let first_cut = format!("ctx{}", MAX_DIFF_LINES);
+        assert!(h.contains(&last_shown), "the bound cut too early");
+        assert!(!h.contains(&first_cut), "the bound did not cut");
     }
 
     #[test]
