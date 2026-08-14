@@ -250,53 +250,11 @@ fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptio
     finish(status, &resp);
 }
 
-/// Signs every op in `source` on one channel and submits them as one
-/// batch (D17).
+/// The trusted keys this client holds, in the operator's own file
+/// format: one key per line, hex, with an optional channel name before
+/// it.
 ///
-/// The node has told agents since D26 that `/api/submit-batch` is the
-/// primary path for their workloads — one durability barrier per batch
-/// against one per operation — and until now the CLI could not reach it.
-/// An agent taking that advice had to hand-roll ed25519 signing and
-/// `curl`, which is the thing this binary exists to prevent.
-///
-/// **The log scope is read once, not once per op.** `submit` reads it
-/// per call because it sends one op; doing that here would put an HTTP
-/// round trip in front of every operation and spend exactly what the
-/// batch endpoint saves. One read is also correct rather than merely
-/// cheaper: admission checks that the head an op names is still *in the
-/// window*, not that it is the current head, so ops signed against one
-/// head are admissible in sequence behind each other.
-///
-/// **Output is one line per op, in request order**, so a script can read
-/// line *n* for op *n* without counting brackets — and the accepted and
-/// rejected totals go to stderr, following the rule the runner already
-/// documents: machine-facing on stdout, human-facing on stderr.
-/// Reads log entries from a cursor and, with `--verify`, checks them
-/// the way `SYNC.md` says a client should (D17).
-///
-/// `/api/log` was the last agent-facing endpoint with no command, and it
-/// is the one where that cost most: the repository ships a 177-line
-/// contract telling clients how to establish that the pages they were
-/// handed really are the chain — continuity, hash recomputation,
-/// authorship — and every step of it was prose. An agent following it
-/// hand-rolled hash-chain and ed25519 checking, and the doc has to warn
-/// about the subtleties it gets wrong.
-///
-/// **What `--verify` establishes, and what it does not.** Continuity and
-/// recomputation need nothing but the page: they are fully independent
-/// of the node. Authorship needs the public key, which this command only
-/// has for actors named in `--keys`; an entry whose key it does not hold
-/// is reported as **unverified**, never as verified. Saying "checked"
-/// for a signature nobody could check is the one failure that would make
-/// this worse than no command at all.
-///
-/// **This is a first-party client and says so.** It decodes into the
-/// same `OpEntry` the node encodes from, so a hash agreeing here proves
-/// the node agrees with *this build's* definition of the format rather
-/// than with an independent reading of `SYNC.md`.
-/// `choir-node/tests/it/sync_contract.rs` is the independent one: it
-/// rebuilds the canonical bytes by hand and deliberately never calls
-/// `content_hash`.
+/// Reusing that spelling means the file an operator already keeps is the
 /// file a verifying client already has, rather than a second format that
 /// can disagree with the first.
 fn load_registry(path: &str) -> Registry {
@@ -328,6 +286,32 @@ fn load_registry(path: &str) -> Registry {
     registry
 }
 
+/// Reads log entries from a cursor and, with `--verify`, checks them
+/// the way `SYNC.md` says a client should (D17).
+///
+/// `/api/log` was the last agent-facing endpoint with no command, and it
+/// is the one where that cost most: the repository ships a 177-line
+/// contract telling clients how to establish that the pages they were
+/// handed really are the chain — continuity, hash recomputation,
+/// authorship — and every step of it was prose. An agent following it
+/// hand-rolled hash-chain and ed25519 checking, and the doc has to warn
+/// about the subtleties it gets wrong.
+///
+/// **What `--verify` establishes, and what it does not.** Continuity and
+/// recomputation need nothing but the page: they are fully independent
+/// of the node. Authorship needs the public key, which this command only
+/// has for actors named in `--keys`; an entry whose key it does not hold
+/// is reported as **unverified**, never as verified. Saying "checked"
+/// for a signature nobody could check is the one failure that would make
+/// this worse than no command at all.
+///
+/// **This is a first-party client and says so.** It decodes into the
+/// same `OpEntry` the node encodes from, so a hash agreeing here proves
+/// the node agrees with *this build's* definition of the format rather
+/// than with an independent reading of `SYNC.md`.
+/// `choir-node/tests/it/sync_contract.rs` is the independent one: it
+/// rebuilds the canonical bytes by hand and deliberately never calls
+/// `content_hash`.
 fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions<'_>) -> ! {
     let (status, body) = http(api, auth, "choir_log", serde_json::json!({ "from": from }));
     if !(200..300).contains(&status) {
@@ -371,11 +355,27 @@ fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions
     std::process::exit(i32::from(!report.failures.is_empty()));
 }
 
-/// The trusted keys this client holds, in the operator's own file format:
-/// one key per line, hex, with an optional channel name before it.
+/// Signs every op in `source` on one channel and submits them as one
+/// batch (D17).
 ///
-/// Reusing that spelling means the file an operator already keeps is the
-
+/// The node has told agents since D26 that `/api/submit-batch` is the
+/// primary path for their workloads — one durability barrier per batch
+/// against one per operation — and until now the CLI could not reach it.
+/// An agent taking that advice had to hand-roll ed25519 signing and
+/// `curl`, which is the thing this binary exists to prevent.
+///
+/// **The log scope is read once, not once per op.** `submit` reads it
+/// per call because it sends one op; doing that here would put an HTTP
+/// round trip in front of every operation and spend exactly what the
+/// batch endpoint saves. One read is also correct rather than merely
+/// cheaper: admission checks that the head an op names is still *in the
+/// window*, not that it is the current head, so ops signed against one
+/// head are admissible in sequence behind each other.
+///
+/// **Output is one line per op, in request order**, so a script can read
+/// line *n* for op *n* without counting brackets — and the accepted and
+/// rejected totals go to stderr, following the rule the runner already
+/// documents: machine-facing on stdout, human-facing on stderr.
 fn batch(api: &str, key_file: &str, channel: &str, source: &str, auth: AuthOptions<'_>) -> ! {
     let text = if source == "-" {
         let mut buffer = String::new();
