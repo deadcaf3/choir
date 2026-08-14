@@ -781,22 +781,33 @@ fn a_repository_page_shows_the_path_you_clone_it_from() {
     let (base, work, _oid, _) = served("clone-path", "");
     let (status, _, page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
     assert_eq!(status, 200);
-    assert!(
-        page.contains("/agents/one.git"),
-        "a reader on the repository page cannot find out how to clone it: {page}"
-    );
 
-    // The claim is only worth making if the path works. Clone it.
+    // Read the path off the page rather than rebuilding it here. The
+    // first version of this test cloned a URL it composed itself, so the
+    // clone proved the node serves `/agents/one.git` — which was never in
+    // doubt — and proved nothing about what the page printed. Mutating
+    // the pill to `/git/agents/one.git` left it green.
+    let printed = page
+        .split_once(">clone ")
+        .and_then(|(_, rest)| rest.split_once('<'))
+        .map(|(path, _)| path.trim().to_string())
+        .unwrap_or_else(|| {
+            panic!("a reader on the repository page cannot find out how to clone it: {page}")
+        });
+
     let host = base.trim_start_matches("http://");
     let dest = work.join("cloned-from-the-page");
-    let url = format!("http://alice:a@{host}/agents/one.git");
+    let url = format!("http://alice:a@{host}{printed}");
     let out = git(&work, &["clone", "-q", &url, dest.to_str().unwrap()]);
     assert!(
         out.status.success(),
-        "the page prints a clone path that does not clone: {}",
+        "the page prints `{printed}`, which does not clone: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(dest.join("README.md").is_file(), "the clone came back empty");
+    assert!(
+        dest.join("README.md").is_file(),
+        "cloning `{printed}` came back without the file that was pushed"
+    );
 }
 
 #[test]
