@@ -121,11 +121,7 @@ fn a_push_over_the_ceiling_is_refused_without_the_hook_ever_running() {
         Platform::start(Registry::new(), Box::new(choir_oplog::MemLog::new()), ActorKey::generate())
             .expect("platform starts"),
     );
-    let node = std::sync::Arc::new(node);
-    {
-        let node = node.clone();
-        std::thread::spawn(move || node.serve_forever());
-    }
+    std::thread::spawn(move || node.serve_forever());
 
     let url = format!("http://alice:a@127.0.0.1:{port}/agents/demo.git");
     let view_url = format!("http://127.0.0.1:{port}/api/view");

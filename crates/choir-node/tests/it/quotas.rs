@@ -93,11 +93,7 @@ fn the_workspace_ceiling_is_per_user_and_names_its_own_repair() {
         Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
             .expect("platform starts"),
     );
-    let node = std::sync::Arc::new(node);
-    {
-        let node = node.clone();
-        std::thread::spawn(move || node.serve_forever());
-    }
+    std::thread::spawn(move || node.serve_forever());
 
     // Alice's allowance is two, and the second one is not the one refused.
     for name in ["one", "two"] {
@@ -158,11 +154,7 @@ fn a_node_wide_grant_holder_is_exempt_from_the_workspace_ceiling() {
         Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
             .expect("platform starts"),
     );
-    let node = std::sync::Arc::new(node);
-    {
-        let node = node.clone();
-        std::thread::spawn(move || node.serve_forever());
-    }
+    std::thread::spawn(move || node.serve_forever());
 
     // Alice has the same grant on the repository and no `@node` grant,
     // so the ceiling is hers to hit. This is the control: without it the
@@ -199,11 +191,7 @@ fn an_unset_workspace_ceiling_limits_nothing() {
         Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
             .expect("platform starts"),
     );
-    let node = std::sync::Arc::new(node);
-    {
-        let node = node.clone();
-        std::thread::spawn(move || node.serve_forever());
-    }
+    std::thread::spawn(move || node.serve_forever());
 
     for name in ["one", "two", "three", "four", "five"] {
         let (code, body) = create(port, "alice:a", name);
