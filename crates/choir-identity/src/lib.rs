@@ -59,6 +59,25 @@ pub enum IdentityError {
     /// answering the second with the first would report an operational
     /// fault as an attack.
     Verifier(String),
+    /// The signature names a scheme this verifier cannot check, carrying
+    /// the tag it named ([`choir_oplog::scheme`]).
+    ///
+    /// Separate from [`IdentityError::BadSignature`] because the two are
+    /// different events: a bad signature is a claim that failed, while
+    /// this is a claim never examined. Collapsing them would let a
+    /// future scheme look like an attack, and — worse in the other
+    /// direction — would let a caller believe an unexamined signature
+    /// had been rejected on its merits.
+    UnsupportedScheme(u16),
+    /// A WebAuthn assertion verified cryptographically but attests to a
+    /// different challenge than the one asked about, so it is a valid
+    /// signature over something nobody in this request agreed to.
+    ///
+    /// D39 treats this as forgery-class rather than as a mismatch: the
+    /// whole point of binding the challenge to
+    /// [`choir_oplog::OpEntry::signing_hash`] is that a signature cannot
+    /// be moved from the operation it approved to another one.
+    ChallengeMismatch,
 }
 
 /// An actor's signing keypair.
@@ -103,10 +122,7 @@ impl ActorKey {
     pub fn sign_submission(&self, channel: &str, payload: &[u8]) -> Witness {
         let hash = choir_oplog::signing_hash(channel, payload);
         let sig = self.signing.sign(hash.to_hex().as_bytes());
-        Witness {
-            key_id: self.actor_id().to_hex(),
-            signature: sig.to_bytes().to_vec(),
-        }
+        Witness::ed25519(self.actor_id().to_hex(), sig.to_bytes().to_vec())
     }
 
     /// Signs `entry` in place: sets `author_sig` over the entry's
@@ -185,6 +201,17 @@ impl Registry {
         signing: &ContentHash,
         sig: &Witness,
     ) -> Result<ContentHash, IdentityError> {
+        // Dispatch on the tag before touching the bytes. Without this a
+        // WebAuthn signature would be handed to ed25519, fail, and be
+        // reported as a bad signature — safe by accident, and the wrong
+        // answer: it was never checked against the scheme it named. This
+        // registry holds ed25519 keys only; P-256 credentials arrive
+        // with enrolment (D39) and verify through
+        // [`verify_webauthn_assertion`].
+        let claimed = sig.scheme_id();
+        if claimed != choir_oplog::scheme::ED25519 {
+            return Err(IdentityError::UnsupportedScheme(claimed));
+        }
         let key = self
             .keys
             .get(&sig.key_id)
@@ -321,4 +348,137 @@ fn verify_es256_in(
     } else {
         Err(IdentityError::BadSignature)
     }
+}
+
+/// The challenge bytes a browser must be given so that the assertion it
+/// returns attests to this submission (D39).
+///
+/// This is the hex form of the [`choir_oplog::signing_hash`], the exact
+/// bytes the ed25519 path signs. Both schemes therefore commit to one
+/// definition of *what was approved*, and a reader comparing an ed25519
+/// op with a passkey op is comparing like with like rather than two
+/// encodings that happen to agree today.
+pub fn webauthn_challenge(signing: &ContentHash) -> Vec<u8> {
+    signing.to_hex().into_bytes()
+}
+
+/// Base64url without padding, WebAuthn's encoding for the challenge
+/// inside clientDataJSON.
+fn base64url_nopad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        let take = chunk.len() + 1;
+        for i in 0..take {
+            let idx = (n >> (18 - 6 * i)) & 0x3f;
+            out.push(ALPHABET[idx as usize] as char);
+        }
+    }
+    out
+}
+
+/// SHA-256, via `openssl`, for the one place WebAuthn requires it.
+///
+/// No hash crate and no hand-rolled compression function: the second is
+/// the wrong thing to write for a security check, and the first would be
+/// a dependency bought for sixteen bytes of glue on a path that already
+/// runs `openssl` twice.
+fn sha256(bytes: &[u8]) -> Result<Vec<u8>, IdentityError> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| IdentityError::Verifier(e.to_string()))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| IdentityError::Verifier("openssl stdin unavailable".into()))?
+        .write_all(bytes)
+        .map_err(|e| IdentityError::Verifier(e.to_string()))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| IdentityError::Verifier(e.to_string()))?;
+    if !out.status.success() || out.stdout.len() != 32 {
+        return Err(IdentityError::Verifier("openssl dgst failed".into()));
+    }
+    Ok(out.stdout)
+}
+
+/// Verifies a WebAuthn assertion **and** that it attests to `signing`
+/// (D39).
+///
+/// This is the binding [`verify_es256`] deliberately does not do. It
+/// answers the whole question a caller actually has — "did the holder of
+/// this credential approve *this* operation" — rather than the primitive's
+/// narrower "did this key sign these bytes". D39 carries a tripwire for
+/// getting this wrong, because an assertion accepted against the wrong
+/// challenge is a real signature attesting to something nobody agreed to,
+/// which is forgery rather than a bug.
+///
+/// `spki_der` is the enrolled credential's public key in
+/// SubjectPublicKeyInfo DER; `sig` must carry
+/// [`choir_oplog::scheme::WEBAUTHN_ES256`] together with the
+/// authenticator data and client data JSON the browser returned.
+///
+/// The comparison is made in the *encoded* form: the expected challenge
+/// is base64url-encoded and compared to the string the browser sent,
+/// rather than decoding what the browser sent. That is deliberately the
+/// stricter direction — a non-canonical encoding that would decode to the
+/// right bytes is refused — and it means this path needs no base64
+/// decoder that an attacker's input reaches.
+///
+/// # Errors
+///
+/// [`IdentityError::UnsupportedScheme`] if `sig` names another scheme,
+/// [`IdentityError::BadSignature`] for missing WebAuthn fields, an
+/// unparseable clientDataJSON, a ceremony that is not `webauthn.get`, or
+/// a signature that does not verify, [`IdentityError::ChallengeMismatch`]
+/// when it verifies against a different challenge, and
+/// [`IdentityError::Verifier`] when `openssl` could not be run.
+pub fn verify_webauthn_assertion(
+    spki_der: &[u8],
+    signing: &ContentHash,
+    sig: &Witness,
+) -> Result<(), IdentityError> {
+    let claimed = sig.scheme_id();
+    if claimed != choir_oplog::scheme::WEBAUTHN_ES256 {
+        return Err(IdentityError::UnsupportedScheme(claimed));
+    }
+    let authenticator_data = sig
+        .authenticator_data
+        .as_ref()
+        .ok_or(IdentityError::BadSignature)?;
+    let client_data_json = sig
+        .client_data_json
+        .as_ref()
+        .ok_or(IdentityError::BadSignature)?;
+
+    let client: serde_json::Value =
+        serde_json::from_slice(client_data_json).map_err(|_| IdentityError::BadSignature)?;
+    // An assertion only. A registration ceremony over the same challenge
+    // would otherwise be replayable here as an approval.
+    if client.get("type").and_then(|t| t.as_str()) != Some("webauthn.get") {
+        return Err(IdentityError::BadSignature);
+    }
+    let challenge = client
+        .get("challenge")
+        .and_then(|c| c.as_str())
+        .ok_or(IdentityError::BadSignature)?;
+    if challenge != base64url_nopad(&webauthn_challenge(signing)) {
+        return Err(IdentityError::ChallengeMismatch);
+    }
+
+    // What an authenticator actually signs.
+    let mut message = authenticator_data.clone();
+    message.extend_from_slice(&sha256(client_data_json)?);
+    verify_es256(spki_der, &message, &sig.signature)
 }

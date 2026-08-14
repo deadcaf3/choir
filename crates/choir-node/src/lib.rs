@@ -15,11 +15,13 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+mod account_page;
 pub mod accounts;
 pub mod acl;
 pub mod hooks;
 pub mod limits;
 pub mod platform;
+mod prepare;
 pub mod provision;
 pub mod quota;
 pub mod reject;
@@ -286,6 +288,13 @@ impl Node {
     /// Enables the platform API (`/api/submit`, `/api/view`) backed by
     /// `platform`. Call before [`Node::serve_forever`].
     pub fn enable_platform(&mut self, platform: Platform) {
+        // The other half of the join in `enable_accounts`: whichever flag
+        // is applied second attaches the store, so passkey verification
+        // does not depend on the order the daemon happens to configure in
+        // (D39).
+        if let Some(store) = self.accounts.as_ref() {
+            platform.attach_accounts(store.clone());
+        }
         self.platform = Some(std::sync::Arc::new(platform));
     }
 
@@ -414,7 +423,14 @@ impl Node {
         let reserved = table.keys().cloned().collect();
         let store = accounts::Accounts::open(path, keys_out, reserved)?;
         eprintln!("accounts enabled ({} issued)", store.len());
-        self.accounts = Some(std::sync::Arc::new(store));
+        let store = std::sync::Arc::new(store);
+        // Either order: whichever of the two flags is applied second
+        // performs the join, so a passkey submission is verifiable
+        // regardless of how the daemon was configured (D39).
+        if let Some(platform) = self.platform.as_ref() {
+            platform.attach_accounts(store.clone());
+        }
+        self.accounts = Some(store);
         Ok(())
     }
 
@@ -898,6 +914,34 @@ impl Node {
                     access.finish(log, &user, &outcome);
                     return;
                 }
+                // Build one op's bytes for a browser to sign (D39).
+                // Ahead of the platform API for the same reason the
+                // account routes are: it needs no sequencer.
+                if request.url().split('?').next().unwrap_or("") == "/api/prepare" {
+                    let outcome = handle_prepare(&user, acl.as_deref(), request);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                // The page a person enrols a passkey on (D39). Ahead
+                // of the API block because it is a page, not an endpoint,
+                // and it is gated by nothing but being authenticated: the
+                // only account it can ever show is the caller's own.
+                if request.url().split('?').next().unwrap_or("") == "/account" {
+                    let page = account_page::render(accounts.as_deref(), &user);
+                    let bytes = page.html.len() as u64;
+                    let response = tiny_http::Response::from_string(page.html)
+                        .with_status_code(page.status)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"text/html; charset=utf-8"[..],
+                            )
+                            .expect("static header"),
+                        );
+                    let outcome = served(request, response, page.status, bytes);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
                 // Credential self-service (D36). Ahead of the platform
                 // API because it needs no sequencer: a node that serves
                 // git and nothing else still issues credentials.
@@ -1308,6 +1352,103 @@ fn basic_auth(request: &tiny_http::Request) -> Option<(String, String)> {
     Some((user.to_string(), secret.to_string()))
 }
 
+/// Serves `POST /api/prepare`: the bytes of one op, for a browser that
+/// is about to sign them with a passkey (D39).
+///
+/// The author is always the authenticated caller and never a name in the
+/// body, the same rule passkey enrolment follows. A body that could
+/// choose its author would let this endpoint mint a payload claiming
+/// somebody else — refused at admission by the view's own author check,
+/// but only after the node had helpfully built it.
+///
+/// Only comments come through here. A verdict is fully determined by the
+/// review and the button, so it is rendered into the page; a comment
+/// carries text nobody has typed yet, which is the whole reason this
+/// round trip exists.
+fn handle_prepare(
+    user: &str,
+    acl: Option<&acl::Acl>,
+    mut request: tiny_http::Request,
+) -> std::io::Result<(u16, u64)> {
+    let mut req_body = Vec::new();
+    request.as_reader().read_to_end(&mut req_body)?;
+    let method = request.method().as_str().to_string();
+    let path = request.url().split('?').next().unwrap_or("").to_string();
+    let (status, body) = match acl {
+        Some(table) => match acl::api_denial(table, user, &method, &path, &req_body, |_| None) {
+            Some(denial) => (
+                denial.status,
+                serde_json::json!({ "error": denial.reason }).to_string(),
+            ),
+            None => prepare_body(user, &req_body),
+        },
+        None => prepare_body(user, &req_body),
+    };
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        );
+    served(request, response, status, bytes)
+}
+
+/// The body half of [`handle_prepare`], split out so the authorization
+/// half above has one shape regardless of whether a table exists.
+fn prepare_body(user: &str, req_body: &[u8]) -> (u16, String) {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(req_body) else {
+        return (400, r#"{"error":"body must be JSON"}"#.to_string());
+    };
+    let field = |name: &str| {
+        json.get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    if field("kind") != Some("comment") {
+        return (
+            400,
+            r#"{"error":"`kind` must be \"comment\"; a verdict is prepared in the page"}"#
+                .to_string(),
+        );
+    }
+    let (Some(id), Some(text)) = (field("id"), field("body")) else {
+        return (
+            400,
+            r#"{"error":"`id` (the review) and `body` (the comment) are required"}"#.to_string(),
+        );
+    };
+    if text.chars().count() > MAX_COMMENT_CHARS {
+        return (
+            400,
+            serde_json::json!({
+                "error": format!("a comment is at most {MAX_COMMENT_CHARS} characters"),
+            })
+            .to_string(),
+        );
+    }
+    // Minted here, not taken from the body: the comment id is the
+    // author's retry identity, so a browser that submits one prepared
+    // payload twice must hit the refusal that identity exists to give.
+    let comment_id = choir_identity::ActorKey::generate().actor_id().to_hex();
+    let prepared = prepare::comment(id, user, &comment_id, text);
+    (
+        200,
+        serde_json::json!({
+            "payload_hex": prepared.payload_hex,
+            "challenge": prepared.challenge,
+            "comment": comment_id,
+            "channel": user,
+        })
+        .to_string(),
+    )
+}
+
+/// Longest comment the prepare endpoint will build. A review thread is
+/// discussion, and the op log keeps every byte of it forever.
+const MAX_COMMENT_CHARS: usize = 4096;
+
 /// Serves one `/api/accounts...` request (D36).
 ///
 /// The ACL decides who may issue, revoke and read the roster, through the
@@ -1366,6 +1507,12 @@ fn handle_accounts(
                         ),
                     },
                     (Some(json), "POST", "/api/accounts/revoke") => store.revoke(&json),
+                    (Some(json), "POST", "/api/accounts/passkey") => {
+                        store.enroll_passkey(user, &json)
+                    }
+                    (Some(json), "POST", "/api/accounts/passkey/remove") => {
+                        store.remove_passkey(user, &json)
+                    }
                     (Some(_), "GET", "/api/accounts") => (200, store.list_json().to_string()),
                     _ => (404, r#"{"error":"no such endpoint"}"#.to_string()),
                 }
@@ -1678,7 +1825,7 @@ fn handle_browse(
         }
     }
 
-    let rendered = browse::render(root, page, &readable, platform);
+    let rendered = browse::render(root, page, &readable, platform, user);
     // Revalidation happens after the ACL check and before the body is
     // written, so a `304` costs the reader nothing and still cannot be
     // obtained for a repository they may not read.

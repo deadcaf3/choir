@@ -86,10 +86,7 @@ impl Rng {
     }
 
     fn witness(&mut self) -> Witness {
-        Witness {
-            key_id: self.text(),
-            signature: self.payload(),
-        }
+        Witness::ed25519(self.text(), self.payload())
     }
 
     fn option<T>(&mut self, value: T) -> Option<T> {
@@ -288,10 +285,7 @@ fn every_field_is_covered_by_the_entry_hash() {
             }),
             ("witnesses", {
                 let mut e = entry.clone();
-                e.witnesses.push(Witness {
-                    key_id: "extra".into(),
-                    signature: vec![7],
-                });
+                e.witnesses.push(Witness::ed25519("extra", vec![7]));
                 e
             }),
         ];
@@ -308,10 +302,7 @@ fn every_field_is_covered_by_the_entry_hash() {
         // written before L8 existed must re-serialize byte-identically.
         let mut toggled = entry.clone();
         toggled.author_sig = match &entry.author_sig {
-            None => Some(Witness {
-                key_id: "author".into(),
-                signature: vec![1, 2, 3],
-            }),
+            None => Some(Witness::ed25519("author", vec![1, 2, 3])),
             Some(_) => None,
         };
         assert_ne!(
@@ -421,10 +412,7 @@ fn signing_hash_ignores_everything_but_channel_and_payload() {
         let mut repositioned = entry.clone();
         repositioned.seq = entry.seq.wrapping_add(1_000);
         repositioned.parent = Some(ContentHash::blake3(b"a different position"));
-        repositioned.witnesses = vec![Witness {
-            key_id: "witness".into(),
-            signature: vec![4, 5, 6],
-        }];
+        repositioned.witnesses = vec![Witness::ed25519("witness", vec![4, 5, 6])];
         repositioned.author_sig = None;
         assert_eq!(
             repositioned.signing_hash(),
@@ -543,4 +531,83 @@ fn only_git_oid_widths_enter_the_envelope() {
             "{at}: non-hex must not decode"
         );
     }
+}
+
+/// D39's format change is additive, and "additive" here means something
+/// stricter than "old logs still decode": every entry written before the
+/// change must re-serialize to the *same bytes* and therefore keep the
+/// *same hash*. A signature is inside `OpEntry`, so a `Witness` that
+/// gained a serialized field would silently rewrite the hash of every
+/// signed entry ever stored — invariant 1 and invariant 3 at once.
+///
+/// Checked over the generated entries rather than one example, because
+/// the failure would be uniform and a single hand-built case proves the
+/// least interesting instance of it.
+#[test]
+fn the_d39_witness_fields_change_no_pre_d39_byte() {
+    for_each_entry(|entry, at| {
+        let bytes = canonical(entry);
+        let text = String::from_utf8_lossy(&bytes);
+        for field in ["scheme", "authenticator_data", "client_data_json"] {
+            assert!(
+                !text.contains(field),
+                "{at}: an ed25519 entry emitted the additive field `{field}`"
+            );
+        }
+        // And the round trip still holds through the wider struct: a
+        // decoder that filled `scheme` with a default on the way in
+        // would pass the check above and fail here.
+        let back: OpEntry = serde_json::from_slice(&bytes).expect("decodes");
+        assert_eq!(canonical(&back), bytes, "{at}: re-encode changed the bytes");
+        assert_eq!(back.content_hash(), entry.content_hash(), "{at}: hash moved");
+    });
+}
+
+/// A `Witness` stored before D39 has no `scheme` member at all, and the
+/// absence has to mean ed25519 rather than "unknown". Written as literal
+/// JSON on purpose: constructing one through the current struct cannot
+/// reproduce a document written by an older binary, which is the only
+/// input this property is about.
+#[test]
+fn a_witness_without_a_scheme_reads_as_ed25519_and_survives_a_round_trip() {
+    let stored = br#"{"key_id":"1e-abc","signature":[1,2,3]}"#;
+    let w: Witness = serde_json::from_slice(stored).expect("a pre-D39 witness decodes");
+    assert_eq!(w.scheme, None, "no tag was written, so none is read");
+    assert_eq!(
+        w.scheme_id(),
+        choir_oplog::scheme::ED25519,
+        "an absent tag must resolve to the only scheme that existed"
+    );
+    assert_eq!(
+        canonical(&w),
+        stored.to_vec(),
+        "a pre-D39 witness must re-serialize to the byte string it was stored as"
+    );
+}
+
+/// Measured rather than assumed, because D39 rests on it: a `Witness`
+/// carrying a member this binary has never heard of still decodes. No
+/// struct in this workspace sets `deny_unknown_fields`, so a *new field*
+/// is backward-compatible where a new enum variant would not be — the
+/// distinction D35 records. If this ever fails, an old reader can no
+/// longer replay a log a newer writer produced, which is a migration
+/// rather than a release.
+#[test]
+fn a_witness_from_a_newer_writer_still_decodes() {
+    let future = br#"{"key_id":"k","signature":[9],"scheme":2,"a_field_from_2027":{"x":1}}"#;
+    let w: Witness = serde_json::from_slice(future).expect("an unknown member must not stop a read");
+    assert_eq!(w.scheme_id(), choir_oplog::scheme::WEBAUTHN_ES256);
+    assert_eq!(w.signature, vec![9]);
+}
+
+/// An unrecognised scheme decodes too, and this is the deliberate half of
+/// the same decision: replay must not stop at a signature this binary
+/// cannot check. The refusal belongs at verification, where the caller
+/// knows whether an unverifiable signature matters, and never at decode,
+/// where refusing means an old node cannot read the log at all.
+#[test]
+fn an_unknown_scheme_decodes_and_is_reported_verbatim() {
+    let w: Witness =
+        serde_json::from_slice(br#"{"key_id":"k","signature":[1],"scheme":40000}"#).expect("decodes");
+    assert_eq!(w.scheme_id(), 40_000, "the tag is reported, not normalised");
 }

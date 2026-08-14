@@ -385,6 +385,7 @@ pub(crate) fn render(
     page: &Page,
     readable: &dyn Fn(&str) -> bool,
     platform: Option<&crate::platform::Platform>,
+    user: &str,
 ) -> Rendered {
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
@@ -408,7 +409,7 @@ pub(crate) fn render(
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev),
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid),
         Page::Reviews { repo } => reviews(repo, platform),
-        Page::Review { repo, id } => review(&bare(root, repo), repo, id, platform),
+        Page::Review { repo, id } => review(&bare(root, repo), repo, id, platform, user),
     }
 }
 
@@ -833,6 +834,7 @@ fn review(
     repo: &str,
     id: &str,
     platform: Option<&crate::platform::Platform>,
+    user: &str,
 ) -> Rendered {
     let Some(platform) = platform else {
         return unavailable(repo);
@@ -986,8 +988,228 @@ fn review(
         }
     }
     h.push_str("</section>");
+
+    verdict_buttons(&mut h, id, &state, user);
+    comment_box(&mut h, id, &state, user);
     Rendered { status: 200, etag: None, html: close(h) }
 }
+
+/// The passkey write affordance (D39), and the one place this repository
+/// runs script in a page.
+///
+/// **Everything above this call renders identically without it.** D28's
+/// rule was "no JavaScript"; D39 reverses that in one narrow place
+/// because a browser write the node cannot forge requires the browser to
+/// *produce a signature*, and an HTML form submits values rather than
+/// computing them. The reversal buys exactly one thing and must keep
+/// buying only that: the read surface is unchanged, the script is inline,
+/// nothing is fetched, and with scripting off the section below is a
+/// sentence naming the CLI rather than a broken control.
+///
+/// The page does not know the op format. The node renders the two
+/// payloads and their challenges; the script's whole job is to hand a
+/// challenge to the authenticator and post what comes back. That is what
+/// keeps this forty lines instead of a second implementation of a hashed
+/// format in a language with no tests here.
+fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &str) {
+    // Only a reviewer on this review has a verdict to cast. Showing the
+    // buttons to anyone else would be offering an action the node will
+    // refuse, which is worse than not offering it.
+    let is_reviewer = state["reviewers"]
+        .as_array()
+        .is_some_and(|list| list.iter().any(|r| r.as_str() == Some(user)));
+    if !is_reviewer || state["archived"].as_bool().unwrap_or(false) {
+        return;
+    }
+    // Already answered: the log keeps the first verdict, so a second
+    // button press would be refused. Say so instead of offering it.
+    if state["verdicts"][user]["verdict"].as_str().is_some() {
+        return;
+    }
+
+    h.push_str("<section><h2>Your verdict</h2>");
+    h.push_str("<noscript><p class=\"note\">Casting a verdict needs a passkey, which the \
+                browser can only produce with scripting enabled. With it off, use \
+                <code>choir verdict</code> — the CLI is the write path this page is an \
+                alternative to, never a replacement for.</p></noscript>");
+    // The channel travels on the element rather than in the script, so
+    // the script is a constant with nothing interpolated into it — the
+    // one property that makes "is this page's script safe" a question you
+    // answer once instead of per render.
+    h.push_str("<div id=\"verdict\" hidden data-user=\"");
+    h.push_str(&esc(user));
+    h.push_str("\"><p class=\"note\">Signed by your passkey on this device. Nothing is sent \
+                until you approve the prompt.</p>");
+    for (verdict, label, class) in [
+        ("Approve", "Approve", "ok"),
+        ("RequestChanges", "Request changes", "danger"),
+    ] {
+        let Some(prepared) = crate::prepare::verdict(id, user, verdict) else {
+            continue;
+        };
+        h.push_str("<button class=\"verdict ");
+        h.push_str(class);
+        h.push_str("\" data-payload=\"");
+        h.push_str(&esc(&prepared.payload_hex));
+        h.push_str("\" data-challenge=\"");
+        h.push_str(&esc(&prepared.challenge));
+        h.push_str("\">");
+        h.push_str(label);
+        h.push_str("</button> ");
+    }
+    h.push_str("<p id=\"verdict-said\" class=\"note\" hidden></p></div>");
+    h.push_str(VERDICT_SCRIPT);
+    h.push_str("</section>");
+}
+
+/// The comment box (D39 × D38), offered to anyone who may write here
+/// rather than to reviewers only.
+///
+/// Discussion is deliberately wider than judgement: a verdict is an
+/// authorization and belongs to the people asked for one, while a comment
+/// is a statement and belongs to anyone the ACL already lets write to
+/// this repository. The node makes that call at `/api/submit`; the page
+/// offering the box to a reader who is then refused would be worse than
+/// either, so it is shown only to a caller with a name — never to `anon`.
+///
+/// Unlike a verdict, the payload cannot be rendered ahead of time: it
+/// carries text nobody has typed yet. So this posts to `/api/prepare`
+/// first and signs what comes back, which keeps the op format in one
+/// implementation exactly as the verdict path does.
+fn comment_box(h: &mut String, id: &str, state: &serde_json::Value, user: &str) {
+    if user.is_empty() || user == "anon" || state["archived"].as_bool().unwrap_or(false) {
+        return;
+    }
+    h.push_str("<section><h2>Say something</h2>");
+    h.push_str("<noscript><p class=\"note\">Commenting signs an operation with your passkey, \
+                which needs scripting. With it off, use <code>choir comment</code>.</p></noscript>");
+    h.push_str("<div id=\"comment\" hidden data-review=\"");
+    h.push_str(&esc(id));
+    h.push_str("\" data-user=\"");
+    h.push_str(&esc(user));
+    h.push_str("\"><textarea id=\"comment-body\" rows=\"3\" maxlength=\"4096\" \
+                placeholder=\"What do you make of it?\"></textarea>");
+    h.push_str("<p><button id=\"comment-go\">Sign and post</button></p>");
+    h.push_str("<p id=\"comment-said\" class=\"note\" hidden></p></div>");
+    h.push_str(COMMENT_SCRIPT);
+    h.push_str("</section>");
+}
+
+/// The comment ceremony: prepare, sign, submit. Inline, no `src`, no
+/// library, no build step — the same scope as the verdict script, and
+/// held by the same test.
+const COMMENT_SCRIPT: &str = r#"<script>
+(function () {
+  var box = document.getElementById('comment');
+  var said = document.getElementById('comment-said');
+  if (!box || !window.PublicKeyCredential || !navigator.credentials) return;
+  box.hidden = false;
+  var hex = function (buf) {
+    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+      return ('0' + b.toString(16)).slice(-2);
+    }).join('');
+  };
+  var unb64url = function (s) {
+    var t = s.replace(/-/g, '+').replace(/_/g, '/');
+    var raw = atob(t + '==='.slice(0, (4 - t.length % 4) % 4));
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  };
+  var say = function (t) { said.hidden = false; said.textContent = t; };
+  document.getElementById('comment-go').addEventListener('click', function () {
+    var text = document.getElementById('comment-body').value;
+    if (!text.trim()) { say('Nothing to say yet.'); return; }
+    say('Preparing...');
+    fetch('/api/prepare', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: JSON.stringify({ kind: 'comment', id: box.dataset.review, body: text })
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    }).then(function (p) {
+      say('Waiting for your authenticator...');
+      return navigator.credentials.get({
+        publicKey: { challenge: unb64url(p.challenge), userVerification: 'preferred' }
+      }).then(function (c) {
+        return fetch('/api/submit', {
+          method: 'POST',
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            channel: p.channel,
+            payload_hex: p.payload_hex,
+            key_id: c.id,
+            scheme: 2,
+            signature_hex: hex(c.response.signature),
+            authenticator_data_hex: hex(c.response.authenticatorData),
+            client_data_json_hex: hex(c.response.clientDataJSON)
+          })
+        });
+      });
+    }).then(function (r) {
+      if (r.ok) { location.reload(); return; }
+      return r.text().then(function (t) { say('The node refused it: ' + t); });
+    }).catch(function (e) { say('Not posted: ' + e.message); });
+  });
+})();
+</script>"#;
+
+/// The whole of D39's client half. Inline, no `src`, no library, no build
+/// step — the scope the decision register approved, and the reason
+/// `the_page_references_no_external_resource` narrows rather than
+/// disappears.
+const VERDICT_SCRIPT: &str = r#"<script>
+(function () {
+  var box = document.getElementById('verdict');
+  var said = document.getElementById('verdict-said');
+  if (!box || !window.PublicKeyCredential || !navigator.credentials) return;
+  box.hidden = false;
+  var bytes = function (hex) {
+    var out = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  };
+  var hex = function (buf) {
+    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+      return ('0' + b.toString(16)).slice(-2);
+    }).join('');
+  };
+  var unb64url = function (s) {
+    var t = s.replace(/-/g, '+').replace(/_/g, '/');
+    var raw = atob(t + '==='.slice(0, (4 - t.length % 4) % 4));
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  };
+  var say = function (text) { said.hidden = false; said.textContent = text; };
+  Array.prototype.forEach.call(document.querySelectorAll('button.verdict'), function (b) {
+    b.addEventListener('click', function () {
+      say('Waiting for your authenticator...');
+      navigator.credentials.get({
+        publicKey: { challenge: unb64url(b.dataset.challenge), userVerification: 'preferred' }
+      }).then(function (c) {
+        return fetch('/api/submit', {
+          method: 'POST',
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            channel: box.dataset.user,
+            payload_hex: b.dataset.payload,
+            key_id: c.id,
+            scheme: 2,
+            signature_hex: hex(c.response.signature),
+            authenticator_data_hex: hex(c.response.authenticatorData),
+            client_data_json_hex: hex(c.response.clientDataJSON)
+          })
+        });
+      }).then(function (r) {
+        if (r.ok) { location.reload(); return; }
+        return r.text().then(function (t) { say('The node refused it: ' + t); });
+      }).catch(function (e) { say('Not signed: ' + e.message); });
+    });
+  });
+})();
+</script>"#;
 
 /// The git object id inside a view hash, or `None` when the hash is not
 /// a git object at all.
@@ -1471,4 +1693,109 @@ mod tests {
         // `ls-tree --long` prints `-` for a tree's size column.
         assert_eq!(human("-"), "-");
     }
+
+    /// D39's reversal, held to the scope the row approved: the review
+    /// page runs script, and that script is inline, carries no `src`,
+    /// pulls in no library, and needs no build step.
+    ///
+    /// The sibling in `ui.rs` asserts the read surface still has no
+    /// script at all. Between them the rule is stated where each applies,
+    /// rather than one weakened probe covering both.
+    #[test]
+    fn the_review_page_runs_only_inline_script() {
+        // The constants are the whole client half, so probing them is
+        // probing what ships. Both, by name: a new one added without a
+        // line here is the way this rule rots.
+        for (what, script) in [
+            ("verdict", super::VERDICT_SCRIPT),
+            ("comment", super::COMMENT_SCRIPT),
+        ] {
+            assert!(script.starts_with("<script>"), "{what}");
+            assert!(!script.contains("src="), "{what}: the script is fetched");
+            for probe in ["http://", "https://", "//cdn", "@import", "import ", "require("] {
+                assert!(!script.contains(probe), "{what}: reaches out via {probe}");
+            }
+            // One script element each: two would mean somebody added a
+            // surface without reading this.
+            assert_eq!(script.matches("<script").count(), 1, "{what}");
+            // Nothing is interpolated, which is why "is this script safe"
+            // is answered once rather than per render.
+            assert!(!script.contains("{}"), "{what}");
+        }
+    }
+
+    /// Discussion is wider than judgement, and narrower than the page.
+    /// A verdict belongs to the people asked for one; a comment belongs
+    /// to anyone with a name; neither is offered to an anonymous reader
+    /// or on a settled review.
+    #[test]
+    fn the_comment_box_is_offered_more_widely_than_a_verdict_and_never_to_anon() {
+        let live = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": false,
+        });
+        let rendered = |user: &str| {
+            let mut h = String::new();
+            super::comment_box(&mut h, "review-1", &live, user);
+            h
+        };
+        assert!(rendered("carol").contains("comment-go"), "a reviewer");
+        assert!(
+            rendered("mallory").contains("comment-go"),
+            "someone who is not a reviewer may still discuss"
+        );
+        assert!(rendered("anon").is_empty(), "an anonymous reader was offered a box");
+        assert!(rendered("").is_empty(), "an unnamed caller was offered a box");
+
+        let archived = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": true,
+        });
+        let mut h = String::new();
+        super::comment_box(&mut h, "review-1", &archived, "carol");
+        assert!(h.is_empty(), "an archived review still took comments");
+    }
+
+    /// The write affordance is offered only to someone who can actually
+    /// use it, and never to a reader.
+    #[test]
+    fn verdict_buttons_appear_only_for_a_reviewer_who_has_not_voted() {
+        let state = serde_json::json!({
+            "reviewers": ["carol", "dave"],
+            "verdicts": { "dave": { "verdict": "Approve", "note": "" } },
+            "archived": false,
+        });
+        let rendered = |user: &str| {
+            let mut h = String::new();
+            super::verdict_buttons(&mut h, "review-1", &state, user);
+            h
+        };
+        assert!(rendered("carol").contains("button class=\"verdict"), "an asked reviewer");
+        assert!(rendered("dave").is_empty(), "dave already answered");
+        assert!(rendered("mallory").is_empty(), "not a reviewer on this review");
+
+        let archived = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": true,
+        });
+        let mut h = String::new();
+        super::verdict_buttons(&mut h, "review-1", &archived, "carol");
+        assert!(h.is_empty(), "an archived review takes no more verdicts");
+    }
+
+    /// With scripting off the section is a sentence, not a dead control.
+    /// D39 carries this as a tripwire: the enhancement must never become
+    /// a dependency.
+    #[test]
+    fn the_verdict_section_says_what_to_do_without_script() {
+        let state = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": false,
+        });
+        let mut h = String::new();
+        super::verdict_buttons(&mut h, "review-1", &state, "carol");
+        assert!(h.contains("<noscript>"), "no fallback at all");
+        assert!(h.contains("choir verdict"), "the fallback must name the CLI");
+        // The controls start hidden and are revealed by the script, so a
+        // reader with scripting off is never shown a button that cannot
+        // work.
+        assert!(h.contains("id=\"verdict\" hidden"), "the controls are not hidden by default");
+    }
+
 }

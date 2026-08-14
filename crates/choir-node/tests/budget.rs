@@ -92,10 +92,7 @@ fn submit_path_budget() {
         channel: workspace.to_string(),
         payload: payload.clone(),
         witnesses: Vec::new(),
-        author_sig: Some(Witness {
-            key_id: sig.key_id.clone(),
-            signature: sig.signature.clone(),
-        }),
+        author_sig: Some(Witness::ed25519(sig.key_id.clone(), sig.signature.clone())),
     };
 
     let small = view_with(100);

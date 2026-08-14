@@ -27,10 +27,7 @@ fn h(tag: &[u8]) -> ContentHash {
 }
 
 fn witness() -> Witness {
-    Witness {
-        key_id: "owner-key".into(),
-        signature: vec![1, 2, 3],
-    }
+    Witness::ed25519("owner-key", vec![1, 2, 3])
 }
 
 /// Every op shape, in both admissible and inadmissible states. Hand-rolled

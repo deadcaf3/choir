@@ -131,14 +131,8 @@ fn op_entry_is_frozen() {
         seq: 7,
         channel: "agent-1".into(),
         payload: b"opaque payload".to_vec(),
-        witnesses: vec![Witness {
-            key_id: "1e-witness".into(),
-            signature: vec![1, 2, 3, 4],
-        }],
-        author_sig: Some(Witness {
-            key_id: "1e-author".into(),
-            signature: vec![9, 8, 7, 6],
-        }),
+        witnesses: vec![Witness::ed25519("1e-witness", vec![1, 2, 3, 4])],
+        author_sig: Some(Witness::ed25519("1e-author", vec![9, 8, 7, 6])),
     };
     assert_golden(
         "signed op entry",
@@ -329,10 +323,7 @@ fn view_op_variants_are_frozen() {
             workspace: "repo/agent".into(),
             prev_revision: h(b"commit two"),
             owner: "operator/agent".into(),
-            owner_sig: Witness {
-                key_id: "owner-key".into(),
-                signature: vec![1, 2, 3],
-            },
+            owner_sig: Witness::ed25519("owner-key", vec![1, 2, 3]),
         }),
         r#"{"format_version":1,"kind":{"ArchiveChange":{"id":"change-1","workspace":"repo/agent","prev_revision":{"codec":30,"digest":[85,132,118,97,239,147,219,56,81,251,10,83,89,23,246,20,25,60,73,118,206,203,90,41,65,69,251,150,168,140,62,8]},"owner":"operator/agent","owner_sig":{"key_id":"owner-key","signature":[1,2,3]}}}}"#,
         "1e-86f079f00edc377222fd784aaff45ee30e887979385b6e77b2abd60b19fdf2d3",
@@ -398,10 +389,7 @@ fn owner_authorized_create_change_is_frozen() {
             workspace: "repo/agent".into(),
             base_revision: h(b"commit one"),
             idempotency_key: "request-1".into(),
-            owner_sig: Some(Witness {
-                key_id: "owner-key".into(),
-                signature: vec![4, 5, 6],
-            }),
+            owner_sig: Some(Witness::ed25519("owner-key", vec![4, 5, 6])),
         }),
         r#"{"format_version":1,"kind":{"CreateChange":{"id":"change-1","owner":"operator/agent","workspace":"repo/agent","base_revision":{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]},"idempotency_key":"request-1","owner_sig":{"key_id":"owner-key","signature":[4,5,6]}}}}"#,
         "1e-600348c35115eb72878f3c005c1732e14ffdc576fd8b9e5b4f90266724e5ca7f",

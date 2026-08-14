@@ -1946,6 +1946,11 @@ struct ChoirPolicy {
     /// after the view fold on the same writer thread, so its FIFO order
     /// matches the sequencer order exactly.
     review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
+    /// The credential store, when the node has one (D39). Shared with
+    /// [`Platform`] as a slot rather than taken at construction because
+    /// the two are enabled independently and in either order; a node
+    /// without accounts simply has no passkey authors.
+    passkeys: Arc<Mutex<Option<Arc<crate::accounts::Accounts>>>>,
     /// Webhook delivery handle (D32), shared with [`Platform`] so the
     /// operator's `--hooks-file` can be attached after the writer thread
     /// is already running. Offering an event to it never blocks: see
@@ -2192,6 +2197,43 @@ impl ChoirPolicy {
     }
 }
 
+impl ChoirPolicy {
+    /// Verifies a passkey submission against the credential the *channel*
+    /// enrolled (D39).
+    ///
+    /// The channel is the account name, and that is the whole binding:
+    /// `Accounts::passkey_spki` is keyed by `(account, credential_id)`, so
+    /// an assertion by alice's authenticator submitted on bob's channel
+    /// finds no key and is refused. There is no separate table mapping
+    /// credentials to channels, because the store already is one — and a
+    /// second table would be a second thing to keep in agreement.
+    ///
+    /// The returned actor id is `blake3` of the credential's public key,
+    /// the same rule [`choir_identity::ActorKey::actor_id`] uses for an
+    /// ed25519 key. It is an in-process authorization handle only: an
+    /// `OpEntry` records the channel and the signature, never an actor
+    /// id, so this derivation is not frozen into the log and changing it
+    /// later would not be a migration.
+    fn verify_passkey(
+        &self,
+        signing: &ContentHash,
+        sig: &Witness,
+        channel: &str,
+    ) -> Result<ContentHash, choir_identity::IdentityError> {
+        let store = self.passkeys.lock().expect("passkey store lock").clone();
+        let Some(store) = store else {
+            // No store at all: the node has no self-service, so it has no
+            // enrolled credentials and this key id is unknown to it.
+            return Err(choir_identity::IdentityError::UnknownKey(sig.key_id.clone()));
+        };
+        let spki = store
+            .passkey_spki(channel, &sig.key_id)
+            .ok_or_else(|| choir_identity::IdentityError::UnknownKey(sig.key_id.clone()))?;
+        choir_identity::verify_webauthn_assertion(&spki, signing, sig)?;
+        Ok(ContentHash::blake3(&spki))
+    }
+}
+
 impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
@@ -2201,10 +2243,19 @@ impl SubmitPolicy for ChoirPolicy {
         // in the stale registry and would verify successfully.
         self.reload_keys();
         let signing = choir_oplog::signing_hash(&sub.channel, &sub.payload);
-        let mut verified_actor = self.registry.verify_signing_hash(&signing, sig);
+        let mut verified_actor = if sig.scheme_id() == choir_oplog::scheme::WEBAUTHN_ES256 {
+            self.verify_passkey(&signing, sig, &sub.channel)
+        } else {
+            self.registry.verify_signing_hash(&signing, sig)
+        };
         // Retry a failed signature in case the file changed between the
-        // pre-verification metadata check and this verification.
-        if verified_actor.is_err() && self.reload_keys() {
+        // pre-verification metadata check and this verification. Only the
+        // ed25519 path has a file behind it; a passkey lives in the store
+        // and is read fresh on every call already.
+        if verified_actor.is_err()
+            && sig.scheme_id() != choir_oplog::scheme::WEBAUTHN_ES256
+            && self.reload_keys()
+        {
             verified_actor = self.registry.verify_signing_hash(&signing, sig);
         }
         let actor_id = verified_actor.map_err(|e| {
@@ -2698,6 +2749,9 @@ pub struct Platform {
     /// Shared with the policy: when set, a protected ref only moves to a
     /// commit an approved review already named.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with the policy: the credential store passkey submissions
+    /// are verified against (D39). Filled by [`Platform::attach_accounts`].
+    passkeys: Arc<Mutex<Option<Arc<crate::accounts::Accounts>>>>,
     /// Shared with the policy: when set, only scoped ops are admitted.
     require_scope: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the policy: actor id → bound channel name.
@@ -2900,6 +2954,7 @@ impl Platform {
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let require_scope = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hooks = Arc::new(Mutex::new(None));
+        let passkeys = Arc::new(Mutex::new(None));
         let sequencer = Sequencer::spawn_with_policy(
             log,
             Box::new(ChoirPolicy {
@@ -2919,6 +2974,7 @@ impl Platform {
                 review_retention: review_retention.clone(),
                 hooks: hooks.clone(),
                 workspace_tally: workspace_tally.clone(),
+                passkeys: passkeys.clone(),
             }),
         );
         let platform = Self {
@@ -2936,6 +2992,7 @@ impl Platform {
             protected_refs,
             require_review,
             require_scope,
+            passkeys,
             key_names,
             concentration,
             workspace_tally,
@@ -3097,6 +3154,18 @@ impl Platform {
     pub fn with_protected_refs(self, path: std::path::PathBuf) -> Self {
         *self.protected_refs.lock().expect("protected refs lock") = Some(path);
         self
+    }
+
+    /// Gives the admission policy the credential store, so a submission
+    /// signed by an enrolled passkey can be verified (D39).
+    ///
+    /// A setter rather than a constructor argument because accounts and
+    /// the platform are enabled independently, in either order, by
+    /// separate flags. Until this is called a passkey submission is
+    /// refused for want of a store, which is the same answer a node
+    /// without self-service gives permanently.
+    pub fn attach_accounts(&self, store: Arc<crate::accounts::Accounts>) {
+        *self.passkeys.lock().expect("passkey store lock") = Some(store);
     }
 
     /// A protected ref only moves to a commit that an **approved** review
@@ -5183,13 +5252,44 @@ fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, Strin
         },
         Err(_) => None,
     };
+    // A submission that names no scheme is ed25519, the only one that
+    // existed before D39 -- the same rule `Witness::scheme_id` applies to
+    // stored entries, so the wire and the log agree about what silence
+    // means.
+    let author_sig = match req.get("scheme").and_then(serde_json::Value::as_u64) {
+        None => Witness::ed25519(key_id.to_string(), signature),
+        Some(tag) if tag == u64::from(choir_oplog::scheme::WEBAUTHN_ES256) => {
+            let (Some(auth_hex), Some(client_hex)) = (
+                field("authenticator_data_hex"),
+                field("client_data_json_hex"),
+            ) else {
+                return Err(
+                    "a webauthn signature needs authenticator_data_hex and client_data_json_hex"
+                        .to_string(),
+                );
+            };
+            let (Some(authenticator_data), Some(client_data_json)) =
+                (hex_decode(auth_hex), hex_decode(client_hex))
+            else {
+                return Err("bad hex in the webauthn fields".to_string());
+            };
+            Witness::webauthn_es256(
+                key_id.to_string(),
+                signature,
+                authenticator_data,
+                client_data_json,
+            )
+        }
+        // Named rather than silently reinterpreted. A scheme this binary
+        // cannot check is refused here, where the caller learns which tag
+        // was rejected, instead of being handed to ed25519 and failing as
+        // a bad signature.
+        Some(tag) => return Err(format!("unknown signature scheme {tag}")),
+    };
     Ok(DecodedSubmission {
         channel: channel.to_string(),
         payload,
-        author_sig: Some(Witness {
-            key_id: key_id.to_string(),
-            signature,
-        }),
+        author_sig: Some(author_sig),
         unassigned_review,
     })
 }

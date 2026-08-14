@@ -915,12 +915,33 @@ mod tests {
 
     /// Nothing is fetched from anywhere. This is what makes the page
     /// paint in one round trip, so it is asserted rather than assumed.
+    ///
+    /// **`<script` left this list in D39 and the test got stronger, not
+    /// weaker.** The old probe conflated two things: "this page fetches
+    /// something" and "this page runs script". D39 reversed the second
+    /// in one narrow place, and the row scoped the reversal to inline
+    /// script with no `src`, no library and no build step. So the
+    /// property that mattered is now stated directly — every other probe
+    /// stands, and a script element that carries a `src` is a fetch and
+    /// is refused by name.
+    ///
+    /// This page has no script at all; the review page is the one that
+    /// does, and `browse::the_review_page_runs_only_inline_script` holds
+    /// the same line there.
     #[test]
     fn the_page_references_no_external_resource() {
         let page = render(r#"{"refs":{}}"#, 1);
-        for probe in ["http://", "https://", "//cdn", "<script", "@import"] {
+        for probe in ["http://", "https://", "//cdn", "@import"] {
             assert!(!page.contains(probe), "page reaches out via {probe}");
         }
+        assert!(
+            !page.contains("<script"),
+            "the D28 read surface gained script; D39's reversal was scoped to the review page"
+        );
+        assert!(
+            !page.contains("src="),
+            "a fetched resource is a fetched resource whether or not it is script"
+        );
     }
 
     /// Shortening is a display detail, and a display detail must not be
