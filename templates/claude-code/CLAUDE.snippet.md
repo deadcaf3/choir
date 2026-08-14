@@ -40,6 +40,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir reviews <api> <reviewer>` — your pending review queue
 - `choir triage <api>` — every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
 - `choir state <api> <channel>` — your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
+- `choir skill install [--into <dir>]` — install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
 - `choir view <api>` — the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
 <!-- /generated -->
 

@@ -23,6 +23,7 @@
 //! choir view <api>
 //! choir triage <api>
 //! choir state <api> <channel>
+//! choir skill install [--into <dir>]
 //! ```
 //!
 //! Exit codes: 0 = the node accepted, 1 = the node rejected (the JSON
@@ -1109,6 +1110,30 @@ fn main() {
         ["view", api] => {
             let (status, resp) = http(api, auth, "choir_view", serde_json::json!({}));
             finish(status, &resp);
+        }
+        ["skill", "install", rest @ ..] => {
+            let into = match rest {
+                [] => ".claude/skills",
+                ["--into", dir] => dir,
+                _ => usage(),
+            };
+            let dir = std::path::Path::new(into).join(choir_cli::surface::SKILL_DIR);
+            let path = dir.join("SKILL.md");
+            let rendered = choir_cli::surface::skill_md();
+            // Byte-compare before writing: a re-install after `cargo
+            // install` refreshes a stale skill and leaves a current one
+            // untouched, so repeated installs produce no churn.
+            let wrote = std::fs::read_to_string(&path).ok().as_deref() != Some(rendered.as_str());
+            if wrote {
+                if let Err(error) =
+                    std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &rendered))
+                {
+                    eprintln!("choir: cannot write {}: {error}", path.display());
+                    std::process::exit(1);
+                }
+            }
+            let doc = serde_json::json!({ "path": path.display().to_string(), "wrote": wrote });
+            finish(200, &doc.to_string());
         }
         ["triage", api] => {
             let doc = derived_view(api, auth, |view| choir_cli::triage::triage(view));

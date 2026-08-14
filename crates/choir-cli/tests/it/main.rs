@@ -11,5 +11,6 @@ mod insight;
 mod install_policy;
 mod mcp;
 mod runner;
+mod skill;
 mod surface;
 mod symphony_backend;

@@ -213,6 +213,12 @@ choir_state() {
 	choir_run state "$@"
 }
 
+# choir skill install [--into <dir>]
+#   install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
+choir_skill() {
+	choir_run skill "$@"
+}
+
 # choir view <api>
 #   the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
 choir_view() {
