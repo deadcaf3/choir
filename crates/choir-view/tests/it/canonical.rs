@@ -173,6 +173,7 @@ fn commit_from(pairs: &[(String, TreeEntry)], parents: Vec<ContentHash>) -> Comm
         tree: pairs.iter().cloned().collect(),
         author: "agent-1".into(),
         message: "property".into(),
+        resolves: None,
     }
 }
 

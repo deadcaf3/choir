@@ -1016,6 +1016,9 @@ pub enum ViewError {
     /// match the view, the claimed position is not the fold position, or
     /// the chain pointer does not name the latest admitted snapshot.
     Snapshot(String),
+    /// Resolution-link precondition failure: [`Commit::resolves`] names
+    /// a commit the store does not hold, or one with nothing to resolve.
+    Resolution(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -1052,6 +1055,16 @@ pub struct Commit {
     pub author: String,
     /// Commit message.
     pub message: String,
+    /// The commit whose [`TreeEntry::Conflict`] this commit resolves,
+    /// when it is a resolution — Pijul's resolution-as-linked-change,
+    /// as metadata on the existing shape (plan.md D15: never a new merge
+    /// substrate). A conflict is a value (invariant 6): the link points
+    /// *at* the conflicted commit, which stays in history untouched.
+    /// Additive (`default` + `skip_serializing_if`), so commits written
+    /// before the field existed decode as `None` and re-serialize
+    /// byte-identically — invariant 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves: Option<ContentHash>,
 }
 
 impl Commit {
@@ -1060,6 +1073,37 @@ impl Commit {
         self.tree
             .values()
             .any(|e| matches!(e, TreeEntry::Conflict { .. }))
+    }
+
+    /// Validates this commit's `resolves` link against `store`.
+    ///
+    /// A `Some` link must name a commit the store holds whose tree still
+    /// carries an unresolved [`TreeEntry::Conflict`] — anything else is
+    /// refused, never silently dropped: a dangling link admitted once
+    /// would replay forever as a claim about a conflict nobody can load.
+    /// `None` validates trivially (most commits resolve nothing).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewError::Resolution`] when the link is dangling or the
+    /// referenced commit has no conflict to resolve.
+    pub fn validate_resolves(&self, store: &dyn ChunkStore) -> Result<(), ViewError> {
+        let Some(target) = &self.resolves else {
+            return Ok(());
+        };
+        let resolved = Commit::get(store, target).map_err(|e| {
+            ViewError::Resolution(format!(
+                "resolves names {} which the store cannot supply: {e:?}",
+                target.to_hex()
+            ))
+        })?;
+        if !resolved.is_conflicted() {
+            return Err(ViewError::Resolution(format!(
+                "resolves names {} which holds no unresolved conflict",
+                target.to_hex()
+            )));
+        }
+        Ok(())
     }
 
     /// Stores this commit in `store` and returns its content address.
@@ -1886,4 +1930,40 @@ pub fn append_op(
             author_sig: None,
     };
     log.append(entry).map_err(ViewError::Log)
+}
+
+/// [`append_op`], plus the resolution-link check a store makes possible:
+/// a head-moving op whose commit the store holds is refused when that
+/// commit's [`Commit::resolves`] link is dangling or names a commit with
+/// no conflict to resolve.
+///
+/// This is admission policy, not part of the pure fold — the same split
+/// as the node's scope and provenance checks: [`View::apply`] stays a
+/// store-free function so replicas can replay a log with no store at
+/// hand, and every op admitted here still replays cleanly through it.
+/// A commit the store cannot supply is skipped, not refused: refs on the
+/// git-compat path carry git oids that never enter the chunk store
+/// (invariant 2), and a resolves link cannot exist on a commit that
+/// cannot be loaded.
+///
+/// # Errors
+///
+/// [`ViewError::Resolution`] for an invalid link, plus everything
+/// [`append_op`] returns.
+pub fn append_op_with_store(
+    log: &mut dyn OpLog,
+    store: &dyn ChunkStore,
+    submitter: &str,
+    op: ViewOp,
+) -> Result<ContentHash, ViewError> {
+    let named = match &op.kind {
+        OpKind::SetWorkspaceHead { commit, .. } | OpKind::SetRef { commit, .. } => Some(commit),
+        _ => None,
+    };
+    if let Some(id) = named {
+        if let Ok(commit) = Commit::get(store, id) {
+            commit.validate_resolves(store)?;
+        }
+    }
+    append_op(log, submitter, op)
 }
