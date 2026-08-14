@@ -617,19 +617,6 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
         .to_string()
     };
 
-    // Replaying this assertion on somebody else's channel is refused at
-    // the lookup, which runs first. Kept because it is the cheap attack,
-    // but it does not isolate the lookup: a mutation that unscoped the
-    // lookup still refused this, at the challenge instead, because
-    // `signing_hash` covers the channel. The next case is the one that
-    // isolates it.
-    let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "-d", &submit("alice", 2),
-        &format!("{base}/api/submit"),
-    ]);
-    assert_eq!(status, 400, "{body}");
-    assert_eq!(body["code"], "unknown_key", "{body}");
-
     // The attack the account-keyed lookup actually stops: bob holds his
     // own authenticator, so he can mint a *fresh* assertion over the
     // signing hash of alice's channel. The challenge then matches
@@ -685,6 +672,19 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
         body["code"], "unknown_key",
         "a genuine assertion by bob's credential was accepted on alice's channel: {body}"
     );
+
+    // Replaying this assertion on somebody else's channel is refused at
+    // the lookup, which runs first. Kept because it is the cheap attack,
+    // but it does not isolate the lookup: a mutation that unscoped the
+    // lookup still refused this, at the challenge instead, because
+    // `signing_hash` covers the channel. The next case is the one that
+    // isolates it.
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "-d", &submit("alice", 2),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "unknown_key", "{body}");
 
     // A scheme the node does not implement is named rather than
     // reinterpreted as ed25519 and reported as a bad signature.
