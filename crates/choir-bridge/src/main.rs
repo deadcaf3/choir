@@ -462,7 +462,12 @@ fn queue_round(
     for entry in &train.entries {
         // Statuses land on the PR head sha, which the fetched ref points at.
         let sha = git(&["rev-parse", &entry.head], Some(workdir))?.trim().to_string();
-        let (state, desc) = if !entry.merged {
+        let (state, desc) = if entry.already_landed {
+            // Recognized by patch identity, not re-merged (item 4): the
+            // change is in, so reporting a failure here would ask the
+            // author to fix work that already landed.
+            ("success", entry.note.as_str())
+        } else if !entry.merged {
             ("failure", entry.note.as_str())
         } else {
             match verdict {

@@ -101,6 +101,47 @@ fn conflicting_pr_is_excluded_and_train_continues() {
     assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
 }
 
+/// Stable change identity across rebase (Pijul item 4). The train lands
+/// a PR, the author rebases the same change onto the rewritten tip and
+/// resubmits: `build_train` recognizes it by patch identity instead of
+/// re-merging it, and it is reported as landed rather than conflicted.
+#[test]
+fn a_rebased_resubmission_is_recognized_not_remerged() {
+    let dir = tempdir("patch-identity");
+    fixture(&dir);
+    let base = rev(&dir, "main");
+
+    // The train lands pr-2 first, then lands pr-1's change *rewritten*:
+    // cherry-picked onto the new tip, so it carries a different oid and
+    // the same patch identity. This is what the train does when it
+    // rebases a change rather than merging the author's exact commit.
+    let first = build_train(&dir, &base, &[(2, rev(&dir, "pr-2"))]).unwrap();
+    assert!(first.entries[0].merged);
+    assert!(!first.entries[0].already_landed);
+    git(&dir, &["branch", "-f", "main", &first.tip]);
+    git(&dir, &["checkout", "-q", "main"]);
+    git(&dir, &["cherry-pick", "-x", &rev(&dir, "pr-1")]);
+    let landed = rev(&dir, "main");
+    assert_ne!(landed, rev(&dir, "pr-1"), "the rewrite produced a new oid");
+
+    // The author, unaware, resubmits their original pr-1 branch. Only
+    // the patch identity relates it to what landed.
+    let second = build_train(&dir, &landed, &[(1, rev(&dir, "pr-1"))]).unwrap();
+    let entry = &second.entries[0];
+    assert!(entry.already_landed, "patch identity must recognize it");
+    assert!(!entry.merged, "and it must not be merged a second time");
+    assert!(entry.note.contains("already landed"));
+    assert_eq!(second.tip, landed, "the train tip must not move");
+
+    // A PR that has not landed is unaffected by the check: it takes the
+    // ordinary path and reports its ordinary outcome (pr-conflict
+    // clashes with pr-1's file, which landed above).
+    let fresh = build_train(&dir, &landed, &[(3, rev(&dir, "pr-conflict"))]).unwrap();
+    assert!(!fresh.entries[0].already_landed, "a real conflict is not a duplicate");
+    assert!(!fresh.entries[0].merged);
+    assert!(fresh.entries[0].note.contains("conflicts"));
+}
+
 #[test]
 fn empty_pr_list_leaves_train_at_base() {
     let dir = tempdir("empty");

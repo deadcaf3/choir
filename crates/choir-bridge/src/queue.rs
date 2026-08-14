@@ -28,6 +28,12 @@ pub struct TrainEntry {
     pub merge: Option<String>,
     /// Human-readable note (merge position or the conflict reason).
     pub note: String,
+    /// The PR's every commit is already in the train by patch identity
+    /// (Pijul item 4, `git patch-id --stable` equivalence via
+    /// `git cherry`): the train rewrote or landed this change earlier,
+    /// so it was recognized rather than re-merged — a success, not a
+    /// conflict, despite `merged` being false.
+    pub already_landed: bool,
 }
 
 /// Result of building one speculative train.
@@ -76,6 +82,22 @@ pub fn build_train(repo: &Path, base: &str, prs: &[(u64, String)]) -> Result<Tra
     let mut entries = Vec::new();
     let mut position = 0usize;
     for (id, head) in prs {
+        // Stable change identity (Pijul item 4): a PR whose every commit
+        // is already in the train by patch identity — the train landed a
+        // rewritten form of it, or it was rebased in — is recognized,
+        // not re-merged. Checked against the current tip so a duplicate
+        // of an earlier train member is caught too.
+        if already_in(repo, "HEAD", head)? {
+            entries.push(TrainEntry {
+                id: *id,
+                head: head.clone(),
+                merged: false,
+                merge: None,
+                note: "already landed (patch identity)".to_string(),
+                already_landed: true,
+            });
+            continue;
+        }
         let msg = format!("choir train: PR #{id}");
         match git(repo, &["merge", "--no-ff", "-q", "-m", &msg, head]) {
             Ok(_) => {
@@ -87,6 +109,7 @@ pub fn build_train(repo: &Path, base: &str, prs: &[(u64, String)]) -> Result<Tra
                     merged: true,
                     merge: Some(merge),
                     note: format!("train position {position}"),
+                    already_landed: false,
                 });
             }
             Err(_) => {
@@ -98,12 +121,23 @@ pub fn build_train(repo: &Path, base: &str, prs: &[(u64, String)]) -> Result<Tra
                     merged: false,
                     merge: None,
                     note: "conflicts with train".to_string(),
+                    already_landed: false,
                 });
             }
         }
     }
     let tip = git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
     Ok(Train { tip, entries })
+}
+
+/// Whether every commit of `head` is already contained in `upstream` by
+/// patch identity. `git cherry` marks a commit `-` when an equivalent
+/// change (same `git patch-id --stable`) is upstream, `+` when it is
+/// not; no `+` lines — including the empty output of a plain ancestor —
+/// means there is nothing left to merge.
+pub fn already_in(repo: &Path, upstream: &str, head: &str) -> Result<bool, String> {
+    let out = git(repo, &["cherry", upstream, head])?;
+    Ok(out.lines().all(|line| !line.starts_with('+')))
 }
 
 /// Structured advisory result returned by the separately built D23 runner.

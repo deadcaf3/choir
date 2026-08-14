@@ -20,6 +20,7 @@ pub mod corpus;
 pub mod differential;
 pub mod differential_ledger;
 pub mod envelope;
+pub mod identity;
 pub mod memory;
 
 use choir_merge::{safety, MergeOutcome, Pipeline};
@@ -79,6 +80,11 @@ pub enum Rejection {
         /// The CI-failing change this one depends on.
         on: u64,
     },
+    /// A change with this [`identity::change_identity`] already landed
+    /// through this queue (Pijul item 4): the resubmission — typically
+    /// the same edit rebased after the train rewrote the tip — is
+    /// refused without re-merging, so it cannot land twice.
+    AlreadyLanded,
 }
 
 /// The CI executor seam (D18): pass/fail verdict for a candidate state.
@@ -123,6 +129,7 @@ pub struct MergeQueue {
     window: usize,
     queue: std::collections::VecDeque<Change>,
     memory: memory::ResolutionMemory,
+    landed: std::collections::BTreeSet<String>,
 }
 
 impl MergeQueue {
@@ -142,6 +149,7 @@ impl MergeQueue {
             window: DEFAULT_WINDOW,
             queue: std::collections::VecDeque::new(),
             memory: memory::ResolutionMemory::new(),
+            landed: std::collections::BTreeSet::new(),
         }
     }
 
@@ -150,6 +158,13 @@ impl MergeQueue {
     /// The default is an empty memory, which changes nothing.
     pub fn set_memory(&mut self, memory: memory::ResolutionMemory) {
         self.memory = memory;
+    }
+
+    /// Seeds a landed change identity (item 4), for a queue picking up
+    /// where an earlier instance left off. `drain` records identities of
+    /// everything it lands through the same set.
+    pub fn mark_landed(&mut self, identity: String) {
+        self.landed.insert(identity);
     }
 
     /// Enqueues a change.
@@ -191,6 +206,14 @@ impl MergeQueue {
             let mut train_rejects: Vec<(u64, Rejection)> = Vec::new();
             for _ in 0..take {
                 let change = self.queue.pop_front().unwrap();
+                // Stable change identity (item 4): a resubmission of an
+                // already-landed change — the same position-independent
+                // edit, however rebased — is refused before any merge
+                // work, so the train neither re-merges nor duplicates it.
+                if self.landed.contains(&identity::change_identity(&change)) {
+                    train_rejects.push((change.id, Rejection::AlreadyLanded));
+                    continue;
+                }
                 // Resolution memory (item B): a remembered triple is
                 // replayed without re-invoking the strategy pipeline.
                 // The replay is a *candidate* — it joins the train and
@@ -259,6 +282,7 @@ impl MergeQueue {
                     // Whole train is green: merge it all.
                     for (change, state) in train {
                         self.base = state.clone();
+                        self.landed.insert(identity::change_identity(&change));
                         handle.submit(&change.workspace, state.into_bytes());
                         merged.push(change.id);
                         self.window += 1;
@@ -269,6 +293,7 @@ impl MergeQueue {
                     // rest for retesting against a state without the failure.
                     for (change, state) in train.drain(..i) {
                         self.base = state.clone();
+                        self.landed.insert(identity::change_identity(&change));
                         handle.submit(&change.workspace, state.into_bytes());
                         merged.push(change.id);
                         self.window += 1;
