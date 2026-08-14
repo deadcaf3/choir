@@ -371,11 +371,6 @@ fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions
     std::process::exit(i32::from(!report.failures.is_empty()));
 }
 
-/// Rebuilds the hashed form from the fields `/api/log` serves.
-///
-/// Every field of the canonical form is on the wire, which is what makes
-/// the chain checkable by someone who does not trust the node — so a
-
 /// The trusted keys this client holds, in the operator's own file format:
 /// one key per line, hex, with an optional channel name before it.
 ///
