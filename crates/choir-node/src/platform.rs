@@ -5186,10 +5186,12 @@ fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, Strin
     Ok(DecodedSubmission {
         channel: channel.to_string(),
         payload,
-        author_sig: Some(Witness {
-            key_id: key_id.to_string(),
-            signature,
-        }),
+        // Ed25519 explicitly: this decoder reads no scheme off the wire,
+        // so a submission cannot yet claim one. A passkey write arrives
+        // with enrolment (D39); until then anything else fails closed at
+        // `Registry::verify_signing_hash` rather than being reinterpreted
+        // here.
+        author_sig: Some(Witness::ed25519(key_id.to_string(), signature)),
         unassigned_review,
     })
 }

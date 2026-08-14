@@ -35,14 +35,102 @@ pub use choir_hash::ContentHash;
 /// changes keep the version (plan.md §E evolution policy).
 pub const FORMAT_VERSION: u16 = 1;
 
-/// A witness cosignature. Unused until Phase 2 (D16); present in the format
-/// from the first persisted byte so adding witnessing never rewrites history.
+/// Signature scheme identifiers for [`Witness::scheme`] (D39).
+///
+/// These are choir-local numbers rather than multicodec entries, unlike
+/// [`ContentHash`]'s codec byte, and the difference is deliberate:
+/// multicodec names a *key type*, while a verifier needs the
+/// *construction* — which bytes were actually signed. A WebAuthn
+/// signature covers `authenticator_data ‖ SHA-256(client_data_json)`
+/// rather than the message, and no curve identifier says that.
+pub mod scheme {
+    /// Ed25519 over the signed bytes directly. The only scheme that
+    /// existed before D39, which is why an absent [`super::Witness::scheme`]
+    /// means this one.
+    pub const ED25519: u16 = 1;
+    /// WebAuthn ES256 (D39): ECDSA P-256 with SHA-256, over
+    /// `authenticator_data ‖ SHA-256(client_data_json)`, where the
+    /// challenge inside `client_data_json` is the entry's
+    /// [`super::OpEntry::signing_hash`].
+    pub const WEBAUTHN_ES256: u16 = 2;
+}
+
+/// A cosignature: a witness cosignature (unused until Phase 2, D16) or,
+/// in [`OpEntry::author_sig`], the author's own. Present in the format
+/// from the first persisted byte so adding witnessing never rewrites
+/// history.
+///
+/// The scheme and WebAuthn fields are additive (`serde(default)` plus
+/// `skip_serializing_if`), so a signature written before D39 serializes
+/// to exactly the bytes it always did and every entry hash containing
+/// one is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Witness {
     /// Identifier of the witness key that produced [`Witness::signature`].
     pub key_id: String,
     /// Signature over the entry's content hash.
     pub signature: Vec<u8>,
+    /// Which scheme produced [`Witness::signature`], from [`scheme`].
+    ///
+    /// Absent means [`scheme::ED25519`]: entries written before D39
+    /// carry no tag, and giving them one would change their bytes and
+    /// therefore their hash. An unrecognised value decodes fine on
+    /// purpose — an old reader must be able to replay a log containing
+    /// a scheme it cannot verify, so the refusal belongs at
+    /// verification rather than at decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<u16>,
+    /// WebAuthn authenticator data, the first half of what a
+    /// [`scheme::WEBAUTHN_ES256`] signature covers. Absent for every
+    /// other scheme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticator_data: Option<Vec<u8>>,
+    /// WebAuthn client data JSON, whose `challenge` member carries the
+    /// [`OpEntry::signing_hash`] the human approved. Absent for every
+    /// other scheme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_data_json: Option<Vec<u8>>,
+}
+
+impl Witness {
+    /// An ed25519 cosignature, the shape every caller before D39 wrote
+    /// as a struct literal.
+    pub fn ed25519(key_id: impl Into<String>, signature: Vec<u8>) -> Self {
+        Self {
+            key_id: key_id.into(),
+            signature,
+            scheme: None,
+            authenticator_data: None,
+            client_data_json: None,
+        }
+    }
+
+    /// A WebAuthn ES256 cosignature (D39), carrying the two byte strings
+    /// a verifier needs and cannot reconstruct: the authenticator data,
+    /// and the client data JSON whose `challenge` binds the signature to
+    /// one [`OpEntry::signing_hash`].
+    pub fn webauthn_es256(
+        key_id: impl Into<String>,
+        signature: Vec<u8>,
+        authenticator_data: Vec<u8>,
+        client_data_json: Vec<u8>,
+    ) -> Self {
+        Self {
+            key_id: key_id.into(),
+            signature,
+            scheme: Some(scheme::WEBAUTHN_ES256),
+            authenticator_data: Some(authenticator_data),
+            client_data_json: Some(client_data_json),
+        }
+    }
+
+    /// The scheme this signature claims, resolving the pre-D39 absence
+    /// to [`scheme::ED25519`]. Verifiers should match on this rather
+    /// than on [`Witness::scheme`] directly, so the two spellings of
+    /// ed25519 never diverge.
+    pub fn scheme_id(&self) -> u16 {
+        self.scheme.unwrap_or(scheme::ED25519)
+    }
 }
 
 /// One operation in the log. Payload semantics live above this layer.

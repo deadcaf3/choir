@@ -257,10 +257,10 @@ fn a_served_entry_verifies_against_a_key_the_client_already_holds() {
     // -- but the inputs it is handed all came out of the response.
     let mut client_side = Registry::new();
     client_side.register(&key.public_key_bytes()).expect("valid key");
-    let sig = Witness {
-        key_id: e["author_key"].as_str().expect("author_key").to_string(),
-        signature: hex_decode(e["author_sig_hex"].as_str().expect("sig hex")).expect("hex"),
-    };
+    let sig = Witness::ed25519(
+        e["author_key"].as_str().expect("author_key").to_string(),
+        hex_decode(e["author_sig_hex"].as_str().expect("sig hex")).expect("hex"),
+    );
     let author = client_side
         .verify_submission(workspace, &payload, &sig)
         .expect("served entry verifies against the author's key");

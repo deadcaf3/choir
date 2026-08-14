@@ -192,3 +192,195 @@ fn an_es256_assertion_verifies_and_a_tampered_one_does_not() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// Base64url-without-padding, derived through `openssl` rather than
+/// through the encoder under test. The point of this test is the
+/// challenge comparison, and computing the expected value with the same
+/// code that computes the actual one would assert only that a function
+/// equals itself.
+fn base64url_via_openssl(bytes: &[u8], work: &std::path::Path) -> String {
+    let raw = work.join("challenge.bin");
+    std::fs::write(&raw, bytes).unwrap();
+    let out = std::process::Command::new("openssl")
+        .args(["base64", "-A", "-in"])
+        .arg(&raw)
+        .output()
+        .expect("openssl runs");
+    assert!(out.status.success(), "base64 the challenge");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .chars()
+        .filter(|c| *c != '=')
+        .map(|c| match c {
+            '+' => '-',
+            '/' => '_',
+            other => other,
+        })
+        .collect()
+}
+
+/// Mints a throwaway P-256 credential and returns `(spki_der, secret_path)`.
+fn p256_credential(work: &std::path::Path) -> (Vec<u8>, std::path::PathBuf) {
+    let secret = work.join("cred.key");
+    let spki = work.join("cred.der");
+    let ok = std::process::Command::new("openssl")
+        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+        .arg(&secret)
+        .output()
+        .expect("openssl runs");
+    assert!(ok.status.success(), "generate P-256 key");
+    let ok = std::process::Command::new("openssl")
+        .args(["ec", "-in"])
+        .arg(&secret)
+        .args(["-pubout", "-outform", "DER", "-out"])
+        .arg(&spki)
+        .output()
+        .expect("openssl runs");
+    assert!(ok.status.success(), "extract SPKI");
+    (std::fs::read(&spki).unwrap(), secret)
+}
+
+/// Signs `authenticator_data ‖ SHA-256(client_data_json)` the way an
+/// authenticator does, and returns the DER `(r, s)`.
+fn sign_assertion(
+    secret: &std::path::Path,
+    work: &std::path::Path,
+    authenticator_data: &[u8],
+    client_data_json: &[u8],
+) -> Vec<u8> {
+    let cd = work.join("cd.json");
+    std::fs::write(&cd, client_data_json).unwrap();
+    let hashed = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .arg(&cd)
+        .output()
+        .expect("openssl runs");
+    assert!(hashed.status.success(), "hash clientDataJSON");
+    let mut message = authenticator_data.to_vec();
+    message.extend_from_slice(&hashed.stdout);
+
+    let msg_path = work.join("assertion.bin");
+    let sig_path = work.join("assertion.der");
+    std::fs::write(&msg_path, &message).unwrap();
+    let ok = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(secret)
+        .arg("-out")
+        .arg(&sig_path)
+        .arg(&msg_path)
+        .output()
+        .expect("openssl runs");
+    assert!(ok.status.success(), "sign the assertion");
+    std::fs::read(&sig_path).unwrap()
+}
+
+/// The D39 binding, and the tripwire the row carries in writing: *"An op
+/// is accepted whose passkey challenge is not `signing_hash(channel,
+/// payload)` → the binding is broken and a signature no longer attests
+/// to what it appears to; forgery-class."*
+///
+/// Every assertion here is over a *cryptographically valid* signature.
+/// That is the whole design of the test: `verify_es256` already proves
+/// tampered bytes are refused, so repeating that would prove nothing new.
+/// What is unproven until here is that a genuine signature, by the real
+/// key, over well-formed WebAuthn structures, is still refused when it
+/// approves a different operation than the one being decided.
+#[test]
+fn a_valid_assertion_is_refused_when_it_attests_to_a_different_operation() {
+    let work = std::env::temp_dir().join(format!("choir-d39-binding-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let (spki, secret) = p256_credential(&work);
+
+    let approved = choir_oplog::signing_hash("agents/demo", b"the op the human read");
+    let other = choir_oplog::signing_hash("agents/demo", b"an op the human never saw");
+    assert_ne!(approved, other, "the two operations must differ to test this");
+
+    let challenge = base64url_via_openssl(&choir_identity::webauthn_challenge(&approved), &work);
+    let client_data =
+        format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"https://node"}}"#)
+            .into_bytes();
+    let auth_data = vec![0x49u8; 37];
+    let signature = sign_assertion(&secret, &work, &auth_data, &client_data);
+    let sig = choir_oplog::Witness::webauthn_es256(
+        "cred-1",
+        signature,
+        auth_data.clone(),
+        client_data.clone(),
+    );
+
+    // It really is a good signature for the operation it approved.
+    assert_eq!(
+        choir_identity::verify_webauthn_assertion(&spki, &approved, &sig),
+        Ok(()),
+        "a genuine assertion over the approved operation must verify"
+    );
+
+    // The same bytes, offered for a different operation. Nothing about
+    // the signature changed; only the question did.
+    assert_eq!(
+        choir_identity::verify_webauthn_assertion(&spki, &other, &sig),
+        Err(IdentityError::ChallengeMismatch),
+        "an assertion must not carry over to an operation it never approved"
+    );
+
+    // A registration ceremony carrying the right challenge is not an
+    // approval. Without the `type` check this signature would verify,
+    // because the signed bytes are formed identically.
+    let create = String::from_utf8(client_data.clone())
+        .unwrap()
+        .replace("webauthn.get", "webauthn.create")
+        .into_bytes();
+    let create_sig = sign_assertion(&secret, &work, &auth_data, &create);
+    assert_eq!(
+        choir_identity::verify_webauthn_assertion(
+            &spki,
+            &approved,
+            &choir_oplog::Witness::webauthn_es256("cred-1", create_sig, auth_data.clone(), create),
+        ),
+        Err(IdentityError::BadSignature),
+        "a registration ceremony must not be replayable as an approval"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// The two verifiers refuse each other's schemes by name rather than by
+/// failing to parse. `UnsupportedScheme` and `BadSignature` are different
+/// events — a claim never examined against a claim that failed — and a
+/// verifier that reports the first as the second tells an operator an
+/// attack occurred when the truth is that a scheme is missing.
+#[test]
+fn each_verifier_refuses_the_other_scheme_by_name() {
+    let key = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&key.public_key_bytes()).expect("valid key");
+
+    let signing = choir_oplog::signing_hash("w", b"payload");
+    let passkey = choir_oplog::Witness::webauthn_es256("cred", vec![1], vec![2], b"{}".to_vec());
+    assert_eq!(
+        registry.verify_signing_hash(&signing, &passkey),
+        Err(IdentityError::UnsupportedScheme(
+            choir_oplog::scheme::WEBAUTHN_ES256
+        )),
+        "the ed25519 registry must not silently fail a passkey as a bad signature"
+    );
+
+    let ed = key.sign_submission("w", b"payload");
+    assert_eq!(
+        choir_identity::verify_webauthn_assertion(&[], &signing, &ed),
+        Err(IdentityError::UnsupportedScheme(
+            choir_oplog::scheme::ED25519
+        )),
+        "the WebAuthn path must not accept an ed25519 signature"
+    );
+
+    // And the ordinary path is untouched by the dispatch that was added
+    // in front of it — the assertion that would fail if the tag check
+    // rejected everything.
+    assert_eq!(
+        registry.verify_signing_hash(&signing, &ed),
+        Ok(key.actor_id()),
+        "an ed25519 signature still verifies"
+    );
+}

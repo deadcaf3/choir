@@ -9,6 +9,11 @@ choir-hash = { path = "../choir-hash" }
 choir-oplog = { path = "../choir-oplog" }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Not a new dependency to the workspace: `choir-oplog`, which this crate
+# already depends on, hashes every entry through it. Reading two members
+# out of WebAuthn's clientDataJSON by hand would be a JSON parser written
+# for one security check, which is the wrong place to save a dependency.
+serde_json = "1"
 
 [lints]
 workspace = true

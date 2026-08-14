@@ -126,10 +126,7 @@ fn stable_change_survives_checkpoints_and_workspace_archive() {
             workspace: "repo/agent".into(),
             prev_revision: checkpoint.clone(),
             owner: "operator/agent".into(),
-            owner_sig: Witness {
-                key_id: "owner-key".into(),
-                signature: vec![1, 2, 3],
-            },
+            owner_sig: Witness::ed25519("owner-key", vec![1, 2, 3]),
         }),
     )
     .unwrap();
