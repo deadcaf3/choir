@@ -1871,12 +1871,21 @@ fn materialize_platform_state(
     log: &dyn OpLog,
     retention_config: Option<ReviewRetention>,
 ) -> Result<
-    (View, Option<ReviewRetentionState>, ConcentrationState),
+    (
+        View,
+        Option<ReviewRetentionState>,
+        ConcentrationState,
+        crate::quota::WorkspaceTally,
+    ),
     choir_view::ViewError,
 > {
     let mut view = View::default();
     let mut retention = retention_config.map(ReviewRetentionState::new);
     let mut concentration = ConcentrationState::default();
+    // D37. Folded in this loop rather than in a pass of its own, which is
+    // the whole reason a per-user workspace ceiling needs no persisted
+    // file: the log a restart already replays is the tally's storage.
+    let mut workspace_tally = crate::quota::WorkspaceTally::default();
     // Stored entries have no timestamp. Giving every pre-existing live
     // review `now` starts a fresh grace period after restart, which can
     // delay an incomplete-review lapse but can never trigger one early.
@@ -1886,11 +1895,12 @@ fn materialize_platform_state(
         let op = ViewOp::from_payload(&entry.payload)?;
         view.apply(&op)?;
         concentration.observe(&entry, &op, &view);
+        workspace_tally.observe(&entry, &op);
         if let Some(retention) = &mut retention {
             retention.observe(&op, observed_at);
         }
     }
-    Ok((view, retention, concentration))
+    Ok((view, retention, concentration, workspace_tally))
 }
 
 /// Verify author signature, then CAS against the shared view. Runs on
@@ -1941,6 +1951,11 @@ struct ChoirPolicy {
     /// is already running. Offering an event to it never blocks: see
     /// [`crate::hooks`] for why invariant 5 forbids anything else here.
     hooks: Arc<Mutex<Option<crate::hooks::Hooks>>>,
+    /// Which channel holds which workspace (D37). Folded here for the
+    /// reason `concentration` is: it needs the entry's channel as well as
+    /// the typed payload, and it must advance in the same single-writer
+    /// step as the view or the two can disagree about what exists.
+    workspace_tally: Arc<Mutex<crate::quota::WorkspaceTally>>,
 }
 
 impl ChoirPolicy {
@@ -2247,12 +2262,29 @@ impl SubmitPolicy for ChoirPolicy {
                 .encode());
             }
         }
+        // A comment's claimed author is bound the same way and for a
+        // sharper reason: a verdict in the wrong name is a wrong
+        // authorization, a comment in the wrong name is words somebody
+        // never said. The view stores `author`, so the payload claim is
+        // what a reader sees, and it must be the channel that signed.
+        if let OpKind::PostComment { author, .. } = &op.kind {
+            if *author != sub.channel {
+                return Err(Rejection::new(
+                    Code::ReviewerMismatch,
+                    "a comment's author must be the channel it was signed on",
+                    "resubmit on your own channel: `choir comment` signs on the author name by \
+                     construction",
+                )
+                .with_states(Some(sub.channel.clone()), Some(author.clone()))
+                .encode());
+            }
+        }
         // ...and the channel itself must belong to the signing key, or
         // the check above only proves a claim is self-consistent, not
         // that it is true. Review ops only: see `channel_is_owned`.
         if matches!(
             op.kind,
-            OpKind::PostVerdict { .. } | OpKind::RequestReview { .. }
+            OpKind::PostVerdict { .. } | OpKind::RequestReview { .. } | OpKind::PostComment { .. }
         ) {
             self.channel_is_owned(&actor_id, &sub.channel)?;
         }
@@ -2571,6 +2603,13 @@ impl SubmitPolicy for ChoirPolicy {
                 .lock()
                 .expect("concentration lock")
                 .observe(entry, &op, &view);
+            // D37, inside the same view-lock scope as the fold above:
+            // a reader that took the tally between the two would see a
+            // workspace the view already has and the tally does not.
+            self.workspace_tally
+                .lock()
+                .expect("workspace tally lock")
+                .observe(entry, &op);
         }
         if let Some(retention) = &self.review_retention {
             let mut retention = retention.lock().expect("review retention lock");
@@ -2665,6 +2704,9 @@ pub struct Platform {
     key_names: Arc<Mutex<KeyBindings>>,
     /// D24 T3 runtime projection, replayed from the signed log at startup.
     concentration: Arc<Mutex<ConcentrationState>>,
+    /// D37 per-user workspace tally, replayed from the same log in the
+    /// same pass. Shared with the policy, which advances it.
+    workspace_tally: Arc<Mutex<crate::quota::WorkspaceTally>>,
     /// Sequence-ordered live reviews, allocated only under an explicit
     /// retention configuration.
     review_retention: Option<Arc<Mutex<ReviewRetentionState>>>,
@@ -2795,12 +2837,13 @@ impl Platform {
         registry
             .register(&node_key.public_key_bytes())
             .map_err(|e| format!("register node key: {e:?}"))?;
-        let (view, review_retention, concentration) =
+        let (view, review_retention, concentration, workspace_tally) =
             materialize_platform_state(log.as_ref(), retention)
                 .map_err(|e| format!("replay: {e:?}"))?;
         let review_retention = review_retention.map(|state| Arc::new(Mutex::new(state)));
         let view = Arc::new(Mutex::new(view));
         let concentration = Arc::new(Mutex::new(concentration));
+        let workspace_tally = Arc::new(Mutex::new(workspace_tally));
         // Fill the window from the tail only. Materialising the whole log
         // into a Vec and pushing each entry through the window cloned
         // every entry twice at startup and held a second full copy of the
@@ -2875,6 +2918,7 @@ impl Platform {
                 concentration: concentration.clone(),
                 review_retention: review_retention.clone(),
                 hooks: hooks.clone(),
+                workspace_tally: workspace_tally.clone(),
             }),
         );
         let platform = Self {
@@ -2894,6 +2938,7 @@ impl Platform {
             require_scope,
             key_names,
             concentration,
+            workspace_tally,
             review_retention,
             newcomer_audit: None,
             review_adjudications: None,
@@ -3763,6 +3808,35 @@ impl Platform {
             .workspaces
             .get(workspace)
             .cloned()
+    }
+
+    /// How many workspaces `channel` currently holds (D37).
+    ///
+    /// Read from the projection replayed out of the op log, so a node
+    /// that has just restarted answers the same number it answered
+    /// before — the property a per-user ceiling is worthless without.
+    #[must_use]
+    pub fn workspaces_held_by(&self, channel: &str) -> usize {
+        self.workspace_tally
+            .lock()
+            .expect("workspace tally lock")
+            .held_by(channel)
+    }
+
+    /// Every workspace the D37 tally is tracking, sorted.
+    ///
+    /// Exposed for the test that pins the tally against
+    /// [`View::workspaces`]: the two are folded from the same operations
+    /// and a divergence between them is the tripwire on the D37 register
+    /// row.
+    #[must_use]
+    pub fn tallied_workspaces(&self) -> Vec<String> {
+        self.workspace_tally
+            .lock()
+            .expect("workspace tally lock")
+            .workspaces()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// Draws reviewers for unassigned review `id` and records them with
@@ -5250,10 +5324,26 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
             )
         })
         .collect();
+    // An array, not an object: the thread's order is the order the
+    // sequencer admitted it, and a JSON object keyed by comment id would
+    // invite a reader to sort by something else (D38).
+    let comments: Vec<_> = r
+        .comments
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "author": c.author,
+                "body": c.body,
+                "at": c.at,
+            })
+        })
+        .collect();
     serde_json::json!({
         "target": r.target.as_ref().map(choir_oplog::ContentHash::to_hex),
         "target_ref": r.target_ref,
         "reviewers": r.reviewers,
+        "comments": comments,
         "verdicts": verdicts,
         "slashes": r.slashes,
         "complete": r.complete(),

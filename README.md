@@ -120,7 +120,7 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--quota-push-bytes` / `--quota-workspaces`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 
@@ -269,6 +269,31 @@ Three things are never limited, and each is a deliberate refusal to build a lock
 
 On a node with `--auth-file` but no `--acl-file` nobody is exempt except the hook callback, because there is no `@node` grant to hold. An operator who wants an exemption grants themselves one — which is the same two lines the ACL section already recommends.
 
+### Per-user quotas (D37)
+
+A rate does not imply a size. One push a minute is still an unbounded pack, and one workspace a minute is still unbounded disk. Two more ceilings, on the same subject as the D33 flags and so with the same `--auth-file` requirement and the same three exemptions:
+
+```bash
+cargo run -p choir-node -- /tmp/choir-repos 8417 \
+  --auth-file ~/.choir/auth \
+  --acl-file ~/.choir/acl \
+  --quota-push-bytes 268435456 \
+  --quota-workspaces 20
+```
+
+**`--quota-push-bytes`** bounds the body of one git request. Over it, the node answers `413` with both numbers — what you sent and what is allowed — because a refusal that says only "too large" leaves the pusher guessing how much to split by.
+
+Where that check sits is the whole design rather than an implementation detail. Git applies no ref until the `pre-receive` hook exits zero, so a size check *inside* the hook would already have submitted ops for the refs it did reach — ops for refs git will never create — and would have to drive the compensating retraction pass to take them back. The ceiling is checked before `git http-backend` is spawned, and `git http-backend` is what runs the hook. So a refused push never runs a hook, never submits an op, and never enters the retraction path. It also closes an unbounded read that buffered every pushed pack in memory.
+
+The cost is stated rather than hidden: an over-limit body is drained to a sink before the refusal is written, so the client reads a `413` instead of a broken connection. The bytes still cross the network. What the ceiling buys is that they never reach memory beyond the ceiling, never reach `git`, and never reach the log.
+
+**`--quota-workspaces`** bounds how many workspaces one user holds at once, answered `403` with the `quota_exceeded` code and the action that frees room. The count is **not a new persisted file**: it is folded out of the op log during the replay the node already performs at startup, keyed on the attribution channel every workspace-creating operation already carries. A restart rebuilds it from the same log that rebuilds the view, so the ceiling survives a restart with no new format, no new file and no second durability barrier.
+
+Two boundaries, named rather than left to be discovered:
+
+- The ceiling is checked on `POST /api/workspace` and not on `POST /api/submit`. A credential that signs a `SetWorkspaceHead` itself still creates a view entry nothing refuses. Enforcing on the submission path means enforcing inside the sequencer's admission check, which cannot see an `@node` grant and would therefore throttle the one actor who can repair the node — the lockout this whole family of features exists not to cause.
+- The count is read outside the provisioning lock, so two simultaneous creations by a user at their ceiling can both pass. The overshoot is bounded by that user's own concurrency, not unbounded.
+
 ## Use the node
 
 Auth on the CLI is flags, not env:
@@ -402,6 +427,7 @@ commands:
   choir submit <api> <key-file> <channel> '<op-json>'
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+  choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'
   choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
   choir abandon <api> <node-key-file> <id>
   choir bind <api> <node-key-file> <operator> <key-hex> [channel]

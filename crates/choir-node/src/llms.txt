@@ -36,6 +36,7 @@ choir runner <config-file> - drive one workspace lifecycle step for an orchestra
 choir submit <api> <key-file> <channel> '<op-json>' - sign and submit one raw operation
 choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]... - request review on a commit; name no reviewers and the node draws them
 choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note] - answer a review you were assigned
+choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>' - say something on a review; append-only and permanent, and the comment id is your retry identity
 choir slash <api> <node-key-file> <id> <reviewer> '<reason>' - invalidate one reviewer's approval; operator-only and never moves a ref
 choir abandon <api> <node-key-file> <id> - archive a stale incomplete review as lapsed, settling it unapproved; operator-only and never moves a ref
 choir bind <api> <node-key-file> <operator> <key-hex> [channel] - record in the log that a key belongs to an operator; operator-only and never moves a ref

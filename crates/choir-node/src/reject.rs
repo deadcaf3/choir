@@ -43,7 +43,8 @@ pub enum Code {
     MalformedOp,
     /// The request body was missing fields or badly encoded.
     MalformedRequest,
-    /// A verdict claimed a reviewer other than the signed channel.
+    /// A verdict or comment claimed an attribution other than the
+    /// signed channel.
     ReviewerMismatch,
     /// The signing key is bound to a different channel name.
     ChannelNotOwned,
@@ -85,6 +86,9 @@ pub enum Code {
     ForeignScope,
     /// The scoped head is no longer recent enough to admit.
     StaleScope,
+    /// A per-user quota (D37) was already full, or this request was
+    /// larger than one is allowed to be.
+    QuotaExceeded,
     /// The signature does not verify under the key it names, which this
     /// node does trust. Distinct from [`Code::UnknownKey`] because the
     /// repairs are opposites: that one widens the trusted set, this one
@@ -123,6 +127,7 @@ impl Code {
             Self::ScopeRequired => "scope_required",
             Self::ForeignScope => "foreign_scope",
             Self::StaleScope => "stale_scope",
+            Self::QuotaExceeded => "quota_exceeded",
             Self::BadSignature => "bad_signature",
             Self::Unclassified => "unclassified",
         }
@@ -154,6 +159,7 @@ impl Code {
             Self::ScopeRequired,
             Self::ForeignScope,
             Self::StaleScope,
+            Self::QuotaExceeded,
             Self::BadSignature,
             Self::Unclassified,
         ]
@@ -334,7 +340,7 @@ impl Code {
             Self::UnknownKey => "The signature names a key id this node has no record of",
             Self::MalformedOp => "The payload did not decode as a `ViewOp`",
             Self::MalformedRequest => "The request body was missing fields or badly encoded",
-            Self::ReviewerMismatch => "A verdict claimed a reviewer other than the signed channel",
+            Self::ReviewerMismatch => "A verdict or comment claimed an attribution other than the signed channel",
             Self::ChannelNotOwned => "The signing key is bound to a different channel name",
             Self::NodeOnly => "Only the node's own key may author this operation",
             Self::AssignmentRequired => "This node assigns reviewers; a self-named list was refused",
@@ -353,6 +359,7 @@ impl Code {
             Self::ScopeRequired => "This node admits only ops signed for its own log and a recent head, and this op carried no scope",
             Self::ForeignScope => "The op was signed for another node's log",
             Self::StaleScope => "The head the op was signed against is no longer in the node's recent window",
+            Self::QuotaExceeded => "A per-user quota was already full, or this request was larger than one is allowed to be",
             Self::BadSignature => "The signature does not verify over these bytes, under a key this node does trust",
             Self::Unclassified => "A rejection that did not originate as a structured one",
         }
@@ -365,7 +372,7 @@ impl Code {
             Self::UnknownKey => "Ask the operator to register your public key.                 `choir key <file> <you>` prints the line; it takes effect on the next request.",
             Self::MalformedOp => "Serialize a `ViewOp` and sign its bytes. `choir submit` does                 this correctly; `GET /llms.txt` lists the operations.",
             Self::MalformedRequest => "Send a JSON object with the fields the endpoint wants.                 `GET /llms.txt` lists them.",
-            Self::ReviewerMismatch => "Resubmit on your own channel. `choir verdict` signs on                 the reviewer name by construction, so use it rather than hand-rolling.",
+            Self::ReviewerMismatch => "Resubmit on your own channel. `choir verdict` and                 `choir comment` sign on the attribution name by construction, so use them rather                 than hand-rolling.",
             Self::ChannelNotOwned => "Submit on the channel your key is bound to — it is in                 `expected`. Or ask the operator to bind a key to the channel you want.",
             Self::NodeOnly => "Nothing to retry: this operation is the node's to author. For                 reviewer assignment, request a review with an empty reviewer list.",
             Self::AssignmentRequired => "Resubmit with an empty reviewer list. The node draws                 reviewers and returns their names in the response.",
@@ -384,6 +391,7 @@ impl Code {
             Self::ScopeRequired => "Read `log.node` and `log.head` from `GET /api/view`,                 put them in the op's `scope`, and sign that. `choir submit` does this                 automatically. An unscoped op cannot be admitted here because nothing in it                 says which log it was meant for or that it has not run before.",
             Self::ForeignScope => "Nothing to retry against this node: the op names another                 node's id in `expected`. Sign a scope naming this node, whose id is in                 `actual` and in `log.node` of `GET /api/view`.",
             Self::StaleScope => "Re-read `log.head` from `GET /api/view` and sign a fresh op                 against it. A signature is only admissible while the head it names is still                 in the node's window, which is what stops a captured op from being replayed                 later.",
+            Self::QuotaExceeded => "Not a retry: retrying the same request gets the same                 answer. `expected` names the ceiling and `actual` what you asked for.                 For a push, send fewer objects — several smaller pushes, or a shallower                 history. For a workspace, archive one you are finished with                 (`POST /api/workspace/archive`) to free the allowance. If neither is                 possible, the ceiling is the operator's to raise.",
             Self::BadSignature => "Re-sign the exact bytes you are submitting: a signature covers                 one `(channel, payload)` pair and does not carry to another. Registering a key                 does not help here, the key this names is already trusted. If you did not send                 this, a signature of yours was replayed onto bytes you never signed, and the                 operator wants to know.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",
         }

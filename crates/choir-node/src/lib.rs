@@ -21,6 +21,7 @@ pub mod hooks;
 pub mod limits;
 pub mod platform;
 pub mod provision;
+pub mod quota;
 pub mod reject;
 mod browse;
 pub mod ssh;
@@ -114,6 +115,10 @@ pub struct Node {
     /// generations of both. Rebuilt when either moves, so authorization
     /// does not rebuild a table per request.
     acl_merged: std::sync::RwLock<Option<(u64, u64, std::sync::Arc<acl::Acl>)>>,
+    /// Per-user ceilings on push size and workspace count (D37). Both
+    /// unset = nothing is ever refused for quota, which is the pre-D37
+    /// behaviour.
+    quotas: quota::Quotas,
 }
 
 /// A watched trusted-keys file and the mtime last folded into
@@ -223,6 +228,7 @@ impl Node {
             rate: None,
             accounts: None,
             acl_merged: std::sync::RwLock::new(None),
+            quotas: quota::Quotas::default(),
         })
     }
 
@@ -256,6 +262,25 @@ impl Node {
     ) {
         let limiter = limits::RateLimiter::new(api_per_minute, git_per_minute);
         self.rate = limiter.is_active().then(|| std::sync::Arc::new(limiter));
+    }
+
+    /// Sets the per-user quotas (D37): the largest git request body one
+    /// user may send, and the most workspaces one user may hold at once.
+    /// `None` leaves that ceiling off.
+    ///
+    /// Exempt exactly where the D33 rate limiter is exempt, and for the
+    /// same reason — see [`Node::serve_forever`]. A quota that can lock
+    /// an operator out of their own node is the failure this must not
+    /// cause.
+    pub fn enable_quotas(
+        &mut self,
+        push_bytes: Option<std::num::NonZeroU64>,
+        workspaces: Option<std::num::NonZeroU32>,
+    ) {
+        self.quotas = quota::Quotas {
+            push_bytes,
+            workspaces,
+        };
     }
 
     /// Enables the platform API (`/api/submit`, `/api/view`) backed by
@@ -645,6 +670,11 @@ impl Node {
     /// 3. **Any node without `--auth-file`.** There is no per-user
     ///    identity to bucket by, and a single shared `anon` bucket is a
     ///    self-inflicted denial of service rather than a limit.
+    ///
+    /// The D37 quotas ([`Node::enable_quotas`]) take the same three,
+    /// from the same computed value rather than a second copy of the
+    /// rule: whether a request is metered is one question, and answering
+    /// it twice is how the two answers start to differ.
     pub fn serve_forever(&self) {
         for request in self.server.incoming_requests() {
             // Cheap stat between accepting a request and handling it, so
@@ -689,6 +719,7 @@ impl Node {
             let request_log = self.request_log.clone();
             let rate = self.rate.clone();
             let accounts = self.accounts.clone();
+            let quotas = self.quotas;
             let authenticated = self.auth.is_some();
             let port = self.port;
             let scheme = self.scheme;
@@ -758,19 +789,31 @@ impl Node {
                     access.finish(log, &user, &outcome);
                     return;
                 }
+                // D33's three exemptions, hoisted because D37's quotas
+                // take exactly the same three: the callback that a push
+                // fans out into, the actor who can repair the node, and a
+                // node with no identity to meter. A metering rule that
+                // exempted one of them and not the other would be two
+                // rules for one question.
+                //
+                // Short-circuited on "is anything metered at all" so a
+                // node running none of this pays no ACL lookup per
+                // request for it.
+                let metered = (rate.is_some() || quotas.is_active()) && {
+                    let node_wide = acl
+                        .as_deref()
+                        .is_some_and(|table| table.allows(&user, &acl::Scope::Node, acl::Level::Read));
+                    !(internal_ok || !authenticated || node_wide)
+                };
                 // D33. After authentication, because the bucket is per
                 // user; before any work, because a refused request should
                 // cost the node as little as possible. The exemptions are
                 // documented on `serve_forever`.
                 if let Some(rate) = rate.as_deref() {
-                    let node_wide = acl
-                        .as_deref()
-                        .is_some_and(|table| table.allows(&user, &acl::Scope::Node, acl::Level::Read));
-                    let exempt = internal_ok || !authenticated || node_wide;
-                    let refusal = if exempt {
-                        None
-                    } else {
+                    let refusal = if metered {
                         rate.check(&user, limits::class_of(access.path()))
+                    } else {
+                        None
                     };
                     if let Some(retry_after) = refusal {
                         let outcome = respond_rate_limited(request, access.path(), retry_after);
@@ -884,6 +927,7 @@ impl Node {
                         &base_url,
                         &user,
                         acl_for_api,
+                        metered.then_some(quotas.workspaces).flatten(),
                         request,
                     );
                     access.finish(log, &user, &outcome);
@@ -930,7 +974,12 @@ impl Node {
                         extra_env.push(("CHOIR_INTERNAL".to_string(), internal_token));
                     }
                 }
-                let outcome = handle(root, request, &extra_env);
+                let outcome = handle(
+                    root,
+                    request,
+                    &extra_env,
+                    metered.then_some(quotas.push_bytes).flatten(),
+                );
                 access.finish(log, &user, &outcome);
             });
         }
@@ -1003,6 +1052,32 @@ fn respond_rate_limited(
             .expect("retry-after header"),
         );
     served(request, response, 429, bytes)
+}
+
+/// Answers a git request whose body was over the per-user push ceiling
+/// (D37).
+///
+/// `413` is the exact HTTP meaning, and the body is plain text because a
+/// git client shows the operator the body and nothing else. It names both
+/// numbers: a refusal that says only "too large" leaves the pusher
+/// guessing how much to split by.
+fn respond_push_too_large(
+    request: tiny_http::Request,
+    limit: u64,
+    size: u64,
+) -> std::io::Result<(u16, u64)> {
+    let body = format!(
+        "push refused: {size} bytes, and this node's per-user limit is {limit} bytes per \
+         request\npush fewer objects at a time, or ask the operator to raise the limit\n"
+    );
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(413)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+                .expect("static header"),
+        );
+    served(request, response, 413, bytes)
 }
 
 /// Answers a git request the ACL refused. Plain text, because that is
@@ -1484,12 +1559,64 @@ fn handle_browse(
     served(request, response, status, bytes)
 }
 
+/// Whether this workspace request is over the caller's D37 ceiling, and
+/// the refusal to send if it is.
+///
+/// A request naming a workspace that already exists cannot raise anyone's
+/// count, so it is not checked: an idempotent retry (D35 binds one to a
+/// change id and an idempotency key precisely so it can be retried) must
+/// not be refused for creating nothing. That is also why this reads the
+/// body — it is the only place the workspace being asked for is named —
+/// and why it reads nothing else out of it, leaving every other judgement
+/// about the request to `provision`.
+fn workspace_quota_refusal(
+    platform: &Platform,
+    user: &str,
+    ceiling: Option<std::num::NonZeroU32>,
+    body: &[u8],
+) -> Option<(u16, String)> {
+    let ceiling = ceiling?.get() as usize;
+    let request: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let field = |key: &str| request.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+    let (repo, name) = (field("repo"), field("name"));
+    if repo.is_empty() || name.is_empty() {
+        // Malformed: let `provision` say so, in its own words.
+        return None;
+    }
+    if platform.workspace_head(&format!("{repo}/{name}")).is_some() {
+        return None;
+    }
+    let channel = quota::channel_for(user);
+    let held = platform.workspaces_held_by(&channel);
+    if held < ceiling {
+        return None;
+    }
+    let rejection = reject::Rejection::new(
+        reject::Code::QuotaExceeded,
+        format!("you already hold {held} workspaces, which is this node's per-user limit"),
+        "archive a workspace you are finished with (POST /api/workspace/archive) to free the \
+         allowance, or ask the operator to raise the limit",
+    )
+    .with_states(
+        Some(format!("at most {ceiling} workspaces")),
+        Some(format!("{held} workspaces")),
+    );
+    Some((403, rejection.body()))
+}
+
+/// Serves one platform-API request.
+///
+/// `workspaces` is the caller's per-user workspace ceiling (D37),
+/// already `None` for anyone the metering exempts. It is checked here
+/// rather than inside [`provision::create_workspace`] so the quota
+/// observes the creation path instead of editing it.
 fn handle_api(
     platform: Option<&Platform>,
     root: &Path,
     base_url: &str,
     user: &str,
     acl: Option<&acl::Acl>,
+    workspaces: Option<std::num::NonZeroU32>,
     mut request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
     let (status, body) = match platform {
@@ -1506,7 +1633,10 @@ fn handle_api(
             if let Some(denial) = denial {
                 (denial.status, serde_json::json!({ "error": denial.reason }).to_string())
             } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
-                provision::create_workspace(root, p, base_url, user, &req_body)
+                match workspace_quota_refusal(p, user, workspaces, &req_body) {
+                    Some(refusal) => refusal,
+                    None => provision::create_workspace(root, p, base_url, user, &req_body),
+                }
             } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace/archive") {
                 provision::archive_workspace(root, p, user, &req_body)
             } else if (method.as_str(), path.as_str()) == ("GET", "/api/ref-agreement") {
@@ -1551,10 +1681,19 @@ fn handle_api(
 
 /// Bridges one HTTP request to `git http-backend` CGI. `extra_env` is
 /// added to the CGI child (and thus inherited by git hooks).
+///
+/// `push_bytes` is the caller's per-user ceiling on the request body
+/// (D37). It is checked here, before the CGI child is spawned, which is
+/// the point of the whole design: `git http-backend` is what runs the
+/// `pre-receive` hook, and the hook is what submits ops. A body refused
+/// on this side of the spawn means no hook ran, so no op was submitted
+/// and the hook's retraction path — the one that has to undo the refs an
+/// aborted push already got into the durable log — is never entered.
 fn handle(
     root: PathBuf,
     mut request: tiny_http::Request,
     extra_env: &[(String, String)],
+    push_bytes: Option<std::num::NonZeroU64>,
 ) -> std::io::Result<(u16, u64)> {
     let url = request.url().to_string();
     let (path, query) = match url.split_once('?') {
@@ -1562,8 +1701,12 @@ fn handle(
         None => (url.clone(), String::new()),
     };
 
-    let mut body = Vec::new();
-    request.as_reader().read_to_end(&mut body)?;
+    let body = match quota::read_bounded(request.as_reader(), push_bytes)? {
+        quota::Body::Complete(body) => body,
+        quota::Body::OverLimit { limit, size } => {
+            return respond_push_too_large(request, limit, size)
+        }
+    };
 
     let method = request.method().as_str().to_string();
     let content_type = request

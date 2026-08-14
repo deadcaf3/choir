@@ -20,9 +20,11 @@
 //! caps and retroactive slashing, and none of it was visible next to the
 //! change it judged. They add no state — every field comes from the same
 //! `review_json` the API serves — so there is nothing here that can
-//! disagree with `/api/view`. Comments are deliberately absent: a
-//! discussion record is a new persisted op, which is a decision of its
-//! own rather than a page.
+//! disagree with `/api/view`. The discussion D34 deferred is now on the
+//! page too, under its own decision (D38): a comment is a signed
+//! operation folded into the review, so this surface renders the thread
+//! and accepts nothing. There is no form here and no POST route; the
+//! only way a comment reaches the log is a signature over its payload.
 //!
 //! # Why this cannot collide with a git route
 //!
@@ -770,6 +772,40 @@ fn review(
             }
             h.push_str("</td><td>");
             h.push_str(&esc(verdict["note"].as_str().unwrap_or("")));
+            h.push_str("</td></tr>");
+        }
+        h.push_str("</tbody></table>");
+    }
+    h.push_str("</section>");
+
+    // The discussion (D38). Rendered, never accepted: a comment is a
+    // signed operation, so the only way one reaches the log is the
+    // submit endpoint. This surface stays read-only, exactly as D34
+    // built it.
+    h.push_str("<section><h2>Discussion</h2>");
+    let comments = state["comments"].as_array().cloned().unwrap_or_default();
+    let archived = state["archived"].as_bool().unwrap_or(false);
+    if comments.is_empty() {
+        if archived {
+            // Saying "no comments" here would be a claim the node cannot
+            // support: archiving drops the thread with the verdicts, so
+            // an emptied review and a review nobody discussed look
+            // identical from the view. Report the one that is known.
+            h.push_str("<p class=\"empty\">This review was archived; its discussion was ");
+            h.push_str("dropped with its verdicts. The log still holds every comment.</p>");
+        } else {
+            h.push_str("<p class=\"empty\">Nothing said yet.</p>");
+        }
+    } else {
+        h.push_str("<table><thead><tr><th>op</th><th>author</th><th>comment</th>");
+        h.push_str("</tr></thead><tbody>");
+        for comment in &comments {
+            h.push_str("<tr><td class=\"num mono muted\">");
+            h.push_str(&esc(&comment["at"].to_string()));
+            h.push_str("</td><td class=\"mono\">");
+            h.push_str(&esc(comment["author"].as_str().unwrap_or("")));
+            h.push_str("</td><td>");
+            h.push_str(&esc(comment["body"].as_str().unwrap_or("")));
             h.push_str("</td></tr>");
         }
         h.push_str("</tbody></table>");

@@ -37,6 +37,7 @@ mod newcomer_config;
 mod newcomer_harm;
 mod observability;
 mod policy_hardening;
+mod quotas;
 mod reconcile_refs;
 mod rejections;
 mod resync;
