@@ -189,6 +189,102 @@ fn the_runner_drives_one_lifecycle_end_to_end() {
     );
 }
 
+/// Metering is not a permanent refusal, and the runner has to say so.
+///
+/// A node's 429 body carries no typed `code`, so this outcome rests
+/// entirely on unknown codes defaulting to transient. A scheduler that
+/// read it as terminal would abandon work that a minute's wait would
+/// have completed, and it would do that precisely when the node is
+/// busiest. Pinned against a real 429 from a real limiter rather than a
+/// hand-written body, because the whole risk here is what the node
+/// actually emits.
+#[test]
+fn a_rate_limited_node_is_reported_as_worth_retrying() {
+    let work = std::env::temp_dir().join(format!("choir-runner-429-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let owner_key = ActorKey::from_secret_bytes(&[13; 32]);
+    let key_file = work.join("owner.key");
+    std::fs::write(&key_file, owner_key.secret_bytes()).unwrap();
+    let mut registry = Registry::new();
+    registry.register(&owner_key.public_key_bytes()).unwrap();
+
+    // Metering only applies to an authenticated user without a node-wide
+    // grant, so the node needs an auth table and no ACL.
+    let mut auth = choir_node::AuthTable::new();
+    auth.insert("scheduler".to_string(), "t".to_string());
+    let auth_file = work.join("auth");
+    std::fs::write(&auth_file, "scheduler:t\n").unwrap();
+
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(auth)).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+    );
+    // One API request per minute: an `ensure` spends one resolving its
+    // base and is metered on the create that follows.
+    node.enable_rate_limit(std::num::NonZeroU32::new(1), None);
+    node.create_repo("agents/demo.git").unwrap();
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    std::thread::spawn(move || node.serve_forever());
+    let api = format!("http://127.0.0.1:{port}");
+
+    // Seeding is git traffic, which is a separate unmetered class here.
+    let seed = work.join("seed");
+    let url = format!("http://scheduler:t@127.0.0.1:{port}/agents/demo.git");
+    assert!(git(&work, &["clone", "-q", &url, seed.to_str().unwrap()])
+        .status
+        .success());
+    std::fs::write(seed.join("f.txt"), "v1\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-q", "-m", "first"]);
+    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+
+    let config_path = work.join("runner.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "api": api,
+            "repo": "agents/demo",
+            "owner": "operator/agent",
+            "key_file": key_file.to_str().unwrap(),
+            "namespace": "sy",
+            "base_ref": "agents/demo.git:refs/heads/main",
+            "auth_file": auth_file.to_str().unwrap(),
+            "auth_user": "scheduler",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let (ok, refused) = runner(
+        &config_path,
+        &serde_json::json!({
+            "protocol_version": 1,
+            "operation": "ensure",
+            "scheme": "from-external",
+            "workspace_key": "issue-9",
+            "external_id": "ISSUE-9",
+            "generation": "1",
+        }),
+    );
+    assert!(!ok, "the metered request was reported as success: {refused}");
+    assert_eq!(
+        refused["error"]["retryable"], true,
+        "rate limiting was reported as permanent, which strands work that would succeed: {refused}"
+    );
+    assert_eq!(refused["error"]["code"], "choir_unavailable");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("rate limit")),
+        "the refusal did not say what actually happened: {refused}"
+    );
+}
+
 /// A refused request still answers a typed result on stdout, because an
 /// orchestrator branches on `retryable` and cannot parse a stack trace.
 #[test]
