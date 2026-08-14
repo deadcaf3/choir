@@ -16,3 +16,6 @@
 pub mod mcp;
 pub mod runner;
 pub mod surface;
+
+/// `SYNC.md`'s checks over a served log page.
+pub mod verify;

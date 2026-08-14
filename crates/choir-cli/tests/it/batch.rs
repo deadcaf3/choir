@@ -209,3 +209,64 @@ fn a_malformed_line_is_named_and_nothing_is_submitted() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// `choir log --verify` (D17): `SYNC.md`'s three checks as a flag.
+///
+/// The contract has always been implementable — that is what
+/// `choir-node/tests/it/sync_contract.rs` proves, by hand and without
+/// calling `content_hash`. What it was not was *reachable*: an agent
+/// following the document hand-rolled hash-chain and ed25519 checking.
+#[test]
+fn verify_checks_the_chain_and_is_honest_about_keys_it_does_not_hold() {
+    let (api, key_file, work) = served("verify");
+    let file = work.join("ops.jsonl");
+    std::fs::write(&file, ops(&["alpha", "beta", "gamma"])).expect("ops file");
+    assert!(choir(&[
+        "batch", &api, &key_file, "cli-agent", file.to_str().expect("utf-8")
+    ])
+    .status
+    .success());
+
+    // Without a key file nothing can be attributed, and the command says
+    // so rather than reporting a verified chain. This is the assertion
+    // that fails if "unverified" is ever quietly folded into "checked".
+    let out = choir(&["log", &api, "--verify"]);
+    assert!(out.status.success(), "the chain should hold: {out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("chain holds"), "{err}");
+    assert!(err.contains("0 signatures verified"), "{err}");
+    assert!(err.contains("no key held"), "authorship was claimed without a key: {err}");
+
+    // The same page with the key that signed it: now the signatures are
+    // actually checked, and the count says how many.
+    let pub_hex = String::from_utf8_lossy(&choir(&["key", &key_file]).stdout)
+        .trim()
+        .to_string();
+    let keys = work.join("keys");
+    std::fs::write(&keys, format!("cli-agent {pub_hex}\n")).expect("keys file");
+    let out = choir(&[
+        "log", &api, "--verify", "--keys", keys.to_str().expect("utf-8"),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("3 signatures verified"), "{err}");
+    assert!(err.contains("0 unverified"), "{err}");
+
+    // Entries go to stdout one per line, like `batch`, so the two
+    // commands compose in a pipeline.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim().lines().count(), 3, "{stdout}");
+    for line in stdout.trim().lines() {
+        let entry: serde_json::Value = serde_json::from_str(line).expect("an entry object");
+        assert!(entry["hash"].as_str().is_some(), "{entry}");
+    }
+
+    // A cursor past the end is a real state, not an error.
+    let out = choir(&["log", &api, "--from", "99", "--verify"]);
+    assert!(
+        out.status.success() || !String::from_utf8_lossy(&out.stdout).is_empty(),
+        "a cursor past the end should not be a chain failure: {out:?}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}

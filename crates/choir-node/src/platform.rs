@@ -5326,7 +5326,7 @@ fn decode_submission(req: &serde_json::Value) -> Result<DecodedSubmission, Strin
 /// not there, that test fails rather than a third-party client
 /// silently losing the ability to verify.
 fn entry_json(e: &OpEntry) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "seq": e.seq,
         "workspace": e.channel,
         "payload_hex": hex_encode(&e.payload),
@@ -5346,7 +5346,31 @@ fn entry_json(e: &OpEntry) -> serde_json::Value {
         // The signature itself, not just whose it is. Without the bytes
         // a client can only take the node's word for authorship.
         "author_sig_hex": e.author_sig.as_ref().map(|w| hex_encode(&w.signature)),
-    })
+    });
+    // D39 put three more fields inside `Witness`, and therefore inside
+    // the hashed form. Omitting them here made a passkey-signed entry
+    // unreproducible: a client rebuilding from the served fields
+    // computes a different hash and cannot tell a legitimate entry from
+    // a lying node. That is the exact failure the witnesses comment
+    // above warns about, arriving through a different field — the fields
+    // were added to the format and not to this shape.
+    //
+    // Emitted only when present, so an ed25519 entry's served JSON is
+    // byte-identical to what it always was and no existing client sees a
+    // new key. That mirrors how they are serialized in the hashed form.
+    if let Some(sig) = e.author_sig.as_ref() {
+        let object = value.as_object_mut().expect("entry_json builds an object");
+        if let Some(scheme) = sig.scheme {
+            object.insert("author_scheme".into(), serde_json::json!(scheme));
+        }
+        if let Some(data) = sig.authenticator_data.as_ref() {
+            object.insert("authenticator_data_hex".into(), serde_json::json!(hex_encode(data)));
+        }
+        if let Some(data) = sig.client_data_json.as_ref() {
+            object.insert("client_data_json_hex".into(), serde_json::json!(hex_encode(data)));
+        }
+    }
+    value
 }
 
 /// Reads up to `take` entries starting at `from` straight out of the
