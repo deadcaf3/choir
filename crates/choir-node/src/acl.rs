@@ -626,9 +626,23 @@ pub enum Disclosure {
 /// `every_section_the_view_serves_is_classified` in `tests/it/acl.rs`
 /// makes it loud, comparing this table against a view a real node
 /// served rather than against a sample written from memory.
-pub const SECTIONS: [(&str, Disclosure); 15] = [
+pub const SECTIONS: [(&str, Disclosure); 23] = [
     ("log", Disclosure::Public),
     ("build", Disclosure::Public),
+    // [`crate::bound`]'s marks. Public because of *when* they are
+    // computed, not because a row count is harmless: bounding runs after
+    // this filter, so each count describes the reader's own narrowed
+    // slice. Were the order ever reversed, these would be the worst kind
+    // of NodeWide — a measurement of the node handed to someone granted
+    // one corner of it — and the row would be a lie rather than a leak.
+    ("paging", Disclosure::Public),
+    ("refs_omitted", Disclosure::Public),
+    ("workspaces_omitted", Disclosure::Public),
+    ("provenance_omitted", Disclosure::Public),
+    ("reviews_omitted", Disclosure::Public),
+    ("changes_omitted", Disclosure::Public),
+    ("bindings_omitted", Disclosure::Public),
+    ("pending_omitted", Disclosure::Public),
     ("snapshot", Disclosure::NodeWide),
     ("bindings", Disclosure::NodeWide),
     ("concentration", Disclosure::NodeWide),

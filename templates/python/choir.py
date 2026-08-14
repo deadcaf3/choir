@@ -123,7 +123,7 @@ class Choir:
         """
         return self._request("POST", "/api/submit-batch", body=arguments)
 
-    def choir_view(self):
+    def choir_view(self, **arguments):
         """The materialized view plus the latest ref-state attestation,
         durable key bindings, T2 new-actor review outcomes, T3
         concentration, T4 newcomer harm, complete-view growth, the commit
@@ -132,11 +132,15 @@ class Choir:
         served your own slice: the repositories your credential may read,
         plus reviews you were assigned to; the node-wide sections need a
         node-wide grant. A repository missing from the response is one
-        you were not granted, not one that is gone
+        you were not granted, not one that is gone. Every map-shaped
+        section is bounded: `limit` rows each (200 by default, 1000 at
+        most), `offset` rows skipped in key order, `<section>_omitted`
+        counting what this page left out, and `paging.next` naming the
+        request that fetches the rest or being null when there is none
 
-        Takes no arguments.
+        Arguments become the query string: limit, offset.
         """
-        return self._request("GET", "/api/view")
+        return self._request("GET", "/api/view", query=arguments)
 
     def choir_appeal(self, **arguments):
         """Record an appeal for a rejected newcomer attempt; it requests
@@ -178,7 +182,7 @@ class Choir:
     def choir_reviews(self, **arguments):
         """One actor's pending review queue
 
-        Arguments become the query string: reviewer.
+        Arguments become the query string: reviewer, limit, offset.
         """
         return self._request("GET", "/api/reviews", query=arguments)
 

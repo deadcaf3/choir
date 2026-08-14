@@ -549,7 +549,24 @@ fn every_section_the_view_serves_is_classified() {
 
     let (status, view) = curl(&["-u", "dave:d", &format!("{base}/api/view")]);
     assert_eq!(status, 200, "the auditor's view was refused: {view}");
-    let served_sections = view.as_object().expect("the view is a JSON object");
+    // Both endpoints the table covers, unioned. `pending` and its
+    // omission mark come only from `/api/reviews`, and exempting them by
+    // name here — as this test used to do for `pending` — is how a
+    // section can be classified for an endpoint nobody checks. Asking
+    // the second endpoint costs one request and removes the exemption.
+    let (status, queue) = curl(&[
+        "-u",
+        "dave:d",
+        &format!("{base}/api/reviews?reviewer=dave"),
+    ]);
+    assert_eq!(status, 200, "the auditor's review queue was refused: {queue}");
+    let mut served_sections = view.as_object().expect("the view is a JSON object").clone();
+    served_sections.extend(
+        queue
+            .as_object()
+            .expect("the queue is a JSON object")
+            .clone(),
+    );
 
     let unclassified: Vec<&String> = served_sections
         .keys()
@@ -565,11 +582,10 @@ fn every_section_the_view_serves_is_classified() {
 
     // The reverse direction: a row for a section nothing serves is a
     // rule guarding nothing, and it hides that the real one was renamed.
-    // `pending` is exempt because it belongs to /api/reviews.
     let missing: Vec<&str> = choir_node::acl::SECTIONS
         .iter()
         .map(|(name, _)| *name)
-        .filter(|name| *name != "pending" && !served_sections.contains_key(*name))
+        .filter(|name| !served_sections.contains_key(*name))
         .collect();
     assert!(
         missing.is_empty(),

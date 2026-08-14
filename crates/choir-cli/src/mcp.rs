@@ -124,17 +124,38 @@ impl HttpClient {
                 command.arg(format!("@{}", file.path.display()));
                 Some(file)
             }
-            McpArguments::Query { parameter } => {
-                let value = object
-                    .get(parameter)
-                    .ok_or_else(|| format!("missing `{parameter}` argument"))?;
-                let value = match value {
-                    Value::String(value) => value.clone(),
-                    Value::Number(value) if value.is_i64() || value.is_u64() => value.to_string(),
-                    _ => return Err(format!("`{parameter}` must be a string or integer")),
-                };
-                command.args(["--get", "--data-urlencode"]);
-                command.arg(format!("{parameter}={value}"));
+            McpArguments::Query { parameters } => {
+                // Which of these may be omitted comes from the endpoint's
+                // own input schema rather than a second list kept here.
+                // `limit` and `offset` are optional everywhere they
+                // appear and `reviewer` and `from` are not, and stating
+                // that twice is how the two copies come to disagree.
+                let schema: Value = serde_json::from_str(
+                    endpoint.mcp.as_ref().expect("MCP endpoint").input_schema,
+                )
+                .unwrap_or(Value::Null);
+                let required: Vec<&str> = schema["required"]
+                    .as_array()
+                    .map(|names| names.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                command.arg("--get");
+                for parameter in parameters {
+                    let Some(value) = object.get(*parameter) else {
+                        if required.contains(parameter) {
+                            return Err(format!("missing `{parameter}` argument"));
+                        }
+                        continue;
+                    };
+                    let value = match value {
+                        Value::String(value) => value.clone(),
+                        Value::Number(value) if value.is_i64() || value.is_u64() => {
+                            value.to_string()
+                        }
+                        _ => return Err(format!("`{parameter}` must be a string or integer")),
+                    };
+                    command.args(["--data-urlencode"]);
+                    command.arg(format!("{parameter}={value}"));
+                }
                 None
             }
         };

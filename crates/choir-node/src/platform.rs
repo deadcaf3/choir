@@ -4389,7 +4389,10 @@ impl Platform {
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {
-            ("GET", "/api/view") => {
+            // Query-tolerant: `bound` reads `?limit=`/`?offset=` off the
+            // same URL after this returns, and an exact match here would
+            // have sent every paged request to the catch-all instead.
+            ("GET", path) if path == "/api/view" || path.starts_with("/api/view?") => {
                 let protected_path = self
                     .protected_refs
                     .lock()

@@ -394,9 +394,17 @@ fn tool_calls_cross_real_http_auth_and_preserve_node_results() {
         responses[3]["result"]["structuredContent"]["body"],
         json!({ "accepted": 0, "rejected": 0, "results": [] })
     );
+    // The queue arrives bounded and marked, and the marks travel through
+    // MCP unaltered: an agent reading this tool result must be able to
+    // tell an empty queue from the first page of a long one, which is the
+    // whole point of marking omissions in band rather than in a header.
     assert_eq!(
         responses[4]["result"]["structuredContent"]["body"],
-        json!({ "pending": {} })
+        json!({
+            "pending": {},
+            "pending_omitted": 0,
+            "paging": { "format_version": 1, "limit": 200, "offset": 0, "next": null },
+        })
     );
     assert_eq!(responses[5]["result"]["resultType"], "complete");
     assert_eq!(responses[5]["result"]["isError"], true);

@@ -219,8 +219,8 @@ choir_skill() {
 	choir_run skill "$@"
 }
 
-# choir view <api>
-#   the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
+# choir view <api> [--limit <n>] [--offset <n>]
+#   the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest
 choir_view() {
 	choir_run view "$@"
 }

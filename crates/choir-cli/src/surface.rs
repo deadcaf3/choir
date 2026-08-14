@@ -103,10 +103,15 @@ pub enum McpArguments {
     Empty,
     /// The argument object is forwarded as the JSON request body.
     Body,
-    /// One argument is URL-encoded as a query parameter.
+    /// The named arguments are URL-encoded as query parameters.
+    ///
+    /// A slice rather than one name because the bounded reads take
+    /// `limit` and `offset` alongside whatever they already took, and a
+    /// generator that could only carry one would have silently dropped
+    /// the paging contract out of every generated client.
     Query {
-        /// Name of the argument and query parameter.
-        parameter: &'static str,
+        /// Names of the arguments, which are also the parameter names.
+        parameters: &'static [&'static str],
     },
 }
 
@@ -225,10 +230,27 @@ const LOG_MCP_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
+/// The two parameters every bounded read takes.
+///
+/// Neither is required, and that is the contract: a caller who names
+/// nothing is still served a bounded page. There is no value of `limit`
+/// that turns the budget off — the node clamps to `1..=1000` — so paging
+/// is the way to read a large view, not a fallback for one.
+const PAGING_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Rows per section; defaults to 200 and clamps to this range" },
+    "offset": { "type": "integer", "minimum": 0, "description": "Rows skipped per section, in key order" }
+  },
+  "additionalProperties": false
+}"#;
+
 const REVIEWS_MCP_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
-    "reviewer": { "type": "string", "description": "Reviewer channel name" }
+    "reviewer": { "type": "string", "description": "Reviewer channel name" },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Rows per section; defaults to 200 and clamps to this range" },
+    "offset": { "type": "integer", "minimum": 0, "description": "Rows skipped per section, in key order" }
   },
   "required": ["reviewer"],
   "additionalProperties": false
@@ -390,8 +412,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "view",
-        args: "<api>",
-        summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate",
+        args: "<api> [--limit <n>] [--offset <n>]",
+        summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest",
         agent_facing: true,
     },
 ];
@@ -421,12 +443,14 @@ pub const ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         method: "GET",
-        path: "/api/view",
-        purpose: "The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone",
+        path: "/api/view?limit=N&offset=M",
+        purpose: "The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone. Every map-shaped section is bounded: `limit` rows each (200 by default, 1000 at most), `offset` rows skipped in key order, `<section>_omitted` counting what this page left out, and `paging.next` naming the request that fetches the rest or being null when there is none",
         mcp: Some(McpTool {
             name: "choir_view",
-            input_schema: EMPTY_MCP_SCHEMA,
-            arguments: McpArguments::Empty,
+            input_schema: PAGING_MCP_SCHEMA,
+            arguments: McpArguments::Query {
+                parameters: &["limit", "offset"],
+            },
         }),
     },
     Endpoint {
@@ -451,7 +475,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
         mcp: Some(McpTool {
             name: "choir_log",
             input_schema: LOG_MCP_SCHEMA,
-            arguments: McpArguments::Query { parameter: "from" },
+            arguments: McpArguments::Query { parameters: &["from"] },
         }),
     },
     Endpoint {
@@ -482,7 +506,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
             name: "choir_reviews",
             input_schema: REVIEWS_MCP_SCHEMA,
             arguments: McpArguments::Query {
-                parameter: "reviewer",
+                parameters: &["reviewer", "limit", "offset"],
             },
         }),
     },
@@ -733,11 +757,11 @@ pub fn schema_json() -> String {
             // human reading `llms.txt` and useless to a generator: it
             // would have to parse the template back out. So the two are
             // split here, from information the table already holds —
-            // `McpArguments::Query` names the parameter.
+            // `McpArguments::Query` names the parameters.
             let (path, query) = match e.mcp.as_ref().map(|m| m.arguments) {
-                Some(McpArguments::Query { parameter }) => (
+                Some(McpArguments::Query { parameters }) => (
                     e.path.split('?').next().unwrap_or(e.path),
-                    vec![parameter],
+                    parameters.to_vec(),
                 ),
                 _ => (e.path, Vec::new()),
             };

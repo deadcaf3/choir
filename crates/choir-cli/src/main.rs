@@ -1107,8 +1107,23 @@ fn main() {
             );
             finish(status, &resp);
         }
-        ["view", api] => {
-            let (status, resp) = http(api, auth, "choir_view", serde_json::json!({}));
+        ["view", api, rest @ ..] => {
+            // The view is bounded by default, so the CLI has to be able
+            // to reach page two: a command that could only ever print the
+            // first 200 rows of each section would hide the rest behind a
+            // `paging.next` it gave the caller no way to follow.
+            let mut arguments = serde_json::Map::new();
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                let field = match *arg {
+                    "--limit" => "limit",
+                    "--offset" => "offset",
+                    _ => usage(),
+                };
+                let Some(value) = it.next().and_then(|v| v.parse::<u64>().ok()) else { usage() };
+                arguments.insert(field.to_string(), serde_json::json!(value));
+            }
+            let (status, resp) = http(api, auth, "choir_view", arguments.into());
             finish(status, &resp);
         }
         ["skill", "install", rest @ ..] => {

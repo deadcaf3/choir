@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 mod account_page;
 pub mod accounts;
 pub mod acl;
+mod bound;
 pub mod hooks;
 pub mod limits;
 pub mod platform;
@@ -2170,10 +2171,18 @@ fn handle_api(
                 // the response rather than inside the handler so the
                 // platform keeps answering one question, and the ACL
                 // stays the only thing that knows about grants.
-                match acl {
+                let body = match acl {
                     Some(table) if status == 200 => {
-                        (status, acl::filter_response(table, user, &path, &body))
+                        acl::filter_response(table, user, &path, &body)
                     }
+                    _ => body,
+                };
+                // Bounded last, after any narrowing, because
+                // `<section>_omitted` is a row count and a count of rows
+                // this caller may not read discloses that they exist.
+                // See `bound`'s module docs; the ordering is the design.
+                match status {
+                    200 => (status, bound::apply(&path, &body)),
                     _ => (status, body),
                 }
             }

@@ -21,6 +21,7 @@ mod api;
 mod assignment;
 mod auth;
 mod batch_barriers;
+mod bounded;
 mod browse;
 mod concentration;
 mod git_ordering_trace;
