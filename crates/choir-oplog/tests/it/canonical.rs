@@ -611,3 +611,86 @@ fn an_unknown_scheme_decodes_and_is_reported_verbatim() {
         serde_json::from_slice(br#"{"key_id":"k","signature":[1],"scheme":40000}"#).expect("decodes");
     assert_eq!(w.scheme_id(), 40_000, "the tag is reported, not normalised");
 }
+
+/// Property 6. Every kind of thing this workspace hashes with BLAKE3
+/// carries the same codec byte, so the codec separates hash *functions*
+/// and not *domains* — and a preimage that could be read as two kinds
+/// would let a hash minted in one context be presented in another.
+///
+/// This is the check `internal/oak.md` left open after Oak paid for a
+/// v1 format that lacked domain separation. Half of it was already
+/// closed: `moving_bytes_across_the_channel_payload_boundary_changes_the_signature`
+/// covers ambiguity *within* `signing_hash`. What was untested is
+/// ambiguity *across* kinds, which is this.
+///
+/// **What is proved here, and what is not.** The preimages in use are
+/// structurally disjoint — a JSON object, a JSON array, and raw key
+/// bytes cannot be confused for one another — so a collision between two
+/// kinds would need a BLAKE3 preimage attack rather than an encoding
+/// mistake. That is a claim about the encodings, not a proof of domain
+/// separation in the cryptographic sense: nothing here prefixes a domain
+/// tag, and if a future kind serialized as a bare JSON array it would
+/// land in `signing_hash`'s shape. The assertion below is what would
+/// notice.
+#[test]
+fn the_hashed_kinds_cannot_be_mistaken_for_one_another() {
+    for_each_entry(|entry, at| {
+        let signing = entry.signing_hash();
+        let content = entry.content_hash();
+
+        // The two op-log kinds. `admit_once` indexes spent submissions by
+        // signing hash and the log addresses entries by content hash; a
+        // value that served as both would let one be spent as the other.
+        assert_ne!(
+            signing, content,
+            "{at}: an entry's signing hash equals its content hash"
+        );
+
+        // Neither is the hash of a component on its own. A client that
+        // hashed the payload alone, or the channel alone, must not land
+        // on a value the node treats as a signature commitment.
+        assert_ne!(
+            signing,
+            ContentHash::blake3(&entry.payload),
+            "{at}: signing hash equals the bare payload hash"
+        );
+        assert_ne!(
+            signing,
+            ContentHash::blake3(entry.channel.as_bytes()),
+            "{at}: signing hash equals the bare channel hash"
+        );
+
+        // The preimages are distinguishable by shape, which is *why* the
+        // inequalities above hold rather than a coincidence of this
+        // input. A signing preimage is a JSON array; a content preimage
+        // is a JSON object.
+        //
+        // This half rests on `content_hash_is_blake3_over_the_canonical_bytes`
+        // and does not replace it: what follows shows the two *shapes*
+        // are disjoint, and that other test is what ties `content_hash`
+        // to the shape at all. Verified by mutation — pointing
+        // `content_hash` at the bare payload leaves this test green and
+        // fails that one, which is the correct division rather than a
+        // gap, but only because both exist.
+        let signing_preimage = serde_json::to_vec(&(&entry.channel, &entry.payload))
+            .expect("tuple serializes");
+        let content_preimage = canonical(entry);
+        assert_eq!(signing_preimage.first(), Some(&b'['), "{at}");
+        assert_eq!(content_preimage.first(), Some(&b'{'), "{at}");
+    });
+
+    // An actor id is BLAKE3 over 32 raw key bytes, and an account secret
+    // is BLAKE3 over the ASCII hex of one. Both appear in this workspace
+    // and they must not collide: 32 arbitrary bytes and 67 characters of
+    // `1e-`-prefixed hex are different lengths and different alphabets,
+    // so the only way to confuse them is to hash the wrong spelling.
+    let key_bytes = [7u8; 32];
+    let raw = ContentHash::blake3(&key_bytes);
+    let spelled = ContentHash::blake3(raw.to_hex().as_bytes());
+    assert_ne!(
+        raw, spelled,
+        "hashing a key and hashing its hex spelling landed on one value"
+    );
+    assert_eq!(raw.digest.len(), 32);
+    assert_eq!(raw.to_hex().len(), 67, "codec byte, dash, 64 hex characters");
+}
