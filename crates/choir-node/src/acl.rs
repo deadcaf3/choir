@@ -25,6 +25,13 @@
 //! `--protected-refs`, both operator-side files), and a level with no
 //! operation behind it only invites a meaningless grant.
 //!
+//! The file is not the only source of grants. Credential self-service
+//! (D36) renders what it issued in this same grammar, and the node
+//! enforces the two as one table ([`Acl::merged`]) — so an issued grant
+//! and a hand-written one are the same kind of fact, checked in the same
+//! place. What self-service may not issue is [`Scope::Node`]: node-wide
+//! authority stays in the file the operator writes.
+//!
 //! `*` covers every repository and never covers [`Scope::Node`]: the op
 //! log and the ref-state attestation describe the whole node, not a
 //! repository, and are gated rather than filtered because filtering a
@@ -202,6 +209,23 @@ impl Acl {
         // express, so the two halves of the key cannot be confused for
         // one another however they are spelled.
         format!("{user}\u{1f}{}", held.join(","))
+    }
+
+    /// This table plus `other`'s grants, as one table.
+    ///
+    /// The union, never an intersection: the operator's file and the
+    /// self-service store (D36) each answer for the grants they issued,
+    /// and neither can withdraw the other's. Written so that every
+    /// enforcement point keeps consulting exactly one [`Acl`] — the two
+    /// sources are a detail of where grants come from, not a second
+    /// decision anybody has to remember to make.
+    #[must_use]
+    pub fn merged(&self, other: &Self) -> Self {
+        let mut grants = self.grants.clone();
+        for (user, held) in &other.grants {
+            grants.entry(user.clone()).or_default().extend(held.clone());
+        }
+        Self { grants }
     }
 
     /// The [`Denial`] for `user` over `scope` at `level`, or `None` when
@@ -521,6 +545,22 @@ pub fn api_denial(
         // rejection, not a repository, so there is nothing repo-scoped to
         // check here.
         ("POST", "/api/appeal") => Vec::new(),
+        // Credential self-service (D36). Issuing and revoking are
+        // node-wide writes and reading the roster is the node-wide read,
+        // because an account is a fact about the node rather than about
+        // one repository — and because `@node` is the grant this store is
+        // forbidden to issue, so the authority to issue can only have
+        // come from the operator's own file.
+        ("POST", "/api/accounts/invite" | "/api/accounts/revoke") => {
+            vec![(Scope::Node, Level::Write)]
+        }
+        ("GET", "/api/accounts") => vec![(Scope::Node, Level::Read)],
+        // Redemption is reached by a principal that holds no grant at
+        // all — an unredeemed invite — so there is nothing here to check.
+        // What keeps it from being an open door is that the invite is
+        // itself a credential, and that an invite principal is refused
+        // every other route before this table is consulted.
+        ("POST", "/api/accounts/redeem") => Vec::new(),
         _ => {
             return Some(Denial {
                 status: 404,

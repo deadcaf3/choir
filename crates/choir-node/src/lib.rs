@@ -5,14 +5,17 @@
 //! over git plumbing, and platform behavior (sequencer, queue, identity)
 //! layers on top. ForgeMark benchmarks this surface directly.
 //!
-//! Authentication is per-actor basic auth ([`AuthTable`], `--auth-file`);
-//! the platform API ([`platform`]) additionally verifies ed25519 op
-//! signatures. The bind stays loopback-only: beyond localhost you still
-//! need TLS or an SSH tunnel so tokens aren't sent in the clear.
+//! Authentication is per-actor basic auth ([`AuthTable`], `--auth-file`),
+//! plus the credentials self-service has issued ([`accounts`],
+//! `--accounts-file`); the platform API ([`platform`]) additionally
+//! verifies ed25519 op signatures. The bind stays loopback-only: beyond
+//! localhost you still need TLS or an SSH tunnel so tokens aren't sent in
+//! the clear.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub mod accounts;
 pub mod acl;
 pub mod hooks;
 pub mod limits;
@@ -104,6 +107,13 @@ pub struct Node {
     /// Per-user token buckets (D33). `None` = no ceiling was configured,
     /// so no request is ever refused for rate.
     rate: Option<std::sync::Arc<limits::RateLimiter>>,
+    /// Self-service credentials (D36). `None` = no `--accounts-file`, so
+    /// the only credentials are the ones the operator wrote by hand.
+    accounts: Option<std::sync::Arc<accounts::Accounts>>,
+    /// The file table and the store's grants, merged, cached against the
+    /// generations of both. Rebuilt when either moves, so authorization
+    /// does not rebuild a table per request.
+    acl_merged: std::sync::RwLock<Option<(u64, u64, std::sync::Arc<acl::Acl>)>>,
 }
 
 /// A watched trusted-keys file and the mtime last folded into
@@ -118,6 +128,11 @@ struct AclWatch {
     path: PathBuf,
     mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
     table: std::sync::RwLock<std::sync::Arc<acl::Acl>>,
+    /// Bumped on every successful reload. A counter rather than the
+    /// table's address, because an address can be reused by the next
+    /// allocation and a stale merge on an authorization path is exactly
+    /// the failure worth spending a `u64` to make impossible.
+    epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Node {
@@ -206,6 +221,8 @@ impl Node {
             ui_cache: std::sync::Arc::new(ui::UiCache::new()),
             request_log: None,
             rate: None,
+            accounts: None,
+            acl_merged: std::sync::RwLock::new(None),
         })
     }
 
@@ -330,8 +347,49 @@ impl Node {
                 std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
             ),
             table: std::sync::RwLock::new(std::sync::Arc::new(table)),
+            epoch: std::sync::atomic::AtomicU64::new(0),
             path,
         }));
+        Ok(())
+    }
+
+    /// Turns on account and token self-service (D36) from the store at
+    /// `path`, optionally generating the `authorized_keys` D31's forced
+    /// commands live in.
+    ///
+    /// # Errors
+    ///
+    /// Refuses without `--auth-file` and without `--acl-file`, for the
+    /// reason D29 and D33 refuse the same combinations: a credential
+    /// issued on a node that authenticates nobody is not a credential,
+    /// and one issued on a node with no ACL is a credential to every
+    /// repository, which is the thing being issued *against*. Also
+    /// returns the store's own load failures.
+    pub fn enable_accounts(
+        &mut self,
+        path: PathBuf,
+        keys_out: Option<accounts::SshKeysOut>,
+    ) -> Result<(), String> {
+        let Some(table) = self.auth.as_ref().as_ref() else {
+            return Err(
+                "--accounts-file needs --auth-file: an issued token is checked where every \
+                 other credential is"
+                    .to_string(),
+            );
+        };
+        if self.acl_watch.is_none() {
+            return Err(
+                "--accounts-file needs --acl-file: without a table to grade them against, \
+                 an issued grant would be a grant to every repository"
+                    .to_string(),
+            );
+        }
+        // Every operator credential's name, so self-service can never
+        // issue an account that shadows one.
+        let reserved = table.keys().cloned().collect();
+        let store = accounts::Accounts::open(path, keys_out, reserved)?;
+        eprintln!("accounts enabled ({} issued)", store.len());
+        self.accounts = Some(std::sync::Arc::new(store));
         Ok(())
     }
 
@@ -355,16 +413,42 @@ impl Node {
             Ok(table) => {
                 eprintln!("acl: reloaded ({} grants)", table.len());
                 *watch.table.write().expect("acl write lock") = std::sync::Arc::new(table);
+                watch
+                    .epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
             }
             Err(e) => eprintln!("acl: file unusable, keeping previous: {e}"),
         }
     }
 
-    /// The ACL table currently in force, if one is configured.
+    /// The ACL table currently in force, if one is configured: the
+    /// operator's file, merged with the grants self-service has issued
+    /// (D36).
+    ///
+    /// Merged rather than checked separately so that every enforcement
+    /// point — the git chokepoint, the API's per-endpoint table, the
+    /// response filter, the D33 rate-limit exemption — keeps asking one
+    /// table one question. The merge is cached against both sources'
+    /// generations, so the ordinary request pays two atomic loads.
     fn acl_now(&self) -> Option<std::sync::Arc<acl::Acl>> {
-        self.acl_watch
-            .as_ref()
-            .map(|w| std::sync::Arc::clone(&w.table.read().expect("acl read lock")))
+        let watch = self.acl_watch.as_ref()?;
+        let file = std::sync::Arc::clone(&watch.table.read().expect("acl read lock"));
+        let Some(store) = self.accounts.as_ref() else {
+            return Some(file);
+        };
+        let epoch = watch.epoch.load(std::sync::atomic::Ordering::Acquire);
+        let generation = store.generation();
+        if let Some((cached_epoch, cached_generation, table)) =
+            self.acl_merged.read().expect("merged acl read lock").as_ref()
+        {
+            if *cached_epoch == epoch && *cached_generation == generation {
+                return Some(std::sync::Arc::clone(table));
+            }
+        }
+        let merged = std::sync::Arc::new(file.merged(&store.acl()));
+        *self.acl_merged.write().expect("merged acl write lock") =
+            Some((epoch, generation, std::sync::Arc::clone(&merged)));
+        Some(merged)
     }
 
     /// Port the daemon is listening on.
@@ -390,7 +474,12 @@ impl Node {
     pub fn write_ssh_handoff(&self, path: &Path) -> std::io::Result<()> {
         let base = format!("{}://127.0.0.1:{}", self.scheme, self.port);
         let acl = self.acl_watch.as_ref().map(|watch| watch.path.as_path());
-        ssh::write_handoff(path, &base, &self.internal_token, acl)
+        // D36: the store goes in too, so the shim grades a self-served
+        // account by the same grants the HTTP route does. Call
+        // `enable_accounts` before this, or the line is absent and every
+        // issued grant is invisible over SSH.
+        let accounts = self.accounts.as_ref().map(|store| store.path());
+        ssh::write_handoff(path, &base, &self.internal_token, acl, accounts)
     }
 
     /// Creates a bare repo `name` (e.g. `"owner/repo.git"`) with pushes
@@ -599,6 +688,7 @@ impl Node {
             let internal_token = self.internal_token.clone();
             let request_log = self.request_log.clone();
             let rate = self.rate.clone();
+            let accounts = self.accounts.clone();
             let authenticated = self.auth.is_some();
             let port = self.port;
             let scheme = self.scheme;
@@ -614,9 +704,17 @@ impl Node {
                     || request.url().starts_with("/api/git-abort"))
                     && header(&request, "X-Choir-Internal").as_deref() == Some(&internal_token);
                 let mut user = "anon".to_string();
+                // D36. Set when the presented credential is an unredeemed
+                // invite rather than an account, which may reach exactly
+                // one route.
+                let mut invite: Option<String> = None;
                 if let Some(table) = auth.as_ref() {
-                    match authorized(table, &request) {
-                        Some(u) => user = u,
+                    match authenticate(table, accounts.as_deref(), &request) {
+                        Some(accounts::Principal::Account(u)) => user = u,
+                        Some(accounts::Principal::Invite(id)) => {
+                            user.clone_from(&id);
+                            invite = Some(id);
+                        }
                         None if internal_ok => {}
                         None => {
                             let body = "unauthorized\n";
@@ -679,6 +777,46 @@ impl Node {
                         access.finish(log, &user, &outcome);
                         return;
                     }
+                }
+                // D36. An unredeemed invite is a credential for exactly
+                // one thing. Refused here, ahead of every route, rather
+                // than by each route remembering to ask: the ACL grades
+                // accounts, and an invite is not one yet — it holds no
+                // grant, so several endpoints that require none would
+                // otherwise let it through.
+                if invite.is_some()
+                    && !(request.method().as_str() == "POST"
+                        && request.url() == "/api/accounts/redeem")
+                {
+                    let body = "{\"error\":\"an invite may only be redeemed\"}\n";
+                    let response = tiny_http::Response::from_string(body)
+                        .with_status_code(403)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .expect("static header"),
+                        );
+                    let outcome = served(request, response, 403, body.len() as u64);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                // Credential self-service (D36). Ahead of the platform
+                // API because it needs no sequencer: a node that serves
+                // git and nothing else still issues credentials.
+                if request.url().split('?').next().unwrap_or("") == "/api/accounts"
+                    || request.url().starts_with("/api/accounts/")
+                {
+                    let outcome = handle_accounts(
+                        accounts.as_deref(),
+                        &user,
+                        invite.as_deref(),
+                        acl.as_deref(),
+                        request,
+                    );
+                    access.finish(log, &user, &outcome);
+                    return;
                 }
                 // The surface as plain text, for an agent that has never
                 // seen choir, and the sync contract it points at. Behind
@@ -897,20 +1035,119 @@ pub(crate) fn repo_from_path(url: &str) -> Option<String> {
 /// Checks a request's basic-auth credentials against the table; returns
 /// the authenticated username.
 fn authorized(table: &AuthTable, request: &tiny_http::Request) -> Option<String> {
-    let auth_header = header(request, "Authorization")?;
-    let b64 = auth_header.strip_prefix("Basic ")?.trim();
-    let creds = String::from_utf8(base64_decode(b64)?).ok()?;
-    let (user, token) = creds.split_once(':')?;
+    let (user, token) = basic_auth(request)?;
     // Compare without early exit on length/content so timing doesn't
     // leak how much of the token matched.
-    let expected = table.get(user)?;
+    let expected = table.get(&user)?;
     let a = expected.as_bytes();
     let b = token.as_bytes();
     let mut diff = a.len() ^ b.len();
     for i in 0..a.len().min(b.len()) {
         diff |= (a[i] ^ b[i]) as usize;
     }
-    (diff == 0).then(|| user.to_string())
+    (diff == 0).then_some(user)
+}
+
+/// Identifies a request: an operator credential from the auth file, or a
+/// self-service account or invite from the store (D36).
+///
+/// The file is consulted first, so a name the operator wrote by hand can
+/// never be shadowed by an issued one. The store refuses to issue those
+/// names in the first place; checking in this order means the property
+/// does not depend on that refusal alone.
+fn authenticate(
+    table: &AuthTable,
+    accounts: Option<&accounts::Accounts>,
+    request: &tiny_http::Request,
+) -> Option<accounts::Principal> {
+    if let Some(user) = authorized(table, request) {
+        return Some(accounts::Principal::Account(user));
+    }
+    let (user, secret) = basic_auth(request)?;
+    accounts?.authenticate(&user, &secret)
+}
+
+/// The `user` and `secret` halves of a basic-auth header, undecided.
+fn basic_auth(request: &tiny_http::Request) -> Option<(String, String)> {
+    let auth_header = header(request, "Authorization")?;
+    let b64 = auth_header.strip_prefix("Basic ")?.trim();
+    let creds = String::from_utf8(base64_decode(b64)?).ok()?;
+    let (user, secret) = creds.split_once(':')?;
+    Some((user.to_string(), secret.to_string()))
+}
+
+/// Serves one `/api/accounts...` request (D36).
+///
+/// The ACL decides who may issue, revoke and read the roster, through the
+/// same [`acl::api_denial`] table every other endpoint goes through. Two
+/// things are checked here instead, because neither is a grant: that the
+/// node has a store at all, and that redemption is being performed by the
+/// invite it names rather than by somebody who merely holds a credential.
+fn handle_accounts(
+    store: Option<&accounts::Accounts>,
+    user: &str,
+    invite: Option<&str>,
+    acl: Option<&acl::Acl>,
+    mut request: tiny_http::Request,
+) -> std::io::Result<(u16, u64)> {
+    let mut req_body = Vec::new();
+    request.as_reader().read_to_end(&mut req_body)?;
+    let method = request.method().as_str().to_string();
+    let path = request.url().split('?').next().unwrap_or("").to_string();
+    let (status, body) = match (store, acl) {
+        (None, _) => (
+            503,
+            r#"{"error":"account self-service is not enabled on this node"}"#.to_string(),
+        ),
+        // Unreachable through the daemon, which refuses `--accounts-file`
+        // without `--acl-file`. Fail closed anyway rather than assume the
+        // only caller stays the only caller.
+        (_, None) => (
+            403,
+            r#"{"error":"account self-service needs an ACL"}"#.to_string(),
+        ),
+        (Some(store), Some(table)) => {
+            let denial = acl::api_denial(table, user, &method, &path, &req_body, |_| None);
+            if let Some(denial) = denial {
+                (
+                    denial.status,
+                    serde_json::json!({ "error": denial.reason }).to_string(),
+                )
+            } else {
+                let json = if req_body.iter().all(u8::is_ascii_whitespace) {
+                    Some(serde_json::Value::Null)
+                } else {
+                    serde_json::from_slice::<serde_json::Value>(&req_body).ok()
+                };
+                match (json, method.as_str(), path.as_str()) {
+                    (None, _, _) => (
+                        400,
+                        r#"{"error":"body must be JSON"}"#.to_string(),
+                    ),
+                    (Some(json), "POST", "/api/accounts/invite") => store.invite(user, &json),
+                    (Some(json), "POST", "/api/accounts/redeem") => match invite {
+                        Some(id) => store.redeem(id, &json),
+                        None => (
+                            403,
+                            r#"{"error":"redeem an invite by presenting it as the credential"}"#
+                                .to_string(),
+                        ),
+                    },
+                    (Some(json), "POST", "/api/accounts/revoke") => store.revoke(&json),
+                    (Some(_), "GET", "/api/accounts") => (200, store.list_json().to_string()),
+                    _ => (404, r#"{"error":"no such endpoint"}"#.to_string()),
+                }
+            }
+        }
+    };
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        );
+    served(request, response, status, bytes)
 }
 
 /// Encodes bytes as standard base64 with `=` padding.
@@ -1045,7 +1282,7 @@ pub fn write_allowed_signers(root: &Path, keys: &[TrustedKey]) -> std::io::Resul
 }
 
 /// Decodes standard base64 (with `=` padding); `None` on any bad input.
-fn base64_decode(input: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut rev = [255u8; 256];
     for (i, &c) in ALPHABET.iter().enumerate() {

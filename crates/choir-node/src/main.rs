@@ -12,6 +12,7 @@
 //! [--request-log path [--request-log-max-bytes n]]
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--bind addr] [--ssh-handoff path]
+//! [--accounts-file path [--ssh-authorized-keys path [--ssh-shim path]]]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
 //!
@@ -72,6 +73,19 @@
 //! `--ssh-handoff` (D31) writes this daemon's base URL and loopback
 //! secret to a 0600 file for the `choir-ssh` forced command, which is how
 //! a push arriving over SSH reaches the same sequencer an HTTP push does.
+//! `--accounts-file` (D36) turns on invite-only credential self-service:
+//! a holder of `@node write` mints a single-use expiring invite at
+//! `POST /api/accounts/invite`, its holder redeems it at
+//! `POST /api/accounts/redeem` for a token and a registered ssh key, and
+//! `POST /api/accounts/revoke` deletes the account so the token stops
+//! working on the next request. Issued grants join the `--acl-file`
+//! table, which is why the flag needs both `--auth-file` and
+//! `--acl-file`; the store can never issue `@node`, so self-service
+//! cannot mint an auditor or a rate-limit exemption.
+//! `--ssh-authorized-keys` writes the D31 forced commands for every
+//! registered key to a file `sshd` is pointed at once — generated, so
+//! hand edits are lost — using the `choir-ssh` beside this binary unless
+//! `--ssh-shim` names another.
 
 use choir_node::platform::ReviewRetention;
 use choir_node::{AuthTable, Node, Platform};
@@ -133,6 +147,9 @@ fn main() -> std::io::Result<()> {
         "--request-log-max-bytes",
         "--rate-limit-api",
         "--rate-limit-git",
+        "--accounts-file",
+        "--ssh-authorized-keys",
+        "--ssh-shim",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -469,6 +486,64 @@ fn main() -> std::io::Result<()> {
         None => eprintln!(
             "acl: no --acl-file, so every authenticated actor reaches every repository"
         ),
+    }
+    // D36. Credential self-service. After the ACL, because it refuses to
+    // start without one — a token issued on a node with nothing to grade
+    // it against is a token to every repository. Before the handoff,
+    // because the handoff carries the store's path to the SSH shim.
+    if let Some(path) = flag_value("--accounts-file") {
+        let keys_out = match flag_value("--ssh-authorized-keys") {
+            Some(out) => {
+                let Some(handoff) = flag_value("--ssh-handoff") else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "--ssh-authorized-keys needs --ssh-handoff: a forced command without \
+                         one refuses pushes rather than running them unsequenced",
+                    ));
+                };
+                // Beside this binary unless told otherwise, which is
+                // where an install that shipped the pair together puts
+                // it. Named rather than searched for on `PATH`: what
+                // ends up in a forced command should be a path the
+                // operator can read back, not a lookup done later.
+                let shim = match flag_value("--ssh-shim") {
+                    Some(shim) => std::path::PathBuf::from(shim),
+                    None => std::env::current_exe()?
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join("choir-ssh"),
+                };
+                Some(choir_node::accounts::SshKeysOut {
+                    path: out.into(),
+                    shim,
+                    root: root.clone(),
+                    handoff: handoff.into(),
+                })
+            }
+            None => None,
+        };
+        let generated = keys_out.as_ref().map(|out| out.path.clone());
+        node.enable_accounts(path.into(), keys_out)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        eprintln!(
+            "accounts: invite-only self-service at /api/accounts (an @node write grant issues; \
+             the store can never grant @node)"
+        );
+        if let Some(path) = generated {
+            eprintln!(
+                "accounts: writing {} — point sshd's AuthorizedKeysFile at it once, and never \
+                 edit it: it is regenerated on every account change",
+                path.display()
+            );
+        }
+    } else if flag_value("--ssh-authorized-keys").is_some() {
+        // Nothing would ever be written to it, and a generated file that
+        // is never generated reads as "no keys are registered".
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--ssh-authorized-keys needs --accounts-file: the keys it writes are registered \
+             through self-service",
+        ));
     }
     // D31. The SSH shim runs as a separate process with no way to learn
     // an ephemeral port or a per-process secret, so the daemon writes

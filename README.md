@@ -167,6 +167,40 @@ Fail closed: with the flag set, anything not granted is refused. A repository yo
 
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
+### Issuing a credential without editing a file (D36)
+
+`--accounts-file <path>` turns on invite-only self-service. Nothing above changes: the auth file and the ACL file stay yours, and issued credentials are added to what they say rather than written into them.
+
+```bash
+choir-node ./repos 8417 --auth-file ~/.choir/auth --acl-file ~/.choir/acl \
+  --keys-file ~/.choir/keys --accounts-file ./repos/.choir/accounts.json \
+  --ssh-handoff ./repos/.choir/ssh-handoff \
+  --ssh-authorized-keys ./repos/.choir/authorized_keys
+```
+
+Mint an invite, as a credential holding `@node write`:
+
+```bash
+curl -u "$OPERATOR" -X POST https://<HOST>/api/accounts/invite \
+  -d '{"user":"bob","grants":["owner/demo read","owner/notes write"]}'
+```
+
+The response carries `invite`, an `id:secret` pair, once. Hand it over out of band. The holder redeems it — the invite *is* the credential, so it is presented as basic auth and reaches nothing else:
+
+```bash
+curl -u "<INVITE>" -X POST https://<HOST>/api/accounts/redeem \
+  -d "{\"ssh_key\":\"$(cat ~/.ssh/id_ed25519.pub)\"}"
+```
+
+That answers, once, with the token to clone with (`https://bob:<TOKEN>@<HOST>/owner/demo.git`) and registers the key for SSH. Invites expire — a day by default, `expires_in_secs` to choose — and are single use.
+
+`GET /api/accounts` lists who holds what, and `POST /api/accounts/revoke` with `{"user":"bob"}` deletes an account: the token stops authenticating on the next request, the grants leave the table, and the key leaves the generated `authorized_keys`. Revocation is deletion rather than a record, which is one reason none of this is in the op log — the log is append-only and cannot forget a credential.
+
+Two rules worth knowing before you rely on it:
+
+- **`@node` can never be issued.** Node-wide authority — the auditor role, and the rate-limit exemption that comes with it — stays in the ACL file you write by hand, so self-service cannot escalate itself. The flag needs both `--auth-file` and `--acl-file` for the same reason: a token issued with nothing to grade it against is a token to every repository.
+- **The generated `authorized_keys` is generated.** Point `sshd` at it once (`AuthorizedKeysFile /path/to/repos/.choir/authorized_keys` in `sshd_config`, alongside the account setup in [Git over SSH](#git-over-ssh-d31)) and never edit it: it is rewritten on every account change, and a hand-added line disappears with the next one.
+
 ### Webhooks: something landed, go run this (D32)
 
 `--hooks-file` posts to a URL you name whenever a ref you name moves. One subscription per line, `#` comments, and the same append-a-line discipline as every other policy file:
@@ -324,7 +358,7 @@ What the shim serves:
 Before deploying it, three limits:
 
 - the handoff file holds the daemon's loopback secret at `0600`, so the SSH account and the daemon must be the same uid. If your deployment needs them separate, stay on HTTPS: do not widen who can read that secret.
-- one line per key, and revocation is deleting the line. There is no expiry, no rotation and no key registry.
+- one line per key, and revocation is deleting the line. There is no expiry and no rotation. With `--accounts-file` the node writes those lines for you from the keys people registered when they redeemed an invite ([above](#issuing-a-credential-without-editing-a-file-d36)); point `AuthorizedKeysFile` at the generated file instead of maintaining one by hand.
 - choir does not manage `sshd`. Its port, host keys, and account are the operator's, exactly as they were before choir was installed.
 
 ### Signed-operation CLI and API (primary agent path)
@@ -346,6 +380,10 @@ Before deploying it, three limits:
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
+| `POST /api/accounts/invite` | Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one |
+| `POST /api/accounts/redeem` | Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it |
+| `POST /api/accounts/revoke` | Delete an account: its token stops authenticating on the next request, and its grants and keys go with it |
+| `GET /api/accounts` | Who holds an account, what they were granted, and which invites are outstanding; never a secret or its hash |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
 | `POST /api/git-abort` | Internal: retracts a refused push's already-accepted refs |
 

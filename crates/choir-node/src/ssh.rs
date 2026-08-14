@@ -120,6 +120,15 @@ pub struct Handoff {
     /// so forgetting the flag costs an operator nothing and grants
     /// nobody anything.
     pub acl: Option<String>,
+    /// The self-service credential store the daemon is enforcing (D36),
+    /// when it has one.
+    ///
+    /// The grants a token was issued with live there rather than in the
+    /// ACL file, so a shim that read only the file would refuse every
+    /// self-served account — the transport disagreeing with the daemon
+    /// about who holds what. Read-only here: the shim never writes an
+    /// account, and takes only the grants.
+    pub accounts: Option<String>,
 }
 
 impl Handoff {
@@ -133,7 +142,7 @@ impl Handoff {
     /// used, because the failure it produces downstream is a push that
     /// silently misses the sequencer.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let (mut api, mut secret, mut acl) = (None, None, None);
+        let (mut api, mut secret, mut acl, mut accounts) = (None, None, None, None);
         for (index, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -147,11 +156,17 @@ impl Handoff {
                 "api" => api = Some(value.trim().to_string()),
                 "secret" => secret = Some(value.trim().to_string()),
                 "acl" => acl = Some(value.trim().to_string()),
+                "accounts" => accounts = Some(value.trim().to_string()),
                 other => return Err(format!("line {number}: unknown key `{other}`")),
             }
         }
         match (api, secret) {
-            (Some(api), Some(secret)) => Ok(Self { api, secret, acl }),
+            (Some(api), Some(secret)) => Ok(Self {
+                api,
+                secret,
+                acl,
+                accounts,
+            }),
             (None, _) => Err("no `api` line".to_string()),
             (_, None) => Err("no `secret` line".to_string()),
         }
@@ -179,17 +194,21 @@ pub fn write_handoff(
     api: &str,
     secret: &str,
     acl: Option<&Path>,
+    accounts: Option<&Path>,
 ) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let acl = acl.map_or(String::new(), |path| format!("acl {}\n", path.display()));
+    let accounts = accounts.map_or(String::new(), |path| {
+        format!("accounts {}\n", path.display())
+    });
     std::fs::write(
         path,
         format!(
             "# choir ssh handoff, rewritten on every start. Not a file to \
              share: the secret line authenticates the sequencer callback.\n\
-             api {api}\nsecret {secret}\n{acl}"
+             api {api}\nsecret {secret}\n{acl}{accounts}"
         ),
     )?;
     #[cfg(unix)]
@@ -410,9 +429,26 @@ impl Shim {
         // Read the table per invocation rather than caching it: a shim
         // process handles one command and exits, so "hot reload" here is
         // just not holding a stale copy.
-        if let Some(path) = acl_file.as_deref() {
-            let acl = Acl::load(path)?;
-            if let Some(denial) = acl.check(&self.user, &acl::Scope::Repo(acl::normalize_repo(&repo)), level)
+        //
+        // Both halves of the daemon's table, for the same reason the
+        // daemon merges them (D36): a grant issued through self-service
+        // lives in the store rather than in the file, and a transport
+        // that consulted only one of them would answer a different
+        // question than the HTTP route answers about the same user.
+        let file_table = acl_file.as_deref().map(Acl::load).transpose()?;
+        let store_table = handoff
+            .as_ref()
+            .and_then(|h| h.accounts.as_deref())
+            .map(|path| crate::accounts::grants_acl(Path::new(path)))
+            .transpose()?;
+        let table = match (file_table, store_table) {
+            (Some(file), Some(store)) => Some(file.merged(&store)),
+            (Some(one), None) | (None, Some(one)) => Some(one),
+            (None, None) => None,
+        };
+        if let Some(table) = table {
+            if let Some(denial) =
+                table.check(&self.user, &acl::Scope::Repo(acl::normalize_repo(&repo)), level)
             {
                 return Err(denial.reason);
             }

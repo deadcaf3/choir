@@ -418,6 +418,34 @@ pub const ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         method: "POST",
+        path: "/api/accounts/invite",
+        purpose: "Mint a single-use, expiring invite for a new account and the grants it will \
+                  hold; needs a node-wide write grant, and can never issue one",
+        mcp: None,
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/accounts/redeem",
+        purpose: "Redeem an invite — presented as the credential — for a token, once, and \
+                  register an ssh key with it",
+        mcp: None,
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/accounts/revoke",
+        purpose: "Delete an account: its token stops authenticating on the next request, and \
+                  its grants and keys go with it",
+        mcp: None,
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/accounts",
+        purpose: "Who holds an account, what they were granted, and which invites are \
+                  outstanding; never a secret or its hash",
+        mcp: None,
+    },
+    Endpoint {
+        method: "POST",
         path: "/api/git-update",
         purpose: "Internal: the pre-receive hook callback",
         mcp: None,
