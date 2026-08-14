@@ -2247,12 +2247,29 @@ impl SubmitPolicy for ChoirPolicy {
                 .encode());
             }
         }
+        // A comment's claimed author is bound the same way and for a
+        // sharper reason: a verdict in the wrong name is a wrong
+        // authorization, a comment in the wrong name is words somebody
+        // never said. The view stores `author`, so the payload claim is
+        // what a reader sees, and it must be the channel that signed.
+        if let OpKind::PostComment { author, .. } = &op.kind {
+            if *author != sub.channel {
+                return Err(Rejection::new(
+                    Code::ReviewerMismatch,
+                    "a comment's author must be the channel it was signed on",
+                    "resubmit on your own channel: `choir comment` signs on the author name by \
+                     construction",
+                )
+                .with_states(Some(sub.channel.clone()), Some(author.clone()))
+                .encode());
+            }
+        }
         // ...and the channel itself must belong to the signing key, or
         // the check above only proves a claim is self-consistent, not
         // that it is true. Review ops only: see `channel_is_owned`.
         if matches!(
             op.kind,
-            OpKind::PostVerdict { .. } | OpKind::RequestReview { .. }
+            OpKind::PostVerdict { .. } | OpKind::RequestReview { .. } | OpKind::PostComment { .. }
         ) {
             self.channel_is_owned(&actor_id, &sub.channel)?;
         }
@@ -5250,10 +5267,26 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
             )
         })
         .collect();
+    // An array, not an object: the thread's order is the order the
+    // sequencer admitted it, and a JSON object keyed by comment id would
+    // invite a reader to sort by something else (D38).
+    let comments: Vec<_> = r
+        .comments
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "author": c.author,
+                "body": c.body,
+                "at": c.at,
+            })
+        })
+        .collect();
     serde_json::json!({
         "target": r.target.as_ref().map(choir_oplog::ContentHash::to_hex),
         "target_ref": r.target_ref,
         "reviewers": r.reviewers,
+        "comments": comments,
         "verdicts": verdicts,
         "slashes": r.slashes,
         "complete": r.complete(),

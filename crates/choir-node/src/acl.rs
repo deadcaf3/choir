@@ -397,9 +397,13 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
         OpKind::RequestReview { target_ref, .. } => {
             target_ref.as_deref().and_then(ref_repo).into_iter().collect()
         }
+        // A comment authorizes against the repository under review, the
+        // same as a verdict on the same review: discussion is part of the
+        // review surface, not a node-wide fact.
         OpKind::PostVerdict { id, .. }
         | OpKind::ArchiveReview { id, .. }
         | OpKind::SlashApproval { id, .. }
+        | OpKind::PostComment { id, .. }
         | OpKind::AssignReviewers { id, .. } => review_repo(id).into_iter().collect(),
         OpKind::RecordProvenance { subject, .. } => subject_repo(subject).into_iter().collect(),
         // Node-scoped by nature: these name keys, or the whole ref
@@ -874,6 +878,21 @@ mod tests {
             vec![Scope::Repo("owner/project".into())]
         );
         assert_eq!(op_scopes(&verdict, none), vec![Scope::Node]);
+
+        // A comment resolves the same way (D38). Scoping it to the node
+        // instead would mean a reader with write on one repository could
+        // not answer a review there without a grant over everything.
+        let comment = OpKind::PostComment {
+            id: "r1".into(),
+            comment: "c1".into(),
+            author: "bob".into(),
+            body: "why this base?".into(),
+        };
+        assert_eq!(
+            op_scopes(&comment, resolves),
+            vec![Scope::Repo("owner/project".into())]
+        );
+        assert_eq!(op_scopes(&comment, none), vec![Scope::Node]);
     }
 
     #[test]

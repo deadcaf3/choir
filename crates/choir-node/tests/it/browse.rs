@@ -431,6 +431,131 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
     assert!(!page.contains("fatal:"), "a non-git target reached git anyway: {page}");
 }
 
+/// The review page renders the discussion (D38), in the order the
+/// sequencer admitted it, and renders it as text rather than as markup.
+/// It accepts nothing: a comment reaches the log only as a signed op, so
+/// there is no form and no POST route on this surface.
+#[test]
+fn a_review_page_renders_the_discussion_thread() {
+    let work = std::env::temp_dir().join("choir-node-browse-review-thread");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let author = ActorKey::generate();
+    // Archiving is the node's own op, so the test keeps the node's key.
+    let node_secret = ActorKey::generate().secret_bytes();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).expect("register author");
+
+    let mut node = Node::bind(&work.join("repos"), 0).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/two.git").expect("repo created");
+    node.enable_platform(
+        Platform::start(
+            registry,
+            Box::new(MemLog::new()),
+            ActorKey::from_secret_bytes(&node_secret),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let post = |op: &ViewOp, channel: &str| {
+        let (code, resp) = crate::support::curl(&[
+            "-X",
+            "POST",
+            "-d",
+            &crate::support::submit_body_legacy(&author, channel, op),
+            &format!("{base}/api/submit"),
+        ]);
+        assert_eq!(code, 200, "{resp}");
+    };
+    let post_as_node = |op: &ViewOp| {
+        let (code, resp) = crate::support::curl(&[
+            "-X",
+            "POST",
+            "-d",
+            &crate::support::submit_body_legacy(
+                &ActorKey::from_secret_bytes(&node_secret),
+                "node/archive",
+                op,
+            ),
+            &format!("{base}/api/submit"),
+        ]);
+        assert_eq!(code, 200, "{resp}");
+    };
+
+    post(
+        &ViewOp::new(OpKind::RequestReview {
+            id: "r-thread".into(),
+            target: choir_oplog::ContentHash::blake3(b"a proposal nobody pushed"),
+            reviewers: vec!["ana".into()],
+            target_ref: Some("agents/two.git:refs/heads/main".into()),
+        }),
+        "author",
+    );
+
+    let (_, _, page) = get(&format!("{base}/r/agents/two/review/r-thread"), &[]);
+    assert!(page.contains("Discussion"), "the page has no discussion section: {page}");
+    assert!(page.contains("Nothing said yet"), "an empty thread is not reported: {page}");
+
+    for (id, who, body) in [
+        ("c1", "ana", "the base looks wrong to me"),
+        ("c2", "author", "<script>alert('x')</script> it is the merge base"),
+    ] {
+        post(
+            &ViewOp::new(OpKind::PostComment {
+                id: "r-thread".into(),
+                comment: id.into(),
+                author: who.into(),
+                body: body.into(),
+            }),
+            who,
+        );
+    }
+
+    let (status, _, page) = get(&format!("{base}/r/agents/two/review/r-thread"), &[]);
+    assert_eq!(status, 200);
+    assert!(page.contains("the base looks wrong to me"), "a comment is missing: {page}");
+    assert!(page.contains("it is the merge base"), "a comment is missing: {page}");
+    let first = page.find("the base looks wrong").expect("first comment");
+    let second = page.find("it is the merge base").expect("second comment");
+    assert!(first < second, "the thread is not rendered in log order: {page}");
+    // A comment body is text a stranger wrote, and this page is served to
+    // a browser. Same rule as file contents on the D30 pages.
+    assert!(
+        !page.contains("<script>alert('x')</script>"),
+        "a comment body reached the page unescaped: {page}"
+    );
+    assert!(page.contains("&lt;script&gt;"), "the body was dropped rather than escaped: {page}");
+
+    // Archiving drops the thread, and the page says so rather than
+    // reporting a discussion that happened as one that never did.
+    post(
+        &ViewOp::new(OpKind::PostVerdict {
+            id: "r-thread".into(),
+            reviewer: "ana".into(),
+            verdict: choir_view::Verdict::Approve,
+            note: "fine".into(),
+        }),
+        "ana",
+    );
+    post_as_node(&ViewOp::new(OpKind::ArchiveReview {
+        id: "r-thread".into(),
+        lapsed: false,
+    }));
+    let (_, _, page) = get(&format!("{base}/r/agents/two/review/r-thread"), &[]);
+    assert!(
+        page.contains("dropped with its verdicts"),
+        "an archived review's dropped thread is not reported: {page}"
+    );
+    assert!(
+        !page.contains("Nothing said yet"),
+        "an archived review reads as one nobody discussed: {page}"
+    );
+}
+
 /// An anonymous reader gets nothing, exactly as on the D28 page. A
 /// human-readable surface is the kind of thing that acquires an
 /// exception, so this is asserted rather than assumed.

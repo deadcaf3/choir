@@ -125,10 +125,14 @@ fn a_bound_key_cannot_speak_as_another_channel() {
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert!(view["reviews"].get("k-2").is_none(), "{view}");
 
-    // Verdicts are covered too. ana is a reviewer of k-1 and may answer;
-    // the unbound key may not answer *as ana*, even though the reviewer
-    // field matches the channel — that check alone only proves a claim
-    // is self-consistent, not that it is true.
+    // Verdicts reach the same channel-ownership check, and this case is
+    // *not* the one that shows it. The unbound key answering as ana is
+    // refused because ana is not a reviewer of k-1, which is review
+    // state and not identity: `channel_is_owned` refuses a key bound to
+    // *another* name, and says nothing about a key bound to no name at
+    // all. Asserting the code rather than the status keeps that
+    // distinction visible; the comment case below is the one that
+    // exercises ownership, with a bound key claiming somebody else.
     let verdict = |id: &str, who: &str| {
         ViewOp::new(OpKind::PostVerdict {
             id: id.into(),
@@ -139,6 +143,29 @@ fn a_bound_key_cannot_speak_as_another_channel() {
     };
     let (code, resp) = post(&unbound, "ana", &verdict("k-1", "ana"));
     assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "review_state", "{resp}");
+
+    // And comments (D38), for the sharper version of the same reason: a
+    // verdict in the wrong name is a wrong authorization, a comment in
+    // the wrong name is words somebody never said. The author field
+    // matching the channel proves only that the claim is self-consistent.
+    let (code, resp) = post(
+        &ana,
+        "bot",
+        &ViewOp::new(OpKind::PostComment {
+            id: "k-1".into(),
+            comment: "c1".into(),
+            author: "bot".into(),
+            body: "I withdraw my objection".into(),
+        }),
+    );
+    assert_eq!(code, 400, "{resp}");
+    assert_eq!(resp["code"], "channel_not_owned", "{resp}");
+    let (_, view) = curl(&[&format!("{api}/view")]);
+    assert!(
+        view["reviews"]["k-1"]["comments"].as_array().unwrap().is_empty(),
+        "a comment survived a refused submission: {view}"
+    );
 
     // An unbound key on its own unclaimed channel is unconstrained —
     // exactly the behaviour every key had before the name column, which

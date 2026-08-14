@@ -5,6 +5,7 @@
 //! globals, or fixed ports in here.
 
 mod canonical;
+mod comments;
 mod golden;
 mod operator_identity;
 mod snapshot;

@@ -257,6 +257,13 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "comment",
+        args: "<api> <key-file> <channel> <review-id> <comment-id> '<body>'",
+        summary: "say something on a review; append-only and permanent, \
+                  and the comment id is your retry identity",
+        agent_facing: true,
+    },
+    Command {
         name: "slash",
         args: "<api> <node-key-file> <id> <reviewer> '<reason>'",
         summary: "invalidate one reviewer's approval; operator-only and never moves a ref",
