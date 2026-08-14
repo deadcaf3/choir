@@ -775,3 +775,57 @@ fn browsing_is_behind_the_same_auth_wall() {
         assert_eq!(status, 401, "{path} served an anonymous reader");
     }
 }
+
+/// A grant on a repository that was never created is the one case that
+/// reaches the renderer with nothing on disk, and it used to answer with
+/// git's own words — which name the absolute `--git-dir` git was handed.
+///
+/// So the page told a stranger the node's install root, the account it
+/// runs as, and its on-disk layout, under a headline saying "You may read
+/// this repository" about a repository that does not exist. Both halves
+/// are asserted here: nothing about the disk, and the same bytes a denied
+/// reader gets, because a granted-but-missing repository that renders
+/// differently is the enumeration oracle the `404` exists to close.
+#[test]
+fn a_granted_repository_that_is_missing_says_nothing_about_the_disk() {
+    let (base, work, _oid, _) = served(
+        "granted-missing",
+        "alice  agents/one  write\nalice  agents/ghost  read\n",
+    );
+    let root = work.join("repos").to_string_lossy().into_owned();
+
+    // Every page that reads the repository off disk, not just the front
+    // one: each resolves a revision, and each used to render the failure.
+    let denied = {
+        let (status, _, body) = get(&format!("{base}/r/agents/one"), &["-u", "bob:b"]);
+        assert_eq!(status, 404, "a reader with no grant was not refused");
+        body
+    };
+    for path in [
+        "/r/agents/ghost",
+        "/r/agents/ghost/tree/main/src",
+        "/r/agents/ghost/blob/main/README.md",
+        "/r/agents/ghost/commits/main",
+    ] {
+        let (status, headers, body) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        assert_eq!(status, 404, "{path} was not a 404");
+        assert_eq!(
+            header_value(&headers, "Content-Type").as_deref(),
+            Some("text/html; charset=utf-8"),
+            "{path} answered a reader outside their own surface"
+        );
+        assert!(
+            !body.contains(&root) && !body.contains("/var/") && !body.contains(".git'"),
+            "{path} put the node's filesystem on a page a stranger can ask for: {body}"
+        );
+        assert!(
+            !body.contains("You may read this repository"),
+            "{path} claims a repository that does not exist is readable: {body}"
+        );
+        assert_eq!(
+            body, denied,
+            "{path} renders a granted-but-missing repository differently from a denied \
+             one, so a reader can learn which names exist by diffing them"
+        );
+    }
+}

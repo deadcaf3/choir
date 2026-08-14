@@ -280,8 +280,22 @@ fn refs_section(h: &mut String, v: &serde_json::Value) {
     for (full, target) in refs {
         let (repo, name) = split_ref(full);
         if repo != current {
+            // The name shown here ends in `.git` because that is the
+            // clone URL, and the browse URL does not — so a reader who
+            // reads the name off this table and types it lands on a
+            // `404`. Linking it means they never have to translate
+            // between the node's two names for one repository.
             h.push_str("<tr class=\"group\"><th colspan=\"2\">");
-            h.push_str(&esc(repo));
+            match repo.strip_suffix(".git") {
+                Some(stem) => {
+                    h.push_str("<a href=\"/r/");
+                    h.push_str(&esc(stem));
+                    h.push_str("\">");
+                    h.push_str(&esc(repo));
+                    h.push_str("</a>");
+                }
+                None => h.push_str(&esc(repo)),
+            }
             h.push_str("</th></tr>");
             current = repo;
         }
@@ -642,12 +656,30 @@ fn row(h: &mut String, label: &str, value: &str) {
 /// same reason the tokens are vendored rather than re-picked.
 ///
 /// `html` is markup on purpose, because these sentences carry `<code>`
-/// around the command a reader is meant to run. Every one of them is a
-/// literal written in this crate: **nothing attacker-influenced may reach
-/// this function**, which is what [`esc`] exists for. The rule is easy to
-/// keep because the argument is never a variable — the one caller that
-/// passes data ([`refusal`]) escapes it first.
-pub(crate) fn next_action(h: &mut String, html: &str) {
+/// around the command a reader is meant to run. **Nothing
+/// attacker-influenced may reach it**, which is what [`esc`] exists for.
+///
+/// That rule is the `&'static str` and not the comment. Request data on
+/// this surface arrives as a `String` or borrowed from a buffer with a
+/// request lifetime, so it cannot be passed here at all — the compiler
+/// refuses it, and a caller with text rather than markup is pushed to
+/// [`next_action_text`], which escapes. This was a comment enforcing an
+/// invariant, the weakest kind of guard, and no test could fail when a
+/// future caller walked around the escaper.
+pub(crate) fn next_action(h: &mut String, html: &'static str) {
+    next_action_escaped(h, html);
+}
+
+/// The same admonition, for a next action assembled from data.
+///
+/// Escapes, because the only reason to reach for this rather than
+/// [`next_action`] is that the sentence is not a literal.
+pub(crate) fn next_action_text(h: &mut String, text: &str) {
+    next_action_escaped(h, &esc(text));
+}
+
+/// The shared body, taking markup that is already safe by construction.
+fn next_action_escaped(h: &mut String, html: &str) {
     h.push_str("<div class=\"callout callout-note\"><span class=\"ico\">next</span><p>");
     h.push_str(html);
     h.push_str("</p></div>");
@@ -724,7 +756,7 @@ pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &s
         }
         h.push_str("</tbody></table>");
     }
-    next_action(&mut h, &esc(r.next));
+    next_action_text(&mut h, r.next);
     h.push_str("</section></main><footer>");
     h.push_str("Read-only. Every write goes through the signed-op API.");
     h.push_str("</footer></body></html>");
@@ -774,6 +806,39 @@ mod tests {
         let page = render(&json, 7);
         assert!(!page.contains("<img src=x"), "raw markup reached the page");
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));
+    }
+
+    /// The refs table names repositories, and the name it shows is not
+    /// the name the browse surface answers to.
+    ///
+    /// A ref key is `owner/name.git:refs/…`, so the heading reads
+    /// `agents/one.git` — which is the clone URL and a `404` under `/r/`.
+    /// A reader who reads a name off this page and types it is following
+    /// the node's own instruction into a dead end, so the heading is the
+    /// link and nobody has to translate between two names for one thing.
+    #[test]
+    fn every_repository_the_refs_table_names_can_be_opened() {
+        let json = serde_json::json!({
+            "refs": {
+                "agents/one.git:refs/heads/main": "11-deadbeefdeadbeef",
+                "agents/one.git:refs/heads/wip": "11-deadbeefdeadbeef",
+                "r/project.git:refs/heads/main": "11-deadbeefdeadbeef",
+            }
+        })
+        .to_string();
+        let page = render(&json, 7);
+        for (shown, href) in [("agents/one.git", "/r/agents/one"), ("r/project.git", "/r/r/project")] {
+            assert!(
+                page.contains(&format!("<a href=\"{href}\">{shown}</a>")),
+                "the refs table names {shown} and gives no way to open it: {page}"
+            );
+        }
+        // One heading per repository: two would read as two repositories.
+        assert_eq!(
+            page.matches("<a href=\"/r/agents/one\">").count(),
+            1,
+            "a repository is headed more than once: {page}"
+        );
     }
 
     /// Malformed and empty payloads render a page rather than panic:

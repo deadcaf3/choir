@@ -336,7 +336,16 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     if out.status.success() {
         Ok(out.stdout)
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        // git names the `--git-dir` it was handed in several of its
+        // failures — `fatal: not a git repository: '/srv/choir/repos/…'`
+        // — and this string is shown to a reader on the `404`. That is
+        // the node's filesystem layout, its account name and its install
+        // root, disclosed to anyone who mistypes an address. The reason
+        // for the message is the *distinction* it carries ("no such
+        // revision" and "not a tree object" send a reader to different
+        // fixes), and the path carries none of that, so it goes.
+        let path = dir.to_string_lossy();
+        Err(String::from_utf8_lossy(&out.stderr).trim().replace(path.as_ref(), "<repository>"))
     }
 }
 
@@ -377,6 +386,21 @@ pub(crate) fn render(
     readable: &dyn Fn(&str) -> bool,
     platform: Option<&crate::platform::Platform>,
 ) -> Rendered {
+    // A page that reads the repository off disk must not start describing
+    // one that is not there. Without this, `resolve` fails and the reader
+    // is handed git's own words — which name the absolute path git was
+    // given — under a headline claiming they may read the repository.
+    // Answering the same refusal a denied reader gets is both the honest
+    // page and the one that keeps the two states indistinguishable.
+    //
+    // `Reviews` is exempt because it is served from the view rather than
+    // from disk: a review can name a destination this node does not host,
+    // and 404-ing the list would hide a review that genuinely exists.
+    if let Some(repo) = page.repo() {
+        if !matches!(page, Page::Reviews { .. }) && !bare(root, repo).is_dir() {
+            return no_such_repository();
+        }
+    }
     match page {
         Page::Index => index(root, readable),
         Page::Tree { repo, rev, path } => tree(&bare(root, repo), repo, rev, path),
@@ -1036,6 +1060,41 @@ fn unavailable(repo: &str) -> Rendered {
     }
 }
 
+/// The page for a repository this credential cannot be shown.
+///
+/// One body for two situations, which is the whole point: a repository
+/// that does not exist and one the reader holds no grant on must be
+/// indistinguishable, so there is a single function rather than two that
+/// happen to agree today. Every word has to be true in both worlds, so
+/// nothing echoes the name that was asked for and the next action is one
+/// that works either way.
+///
+/// The alternative — letting a missing repository fall through to the
+/// pages that read it — is how git's own "not a git repository:
+/// '/srv/…'" ended up on a `404` a stranger could ask for.
+pub(crate) fn no_such_repository() -> Rendered {
+    Rendered {
+        status: 404,
+        etag: None,
+        html: crate::ui::refusal(
+            "No repository here",
+            404,
+            &crate::ui::Refusal {
+                code: "no_such_repository",
+                error: "Nothing readable by this credential is at that address. A repository \
+                        that does not exist and one you were not granted look identical from \
+                        here, on purpose — a credential is never told what it cannot read.",
+                expected: Some("a repository this credential holds a read grant on"),
+                actual: None,
+                next: "Open the repository list — it names every repository this credential \
+                       can read, and following a link from it always works. If what you \
+                       wanted is missing, ask the operator for a read grant by name.",
+            },
+            &[("/r/", "repositories you can read"), ("/", "node state")],
+        ),
+    }
+}
+
 /// The page for a repository with no commits yet.
 ///
 /// Deliberately a `200`: the repository is exactly what the operator
@@ -1230,6 +1289,30 @@ fn human(bytes: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// git's failures are shown to a reader, and several of them quote
+    /// the `--git-dir` they were handed. That path is the node's install
+    /// root and the account it runs as; the distinction the message
+    /// carries is worth showing and the path is not.
+    ///
+    /// Asserted on `git` itself rather than on a page, because the page
+    /// that used to reach it is now refused earlier — so this is the only
+    /// place the scrub can still be made to fail, and every future caller
+    /// inherits it.
+    #[test]
+    fn a_git_failure_never_quotes_the_directory_it_was_handed() {
+        let dir = std::env::temp_dir().join("choir-browse-absent-on-purpose/nowhere.git");
+        let why = git(&dir, &["rev-parse", "--verify", "HEAD"])
+            .expect_err("git cannot resolve a revision in a directory that is not there");
+        assert!(
+            !why.contains(&*dir.to_string_lossy()),
+            "a reader is shown where this node keeps its repositories: {why}"
+        );
+        assert!(
+            why.contains("<repository>"),
+            "the path was dropped rather than replaced, so the message lost its subject: {why}"
+        );
+    }
 
     /// The routing claim the module doc makes, as an assertion: a git
     /// URL is never a browse URL, including for an owner whose name is

@@ -1668,31 +1668,13 @@ fn handle_browse(
     };
     if let Some(repo) = page.repo() {
         if !readable(repo) {
-            // Every word here has to be true whether the repository
-            // exists or not, because that is the property the `404`
-            // buys: a reader without the grant must not be able to tell
-            // the two apart. So nothing echoes the name they asked for,
-            // nothing says "you need a grant on *this*", and the next
-            // action is one that works in both worlds.
-            let html = ui::refusal(
-                "No repository here",
-                404,
-                &ui::Refusal {
-                    code: "no_such_repository",
-                    error: "Nothing readable by this credential is at that address. A \
-                            repository that does not exist and one you were not granted \
-                            look identical from here, on purpose — a credential is never \
-                            told what it cannot read.",
-                    expected: Some("a repository this credential holds a read grant on"),
-                    actual: None,
-                    next: "Open the repository list — it names every repository this \
-                           credential can read, and following a link from it always works. \
-                           If what you wanted is missing, ask the operator for a read grant \
-                           by name.",
-                },
-                &[("/r/", "repositories you can read"), ("/", "node state")],
-            );
-            return respond_page(request, 404, html, None);
+            // The body lives in `browse` because a repository that does
+            // not exist reaches the same refusal from inside the
+            // renderer. Two constructions that agree today are a
+            // coincidence with a test on it; one construction is the
+            // property.
+            let denied = browse::no_such_repository();
+            return respond_page(request, denied.status, denied.html, None);
         }
     }
 
