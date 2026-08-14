@@ -63,6 +63,39 @@ fn the_generated_client_reads_a_real_node_with_only_the_standard_library() {
     std::thread::spawn(move || node.serve_forever());
     let api = format!("http://127.0.0.1:{port}");
 
+    // Seed the log so a cursor has somewhere to point. Signed by the
+    // binary, read by the generated client: the two artifacts meeting is
+    // the shape an agent actually uses.
+    let key_file = work.join("agent.key");
+    std::fs::write(&key_file, key.secret_bytes()).expect("key file");
+    let ops = work.join("ops.jsonl");
+    let lines: Vec<String> = ["alpha", "beta", "gamma"]
+        .iter()
+        .map(|name| {
+            serde_json::json!({
+                "format_version": 1,
+                "kind": { "SetRef": {
+                    "name": name,
+                    "commit": { "codec": 30, "digest": choir_oplog::ContentHash::blake3(name.as_bytes()).digest },
+                    "prev": null,
+                }},
+            })
+            .to_string()
+        })
+        .collect();
+    std::fs::write(&ops, lines.join("\n")).expect("ops file");
+    let seeded = std::process::Command::new(env!("CARGO_BIN_EXE_choir"))
+        .args([
+            "batch",
+            &api,
+            key_file.to_str().expect("utf-8"),
+            "py-agent",
+            ops.to_str().expect("utf-8"),
+        ])
+        .output()
+        .expect("choir runs");
+    assert!(seeded.status.success(), "seeding failed: {seeded:?}");
+
     // Three shapes the schema describes differently: a no-argument GET,
     // a GET whose one argument is a query parameter, and the capability
     // helper that reads the live half of the document.
@@ -73,10 +106,13 @@ from choir import Choir
 node = Choir("{api}")
 view = node.choir_view()
 page = node.choir_log(**{{"from": 0}})
+cursored = node.choir_log(**{{"from": 2}})
 caps = node.capabilities()
 json.dump({{
     "has_log": "log" in view,
     "entries": isinstance(page.get("entries"), list),
+    "first_seq": page["entries"][0]["seq"],
+    "cursored_first_seq": cursored["entries"][0]["seq"],
     "capability_keys": sorted(caps),
     "api_version": node.choir_schema()["api_version"],
 }}, sys.stdout)
@@ -87,6 +123,16 @@ json.dump({{
     let result: serde_json::Value = serde_json::from_str(&stdout).expect("client emitted JSON");
     assert_eq!(result["has_log"], true, "{result}");
     assert_eq!(result["entries"], true, "{result}");
+    // The cursor has to actually reach the transport. Sending `from` as
+    // a request body instead of a query parameter leaves the node
+    // answering from 0, which looks identical unless the log has
+    // entries and the test asks where the page starts — the mutation
+    // that stayed green until this assertion existed.
+    assert_eq!(result["first_seq"], 0, "{result}");
+    assert_eq!(
+        result["cursored_first_seq"], 2,
+        "the cursor did not reach the node, so `from` is not being sent as a query parameter: {result}"
+    );
     assert_eq!(result["api_version"], 1, "{result}");
     assert_eq!(
         result["capability_keys"],
