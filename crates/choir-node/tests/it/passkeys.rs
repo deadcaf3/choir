@@ -1121,7 +1121,7 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
         200
     );
 
-    /// The `Content-Security-Policy` a URL actually answers with.
+    // The `Content-Security-Policy` a URL actually answers with.
     let csp = |path: &str| {
         let out = std::process::Command::new("curl")
             .args(["-s", "-D", "-", "-o", "/dev/null", "-u", "alice:a", &format!("{base}{path}")])
