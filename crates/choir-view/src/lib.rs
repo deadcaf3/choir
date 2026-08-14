@@ -76,6 +76,28 @@ pub struct OpScope {
     pub head: Option<ContentHash>,
 }
 
+/// Which path authored an op, when it was not the default author-signed
+/// submission (D41).
+///
+/// `None` on [`ViewOp::provenance`] is the default class: an actor
+/// built, signed, and submitted the op under its own key. The variants
+/// label the ops the node signs *on behalf of* a git pusher, whose key
+/// never touches the payload — a materially different provenance that
+/// the channel prefix (`key/`, `git/`) previously carried only by
+/// convention. The label sits inside the signed payload, and the node's
+/// admission policy refuses any labeled op not signed by the node's own
+/// key, so the class can neither be claimed by an ordinary author nor
+/// stripped by whoever relays the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Provenance {
+    /// A git push whose push certificate verified: the channel names
+    /// the pusher's own key, but the node signed the op.
+    PushCertified,
+    /// A git push with no verified certificate: the channel names only
+    /// the transport user the push arrived as.
+    PushTransport,
+}
+
 /// A typed operation carried in [`OpEntry::payload`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewOp {
@@ -90,16 +112,34 @@ pub struct ViewOp {
     /// defence is not a log migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<OpScope>,
+    /// How this op was authored, when not the default author-signed
+    /// class; see [`Provenance`]. Additive under the same rule as
+    /// `scope`, so every existing op decodes as `None` and re-serializes
+    /// byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 
 impl ViewOp {
-    /// Wraps `kind` at the current [`FORMAT_VERSION`], unscoped.
+    /// Wraps `kind` at the current [`FORMAT_VERSION`], unscoped, in the
+    /// default author-signed provenance class.
     pub fn new(kind: OpKind) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             kind,
             scope: None,
+            provenance: None,
         }
+    }
+
+    /// Labels this op with a non-default provenance class. Only the
+    /// node's push path does this; admission refuses the label under
+    /// any other signer, so calling it from an ordinary author buys a
+    /// rejection, not a classification.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Provenance) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// Binds this op to one log and one observed head. The scope is

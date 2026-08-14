@@ -31,8 +31,8 @@ use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
 use choir_sequencer::lag::LagMeter;
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
 use choir_view::{
-    reviewer_operator, ArchiveAuthorization, ChangeState, CreateAuthorization, OpKind, ReviewStatus,
-    Verdict, View, ViewOp,
+    reviewer_operator, ArchiveAuthorization, ChangeState, CreateAuthorization, OpKind, Provenance,
+    ReviewStatus, Verdict, View, ViewOp,
 };
 
 use crate::reject::{Code, Rejection};
@@ -2339,6 +2339,20 @@ impl SubmitPolicy for ChoirPolicy {
         ) {
             self.channel_is_owned(&actor_id, &sub.channel)?;
         }
+        // D41: a provenance label claims "the node signed this on behalf
+        // of a git pusher". Unenforced, the label would be exactly the
+        // laundering it exists to prevent — any author could dress an op
+        // as push-derived, or downstream code could trust the label
+        // without checking the signer. Enforced here, an accepted labeled
+        // op always carries the node's own signature.
+        if op.provenance.is_some() && actor_id != self.node_id {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "only the node may label an op with a push provenance",
+                "submit without `provenance`: author-signed ops are the default class and need no label",
+            )
+            .encode());
+        }
         // D24 layer 5: the requester does not choose who reviews them.
         // Only the daemon's own key may fill in a reviewer list; every
         // other author gets a rejection, so an accepted assignment in
@@ -3580,13 +3594,20 @@ impl Platform {
         cert: Option<(&str, &str)>,
     ) -> Result<(), String> {
         let (node, head) = self.scope_now();
-        let payload = ViewOp::new(kind).in_scope(node, head).to_payload();
         // Verified push certificate ("G" = good signature) attributes
         // the op to the pusher's own key; otherwise the transport user.
-        let workspace = match cert {
-            Some(("G", signer)) if !signer.is_empty() => format!("key/{signer}"),
-            _ => format!("git/{user}"),
+        // Either way the node signs, and the payload says so (D41): the
+        // channel prefix alone carried this class only by convention.
+        let (workspace, provenance) = match cert {
+            Some(("G", signer)) if !signer.is_empty() => {
+                (format!("key/{signer}"), Provenance::PushCertified)
+            }
+            _ => (format!("git/{user}"), Provenance::PushTransport),
         };
+        let payload = ViewOp::new(kind)
+            .in_scope(node, head)
+            .with_provenance(provenance)
+            .to_payload();
         let sig = self.node_key.sign_submission(&workspace, &payload);
         self.handle
             .try_submit(&workspace, payload, Some(sig))

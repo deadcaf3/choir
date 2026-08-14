@@ -39,6 +39,7 @@ mod noscript;
 mod observability;
 mod passkeys;
 mod policy_hardening;
+mod provenance;
 mod quotas;
 mod reconcile_refs;
 mod rejections;
