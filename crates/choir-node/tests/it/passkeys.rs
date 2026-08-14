@@ -237,6 +237,37 @@ fn a_key_that_is_not_a_p256_spki_is_refused_at_enrolment() {
     );
     assert_eq!(status, 200, "a real key must still enrol: {body}");
 
+    // The same credential id twice is a conflict, not a second entry. A
+    // duplicate would make removal ambiguous: one `remove` call would
+    // leave a credential that still verifies under an id the holder
+    // believes they withdrew.
+    let (status, body) = store.enroll_passkey(
+        "bob",
+        &json(&format!(
+            r#"{{"credential_id":"c","public_key":"{good}","label":"again"}}"#
+        )),
+    );
+    assert_eq!(status, 409, "a duplicate credential id was accepted: {body}");
+
+    // And the ceiling holds. One account already has one key, so the
+    // next `MAX_PASSKEYS - 1` fit and the one after that does not.
+    for n in 1..choir_node::accounts::MAX_PASSKEYS {
+        let (status, body) = store.enroll_passkey(
+            "bob",
+            &json(&format!(
+                r#"{{"credential_id":"c{n}","public_key":"{good}","label":"x"}}"#
+            )),
+        );
+        assert_eq!(status, 200, "key {n} was refused early: {body}");
+    }
+    let (status, body) = store.enroll_passkey(
+        "bob",
+        &json(&format!(
+            r#"{{"credential_id":"one-too-many","public_key":"{good}","label":"x"}}"#
+        )),
+    );
+    assert_eq!(status, 409, "the ceiling did not hold: {body}");
+
     std::fs::remove_dir_all(&work).ok();
 }
 
