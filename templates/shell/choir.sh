@@ -201,6 +201,18 @@ choir_reviews() {
 	choir_run reviews "$@"
 }
 
+# choir triage <api>
+#   every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved-but-target-moved — ranked most-actionable-first, capped, with truncation marked in-band
+choir_triage() {
+	choir_run triage "$@"
+}
+
+# choir state <api> <channel>
+#   your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
+choir_state() {
+	choir_run state "$@"
+}
+
 # choir view <api>
 #   the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
 choir_view() {
