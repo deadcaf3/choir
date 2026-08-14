@@ -39,6 +39,12 @@
     },
     {
       "agent_facing": true,
+      "args": "<api>",
+      "name": "schema",
+      "summary": "print this node's machine-readable API description and its live capabilities"
+    },
+    {
+      "agent_facing": true,
       "args": "<api> [--from <n>] [--verify] [--keys <file>]",
       "name": "log",
       "summary": "read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag"
@@ -500,11 +506,14 @@
       ]
     },
     {
-      "agent_facing": false,
+      "agent_facing": true,
       "documented_as": "/api/schema",
-      "input_schema": null,
+      "input_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
       "method": "GET",
-      "name": null,
+      "name": "choir_schema",
       "path": "/api/schema",
       "purpose": "This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17)",
       "query_parameters": []

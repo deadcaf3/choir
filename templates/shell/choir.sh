@@ -1,0 +1,209 @@
+#!/usr/bin/env sh
+# choir shell library — source this, then call the functions.
+#
+#   . ./choir.sh
+#   choir_env https://node.example ~/.choir/agent.key my-operator/my-agent
+#   choir_verify_log
+#
+# Every agent harness this project ships a snippet for drives the world
+# through a shell, so this is the client they can all use. It wraps the
+# `choir` binary rather than reimplementing it: signing is ed25519 over
+# (channel, payload) plus a log-scope read, which no pure-shell client
+# can do and the binary already does correctly.
+#
+# The per-command wrappers below the marker are generated from the same
+# table as `choir --help`, the README, `llms.txt` and `/api/schema`, so
+# they cannot drift from the binary. The flows above it are hand-written,
+# because their value is judgement about what to do in what order, and
+# generating that would flatten the part worth shipping — the same split
+# `templates/*/` already uses for prose.
+#
+# Credentials are never printed, interpolated into a command line, or put
+# in an environment variable. `$CHOIR_AUTH_FILE` names a file and the
+# binary reads it; a secret on an argv is visible to every process on the
+# machine through `ps`.
+
+# --- configuration -----------------------------------------------------
+
+# One place to set the node and the key, so no call site repeats them.
+choir_env() {
+	CHOIR_API="$1"
+	CHOIR_KEY="${2-$CHOIR_KEY}"
+	CHOIR_CHANNEL="${3-$CHOIR_CHANNEL}"
+	export CHOIR_API CHOIR_KEY CHOIR_CHANNEL
+}
+
+# Refuses early, by name, rather than letting the binary fail on an empty
+# positional argument three layers down.
+choir_require() {
+	for _v in "$@"; do
+		eval "_set=\${$_v-}"
+		if [ -z "$_set" ]; then
+			echo "choir.sh: $_v is not set; call choir_env first" >&2
+			return 2
+		fi
+	done
+}
+
+# Runs the binary with the auth flags when an auth file is configured.
+# Every wrapper goes through this, so the credential path is one line
+# rather than one per command.
+choir_run() {
+	if [ -n "${CHOIR_AUTH_FILE-}" ] && [ -n "${CHOIR_AUTH_USER-}" ]; then
+		choir --auth-file "$CHOIR_AUTH_FILE" --auth-user "$CHOIR_AUTH_USER" "$@"
+	elif [ -n "${CHOIR_AUTH_FILE-}" ]; then
+		choir --auth-file "$CHOIR_AUTH_FILE" "$@"
+	else
+		choir "$@"
+	fi
+}
+
+# --- flows -------------------------------------------------------------
+#
+# The multi-step sequences an agent otherwise rebuilds from curl and jq
+# every time. Hand-written on purpose.
+
+# Submit many ops as one batch, reading one JSON op per line from stdin.
+#
+#   printf '%s\n' "$op1" "$op2" | choir_submit_all
+#
+# One durability barrier rather than one per op, and one result line per
+# op in request order. Nonzero if any op was refused; the lines say which,
+# which an exit code cannot carry. A batch is not a transaction — the ops
+# that landed, landed.
+choir_submit_all() {
+	choir_require CHOIR_API CHOIR_KEY CHOIR_CHANNEL || return 2
+	choir_run batch "$CHOIR_API" "$CHOIR_KEY" "$CHOIR_CHANNEL" -
+}
+
+# Fetch the log from a cursor and verify it: continuity, every hash
+# recomputed, and the signatures whose keys are in $CHOIR_KEYS.
+#
+# A clean exit means the chain holds, not that every author was
+# authenticated: an entry whose key you do not hold is reported
+# unverified, never verified.
+choir_verify_log() {
+	choir_require CHOIR_API || return 2
+	_from="${1-0}"
+	if [ -n "${CHOIR_KEYS-}" ]; then
+		choir_run log "$CHOIR_API" --from "$_from" --verify --keys "$CHOIR_KEYS"
+	else
+		choir_run log "$CHOIR_API" --from "$_from" --verify
+	fi
+}
+
+# What this node is and what it will accept: the versioned surface plus
+# its live capabilities. Read this before branching on whether accounts
+# or an ACL exist, rather than probing an endpoint and reading the
+# refusal.
+choir_capabilities() {
+	choir_require CHOIR_API || return 2
+	choir_run schema "$CHOIR_API"
+}
+
+# Request review and let the node draw the reviewers.
+#
+# Naming no reviewers is the preferred form: you never pick who reviews
+# you, and a review with no reviewers never counts as approved.
+choir_request_review() {
+	choir_require CHOIR_API CHOIR_KEY CHOIR_CHANNEL || return 2
+	_id="$1"
+	_oid="$2"
+	_ref="${3-}"
+	if [ -n "$_ref" ]; then
+		choir_run review "$CHOIR_API" "$CHOIR_KEY" "$CHOIR_CHANNEL" "$_id" "$_oid" --ref "$_ref"
+	else
+		choir_run review "$CHOIR_API" "$CHOIR_KEY" "$CHOIR_CHANNEL" "$_id" "$_oid"
+	fi
+}
+
+# --- generated: choir surface, do not edit ---
+
+# One function per agent-facing command, forwarding its arguments
+# to the binary. Generated from the same table as `choir --help`;
+# edit `crates/choir-cli/src/surface.rs` and regenerate.
+
+# choir key <key-file> [name]
+#   mint a key and print the line the operator registers; pass your channel name to print the bound form
+choir_key() {
+	choir_run key "$@"
+}
+
+# choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
+#   provision a CoW workspace; advanced flags owner-sign an exact base and stable change
+choir_workspace() {
+	choir_run workspace "$@"
+}
+
+# choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
+#   publish an immutable change revision after committing and pushing its Git object
+choir_checkpoint() {
+	choir_run checkpoint "$@"
+}
+
+# choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
+#   owner-sign and recoverably archive a bound workspace; exact retries are idempotent
+choir_workspace_archive() {
+	choir_run workspace-archive "$@"
+}
+
+# choir schema <api>
+#   print this node's machine-readable API description and its live capabilities
+choir_schema() {
+	choir_run schema "$@"
+}
+
+# choir log <api> [--from <n>] [--verify] [--keys <file>]
+#   read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag
+choir_log() {
+	choir_run log "$@"
+}
+
+# choir batch <api> <key-file> <channel> <ops-file>
+#   sign and submit many operations as one batch — the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op in order
+choir_batch() {
+	choir_run batch "$@"
+}
+
+# choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
+#   request review on a commit; name no reviewers and the node draws them
+choir_review() {
+	choir_run review "$@"
+}
+
+# choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
+#   answer a review you were assigned
+choir_verdict() {
+	choir_run verdict "$@"
+}
+
+# choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'
+#   say something on a review; append-only and permanent, and the comment id is your retry identity
+choir_comment() {
+	choir_run comment "$@"
+}
+
+# choir appeal <api> <attempt-id>
+#   appeal a rejected newcomer attempt for operator adjudication; never grants privilege
+choir_appeal() {
+	choir_run appeal "$@"
+}
+
+# choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
+#   publish a task spec or plan so other agents can see intent
+choir_intent() {
+	choir_run intent "$@"
+}
+
+# choir reviews <api> <reviewer>
+#   your pending review queue
+choir_reviews() {
+	choir_run reviews "$@"
+}
+
+# choir view <api>
+#   the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate
+choir_view() {
+	choir_run view "$@"
+}
+# --- /generated ---

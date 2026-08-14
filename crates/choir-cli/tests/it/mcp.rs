@@ -218,7 +218,12 @@ fn modern_discovery_is_stateless_and_tool_order_is_cache_stable() {
             "choir_log",
             "choir_workspace",
             "choir_workspace_archive",
-            "choir_reviews"
+            "choir_reviews",
+            // D17: the node's own description. Last because this list is
+            // in endpoint-table order and `/api/schema` was appended
+            // there. The order is asserted and not just the set, because
+            // a client may cache a tool list by position.
+            "choir_schema"
         ]
     );
 }

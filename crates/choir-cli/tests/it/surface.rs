@@ -247,10 +247,16 @@ fn mcp_tools_cover_public_operations_once_in_table_order() {
 
     let unique: std::collections::BTreeSet<_> = actual.iter().copied().collect();
     assert_eq!(unique.len(), actual.len(), "duplicate MCP tool name");
+    // Nine since D17 added `/api/schema`: "what will this node accept"
+    // is a question an agent asks before branching, and routing it
+    // through the tool client is what keeps a credential off a `curl`
+    // command line in the generated shell library. The count is
+    // hardcoded so that adding a tool is a decision somebody writes
+    // down, which is exactly what it forced here.
     assert_eq!(
         actual.len(),
-        8,
-        "only the eight public platform operations are tools"
+        9,
+        "only the nine public platform operations are tools"
     );
     for (tool, endpoint) in tools
         .iter()
@@ -371,4 +377,56 @@ fn node_sources() -> String {
     }
     assert!(!src.is_empty(), "no node sources found");
     src
+}
+
+/// The generated shell library has to be a *shell* file, which is not
+/// something the staleness test can notice: a byte-perfect artifact that
+/// `sh` refuses is still stale in the only way that matters to whoever
+/// sources it.
+///
+/// Written after the first generated copy spliced in cleanly, compared
+/// equal, and failed `sh -n` at the marker — the markers were HTML
+/// comments, which are a syntax error in shell rather than a comment.
+#[test]
+fn the_generated_shell_library_parses_as_shell() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = root.join("templates/shell/choir.sh");
+    let out = std::process::Command::new("sh")
+        .arg("-n")
+        .arg(&path)
+        .output()
+        .expect("sh runs");
+    assert!(
+        out.status.success(),
+        "the shell library does not parse: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Every agent-facing command has a function, and the name is the
+    // command with hyphens replaced — a hyphen is not portable in a
+    // shell function name.
+    let text = std::fs::read_to_string(&path).expect("readable");
+    for command in surface::COMMANDS.iter().filter(|c| c.agent_facing) {
+        let function = format!("choir_{}()", command.name.replace('-', "_"));
+        assert!(
+            text.contains(&function),
+            "no wrapper for `{}`: expected `{function}`",
+            command.name
+        );
+    }
+
+    // The hand-written flows live outside the generated region and must
+    // survive regeneration, which is the whole point of the split.
+    for flow in ["choir_submit_all()", "choir_verify_log()", "choir_capabilities()"] {
+        assert!(text.contains(flow), "a hand-written flow was lost: {flow}");
+    }
+
+    // And no credential is ever interpolated into a command line. The
+    // first draft of this file did exactly that — `cat`-ing the auth
+    // file into a `curl -u` argument, where `ps` shows it to every
+    // process on the machine.
+    assert!(
+        !text.contains("$(cat \"$CHOIR_AUTH_FILE\")") && !text.contains("-u $"),
+        "a credential reaches a command line: {text}"
+    );
 }

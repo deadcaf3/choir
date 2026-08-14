@@ -29,6 +29,17 @@ pub const GEN_START: &str = "<!-- generated: choir surface, do not edit -->";
 /// Closing marker of a generated region.
 pub const GEN_END: &str = "<!-- /generated -->";
 
+/// The same pair for a shell file, where an HTML comment is a syntax
+/// error rather than a comment.
+///
+/// Learned by running `sh -n` on the first generated copy: the markers
+/// spliced in cleanly, the file was well-formed markdown, and `sh`
+/// refused it at line 120. A generated artifact nobody executes is one
+/// nobody notices is broken.
+pub const SH_GEN_START: &str = "# --- generated: choir surface, do not edit ---";
+/// Closing marker of a generated region in a shell file.
+pub const SH_GEN_END: &str = "# --- /generated ---";
+
 /// Explicit global options for authenticated node access.
 pub const AUTH_OPTIONS: &str = "[--auth-file <path>] [--auth-user <name>]";
 
@@ -273,6 +284,12 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: false,
     },
     Command {
+        name: "schema",
+        args: "<api>",
+        summary: "print this node's machine-readable API description and its live capabilities",
+        agent_facing: true,
+    },
+    Command {
         name: "log",
         args: "<api> [--from <n>] [--verify] [--keys <file>]",
         summary: "read log entries from a cursor; --verify checks continuity, recomputes every \
@@ -451,7 +468,15 @@ pub const ENDPOINTS: &[Endpoint] = &[
         path: "/api/schema",
         purpose: "This surface, machine-readable and versioned, plus what this particular \
                   node will accept — the description an agent generates a client from (D17)",
-        mcp: None,
+        // A tool like any other: "what will this node accept" is a
+        // question an agent asks before branching, and routing it
+        // through the same authenticated client is what keeps a
+        // credential off a `curl` command line in the shell library.
+        mcp: Some(McpTool {
+            name: "choir_schema",
+            input_schema: EMPTY_MCP_SCHEMA,
+            arguments: McpArguments::Empty,
+        }),
     },
     Endpoint {
         method: "GET",
@@ -746,6 +771,37 @@ pub fn schema_json() -> String {
     )
 }
 
+/// The generated half of `templates/shell/choir.sh`: one function per
+/// agent-facing command (D17).
+///
+/// Thin on purpose. A wrapper that only forwards its arguments cannot
+/// drift from the binary, and the arguments it forwards come from the
+/// same table `--help` prints — so a command renamed here renames the
+/// shell function in the same commit or the staleness test fails.
+/// Anything worth more than forwarding is a *flow*, which is judgement
+/// about order and lives in the hand-written half of that file.
+///
+/// `sh` rather than `bash`: the harnesses that will source this run
+/// whatever `/bin/sh` is, and nothing here needs an array or a
+/// `[[`-test.
+#[must_use]
+pub fn shell_functions() -> String {
+    let mut out = String::from(
+        "# One function per agent-facing command, forwarding its arguments\n\
+         # to the binary. Generated from the same table as `choir --help`;\n\
+         # edit `crates/choir-cli/src/surface.rs` and regenerate.\n",
+    );
+    for c in COMMANDS.iter().filter(|c| c.agent_facing) {
+        // Shell function names cannot carry a hyphen portably.
+        let name = c.name.replace('-', "_");
+        out.push_str(&format!(
+            "\n# choir {} {}\n#   {}\nchoir_{name}() {{\n\tchoir_run {} \"$@\"\n}}\n",
+            c.name, c.args, c.summary, c.name
+        ));
+    }
+    out
+}
+
 /// Replaces the region between [`GEN_START`] and [`GEN_END`] in `doc`.
 ///
 /// # Errors
@@ -753,15 +809,30 @@ pub fn schema_json() -> String {
 /// Returns a description when the markers are missing or out of order,
 /// rather than appending and quietly producing two generated regions.
 pub fn splice(doc: &str, generated: &str) -> Result<String, String> {
-    let start = doc.find(GEN_START).ok_or("missing generated-start marker")?;
-    let end = doc.find(GEN_END).ok_or("missing generated-end marker")?;
+    splice_between(doc, generated, GEN_START, GEN_END)
+}
+
+/// [`splice`] with explicit markers, for a file whose comment syntax is
+/// not HTML.
+///
+/// # Errors
+///
+/// Same as [`splice`]: a missing or out-of-order marker pair.
+pub fn splice_between(
+    doc: &str,
+    generated: &str,
+    start_marker: &str,
+    end_marker: &str,
+) -> Result<String, String> {
+    let start = doc.find(start_marker).ok_or("missing generated-start marker")?;
+    let end = doc.find(end_marker).ok_or("missing generated-end marker")?;
     if end < start {
         return Err("generated markers are out of order".to_string());
     }
     Ok(format!(
         "{}{}\n\n{}\n{}",
         &doc[..start],
-        GEN_START,
+        start_marker,
         generated.trim_end(),
         &doc[end..]
     ))
@@ -796,6 +867,16 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
                 .map_err(|e| format!("README.md: {e}"))?,
         ),
     ];
+    out.push((
+        root.join("templates/shell/choir.sh"),
+        splice_between(
+            &read("templates/shell/choir.sh")?,
+            &shell_functions(),
+            SH_GEN_START,
+            SH_GEN_END,
+        )
+            .map_err(|e| format!("templates/shell/choir.sh: {e}"))?,
+    ));
     for rel in [
         "templates/claude-code/CLAUDE.snippet.md",
         "templates/codex/AGENTS.snippet.md",
