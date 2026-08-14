@@ -735,6 +735,37 @@ impl Accounts {
         base64url_decode(&encoded)
     }
 
+    /// One account's own enrolled credentials, for the page that account
+    /// manages them on (D39).
+    ///
+    /// Separate from [`Accounts::list_json`] because the questions differ:
+    /// the roster is the operator's view of everyone and needs a node-wide
+    /// read, while this is a person looking at their own keys and needs
+    /// only their own credential. Returning an empty list for an unknown
+    /// name is deliberate — an `--auth-file` operator has no account
+    /// record, and that is "nothing enrolled", not an error.
+    #[must_use]
+    pub fn passkeys_json(&self, user: &str) -> Vec<serde_json::Value> {
+        let state = self.state.read().expect("accounts read lock");
+        state
+            .accounts
+            .get(user)
+            .map(|account| render_passkeys(&account.passkeys))
+            .unwrap_or_default()
+    }
+
+    /// Whether this name has an account record at all, which is what
+    /// decides between "you have no passkeys yet" and "this credential
+    /// cannot hold one".
+    #[must_use]
+    pub fn has_account(&self, user: &str) -> bool {
+        self.state
+            .read()
+            .expect("accounts read lock")
+            .accounts
+            .contains_key(user)
+    }
+
     /// Everything the store holds except the secrets: who has an account,
     /// what they were granted, which public keys are registered, and
     /// which invites are outstanding.

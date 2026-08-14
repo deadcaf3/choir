@@ -15,6 +15,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub mod account_page;
 pub mod accounts;
 pub mod acl;
 pub mod hooks;
@@ -856,6 +857,26 @@ impl Node {
                             .expect("static header"),
                         );
                     let outcome = served(request, response, 403, body.len() as u64);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                // The page a person enrols a passkey on (D39). Ahead
+                // of the API block because it is a page, not an endpoint,
+                // and it is gated by nothing but being authenticated: the
+                // only account it can ever show is the caller's own.
+                if request.url().split('?').next().unwrap_or("") == "/account" {
+                    let page = account_page::render(accounts.as_deref(), &user);
+                    let bytes = page.html.len() as u64;
+                    let response = tiny_http::Response::from_string(page.html)
+                        .with_status_code(page.status)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"text/html; charset=utf-8"[..],
+                            )
+                            .expect("static header"),
+                        );
+                    let outcome = served(request, response, page.status, bytes);
                     access.finish(log, &user, &outcome);
                     return;
                 }

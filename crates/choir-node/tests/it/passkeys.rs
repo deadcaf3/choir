@@ -813,3 +813,92 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The door D39 was missing: a human with a browser can reach a page that
+/// enrols a passkey, and it shows them the ones they already have.
+///
+/// Served, not rendered in isolation, because the thing that was actually
+/// absent was a *route* — the endpoint and the ceremony both existed in
+/// pieces and nothing joined them to a URL a person could open.
+#[test]
+fn a_person_can_reach_a_page_that_enrols_a_passkey() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-account");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_accounts(work.join("accounts.json"), None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let page = |who: &str| {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-u", who, &format!("{base}/account")])
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // The operator's credential comes from the auth file, so it has no
+    // account record and cannot hold a passkey. The page says that
+    // instead of offering an enrolment that would 404.
+    let operators = page("alice:a");
+    assert!(
+        operators.contains("cannot hold a passkey"),
+        "the operator was not told why: {operators}"
+    );
+
+    let (_, invite) = curl(&[
+        "-u", "alice:a", "-X", "POST", "--data-binary",
+        r#"{"user":"bob","grants":["agents/demo read"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    let pair = invite["invite"].as_str().expect("invite").to_string();
+    let (_, redeemed) = curl(&[
+        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    let token = redeemed["token"].as_str().expect("token").to_string();
+    let bob = format!("bob:{token}");
+
+    // Bob has an account and no passkeys: the ceremony is offered, with
+    // the scripting-off fallback beside it.
+    let empty = page(&bob);
+    assert!(empty.contains("None yet"), "no empty state: {empty}");
+    assert!(empty.contains("navigator.credentials.create"), "no ceremony");
+    assert!(empty.contains("Add a passkey"), "no control");
+    assert!(empty.contains("<noscript>"), "no scripting-off fallback");
+    assert!(!empty.contains("src="), "the account page fetches something");
+
+    // After enrolling, the page lists it under the name he gave it — and
+    // lists it for him only.
+    let (public_key, _secret) = credential(&work, "account");
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "--data-binary",
+        &format!(
+            r#"{{"credential_id":"work-laptop-cred","public_key":"{public_key}","label":"work laptop"}}"#
+        ),
+        &format!("{base}/api/accounts/passkey"),
+    ]);
+    assert_eq!(status, 200, "{body}");
+
+    let listed = page(&bob);
+    assert!(listed.contains("work laptop"), "the label is missing: {listed}");
+    assert!(listed.contains("work-laptop-cred"), "the credential is missing");
+    assert!(
+        !page("alice:a").contains("work-laptop-cred"),
+        "one account's credential is shown on another's page"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
