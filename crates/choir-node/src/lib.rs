@@ -816,7 +816,33 @@ impl Node {
                         None
                     };
                     if let Some(retry_after) = refusal {
-                        let outcome = respond_rate_limited(request, access.path(), retry_after);
+                        // A reader who refreshed too fast gets a page; an
+                        // agent gets the JSON it parses. Same refusal,
+                        // same `Retry-After`, told in the surface the
+                        // caller is already in.
+                        let outcome = if is_browser_route(access.path()) {
+                            let seconds = format!("{retry_after} seconds");
+                            let html = ui::refusal(
+                                "Too many requests, briefly",
+                                429,
+                                &ui::Refusal {
+                                    code: "rate_limited",
+                                    error: "This credential has spent its request allowance \
+                                            for the moment. Nothing is wrong with the node \
+                                            or with what you asked for.",
+                                    expected: Some("requests within this node's per-user rate"),
+                                    actual: Some(&seconds),
+                                    next: "Wait, then reload. If this keeps happening while \
+                                           you are reading rather than scripting, the \
+                                           operator set the limit low enough to catch a \
+                                           person and would want to know.",
+                                },
+                                &[],
+                            );
+                            respond_page(request, 429, html, Some(retry_after))
+                        } else {
+                            respond_rate_limited(request, access.path(), retry_after)
+                        };
                         access.finish(log, &user, &outcome);
                         return;
                     }
@@ -831,17 +857,44 @@ impl Node {
                     && !(request.method().as_str() == "POST"
                         && request.url() == "/api/accounts/redeem")
                 {
-                    let body = "{\"error\":\"an invite may only be redeemed\"}\n";
-                    let response = tiny_http::Response::from_string(body)
-                        .with_status_code(403)
-                        .with_header(
-                            tiny_http::Header::from_bytes(
-                                &b"Content-Type"[..],
-                                &b"application/json"[..],
-                            )
-                            .expect("static header"),
+                    // A person who was handed an invite and pasted the
+                    // node's URL into a browser lands here, and it is
+                    // very likely their first minute on this node. The
+                    // JSON below says the true thing and tells them
+                    // nothing they can act on without reading the source.
+                    let outcome = if is_browser_route(request.url()) {
+                        let html = ui::refusal(
+                            "That invite is not an account yet",
+                            403,
+                            &ui::Refusal {
+                                code: "invite_only",
+                                error: "The credential you signed in with is an unredeemed \
+                                        invite. An invite may do exactly one thing — become \
+                                        an account — and it holds no grants until it does.",
+                                expected: Some("an account token"),
+                                actual: Some("an unredeemed invite"),
+                                next: "Redeem it once, with the invite as the credential: \
+                                       POST /api/accounts/redeem. It answers with a token; \
+                                       sign in with that and this page will open. Invites \
+                                       expire and are single-use, so do it now rather than \
+                                       later.",
+                            },
+                            &[],
                         );
-                    let outcome = served(request, response, 403, body.len() as u64);
+                        respond_page(request, 403, html, None)
+                    } else {
+                        let body = "{\"error\":\"an invite may only be redeemed\"}\n";
+                        let response = tiny_http::Response::from_string(body)
+                            .with_status_code(403)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .expect("static header"),
+                            );
+                        served(request, response, 403, body.len() as u64)
+                    };
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -930,6 +983,40 @@ impl Node {
                         metered.then_some(quotas.workspaces).flatten(),
                         request,
                     );
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                // A mistyped address. Everything below is git
+                // smart-HTTP, and every smart-HTTP path carries a `.git`
+                // segment — the claim `browse.rs` makes and a test pins —
+                // so a `GET` without one matched no route above and can
+                // never be a git client. It is a person who typed
+                // something slightly wrong, and `git http-backend`'s CGI
+                // 404 tells them nothing about where they are. Answering
+                // here also means the two named destinations are the
+                // same whether or not an ACL is configured; before this,
+                // an ACL node said "no such repository" and a node
+                // without one said whatever git said.
+                if repo_from_path(request.url()).is_none()
+                    && matches!(request.method().as_str(), "GET" | "HEAD")
+                {
+                    let html = ui::refusal(
+                        "Nothing is served at that address",
+                        404,
+                        &ui::Refusal {
+                            code: "no_such_page",
+                            error: "This node answers on a small, fixed set of addresses, and \
+                                    that is not one of them.",
+                            expected: Some("/ for node state, /r/ for repositories, /api/… \
+                                            for the JSON surface"),
+                            actual: Some(access.path()),
+                            next: "Start from the node page and follow links; every address \
+                                   this surface has is reachable from one of the two below. \
+                                   A clone URL is different — it ends in .git.",
+                        },
+                        &[("/", "node state"), ("/r/", "repositories")],
+                    );
+                    let outcome = respond_page(request, 404, html, None);
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -1078,6 +1165,76 @@ fn respond_push_too_large(
                 .expect("static header"),
         );
     served(request, response, 413, bytes)
+}
+
+/// The policy every page on the browser surface carries.
+///
+/// One constant rather than a copy per responder: it is the layer that
+/// holds if the escaper ever misses something, and a fifth hand-typed
+/// copy is how one of them ends up subtly weaker than the rest.
+const BROWSER_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+
+/// Whether this URL is one a person is reading in a browser.
+///
+/// The browser surface is the node page, its alias, and everything under
+/// the D30 browse prefix — minus anything carrying a `.git` segment,
+/// which belongs to git however it is spelled (an owner really named `r`
+/// has a clone URL under `/r/`, and this must not claim it).
+///
+/// Decided on the route rather than on `Accept`: that header says what a
+/// client will *take*, not who it is, and every agent in this workspace
+/// sends `*/*`. Keying on the route is what lets a refusal be a page for
+/// the reader who met a wall while staying the JSON an agent can parse
+/// everywhere else.
+fn is_browser_route(url: &str) -> bool {
+    if repo_from_path(url).is_some() {
+        return false;
+    }
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path == "/" || path == "/index.html" || path == "/r" || path.starts_with("/r/")
+}
+
+/// Answers a browser-surface request with a page.
+///
+/// Carries the same headers the D28 and D30 pages carry, because a
+/// refusal renders content this node did not author just as they do —
+/// a ref name in an error message is still a ref name somebody chose.
+fn respond_page(
+    request: tiny_http::Request,
+    status: u16,
+    html: String,
+    retry_after: Option<u64>,
+) -> std::io::Result<(u16, u64)> {
+    let bytes = html.len() as u64;
+    let mut response = tiny_http::Response::from_string(html)
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-cache"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    if let Some(secs) = retry_after {
+        response.add_header(
+            tiny_http::Header::from_bytes(&b"Retry-After"[..], secs.to_string().as_bytes())
+                .expect("retry-after header"),
+        );
+    }
+    served(request, response, status, bytes)
 }
 
 /// Answers a git request the ACL refused. Plain text, because that is
@@ -1412,9 +1569,28 @@ fn handle_ui(
     let platform = match platform {
         Some(p) => p,
         None => {
-            let body = "the platform API is not enabled on this node, so there is nothing to show\n";
-            let response = tiny_http::Response::from_string(body).with_status_code(503);
-            return served(request, response, 503, body.len() as u64);
+            // A page, not a line of plain text: this is the node's front
+            // door, so it is the first thing a person sees, and "there is
+            // nothing to show" reads as a broken node rather than as a
+            // node deliberately started without a sequencer.
+            let html = ui::refusal(
+                "This node has no view to show",
+                503,
+                &ui::Refusal {
+                    code: "platform_disabled",
+                    error: "This node serves git repositories, but its platform API is \
+                            switched off, so there is no op log, no sequencer and no \
+                            materialized view behind this page.",
+                    expected: Some("a node started with the platform API enabled"),
+                    actual: Some("a git-only node"),
+                    next: "Browse the repositories instead — the link above works, and \
+                           cloning and pushing work exactly as they always did. This page \
+                           fills in once the operator restarts the node with the platform \
+                           API on.",
+                },
+                &[("/r/", "repositories")],
+            );
+            return respond_page(request, 503, html, None);
         }
     };
 
@@ -1458,11 +1634,8 @@ fn handle_ui(
         // through unescaped, the page may not run scripts, load
         // anything remote, or be framed by another origin.
         .with_header(
-            tiny_http::Header::from_bytes(
-                &b"Content-Security-Policy"[..],
-                &b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"[..],
-            )
-            .expect("static header"),
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
         )
         .with_header(
             tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
@@ -1495,17 +1668,31 @@ fn handle_browse(
     };
     if let Some(repo) = page.repo() {
         if !readable(repo) {
-            let body = "no such repository\n";
-            let response = tiny_http::Response::from_string(body)
-                .with_status_code(404)
-                .with_header(
-                    tiny_http::Header::from_bytes(
-                        &b"Content-Type"[..],
-                        &b"text/plain; charset=utf-8"[..],
-                    )
-                    .expect("static header"),
-                );
-            return served(request, response, 404, body.len() as u64);
+            // Every word here has to be true whether the repository
+            // exists or not, because that is the property the `404`
+            // buys: a reader without the grant must not be able to tell
+            // the two apart. So nothing echoes the name they asked for,
+            // nothing says "you need a grant on *this*", and the next
+            // action is one that works in both worlds.
+            let html = ui::refusal(
+                "No repository here",
+                404,
+                &ui::Refusal {
+                    code: "no_such_repository",
+                    error: "Nothing readable by this credential is at that address. A \
+                            repository that does not exist and one you were not granted \
+                            look identical from here, on purpose — a credential is never \
+                            told what it cannot read.",
+                    expected: Some("a repository this credential holds a read grant on"),
+                    actual: None,
+                    next: "Open the repository list — it names every repository this \
+                           credential can read, and following a link from it always works. \
+                           If what you wanted is missing, ask the operator for a read grant \
+                           by name.",
+                },
+                &[("/r/", "repositories you can read"), ("/", "node state")],
+            );
+            return respond_page(request, 404, html, None);
         }
     }
 
@@ -1537,11 +1724,8 @@ fn handle_browse(
         // are attacker-supplied by definition here, so even an escaping
         // miss must not be able to run or fetch anything.
         .with_header(
-            tiny_http::Header::from_bytes(
-                &b"Content-Security-Policy"[..],
-                &b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"[..],
-            )
-            .expect("static header"),
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
         )
         .with_header(
             tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])

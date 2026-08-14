@@ -253,6 +253,36 @@ fn safe_rev(rev: &str) -> Option<String> {
     ok.then(|| rev.to_string())
 }
 
+/// Percent-encodes a repository-relative path for use in a URL — the
+/// inverse of [`decode`], and the reason a link to an awkward filename
+/// resolves to the file it names.
+///
+/// A path is the one thing on this surface with no grammar: a repository
+/// may hold `notes?.txt` or `plan #2.md`, and those are ordinary files.
+/// HTML-escaping alone is not enough for them, because the characters
+/// that break a URL are not the characters that break markup — a browser
+/// asked for `…/blob/main/notes?.txt` sends the path `…/blob/main/notes`
+/// with `.txt` as a query string, and the page had just rendered a dead
+/// link to a file it could see. `/` is deliberately left literal: it is
+/// the segment separator both this and [`route`] agree on, and encoding
+/// it would invent a segment boundary the parser refuses.
+///
+/// Unreserved set per RFC 3986, which is the conservative choice: over-
+/// encoding costs a few bytes and always decodes back, while guessing at
+/// what a browser leaves alone does not.
+fn url_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(char::from(byte));
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Validates a repository-relative path.
 fn safe_path(path: &str) -> Option<()> {
     if path.is_empty() {
@@ -281,6 +311,18 @@ fn safe_oid(oid: &str) -> Option<String> {
 /// deciding it is text is the caller's job, after looking at it.
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let out = std::process::Command::new("git")
+        // `core.quotePath` defaults to *on*, which makes every path
+        // outside ASCII come back as a C-quoted octal string:
+        // `héllo.txt` arrives as `"h\303\251llo.txt"`, quotes included.
+        // That is not a display blemish — the listing builds its links
+        // out of the name it was given, so a repository containing one
+        // non-ASCII filename gets a page of dead links to files whose
+        // real names it never showed. Measured against a real repository
+        // rather than assumed: `ls-tree`, the diffstat and the
+        // `diff --git` headers all quote, and `cat-file` accepts the raw
+        // UTF-8 path, so turning it off is what makes the two agree.
+        .arg("-c")
+        .arg("core.quotePath=false")
         .arg("--git-dir")
         .arg(dir)
         .args(args)
@@ -386,7 +428,24 @@ fn index(root: &Path, readable: &dyn Fn(&str) -> bool) -> Rendered {
     h.push_str("<span class=\"pill\"><a href=\"/\">node state</a></span>");
     h.push_str("</div></header><main id=\"main\"><section>");
     if repos.is_empty() {
-        h.push_str("<p class=\"empty\">No repositories you can read.</p>");
+        // Deliberately not "this node holds N repositories, you may read
+        // none": the count is node-wide state, and a reader with no grant
+        // is exactly who must not learn it. So the page names both causes
+        // and both fixes instead, and says that it cannot tell them apart
+        // on purpose — otherwise a new reader reads D29 working correctly
+        // as the node being broken.
+        h.push_str(
+            "<p class=\"lede\">No repositories you can read. Either this node holds none yet, \
+             or this credential was not granted read on the ones it holds — from here those \
+             look the same, which is deliberate: a credential is shown what it was granted \
+             and never told what else exists.</p>",
+        );
+        crate::ui::next_action(
+            &mut h,
+            "If you run this node, create one: <code>choir-node &lt;root&gt; &lt;port&gt; \
+             --create &lt;owner&gt;/&lt;name&gt;.git</code>. If you do not, ask whoever does \
+             for a <code>read</code> grant on the repository you were pointed at.",
+        );
     } else {
         h.push_str("<table><tbody>");
         for repo in &repos {
@@ -450,7 +509,31 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
     repo_header(&mut h, repo, rev, &oid, path, "tree");
     h.push_str("<section>");
     if rows.is_empty() {
-        h.push_str("<p class=\"empty\">Nothing here at this revision.</p>");
+        // Reached two ways that need different fixes: a path that names
+        // nothing at this revision, and a genuinely empty directory at
+        // the root. `ls-tree` answers both with silence, so the page says
+        // which one it is by looking at whether a path was asked for.
+        if path.is_empty() {
+            h.push_str(
+                "<p class=\"lede\">This revision has no files in it. The commit exists; its \
+                 tree is empty.</p>",
+            );
+            crate::ui::next_action(
+                &mut h,
+                "Try another branch from the history above, or push a commit that adds \
+                 something.",
+            );
+        } else {
+            h.push_str(
+                "<p class=\"lede\">Nothing here at this revision. The path is spelled \
+                 correctly enough to be a path, but this commit's tree does not contain it.</p>",
+            );
+            crate::ui::next_action(
+                &mut h,
+                "Walk down from the repository root using the breadcrumb above — that path \
+                 exists by construction. A file that was deleted is still in the history.",
+            );
+        }
     } else {
         h.push_str("<table><tbody>");
         for (is_dir, name, size) in rows {
@@ -465,7 +548,10 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
             h.push('/');
             h.push_str(&esc(rev));
             h.push('/');
-            h.push_str(&esc(&name));
+            // Encoded for the URL, then escaped for the attribute. The
+            // label below is the other way round on purpose: a reader
+            // must see the name the repository has, not its encoding.
+            h.push_str(&esc(&url_path(&name)));
             h.push_str("\">");
             if is_dir {
                 h.push_str("<span class=\"muted\">/</span>");
@@ -503,9 +589,20 @@ fn blob(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
     } else {
         match git(dir, &["cat-file", "blob", &spec]) {
             Err(why) => {
-                h.push_str("<p class=\"empty\">");
+                // The commit resolved and the size read, so this is a
+                // path that is not a blob — most often a directory asked
+                // for with the wrong verb, which is a link away from
+                // working rather than a fault.
+                h.push_str("<p class=\"lede\">This revision holds nothing readable at that \
+                            path. A directory asked for as a file lands here.</p>");
+                h.push_str("<p class=\"note\">git says: ");
                 h.push_str(&esc(&why));
                 h.push_str("</p>");
+                crate::ui::next_action(
+                    &mut h,
+                    "Use the breadcrumb above to walk to it as a directory, or check the \
+                     spelling against the listing it came from.",
+                );
             }
             // A NUL in the first block is the same heuristic git itself
             // uses to call a file binary, and it is right often enough
@@ -664,7 +761,17 @@ fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered
     h.push_str(" reviews</span><span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
     h.push_str("</div></header><main id=\"main\"><section>");
     if rows.is_empty() {
-        h.push_str("<p class=\"empty\">No review proposes to land on this repository.</p>");
+        h.push_str(
+            "<p class=\"lede\">No review proposes to land on this repository. Reviews are \
+             listed here by the ref they target, so one that named no destination ref will \
+             not appear even though it exists.</p>",
+        );
+        crate::ui::next_action(
+            &mut h,
+            "Request one with <code>choir review &lt;api&gt; &lt;key-file&gt; &lt;channel&gt; \
+             &lt;id&gt; &lt;git-oid&gt; --ref &lt;repo&gt;:&lt;refname&gt;</code>. Name no \
+             reviewers and this node draws them for you.",
+        );
     } else {
         h.push_str("<table><thead><tr><th>review</th><th>onto</th><th>state</th>");
         h.push_str("<th class=\"num\">weight</th></tr></thead><tbody>");
@@ -707,7 +814,7 @@ fn review(
         return unavailable(repo);
     };
     let Some(state) = platform.review_json(id) else {
-        return missing(repo, id, "no such review");
+        return no_such_review(repo, id);
     };
     let commit_oid = git_oid_of(state["target"].as_str().unwrap_or("")).unwrap_or_default();
 
@@ -749,7 +856,20 @@ fn review(
     h.push_str("<section><h2>Reviewers</h2>");
     let reviewers = state["reviewers"].as_array().cloned().unwrap_or_default();
     if reviewers.is_empty() {
-        h.push_str("<p class=\"empty\">Unassigned.</p>");
+        // Not a cosmetic gap. An unassigned review can never read as
+        // approved, so a reader waiting on this one is waiting on
+        // nothing, and the page has to say so rather than look pending.
+        h.push_str(
+            "<p class=\"lede\">Nobody is assigned. This review cannot be approved in this \
+             state — an unassigned review never counts as approved, however many verdicts \
+             arrive.</p>",
+        );
+        crate::ui::next_action(
+            &mut h,
+            "Ask for the draw: a <code>RequestReview</code> naming no reviewers is answered \
+             by this node with an assignment. On a node started <code>--require-assignment</code> \
+             that is the only way a reviewer list is ever set.",
+        );
     } else {
         h.push_str("<table><thead><tr><th>reviewer</th><th>verdict</th><th>note</th>");
         h.push_str("</tr></thead><tbody>");
@@ -896,13 +1016,24 @@ fn state_tag(h: &mut String, review: &serde_json::Value) {
 
 /// The page for a review request on a node with no platform enabled.
 fn unavailable(repo: &str) -> Rendered {
-    let mut h = shell(&format!("{repo}: unavailable"));
-    h.push_str("<header class=\"top\"><h1>");
-    h.push_str(&esc(repo));
-    h.push_str("</h1></header><main id=\"main\"><section><p class=\"note\">");
-    h.push_str("The platform API is not enabled on this node, so it holds no reviews.");
-    h.push_str("</p></section>");
-    Rendered { status: 503, etag: None, html: close(h) }
+    Rendered {
+        status: 503,
+        etag: None,
+        html: crate::ui::refusal(
+            "Reviews are not enabled here",
+            503,
+            &crate::ui::Refusal {
+                code: "platform_disabled",
+                error: "This node serves git, but its platform API is switched off, so it holds \
+                        no reviews to show you. Nothing is broken and nothing was lost.",
+                expected: Some("a node started with the platform API enabled"),
+                actual: Some("a git-only node"),
+                next: "Browse the code instead — the link above works. Reviews appear here only \
+                       once the operator restarts this node with the platform API on.",
+            },
+            &[(&format!("/r/{repo}"), "this repository"), ("/r/", "all repositories")],
+        ),
+    }
 }
 
 /// The page for a repository with no commits yet.
@@ -916,26 +1047,77 @@ fn empty(repo: &str) -> Rendered {
     h.push_str(&esc(repo));
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\">empty</span>");
     h.push_str("<span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
-    h.push_str("</div></header><main id=\"main\"><section><p class=\"note\">");
-    h.push_str("No commits yet. Push a branch and it will appear here.</p></section>");
+    h.push_str("</div></header><main id=\"main\"><section>");
+    h.push_str("<p class=\"lede\">No commits yet. This repository exists and you may read it; \
+                nobody has pushed to it.</p>");
+    crate::ui::next_action(
+        &mut h,
+        "Clone it, commit, and push — <code>git push origin HEAD:main</code>. The tree, the \
+         history and the diffs all appear here on the first push.",
+    );
+    h.push_str("</section>");
     Rendered { status: 200, etag: None, html: close(h) }
 }
 
 /// The page for a revision that does not resolve.
 ///
-/// A `404` with git's own words, because "no such revision" and "not a
-/// tree object" send a reader to different fixes, and flattening both
-/// into "not found" costs them the difference.
+/// A `404` carrying git's own words in `found`, because "no such
+/// revision" and "not a tree object" send a reader to different fixes,
+/// and flattening both into "not found" costs them the difference.
+///
+/// The reader is told plainly that the *repository* was readable, which
+/// is the one thing this page can say without breaking D29: they already
+/// hold the grant, so confirming it leaks nothing, and it separates "you
+/// typed the branch wrong" from "you are not allowed here" — two states
+/// that otherwise look identical and have opposite fixes.
 fn missing(repo: &str, rev: &str, why: &str) -> Rendered {
-    let mut h = shell(&format!("{repo}: not found"));
-    h.push_str("<header class=\"top\"><h1>");
-    h.push_str(&esc(repo));
-    h.push_str("</h1></header><main id=\"main\"><section><p class=\"note\">");
-    h.push_str(&esc(rev));
-    h.push_str(": ");
-    h.push_str(&esc(why));
-    h.push_str("</p></section>");
-    Rendered { status: 404, etag: None, html: close(h) }
+    Rendered {
+        status: 404,
+        etag: None,
+        html: crate::ui::refusal(
+            &format!("{repo}: no such revision"),
+            404,
+            &crate::ui::Refusal {
+                code: "no_such_revision",
+                error: "You may read this repository, but nothing in it resolves to what the \
+                        address asked for.",
+                expected: Some("a branch, a tag, or a full object id this repository holds"),
+                actual: Some(&format!("{rev} — git says: {why}")),
+                next: "Open the repository above and read the branch names off its front page. \
+                       A shortened object id will not work here; browsing wants the whole one.",
+            },
+            &[(&format!("/r/{repo}"), "this repository"), ("/r/", "all repositories")],
+        ),
+    }
+}
+
+/// The page for a review id the view does not carry.
+///
+/// Separate from [`missing`] because a review id is not a revision: the
+/// fix is a different command, and telling somebody to check their branch
+/// names when they mistyped a review id wastes the trip.
+fn no_such_review(repo: &str, id: &str) -> Rendered {
+    Rendered {
+        status: 404,
+        etag: None,
+        html: crate::ui::refusal(
+            &format!("{repo}: no such review"),
+            404,
+            &crate::ui::Refusal {
+                code: "no_such_review",
+                error: "No review by that id is in this node's view. An id that was never \
+                        requested and one whose review was archived away both land here.",
+                expected: Some("a review id this node has sequenced"),
+                actual: Some(id),
+                next: "Open the review list above — it names every review proposing to land on \
+                       this repository, archived ones included.",
+            },
+            &[
+                (&format!("/r/{repo}/reviews"), "this repository's reviews"),
+                (&format!("/r/{repo}"), "this repository"),
+            ],
+        ),
+    }
 }
 
 /// Document head and opening tags, shared with the D28 page so the two
@@ -1000,7 +1182,7 @@ fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, her
                 h.push_str("/tree/");
                 h.push_str(&esc(rev));
                 h.push('/');
-                h.push_str(&esc(&walked));
+                h.push_str(&esc(&url_path(&walked)));
                 h.push_str("\">");
                 h.push_str(&esc(segment));
                 h.push_str("</a>");
@@ -1137,6 +1319,41 @@ mod tests {
         ] {
             assert_eq!(route(url), None, "a dangerous URL parsed: {url}");
         }
+    }
+
+    /// Encoding and parsing are inverses, checked as a pair rather than
+    /// separately: a link is only correct if the router gives back the
+    /// path the listing started from, and two functions that each look
+    /// right on their own are exactly how that stops being true.
+    #[test]
+    fn an_encoded_path_parses_back_to_the_path_it_came_from() {
+        for path in [
+            "src/lib.rs",
+            "src/a file.txt",
+            "src/query?.txt",
+            "src/hash#one.txt",
+            "src/ünïcode-café.rs",
+            "src/日本語.txt",
+            "src/<img src=x onerror=alert(1)>.txt",
+            "src/100% done.md",
+            "deep/very/long/nested/path/leaf.txt",
+        ] {
+            let url = format!("/r/o/p/blob/main/{}", url_path(path));
+            assert_eq!(
+                route(&url),
+                Some(Page::Blob {
+                    repo: "o/p".into(),
+                    rev: "main".into(),
+                    path: path.to_string(),
+                }),
+                "the link this page renders for {path} does not route back to it"
+            );
+        }
+        // The separator stays a separator, and nothing else does.
+        assert_eq!(url_path("a/b"), "a/b");
+        assert_eq!(url_path("a?b"), "a%3Fb");
+        assert_eq!(url_path("a b"), "a%20b");
+        assert_eq!(url_path("a%b"), "a%25b");
     }
 
     #[test]

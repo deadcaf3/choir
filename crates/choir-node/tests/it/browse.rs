@@ -59,6 +59,35 @@ fn header_value(headers: &str, name: &str) -> Option<String> {
     })
 }
 
+/// Every `href` on a page, in document order, un-escaped back to the URL
+/// a browser would request.
+///
+/// Deliberately crude — one attribute name, no parser — because it is
+/// used to follow the node's own links, which this crate writes and which
+/// are always double-quoted. Anything cleverer would be a second HTML
+/// implementation to keep right.
+fn hrefs(page: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = page;
+    while let Some(at) = rest.find("href=\"") {
+        rest = &rest[at + 6..];
+        let Some(end) = rest.find('"') else { break };
+        let raw = &rest[..end];
+        rest = &rest[end..];
+        // Only the escapes the page's own escaper can produce.
+        let href = raw
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&#39;", "'")
+            .replace("&quot;", "\"");
+        if href.starts_with('/') {
+            out.push(href);
+        }
+    }
+    out
+}
+
 /// A served node holding one repository with a content tree pushed into
 /// it, returning the base URL, the work directory and the pushed oid.
 ///
@@ -110,6 +139,25 @@ fn served(tag: &str, acl: &str) -> (String, std::path::PathBuf, String, std::pat
     std::fs::write(clone.join("src/lib.rs"), "// <script>alert('x')</script>\nfn main() {}\n").unwrap();
     std::fs::write(clone.join("src/<img src=x onerror=alert(1)>.txt"), "named like markup\n").unwrap();
     std::fs::write(clone.join("binary.dat"), [0u8, 1, 2, 3, 0, 9]).unwrap();
+    // The shapes a real repository has and an invented fixture does not.
+    // In the shared fixture rather than a test of their own so that every
+    // test above walks them too: a listing that renders these wrongly is
+    // a listing, and the walk test should notice.
+    std::fs::write(clone.join("src/ünïcode-café.rs"), "// unicode in the name\n").unwrap();
+    std::fs::write(clone.join("src/日本語.txt"), "outside latin-1 entirely\n").unwrap();
+    // Legal filenames whose characters are URL syntax. Left un-encoded in
+    // an href, `?` starts a query string and `#` a fragment, so the link
+    // resolves to a shorter path than the one it names.
+    std::fs::write(clone.join("src/query?.txt"), "a question mark\n").unwrap();
+    std::fs::write(clone.join("src/hash#one.txt"), "a fragment marker\n").unwrap();
+    let deep = clone.join("deep/very/long/nested/path/that/keeps/going/further/down");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("leaf.txt"), "at the bottom\n").unwrap();
+    std::fs::write(
+        clone.join("src/a-deliberately-long-file-name-of-the-kind-generated-code-produces.rs"),
+        "long name\n",
+    )
+    .unwrap();
     assert!(git(&clone, &["add", "."]).status.success());
     assert!(git(&clone, &["commit", "-q", "-m", "seed the tree"]).status.success());
     let push = git(&clone, &["push", "-q", "origin", "HEAD:main"]);
@@ -553,6 +601,166 @@ fn a_review_page_renders_the_discussion_thread() {
     assert!(
         !page.contains("Nothing said yet"),
         "an archived review reads as one nobody discussed: {page}"
+    );
+}
+
+/// Every name the listing shows is a name the listing can reach.
+///
+/// This is the assertion the unicode bug needed, and it needs no
+/// knowledge of how a filesystem normalises: take the links the page
+/// actually rendered and follow them. `core.quotePath` defaults to *on*,
+/// so `git ls-tree` returned `"src/\303\274n\303\257code.rs"` — quotes
+/// and octal escapes included — and the page built both its label and its
+/// `href` out of that. Every such link was dead, and the reader was shown
+/// a name no part of the repository has.
+///
+/// Following the page's own links is also what catches the next version
+/// of the bug: any escaping, truncation or encoding that makes a label
+/// and its target disagree fails here, whatever caused it.
+#[test]
+fn every_link_a_listing_renders_can_be_followed() {
+    let (base, _work, _oid, _) = served("shapes", "");
+
+    // The octal-escape form, asserted absent by name. This is the exact
+    // byte sequence `ls-tree` emits for `ü` when quoting is on, so it
+    // fails loudly and specifically if the setting comes back.
+    for path in ["/r/agents/one/tree/main/src", "/r/agents/one"] {
+        let (status, _, page) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        assert_eq!(status, 200, "{path} did not render");
+        assert!(
+            !page.contains("\\303"),
+            "{path} shows an octal escape instead of the filename: {page}"
+        );
+    }
+
+    // Walk the tree the way a reader does, following every link the page
+    // offers, and require each to answer.
+    let mut queue = vec!["/r/agents/one/tree/main".to_string()];
+    let mut seen: Vec<String> = Vec::new();
+    let mut blobs = 0usize;
+    while let Some(path) = queue.pop() {
+        if seen.contains(&path) {
+            continue;
+        }
+        seen.push(path.clone());
+        let (status, _, page) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        assert_eq!(status, 200, "a link the page rendered is dead: {path}");
+        for href in hrefs(&page) {
+            if href.contains("/tree/") {
+                queue.push(href);
+            } else if href.contains("/blob/") {
+                let (status, _, body) = get(&format!("{base}{href}"), &["-u", "alice:a"]);
+                assert_eq!(status, 200, "a file link the page rendered is dead: {href}");
+                assert!(
+                    !body.contains("no such revision"),
+                    "a file link resolved to a refusal: {href}"
+                );
+                blobs += 1;
+            }
+        }
+    }
+    // The walk has to have actually walked, or every assertion above was
+    // vacuous. Seven blobs are seeded, at least one of them behind a
+    // directory link, so both counts are lower bounds with slack.
+    assert!(blobs >= 7, "the walk followed only {blobs} file links");
+    assert!(
+        seen.len() >= 3,
+        "the walk never descended into a directory: {seen:?}"
+    );
+}
+
+/// Deep nesting renders a breadcrumb a reader can climb, and every step
+/// of it is a working link. A path ten segments long is the ordinary
+/// shape of a real repository, not an edge case.
+#[test]
+fn a_deep_path_keeps_every_step_of_its_breadcrumb_reachable() {
+    let (base, _work, _oid, _) = served("deep", "");
+    let path = "/r/agents/one/tree/main/deep/very/long/nested/path/that/keeps/going/further/down";
+
+    let (status, _, page) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "a deep path did not render: {page}");
+    assert!(page.contains("leaf.txt"), "the deep directory is empty: {page}");
+    assert!(page.contains("crumbs"), "a deep path rendered no breadcrumb: {page}");
+    // The last segment is where the reader is, so it is text rather than
+    // a link; every one above it must be followable.
+    assert!(
+        page.contains(">root</a>"),
+        "the breadcrumb has no way back to the root: {page}"
+    );
+    let mut climbed = 0usize;
+    for href in hrefs(&page) {
+        if href.contains("/tree/main/deep") {
+            let (status, _, _) = get(&format!("{base}{href}"), &["-u", "alice:a"]);
+            assert_eq!(status, 200, "a breadcrumb step is dead: {href}");
+            climbed += 1;
+        }
+    }
+    assert!(climbed >= 8, "only {climbed} breadcrumb steps were checked");
+}
+
+/// A reader without the grant is told what to do without being told
+/// whether the repository exists. Both halves are the product: the `404`
+/// is D29's non-confirmation, and the words are what stop it reading as
+/// a broken link.
+#[test]
+fn a_denied_repository_says_what_to_do_without_confirming_it_exists() {
+    let (base, _work, _oid, _) = served("denied", "alice  agents/one  write\n");
+
+    // `agents/one` exists; `agents/ghost` does not. A reader with no
+    // grant must not be able to tell them apart — same status, and the
+    // same bytes.
+    let (real_status, real_headers, real) =
+        get(&format!("{base}/r/agents/one"), &["-u", "bob:b"]);
+    let (ghost_status, _, ghost) = get(&format!("{base}/r/agents/ghost"), &["-u", "bob:b"]);
+    assert_eq!(real_status, 404);
+    assert_eq!(ghost_status, 404);
+    assert_eq!(
+        real, ghost,
+        "the refusal for a repository that exists differs from one that does not, \
+         so a reader can enumerate this node by diffing them"
+    );
+
+    // It is a page, in the surface the reader is in.
+    assert_eq!(
+        header_value(&real_headers, "Content-Type").as_deref(),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(real.contains("no_such_repository"), "no code to quote: {real}");
+    // What they may do, and the one action that changes it.
+    assert!(
+        real.contains("read grant"),
+        "the page never says what is missing: {real}"
+    );
+    assert!(
+        real.contains("href=\"/r/\""),
+        "a refused reader is given nowhere to go: {real}"
+    );
+    assert!(real.contains("next"), "no next action: {real}");
+    // ...and nothing on it names the repository they asked for, which is
+    // what would leak the answer the 404 exists to withhold.
+    assert!(
+        !real.contains("agents/one"),
+        "the refusal echoed the repository name back, confirming it: {real}"
+    );
+
+    // The index a refused reader is sent to has to be honest about why
+    // it is empty, without counting what they cannot see.
+    let (status, _, index) = get(&format!("{base}/r/"), &["-u", "bob:b"]);
+    assert_eq!(status, 200);
+    // Both causes and both fixes: an operator whose node is empty and a
+    // reader with no grant land on identical bytes, so the page has to
+    // carry the answer for each of them.
+    assert!(
+        index.contains("not granted read"),
+        "the empty index does not name the missing-grant cause: {index}"
+    );
+    assert!(
+        index.contains("--create"),
+        "the empty index does not name the empty-node cause: {index}"
+    );
+    assert!(
+        !index.contains("agents/one"),
+        "the index leaked a repository its reader cannot read: {index}"
     );
 }
 

@@ -347,7 +347,7 @@ body{background:var(--ground);color:var(--ink);margin:0 auto;
 header.top{border-bottom:var(--border);padding-bottom:var(--sp-5);
   margin-bottom:var(--sp-8)}
 h1{font-size:var(--fs-800);line-height:var(--lh-tight);letter-spacing:var(--tr-display);
-  color:var(--strong);margin:0;font-weight:var(--fw-bold)}
+  color:var(--strong);margin:0;font-weight:var(--fw-bold);overflow-wrap:break-word}
 h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps);
   color:var(--faint);margin:var(--sp-10) 0 var(--sp-3);font-weight:var(--fw-medium);
   border-left:var(--bw-rule) solid var(--accent);padding-left:var(--sp-3)}
@@ -364,7 +364,7 @@ h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps
 section{margin-bottom:var(--sp-8)}
 table{width:100%;border-collapse:collapse;font-size:var(--fs-300)}
 td,th{text-align:left;padding:var(--sp-2) var(--sp-3);
-  border-bottom:var(--border-hair);vertical-align:top}
+  border-bottom:var(--border-hair);vertical-align:top;overflow-wrap:break-word}
 thead th{font-size:var(--fs-100);text-transform:uppercase;
   letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium)}
 tbody tr:hover{background:var(--raise)}
@@ -374,7 +374,14 @@ tr.group th{background:var(--surface);color:var(--muted);
 tr.open{background:var(--accent-tint)}
 tr.open td{border-left:var(--bw-2) solid var(--accent)}
 
-.mono,.id{font-family:var(--font-mono);font-size:var(--fs-300)}
+/* `anywhere` rather than `break-word`, and the difference is the whole
+   point: only `anywhere` lowers a cell's min-content width, so only
+   `anywhere` lets a table holding a 64-character digest or a long ref
+   name shrink to a phone instead of pushing the page sideways. Prose
+   cells keep `break-word` above, which wraps at spaces and never chops a
+   word that had somewhere to go. */
+.mono,.id{font-family:var(--font-mono);font-size:var(--fs-300);
+  overflow-wrap:anywhere}
 .num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
 .muted{color:var(--faint)}
 b.tag{font-size:var(--fs-100);font-weight:var(--fw-medium);
@@ -390,6 +397,44 @@ b.danger{color:var(--danger);background:var(--danger-tint);
 .v{padding:var(--sp-0) 0;font-size:var(--fs-200)}
 .empty,.note{color:var(--faint);font-size:var(--fs-200);margin:var(--sp-2) 0}
 .note{border-left:var(--border-accent);padding-left:var(--sp-3)}
+
+/* `.lede` and the admonitions, lifted verbatim from the design system's
+   components.css exactly as `.skip` above was, and used for exactly what
+   they are named for: the sentence explaining a refusal is a lede, and
+   the one next action is a note-level admonition. Inventing choir-local
+   equivalents was the first draft of this block and it was the wrong
+   instinct — a second vocabulary for the same two things is how a design
+   system stops being one.
+
+   One deliberate divergence, recorded rather than hidden: the source's
+   `.callout > .ico` carries `padding-top:.15em`, an optical nudge. This
+   sheet's rule ("no colour, size, radius, shadow or duration is authored
+   below") is stricter than components.css's own, which permits em nudges
+   and breakpoint literals. The declaration is dropped rather than
+   smuggled in under a marker that says it is not there. */
+.lede{font-size:var(--fs-600);line-height:var(--lh-normal);color:var(--muted);
+  max-width:var(--measure)}
+.callout{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--sp-3);
+  margin:0 0 var(--sp-6);padding:var(--sp-4) var(--sp-5);
+  border:var(--border);border-left:var(--bw-rule) solid var(--line-strong);
+  border-radius:var(--r-sm) var(--r-md) var(--r-md) var(--r-sm);
+  background:var(--card);font-size:var(--fs-400);line-height:var(--lh-normal)}
+.callout > .ico{font-family:var(--font-mono);font-size:var(--fs-200);
+  color:var(--faint);text-transform:uppercase;letter-spacing:var(--tr-caps)}
+.callout p{margin:0 0 var(--sp-2);max-width:none}
+.callout p:last-child{margin:0}
+.callout strong{color:var(--strong)}
+.callout-note{border-left-color:var(--accent);background:var(--accent-tint)}
+.callout-note > .ico{color:var(--accent-ink)}
+.callout-ok{border-left-color:var(--ok);background:var(--ok-tint)}
+.callout-ok > .ico{color:var(--ok)}
+.callout-warn{border-left-color:var(--warn);background:var(--warn-tint)}
+.callout-warn > .ico{color:var(--warn)}
+.callout-danger{border-left-color:var(--danger);background:var(--danger-tint)}
+.callout-danger > .ico{color:var(--danger)}
+/* Choir's own: a command inside a callout or a lede reads as one. */
+.callout code,.lede code{background:var(--sunken);border-radius:var(--r-xs);
+  padding:var(--sp-0) var(--sp-1);font-size:var(--fs-300);color:var(--syn-string)}
 footer{margin-top:var(--sp-12);padding-top:var(--sp-4);border-top:var(--border);
   color:var(--faint);font-size:var(--fs-200)}
 details{margin-top:var(--sp-3)}
@@ -399,13 +444,27 @@ summary:hover{color:var(--accent-ink)}
 
 /* Repository browsing (D30). Code and diffs reuse the design system's
    own syntax tokens rather than inventing a second palette for them. */
+/* A deep path is the ordinary case, not the exceptional one, so the
+   breadcrumb wraps rather than widening the page: `anywhere` because a
+   single segment can be longer than a phone is wide and has no space in
+   it to break at. */
 nav.crumbs{margin-top:var(--sp-3);font-size:var(--fs-200);color:var(--muted);
-  font-family:var(--font-mono)}
+  font-family:var(--font-mono);overflow-wrap:anywhere;line-height:var(--lh-normal)}
 pre.code{background:var(--sunken);border:var(--border);border-radius:var(--r-md);
   padding:var(--sp-3);overflow-x:auto;font-family:var(--font-mono);
   font-size:var(--fs-200);line-height:var(--lh-code);color:var(--syn-plain)}
-pre.code .ln{display:inline-block;width:var(--sp-10);
-  color:var(--syn-gutter);-webkit-user-select:none;user-select:none}
-pre.diff .add{color:var(--syn-added)}
-pre.diff .del{color:var(--syn-removed)}
-pre.diff .hunk{color:var(--syn-comment)}
+/* `min-width`, not `width`: a fixed box is exactly wide enough for four
+   digits, and the five-digit line numbers of any real file overflowed it
+   into the first characters of their own source line. */
+pre.code .ln{display:inline-block;min-width:var(--sp-10);
+  padding-right:var(--sp-2);color:var(--syn-gutter);
+  -webkit-user-select:none;user-select:none}
+/* `--syn-added` and `--syn-removed` are ~14%-alpha washes, i.e. background
+   tokens. Setting them as `color` rendered added and removed lines at 14%
+   opacity on the darkest surface in the sheet — the two lines a reader
+   opens a diff for were the two least legible on the page. The wash is
+   the background it was always meant to be, and the foreground is the
+   signal token that carries a stated contrast ratio. */
+pre.diff .add{color:var(--ok);background:var(--syn-added)}
+pre.diff .del{color:var(--danger);background:var(--syn-removed)}
+pre.diff .hunk{color:var(--accent-ink)}

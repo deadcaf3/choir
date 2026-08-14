@@ -162,9 +162,19 @@ fn s<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
 
 /// Shortens a content hash for display while keeping its codec prefix,
 /// which is the part that says what kind of hash it is.
+///
+/// Counted and cut in `char`s, not bytes. A digest reaching here is hex
+/// in every payload the API builds, but this function is handed whatever
+/// the JSON held, and byte-slicing a multi-byte character in half panics
+/// — which on this path means the browser surface taking the node down
+/// over a display detail. The module's promise is a page that says less,
+/// never a panic that serves nothing.
 fn short(id: &str) -> String {
     match id.split_once('-') {
-        Some((codec, digest)) if digest.len() > 12 => format!("{codec}-{}", &digest[..12]),
+        Some((codec, digest)) if digest.chars().count() > 12 => {
+            let head: String = digest.chars().take(12).collect();
+            format!("{codec}-{head}")
+        }
         // A bare digest — a git commit id, which carries no codec
         // prefix. Found by rendering a real view rather than a fixture:
         // invented data all had prefixes, so this branch did not exist
@@ -238,6 +248,10 @@ fn header(h: &mut String, v: &serde_json::Value, seq: u64) {
     h.push_str("<span class=\"pill\">node ");
     h.push_str(&esc(&short(s(&log, "node"))));
     h.push_str("</span>");
+    // The way out. `/r/` links back here and this did not link there, so
+    // a reader who opened the node's front door could see everything it
+    // *knows* and never find the code — which is the thing they came for.
+    h.push_str("<span class=\"pill\"><a href=\"/r/\">repositories</a></span>");
     h.push_str("</div></header><main id=\"main\">");
 }
 
@@ -252,7 +266,13 @@ fn refs_section(h: &mut String, v: &serde_json::Value) {
     h.push_str(&refs.len().to_string());
     h.push_str("</span></h2>");
     if refs.is_empty() {
-        h.push_str("<p class=\"empty\">No refs yet. A push or a signed <code>SetRef</code> creates one.</p></section>");
+        h.push_str("<p class=\"empty\">No refs yet. This node is holding repositories that nobody has pushed to.</p>");
+        next_action(
+            h,
+            "Push a branch — <code>git push &lt;clone-url&gt; HEAD:main</code> — or submit a \
+             signed <code>SetRef</code>. Either way it appears here at the next sequence.",
+        );
+        h.push_str("</section>");
         return;
     }
     let mut current = "";
@@ -302,13 +322,21 @@ fn reviews_section(h: &mut String, v: &serde_json::Value) {
     h.push_str(" total</span></h2>");
 
     if reviews.is_empty() {
-        h.push_str("<p class=\"empty\">No reviews recorded.</p></section>");
+        h.push_str("<p class=\"empty\">No reviews recorded. Nobody has asked for one yet.</p>");
+        next_action(
+            h,
+            "Request one with <code>choir review &lt;api&gt; &lt;key-file&gt; &lt;channel&gt; \
+             &lt;id&gt; &lt;git-oid&gt;</code>. Name no reviewers and this node draws them.",
+        );
+        h.push_str("</section>");
         return;
     }
 
     // The queue a human is here to act on, in full.
     if open.is_empty() {
-        h.push_str("<p class=\"empty\">Nothing awaiting a verdict.</p>");
+        h.push_str(
+            "<p class=\"empty\">Nothing awaiting a verdict. Every review here has been answered.</p>",
+        );
     } else {
         review_table(h, &open);
     }
@@ -468,9 +496,17 @@ fn attestation_section(h: &mut String, v: &serde_json::Value) {
             h.push_str("</td></tr></tbody></table>");
             h.push_str("<p class=\"note\">Compare <code>id</code> at the same <code>at_seq</code> with another reader to check you were shown the same ref state. It is the node's own signature, so this is a comparison primitive, not proof of non-equivocation.</p>");
         }
-        _ => h.push_str(
-            "<p class=\"empty\">No attestation yet. One is emitted after the next ref update.</p>",
-        ),
+        _ => {
+            h.push_str(
+                "<p class=\"empty\">No attestation yet. This node signs one after a ref moves, \
+                 and no ref has moved since it started.</p>",
+            );
+            next_action(
+                h,
+                "Push anything, or wait for somebody else to. Nothing here needs fixing — an \
+                 attestation is a consequence of a ref update, not a thing to switch on.",
+            );
+        }
     }
     h.push_str("</section>");
 }
@@ -485,7 +521,16 @@ fn workspaces_section(h: &mut String, v: &serde_json::Value) {
     h.push_str(&ws.len().to_string());
     h.push_str("</span></h2>");
     if ws.is_empty() {
-        h.push_str("<p class=\"empty\">None provisioned.</p></section>");
+        h.push_str(
+            "<p class=\"empty\">None provisioned. A workspace is an agent's copy-on-write \
+             checkout, so an idle node has none.</p>",
+        );
+        next_action(
+            h,
+            "Provision one with <code>choir workspace &lt;api&gt; &lt;owner/repo&gt; \
+             &lt;name&gt;</code>, or leave this empty — nothing else on this page depends on it.",
+        );
+        h.push_str("</section>");
         return;
     }
     h.push_str("<table><tbody>");
@@ -590,6 +635,102 @@ fn row(h: &mut String, label: &str, value: &str) {
     h.push_str("</td></tr>");
 }
 
+/// The one next action, as the design system's note-level admonition.
+///
+/// The markup is the design system's `.callout` shape — an `.ico` label
+/// column beside the prose — rather than a choir-local invention, for the
+/// same reason the tokens are vendored rather than re-picked.
+///
+/// `html` is markup on purpose, because these sentences carry `<code>`
+/// around the command a reader is meant to run. Every one of them is a
+/// literal written in this crate: **nothing attacker-influenced may reach
+/// this function**, which is what [`esc`] exists for. The rule is easy to
+/// keep because the argument is never a variable — the one caller that
+/// passes data ([`refusal`]) escapes it first.
+pub(crate) fn next_action(h: &mut String, html: &str) {
+    h.push_str("<div class=\"callout callout-note\"><span class=\"ico\">next</span><p>");
+    h.push_str(html);
+    h.push_str("</p></div>");
+}
+
+/// A refusal, in the shape [`reject::Rejection`] already settled on.
+///
+/// That record is what the node tells an agent when it says no: a stable
+/// `code`, the human sentence, the two states a failed comparison was
+/// between, and a required `next` — the field its doc calls "the one the
+/// research isolates the gain to". A person reading HTML needs exactly
+/// those four things, so this is that record rather than a second
+/// vocabulary invented for the browser. Keeping one shape is also how a
+/// reader and the agent they are debugging with can compare notes.
+///
+/// [`reject::Rejection`]: crate::reject::Rejection
+pub(crate) struct Refusal<'a> {
+    /// The stable machine-readable reason, shown so a reader can quote it
+    /// to an operator without paraphrasing it into something else.
+    pub(crate) code: &'a str,
+    /// What happened, in one sentence, in words that are about the
+    /// reader's situation rather than about the node's internals.
+    pub(crate) error: &'a str,
+    /// What the node required — omitted when nothing was compared.
+    pub(crate) expected: Option<&'a str>,
+    /// What it found instead.
+    pub(crate) actual: Option<&'a str>,
+    /// The single action that changes the situation, in the imperative.
+    pub(crate) next: &'a str,
+}
+
+/// Renders a refusal as a whole page.
+///
+/// `nav` is where a reader who is now lost may actually go, as links —
+/// never back to the thing that just refused them, which is how a
+/// friendly error page becomes a loop. It is a slice rather than a fixed
+/// pair because the honest destinations differ: a reader refused a
+/// repository should be sent to the list of ones they can read, and a
+/// reader refused the node page should not be sent to the node page.
+pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &str)]) -> String {
+    let mut h = String::with_capacity(4 * 1024);
+    h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    h.push_str("<title>choir: ");
+    h.push_str(&esc(headline));
+    h.push_str("</title>");
+    h.push_str(STYLE);
+    h.push_str("</head><body>");
+    h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
+    h.push_str("<header class=\"top\"><h1>");
+    h.push_str(&esc(headline));
+    h.push_str("</h1><div class=\"sub\"><span class=\"pill\">");
+    h.push_str(&status.to_string());
+    h.push_str("</span><span class=\"pill\">");
+    h.push_str(&esc(r.code));
+    h.push_str("</span>");
+    for (href, label) in nav {
+        h.push_str("<span class=\"pill\"><a href=\"");
+        h.push_str(&esc(href));
+        h.push_str("\">");
+        h.push_str(&esc(label));
+        h.push_str("</a></span>");
+    }
+    h.push_str("</div></header><main id=\"main\"><section>");
+    h.push_str("<p class=\"lede\">");
+    h.push_str(&esc(r.error));
+    h.push_str("</p>");
+    if r.expected.is_some() || r.actual.is_some() {
+        h.push_str("<table><tbody>");
+        for (label, value) in [("expected", r.expected), ("found", r.actual)] {
+            if let Some(value) = value {
+                row(&mut h, label, value);
+            }
+        }
+        h.push_str("</tbody></table>");
+    }
+    next_action(&mut h, &esc(r.next));
+    h.push_str("</section></main><footer>");
+    h.push_str("Read-only. Every write goes through the signed-op API.");
+    h.push_str("</footer></body></html>");
+    h
+}
+
 
 /// The whole stylesheet, inline.
 ///
@@ -654,6 +795,128 @@ mod tests {
         let page = render(r#"{"refs":{}}"#, 1);
         for probe in ["http://", "https://", "//cdn", "<script", "@import"] {
             assert!(!page.contains(probe), "page reaches out via {probe}");
+        }
+    }
+
+    /// Shortening is a display detail, and a display detail must not be
+    /// able to stop the node answering. `short` used to cut its digest at
+    /// byte 12, which panics whenever byte 12 lands inside a multi-byte
+    /// character — and every value on this page comes out of a JSON
+    /// document rather than out of a type that guarantees hex.
+    #[test]
+    fn shortening_a_hash_survives_text_that_is_not_hex() {
+        // Byte 12 falls inside the fourth `日` (1 + 3 + 3 + 3 = 10, next
+        // boundary 13), which is the exact case that panicked.
+        assert_eq!(short("11-a日日日日日"), "11-a日日日日日");
+        // Twelve characters kept, whatever they cost in bytes.
+        assert_eq!(short("11-日日日日日日日日日日日日日日"), "11-日日日日日日日日日日日日");
+        // The ordinary case is unchanged: a hex digest still shortens.
+        assert_eq!(short("11-deadbeefdeadbeef"), "11-deadbeefdead");
+        // ...and a whole page built from such a payload still renders.
+        let json = serde_json::json!({
+            "refs": {"o/r.git:refs/heads/main": "11-a日日日日日"},
+            "build": {"commit": "日日日日日日日日日日日日日日"},
+        })
+        .to_string();
+        assert!(render(&json, 1).ends_with("</html>"));
+    }
+
+    /// A refusal has to carry four things, because that is what the JSON
+    /// refusals carry and what a person needs for the same reason: the
+    /// code they can quote, the sentence, the two states, and the one
+    /// action. `next` is the one this test would be pointless without —
+    /// it is the field `reject.rs` calls the one the gain is isolated to.
+    #[test]
+    fn a_refusal_page_carries_the_code_the_states_and_the_next_action() {
+        let page = refusal(
+            "No repository here",
+            404,
+            &Refusal {
+                code: "no_such_repository",
+                error: "Nothing readable by this credential is at that address.",
+                expected: Some("a repository this credential holds a read grant on"),
+                actual: None,
+                next: "Open the repository list and follow a link from it.",
+            },
+            &[("/r/", "repositories you can read")],
+        );
+        assert!(page.starts_with("<!doctype html>") && page.ends_with("</html>"));
+        assert!(page.contains("404"), "the status is not on the page");
+        assert!(page.contains("no_such_repository"), "the code is not on the page");
+        assert!(page.contains("read grant"), "the expected state is not on the page");
+        assert!(
+            page.contains("Open the repository list"),
+            "the next action is not on the page: {page}"
+        );
+        assert!(
+            page.contains("callout-note"),
+            "the next action is not marked as the design system's note admonition"
+        );
+        assert!(
+            page.contains("href=\"/r/\""),
+            "a refused reader was given nowhere to go"
+        );
+        // `actual` was `None`, so no empty row may be invented for it.
+        assert!(!page.contains("<td>found</td>"), "an absent state got a row anyway");
+    }
+
+    /// A refusal renders values the node did not choose — a revision from
+    /// the URL, git's own stderr — so it escapes exactly like the page it
+    /// stands in for.
+    #[test]
+    fn a_refusal_escapes_everything_it_is_handed() {
+        let page = refusal(
+            "<h1>headline",
+            404,
+            &Refusal {
+                code: "<code>",
+                error: "<em>error",
+                expected: Some("<b>expected"),
+                actual: Some("<img src=x onerror=alert(1)>"),
+                next: "<script>alert('x')</script>",
+            },
+            &[("\" onmouseover=alert(1) x=\"", "<i>label")],
+        );
+        for raw in [
+            "<h1>headline",
+            "<code>",
+            "<em>error",
+            "<b>expected",
+            "<img src=x",
+            "<script>alert",
+            "<i>label",
+        ] {
+            assert!(!page.contains(raw), "{raw} reached the page as markup");
+        }
+        assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"), "the value vanished");
+        assert!(
+            !page.contains("\" onmouseover=alert(1) x=\""),
+            "an attribute escaped its quotes"
+        );
+    }
+
+    /// The same claim `the_page_references_no_external_resource` makes,
+    /// for the other document this module serves. Deliberately its own
+    /// test with its own list rather than a shared constant: D39 narrows
+    /// that probe list when it adds the first script, and a shared list
+    /// would narrow this one silently at the same moment. Two lists means
+    /// two decisions.
+    #[test]
+    fn a_refusal_page_references_no_external_resource() {
+        let page = refusal(
+            "No repository here",
+            404,
+            &Refusal {
+                code: "no_such_repository",
+                error: "e",
+                expected: None,
+                actual: None,
+                next: "n",
+            },
+            &[("/r/", "repositories")],
+        );
+        for probe in ["http://", "https://", "//cdn", "<script", "@import"] {
+            assert!(!page.contains(probe), "a refusal reaches out via {probe}");
         }
     }
 
