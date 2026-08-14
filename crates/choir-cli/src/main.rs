@@ -992,7 +992,7 @@ fn main() {
             // whose author differs from the signed channel.
             submit(api, key_file, channel, &op, auth);
         }
-        // A read receipt (internal/oak.md item 7): lets the review's
+        // A read receipt: lets the review's
         // author tell "reviewed and ignored" from "nobody looked yet".
         // First read only; resubmitting is refused, so a lost response
         // is safe to retry and a receipt never doubles.

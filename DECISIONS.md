@@ -16,7 +16,7 @@ that would reverse it are not published.
 | D2 | Single-writer per-repo sequencer | Two-way |
 | D3 | Rivet Actors as the actor runtime | Two-way |
 | D4 | Mergiraf for structured merge, subprocess only | Two-way |
-| D5 | Zuul-style speculative queue with a TCP-like window | Two-way |
+| D5 | Speculative merge queue with a TCP-like window | Two-way |
 | D6 | BLAKE3 + FastCDC content addressing (L0) | **One-way** |
 | D7 | S3-API object store, no vendor extensions | Two-way |
 | D8 | Firecracker microVM + copy-on-write provisioning | Two-way |

@@ -29,7 +29,7 @@ pub struct TrainEntry {
     /// Human-readable note (merge position or the conflict reason).
     pub note: String,
     /// The PR's every commit is already in the train by patch identity
-    /// (Pijul item 4, `git patch-id --stable` equivalence via
+    /// (`git patch-id --stable` equivalence via
     /// `git cherry`): the train rewrote or landed this change earlier,
     /// so it was recognized rather than re-merged — a success, not a
     /// conflict, despite `merged` being false.
@@ -82,7 +82,7 @@ pub fn build_train(repo: &Path, base: &str, prs: &[(u64, String)]) -> Result<Tra
     let mut entries = Vec::new();
     let mut position = 0usize;
     for (id, head) in prs {
-        // Stable change identity (Pijul item 4): a PR whose every commit
+        // Stable change identity: a PR whose every commit
         // is already in the train by patch identity — the train landed a
         // rewritten form of it, or it was rebased in — is recognized,
         // not re-merged. Checked against the current tip so a duplicate

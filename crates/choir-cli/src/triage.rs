@@ -1,6 +1,5 @@
-//! Client-side triage and next-action derivation over `/api/view`
-//! (internal/oak.md items 2 and 3, after Oak's `branch triage` and
-//! `agent state`).
+//! Client-side triage and next-action derivation over `/api/view`:
+//! a branch-triage and agent-state view of what needs attention.
 //!
 //! Both functions are pure folds of the view JSON the node already
 //! serves. Deriving client-side rather than adding endpoints keeps the
@@ -11,7 +10,7 @@
 //! — indistinguishable by design — so rows carry `landed: null` rather
 //! than a guess when the destination ref is not visible.
 //!
-//! Output is bounded (internal/oak.md item 4): every list is capped at
+//! Output is bounded: every list is capped at
 //! [`LIST_CAP`] rows ranked most-actionable-first, and every truncation
 //! is marked in-band with an `omitted` count, never silent.
 
@@ -75,7 +74,7 @@ struct ReviewFacts<'a> {
     reviewers: Vec<&'a str>,
     answered: Vec<&'a str>,
     changes_requested_by: Vec<&'a str>,
-    /// Channels holding a read receipt on the review (oak.md item 7).
+    /// Channels holding a read receipt on the review.
     viewed: Vec<&'a str>,
     /// `Some(true/false)` when the destination ref is visible in the
     /// response; `None` when it is absent — not created yet, or not
@@ -432,7 +431,7 @@ pub fn next_actions(view: &serde_json::Value, api: &str, channel: &str) -> serde
                     let missing = facts.missing();
                     // Which of the awaited reviewers hold a read receipt:
                     // "read but unanswered" and "never looked" call for
-                    // different nudges (oak.md item 7).
+                    // different nudges.
                     let read: Vec<&str> = missing
                         .iter()
                         .filter(|r| facts.viewed.contains(r))

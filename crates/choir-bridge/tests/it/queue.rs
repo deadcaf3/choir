@@ -101,7 +101,7 @@ fn conflicting_pr_is_excluded_and_train_continues() {
     assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
 }
 
-/// Stable change identity across rebase (Pijul item 4). The train lands
+/// Stable change identity across rebase. The train lands
 /// a PR, the author rebases the same change onto the rewritten tip and
 /// resubmits: `build_train` recognizes it by patch identity instead of
 /// re-merging it, and it is reported as landed rather than conflicted.

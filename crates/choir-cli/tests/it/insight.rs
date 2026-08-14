@@ -1,5 +1,4 @@
-//! `choir triage` and `choir state` against a real node (internal/oak.md
-//! items 2-3): the derivations are unit-tested on a hand-written view,
+//! `choir triage` and `choir state` against a real node: the derivations are unit-tested on a hand-written view,
 //! and hand-written samples check the author's imagination, so this
 //! drives the built binary through a workspace + review round and reads
 //! the buckets and actions off the node's actual emissions.
@@ -163,7 +162,7 @@ fn triage_and_state_read_real_emissions() {
     );
 
     // The reviewer records a read receipt; the owner's waiting row now
-    // tells "read but unanswered" from "never looked" (oak.md item 7).
+    // tells "read but unanswered" from "never looked".
     let out = choir(&["viewed", &api, key_file, "bot", "r1"]);
     assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
     let owner = json(&choir(&["state", &api, "cli-agent"]));

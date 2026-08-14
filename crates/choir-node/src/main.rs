@@ -325,8 +325,8 @@ fn main() -> std::io::Result<()> {
         // start and compared on every start after. A mismatch is refused
         // rather than warned about: a node that has already lost its
         // identity should not be allowed to append under a new one.
-        // Borrowed from radicle-node's fingerprint.rs, which exists for
-        // the same reason. See internal/heartwood-inspiration.md.
+        // The same reasoning appears in other peer-to-peer node
+        // implementations that pin an identity beside their state.
         let fingerprint_path = state_dir.join("node.fingerprint");
         let fingerprint = node_key.actor_id().to_hex();
         match std::fs::read_to_string(&fingerprint_path) {

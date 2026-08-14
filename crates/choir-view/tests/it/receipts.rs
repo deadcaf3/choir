@@ -1,4 +1,4 @@
-//! Read receipts as a folded operation (internal/oak.md item 7).
+//! Read receipts as a folded operation.
 //!
 //! The claims worth testing are the ones the op's doc commits to: a
 //! receipt records the *first* read at its fold position, a (review,

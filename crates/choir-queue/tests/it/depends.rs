@@ -1,4 +1,4 @@
-//! Explicit change dependencies in the queue (Pijul item 2): a combined
+//! Explicit change dependencies in the queue: a combined
 //! build failure ejects exactly the failing change and its (transitive)
 //! declared dependents; independent changes land in the same drain and
 //! the window is not halved. With no declarations the legacy

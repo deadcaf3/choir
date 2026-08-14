@@ -118,7 +118,7 @@ pub struct ViewOp {
     /// byte-identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
-    /// Explicit change dependencies (Pijul item 2): content hashes of
+    /// Explicit change dependencies: content hashes of
     /// the changes this op declares it builds on. Declared-only — the
     /// platform never infers dependencies from file overlap; inference
     /// is a separate decision. Additive under the same rule as `scope`
@@ -676,7 +676,7 @@ pub enum OpKind {
         snapshot: RefSnapshot,
     },
     /// Record that `viewer` read review `id` (a read receipt; additive
-    /// variant, wire-format unchanged; internal/oak.md item 7).
+    /// variant, wire-format unchanged; the backlog).
     ///
     /// The receipt is what lets an author distinguish "reviewed and
     /// ignored" from "nobody has looked yet". The fact recorded is the
@@ -885,7 +885,7 @@ pub struct ReviewState {
     /// Emptied by [`OpKind::ArchiveReview`] with the rest of the bulk.
     pub comments: Vec<CommentState>,
     /// viewer → fold position of that viewer's first recorded read
-    /// (internal/oak.md item 7). Emptied by [`OpKind::ArchiveReview`]
+    ///. Emptied by [`OpKind::ArchiveReview`]
     /// with the rest of the bulk.
     pub viewed: BTreeMap<String, u64>,
     /// Live, or settled with its outcome retained. Defaults to
@@ -1106,7 +1106,7 @@ pub struct Commit {
     /// Commit message.
     pub message: String,
     /// The commit whose [`TreeEntry::Conflict`] this commit resolves,
-    /// when it is a resolution — Pijul's resolution-as-linked-change,
+    /// when it is a resolution — resolution-as-linked-change,
     /// as metadata on the existing shape (DECISIONS.md D15: never a new merge
     /// substrate). A conflict is a value (invariant 6): the link points
     /// *at* the conflicted commit, which stays in history untouched.

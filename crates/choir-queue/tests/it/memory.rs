@@ -1,4 +1,4 @@
-//! Resolution memory (Pijul item 1): a conflict triple resolved once —
+//! Resolution memory: a conflict triple resolved once —
 //! recorded through item A's `Commit.resolves` link — is replayed on
 //! recurrence without re-invoking the strategy pipeline, and the replay
 //! is a candidate that still runs CI, never an automatic landing.

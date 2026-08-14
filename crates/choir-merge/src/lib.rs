@@ -221,7 +221,7 @@ impl MergeStrategy for MergirafMerge {
 
 /// The position-independent content of a change: the deleted and
 /// inserted lines of its diff, with hunk positions and context stripped —
-/// the cheap analog of `git patch-id --stable` (Pijul item 4, DECISIONS.md
+/// the cheap analog of `git patch-id --stable` (DECISIONS.md
 /// D15: metadata, never a new merge substrate). Two authorings of the
 /// same edit on different bases — the change before and after the train
 /// rewrites or rebases it — normalize to the same string, which is what

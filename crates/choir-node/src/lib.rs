@@ -1,7 +1,7 @@
 //! L3 node daemon: a minimal git smart-HTTP server (DECISIONS.md D12).
 //!
 //! v1 wraps `git http-backend` (git's own CGI) over bare repositories, the
-//! same shape as Tangled's knot: the daemon is a thin, self-hostable shell
+//! the daemon is a thin, self-hostable shell
 //! over git plumbing, and platform behavior (sequencer, queue, identity)
 //! layers on top. ForgeMark benchmarks this surface directly.
 //!

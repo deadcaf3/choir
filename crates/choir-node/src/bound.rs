@@ -1,5 +1,5 @@
 //! Bounded aggregate responses: every list capped, paged, and every
-//! omission marked in band (`internal/oak.md` item 4).
+//! omission marked in band.
 //!
 //! `/api/view` served six maps that grow with the log — `workspaces`,
 //! `changes`, `refs`, `reviews`, `provenance`, `bindings` — and nothing
@@ -9,7 +9,7 @@
 //! rule. An agent's context is the scarce resource here; a response that
 //! grows without limit spends it on the operator's behalf.
 //!
-//! The contract, taken from Oak wholesale: every list capped, every
+//! The contract, adopted wholesale: every list capped, every
 //! truncation counted in band rather than silently, and the rest always
 //! one named request away. [`Page::from_query`] reads `?limit=` and
 //! `?offset=` and [`apply`] enforces them.

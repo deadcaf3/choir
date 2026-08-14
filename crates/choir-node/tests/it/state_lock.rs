@@ -1,4 +1,4 @@
-//! One writer per state dir (internal/oak.md item 6): a second daemon on
+//! One writer per state dir: a second daemon on
 //! the same root would append to the same ops.jsonl and fork the chain,
 //! so serve start takes a PID lock on `.choir`. A dead holder's lock is
 //! reaped, so a crashed daemon never wedges the next start.

@@ -617,8 +617,8 @@ fn an_unknown_scheme_decodes_and_is_reported_verbatim() {
 /// and not *domains* — and a preimage that could be read as two kinds
 /// would let a hash minted in one context be presented in another.
 ///
-/// This is the check `internal/oak.md` left open after Oak paid for a
-/// v1 format that lacked domain separation. Half of it was already
+/// This is the check left open after a v1 format elsewhere was found
+/// to lack domain separation. Half of it was already
 /// closed: `moving_bytes_across_the_channel_payload_boundary_changes_the_signature`
 /// covers ambiguity *within* `signing_hash`. What was untested is
 /// ambiguity *across* kinds, which is this.

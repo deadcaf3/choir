@@ -272,7 +272,7 @@ fn view_op_variants_are_frozen() {
         r#"{"format_version":1,"kind":{"PostComment":{"id":"review-1","comment":"c1","author":"alice/agent","body":"why this base?"}}}"#,
         "1e-5b0fdd7cbf9cc5457742f8fd471b6a85118b3f6a6aed6e1b9c31e7c74184eab9",
     );
-    // A read receipt (internal/oak.md item 7): two `String` fields in
+    // A read receipt: two `String` fields in
     // declaration order. The (review, viewer) pair is the op's whole
     // identity — the fold refuses a viewer the review already holds —
     // so these bytes are what a client re-serializes on a safe retry.
@@ -524,8 +524,8 @@ fn commit_is_frozen() {
     );
 }
 
-/// `depends` is the additive dependency declaration on `ViewOp` (Pijul
-/// item 2). `depends.rs` proves an old signed payload round-trips and
+/// `depends` is the additive dependency declaration on `ViewOp`.
+/// `depends.rs` proves an old signed payload round-trips and
 /// verifies; this freezes the declared form's exact bytes, and
 /// `view_op_variants_are_frozen` staying green is the proof the
 /// undeclared form's bytes never moved.
@@ -544,8 +544,8 @@ fn view_op_depends_additive_field_is_frozen() {
     );
 }
 
-/// `resolves` is the additive field on `Commit` (Pijul's
-/// resolution-as-linked-change). `resolution.rs` proves an old commit
+/// `resolves` is the additive field on `Commit`
+/// (resolution-as-linked-change). `resolution.rs` proves an old commit
 /// round-trips; this freezes the linked form's exact bytes, and
 /// `commit_is_frozen` above staying green is the proof the unlinked
 /// form's bytes never moved.

@@ -861,7 +861,7 @@ pub fn shell_functions() -> String {
 /// `name:` must equal it, because skill loaders resolve by directory.
 pub const SKILL_DIR: &str = "choir";
 
-/// The installable agent skill (internal/oak.md item 5).
+/// The installable agent skill.
 ///
 /// Rendered from the same table as `--help` and `agents.md` at the moment
 /// of installation, so — unlike docs baked in as static files — the

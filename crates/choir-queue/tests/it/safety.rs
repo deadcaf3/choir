@@ -1,4 +1,4 @@
-//! Train enforcement of the merge-safety invariant (internal/oak.md item 1):
+//! Train enforcement of the merge-safety invariant:
 //! a strategy that resolves by discarding work already in the speculative
 //! state is evicted first-class, before CI, without blocking the train.
 

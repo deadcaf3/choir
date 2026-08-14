@@ -1,9 +1,9 @@
 //! L2 speculative merge queue (DECISIONS.md D5).
 //!
-//! Zuul-style dependent pipeline: changes are tested in parallel against the
+//! Dependent speculative pipeline: changes are tested in parallel against the
 //! speculative future state produced by everything queued ahead of them,
 //! "exactly as if they had been tested one at a time." Window sizing follows
-//! the TCP-flow-control-inspired algorithm from Zuul's docs: start at 20,
+//! a TCP-flow-control-inspired algorithm: start at 20,
 //! +1 per successful merge, halved per failure.
 //!
 //! Conflict policy (DECISIONS.md): a change whose merge conflicts is evicted as
@@ -27,7 +27,7 @@ use choir_merge::{safety, MergeOutcome, Pipeline};
 use choir_oplog::MemLog;
 use choir_sequencer::Sequencer;
 
-/// Default initial speculation window (Zuul's documented default).
+/// Default initial speculation window (a documented default).
 pub const DEFAULT_WINDOW: usize = 20;
 
 /// A change submitted to the queue: a full-file edit carrying its own base.
@@ -47,8 +47,8 @@ pub struct Change {
     pub base: String,
     /// The file content this change proposes.
     pub proposed: String,
-    /// Ids of queued changes this one declares it depends on (Pijul
-    /// item 2). Declared-only — the queue never infers dependencies
+    /// Ids of queued changes this one declares it depends on.
+    /// Declared-only — the queue never infers dependencies
     /// from overlap; inference is a separate decision. Empty (the
     /// default for all existing traffic) keeps the legacy
     /// halve-and-retest behavior on failure; see [`MergeQueue::drain`].
@@ -63,7 +63,7 @@ pub enum Rejection {
     /// CI failed for this change on its speculative state.
     CiFailure,
     /// A strategy resolved, but its output edits the speculative state beyond
-    /// what the change proposed (internal/oak.md item 1): silently reverted
+    /// what the change proposed: silently reverted
     /// or injected lines. Treated like a conflict — evicted first-class,
     /// never landed, never blocking the train — but reported separately
     /// because the author's change may be fine and the *strategy* at fault.
@@ -74,14 +74,14 @@ pub enum Rejection {
         violation: choir_merge::safety::Violation,
     },
     /// Ejected because it (transitively) declared a dependency on a
-    /// change whose combined build failed (Pijul item 2). Not a verdict
+    /// change whose combined build failed. Not a verdict
     /// on this change itself: resubmit once the dependency is fixed.
     DependencyEjection {
         /// The CI-failing change this one depends on.
         on: u64,
     },
     /// A change with this [`identity::change_identity`] already landed
-    /// through this queue (Pijul item 4): the resubmission — typically
+    /// through this queue: the resubmission — typically
     /// the same edit rebased after the train rewrote the tip — is
     /// refused without re-merging, so it cannot land twice.
     AlreadyLanded,
@@ -236,7 +236,7 @@ impl MergeQueue {
                     .merge(&change.base, &speculative, &change.proposed);
                 match resolution.outcome {
                     MergeOutcome::Resolved(next) => {
-                        // Merge-safety invariant (internal/oak.md item 1):
+                        // Merge-safety invariant:
                         // a resolution may only apply edits the change
                         // proposed. A strategy that quietly reverts work
                         // already in the speculative state is evicted like
@@ -302,7 +302,7 @@ impl MergeQueue {
                     let failed_id = failed.id;
                     rejected.push((failed_id, Rejection::CiFailure));
 
-                    // Dependency-aware ejection (Pijul item 2): when any
+                    // Dependency-aware ejection: when any
                     // waiting change declares dependencies, the failure
                     // ejects exactly the failing change plus everything
                     // that (transitively) depends on it, and the window

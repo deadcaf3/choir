@@ -1,4 +1,4 @@
-//! Stable change identity across rebase (Pijul item 4): a change is
+//! Stable change identity across rebase: a change is
 //! identified by the hash of its position-independent content — the
 //! normalized diff from [`choir_merge::normalized_diff`] — so the same
 //! logical edit authored against different bases (before and after the

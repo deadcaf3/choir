@@ -1,4 +1,4 @@
-//! Bounded aggregate responses over the wire (`internal/oak.md` item 4).
+//! Bounded aggregate responses over the wire.
 //!
 //! The unit tests beside `bound.rs` cover the slicing arithmetic against
 //! a hand-built document. What only a served node can show is the part

@@ -1,4 +1,4 @@
-//! Merge-safety verdict conformance (internal/oak.md item 1): a resolved
+//! Merge-safety verdict conformance: a resolved
 //! merge may only apply edits the author proposed; reverted or injected
 //! lines are named as evidence.
 

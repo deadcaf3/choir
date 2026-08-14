@@ -1,4 +1,4 @@
-//! Resolution-as-linked-change (Pijul item 3, metadata-only per D15):
+//! Resolution-as-linked-change (metadata-only per D15):
 //! `Commit::resolves` links a resolution to the conflicted commit it
 //! resolves, admission refuses an invalid link, and the field is
 //! additive — a pre-change commit decodes, re-serializes byte-identically

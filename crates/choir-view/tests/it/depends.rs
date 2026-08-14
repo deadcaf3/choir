@@ -1,4 +1,4 @@
-//! Explicit change dependencies (Pijul item 2): `ViewOp.depends` is
+//! Explicit change dependencies: `ViewOp.depends` is
 //! additive inside the signed payload — an op written before the field
 //! existed re-serializes byte-identically, so its author signature
 //! still verifies (invariant 4), and a declared list rides inside the

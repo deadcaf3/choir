@@ -1,4 +1,4 @@
-//! Stable change identity across rebase (Pijul item 4): the identity is
+//! Stable change identity across rebase: the identity is
 //! the hash of the position-independent diff, so a change rewritten onto
 //! a new base keeps it — and the queue refuses the resubmission as
 //! already landed instead of re-merging or duplicating it.

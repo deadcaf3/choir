@@ -1,4 +1,4 @@
-//! `choir skill install` (internal/oak.md item 5): the installed skill is
+//! `choir skill install`: the installed skill is
 //! rendered from the running binary's surface table, lands under a
 //! directory matching its frontmatter `name:`, and re-installs are
 //! idempotent.
@@ -32,7 +32,7 @@ fn install_is_versioned_with_the_binary_and_idempotent() {
     let path = std::path::PathBuf::from(first["path"].as_str().unwrap());
     assert_eq!(path.file_name().unwrap(), "SKILL.md");
     // Skill loaders resolve by directory, so the frontmatter name and the
-    // directory must agree — Oak's own frontmatter lesson.
+    // directory must agree, a lesson other skill loaders learned first.
     assert_eq!(path.parent().unwrap().file_name().unwrap(), surface::SKILL_DIR);
     let body = std::fs::read_to_string(&path).unwrap();
     assert!(body.starts_with(&format!("---\nname: {}\n", surface::SKILL_DIR)), "{body}");
