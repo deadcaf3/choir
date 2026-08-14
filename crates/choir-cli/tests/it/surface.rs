@@ -338,21 +338,37 @@ fn every_rejection_code_the_node_can_emit_is_documented() {
         assert!(!code.action().is_empty(), "{code:?} has no action");
         assert!(!code.meaning().is_empty(), "{code:?} has no meaning");
     }
-    // And every code the node emits appears in the platform source, so a
-    // documented-but-dead code shows up as a missing constructor.
-    let src = std::fs::read_to_string(
-        repo_root().join("crates/choir-node/src/platform.rs"),
-    )
-    .expect("platform.rs");
-    let reject_src = std::fs::read_to_string(
-        repo_root().join("crates/choir-node/src/reject.rs"),
-    )
-    .expect("reject.rs");
+    // And every code the node emits appears in the node's own source, so
+    // a documented-but-dead code shows up as a missing constructor. The
+    // search covers every `.rs` in the crate rather than a hand-listed
+    // pair of modules: a code constructed in a module the list forgot is
+    // live code that reads as dead, and the failure then accuses the
+    // wrong thing.
+    let src = node_sources();
     for code in choir_node::reject::Code::all() {
         let name = format!("{code:?}");
         assert!(
-            src.contains(&format!("Code::{name}")) || reject_src.contains(&format!("Code::{name}")),
+            src.contains(&format!("Code::{name}")),
             "`{name}` is documented but never constructed"
         );
     }
+}
+
+/// Every Rust source file in `choir-node`, concatenated.
+fn node_sources() -> String {
+    let mut src = String::new();
+    let mut dirs = vec![repo_root().join("crates/choir-node/src")];
+    while let Some(dir) = dirs.pop() {
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}"));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                src.push_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")));
+            }
+        }
+    }
+    assert!(!src.is_empty(), "no node sources found");
+    src
 }
