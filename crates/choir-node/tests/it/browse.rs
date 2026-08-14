@@ -767,6 +767,38 @@ fn a_denied_repository_says_what_to_do_without_confirming_it_exists() {
 /// An anonymous reader gets nothing, exactly as on the D28 page. A
 /// human-readable surface is the kind of thing that acquires an
 /// exception, so this is asserted rather than assumed.
+/// The node has two names for one repository — `/r/agents/one` to read
+/// and `/agents/one.git` to clone — and showed only ever one of them.
+///
+/// A reader who reached a repository page had no way to learn how to get
+/// the code out, which is the thing they are most likely to want next,
+/// and the name they *could* see is a `404` on the surface that printed
+/// it. Both names are now shown, each where it works, and this asserts
+/// the clone path is the one git actually answers on rather than a
+/// plausible-looking string.
+#[test]
+fn a_repository_page_shows_the_path_you_clone_it_from() {
+    let (base, work, _oid, _) = served("clone-path", "");
+    let (status, _, page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("/agents/one.git"),
+        "a reader on the repository page cannot find out how to clone it: {page}"
+    );
+
+    // The claim is only worth making if the path works. Clone it.
+    let host = base.trim_start_matches("http://");
+    let dest = work.join("cloned-from-the-page");
+    let url = format!("http://alice:a@{host}/agents/one.git");
+    let out = git(&work, &["clone", "-q", &url, dest.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "the page prints a clone path that does not clone: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dest.join("README.md").is_file(), "the clone came back empty");
+}
+
 #[test]
 fn browsing_is_behind_the_same_auth_wall() {
     let (base, _work, _oid, _) = served("anon", "");

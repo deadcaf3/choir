@@ -1217,6 +1217,17 @@ fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, her
     h.push_str(&esc(repo));
     h.push_str("/reviews\">reviews</a></span>");
     h.push_str("<span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
+    // The path a reader clones, which nothing on this surface showed. It
+    // is also the other half of the node's two names for one repository:
+    // this page is `/r/<repo>` and the clone is `/<repo>.git`, and a
+    // reader who only ever saw one of them had to guess the other.
+    //
+    // Relative, with no scheme or host: whatever origin the reader is
+    // already on is the right one, and it is the only one this process
+    // can state without being told what proxy sits in front of it.
+    h.push_str("<span class=\"pill mono\">clone /");
+    h.push_str(&esc(repo));
+    h.push_str(".git</span>");
     h.push_str("</div>");
     if !path.is_empty() {
         h.push_str("<nav class=\"crumbs\"><a href=\"/r/");

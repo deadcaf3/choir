@@ -280,22 +280,19 @@ fn refs_section(h: &mut String, v: &serde_json::Value) {
     for (full, target) in refs {
         let (repo, name) = split_ref(full);
         if repo != current {
-            // The name shown here ends in `.git` because that is the
-            // clone URL, and the browse URL does not — so a reader who
-            // reads the name off this table and types it lands on a
-            // `404`. Linking it means they never have to translate
-            // between the node's two names for one repository.
+            // The view keys refs by the on-disk name, which ends in
+            // `.git`; `/r/` answers to the name without it. Showing the
+            // key meant the node displayed a name that 404s on its own
+            // browse surface, so this shows the one a reader can use and
+            // links it. The `.git` name is not lost — it is on the
+            // repository page, as the path you actually clone.
             h.push_str("<tr class=\"group\"><th colspan=\"2\">");
-            match repo.strip_suffix(".git") {
-                Some(stem) => {
-                    h.push_str("<a href=\"/r/");
-                    h.push_str(&esc(stem));
-                    h.push_str("\">");
-                    h.push_str(&esc(repo));
-                    h.push_str("</a>");
-                }
-                None => h.push_str(&esc(repo)),
-            }
+            let stem = repo.strip_suffix(".git").unwrap_or(repo);
+            h.push_str("<a href=\"/r/");
+            h.push_str(&esc(stem));
+            h.push_str("\">");
+            h.push_str(&esc(stem));
+            h.push_str("</a>");
             h.push_str("</th></tr>");
             current = repo;
         }
@@ -609,6 +606,7 @@ fn health_section(h: &mut String, v: &serde_json::Value) {
         row(h, "authoritative view", &format!("{bytes} bytes"));
     }
 
+    let mut indeterminate = false;
     for (label, key) in [
         ("concentration (D24 T3)", "concentration"),
         ("newcomer harm (D24 T4)", "newcomer_harm"),
@@ -616,6 +614,7 @@ fn health_section(h: &mut String, v: &serde_json::Value) {
     ] {
         if let Some(m) = v.get(key).filter(|m| !m.is_null()) {
             let status = s(m, "tripwire_status");
+            indeterminate |= status == "indeterminate";
             let class = match status {
                 "pass" => "ok",
                 "observed" => "warn",
@@ -630,7 +629,25 @@ fn health_section(h: &mut String, v: &serde_json::Value) {
             h.push_str("</b></td></tr>");
         }
     }
-    h.push_str("</tbody></table></section>");
+    h.push_str("</tbody></table>");
+    // Three grey badges reading `indeterminate` and nothing saying what
+    // that is. A reader assumes it means "not enough data yet", and for
+    // one of the three that is true; for the other two the bound itself
+    // is unset, so waiting changes nothing. Both readings are wrong
+    // without this, and the difference decides whether there is anything
+    // for the operator to do.
+    if indeterminate {
+        h.push_str(
+            "<p class=\"note\"><code>indeterminate</code> is neither a pass nor a breach: \
+             the node could not complete the evaluation, and each tripwire reports what it \
+             was missing as <code>evaluation_complete</code> in <code>/api/view</code>. \
+             Concentration completes once every trusted key has a sequenced binding — that \
+             one is waiting on this node. The other two are waiting on bounds D24 records \
+             as unset pending a first real measurement, so they stay here however long the \
+             node runs.</p>",
+        );
+    }
+    h.push_str("</section>");
 }
 
 /// Microseconds as milliseconds, one decimal. The API reports the unit
@@ -808,14 +825,14 @@ mod tests {
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));
     }
 
-    /// The refs table names repositories, and the name it shows is not
-    /// the name the browse surface answers to.
+    /// The refs table names repositories, and the name it shows has to be
+    /// one the reader can use.
     ///
-    /// A ref key is `owner/name.git:refs/…`, so the heading reads
-    /// `agents/one.git` — which is the clone URL and a `404` under `/r/`.
-    /// A reader who reads a name off this page and types it is following
-    /// the node's own instruction into a dead end, so the heading is the
-    /// link and nobody has to translate between two names for one thing.
+    /// A ref key is `owner/name.git:refs/…`, so the heading used to read
+    /// `agents/one.git` — which is a `404` under `/r/`, the node printing
+    /// a name its own browse surface rejects. It shows `agents/one` now
+    /// and links it, and the `.git` path appears on the repository page
+    /// as the thing it is actually for, which is cloning.
     #[test]
     fn every_repository_the_refs_table_names_can_be_opened() {
         let json = serde_json::json!({
@@ -827,17 +844,60 @@ mod tests {
         })
         .to_string();
         let page = render(&json, 7);
-        for (shown, href) in [("agents/one.git", "/r/agents/one"), ("r/project.git", "/r/r/project")] {
+        for name in ["agents/one", "r/project"] {
             assert!(
-                page.contains(&format!("<a href=\"{href}\">{shown}</a>")),
-                "the refs table names {shown} and gives no way to open it: {page}"
+                page.contains(&format!("<a href=\"/r/{name}\">{name}</a>")),
+                "the refs table names {name} and gives no way to open it: {page}"
             );
         }
+        // The name that 404s under `/r/` must not be what the page shows.
+        assert!(
+            !page.contains("agents/one.git"),
+            "the refs table still prints the clone name, which its own \
+             browse surface refuses: {page}"
+        );
         // One heading per repository: two would read as two repositories.
         assert_eq!(
             page.matches("<a href=\"/r/agents/one\">").count(),
             1,
             "a repository is headed more than once: {page}"
+        );
+    }
+
+    /// A tripwire nobody can interpret is worse than one that is absent.
+    ///
+    /// The three D24 rows render `indeterminate` as a grey badge and a
+    /// reader takes that to mean "not enough data yet". For concentration
+    /// that is true and the operator can act on it; for the other two the
+    /// bound itself is unset, so the badge will read the same in a year.
+    /// One word covering both is the page misleading whoever trusts it.
+    #[test]
+    fn a_tripwire_the_node_cannot_evaluate_says_what_that_means() {
+        let waiting = render(
+            &serde_json::json!({"concentration": {"tripwire_status": "indeterminate"}})
+                .to_string(),
+            1,
+        );
+        assert!(waiting.contains("indeterminate"), "the status vanished: {waiting}");
+        assert!(
+            waiting.contains("evaluation_complete"),
+            "the page shows `indeterminate` and never says what would resolve it: {waiting}"
+        );
+        assert!(
+            waiting.contains("neither a pass nor a breach"),
+            "a reader is left to guess whether the node is failing: {waiting}"
+        );
+
+        // ...and it is not boilerplate stapled under every health table:
+        // a node that completed its evaluation has nothing to explain.
+        let settled = render(
+            &serde_json::json!({"concentration": {"tripwire_status": "not_observed"}})
+                .to_string(),
+            1,
+        );
+        assert!(
+            !settled.contains("neither a pass nor a breach"),
+            "the note is shown where nothing is indeterminate: {settled}"
         );
     }
 
@@ -1036,29 +1096,60 @@ mod tests {
     /// past the case that prompted it — `--ok-tint` as `color` would be
     /// exactly as unreadable and exactly as green under every other test.
     ///
-    /// The list is the tokens *defined* as an `rgba(…)`, so an alias like
-    /// `--info-tint: var(--accent-tint)` is not on it and would slip
-    /// through. Following one level of aliasing is a CSS evaluator, which
-    /// is more machinery than this is worth; the gap is named rather than
-    /// half-closed.
+    /// An alias is followed rather than missed. `--info-tint:
+    /// var(--accent-tint)` is not *defined* as an `rgba(…)` and used to
+    /// slip through, which this recorded as a named gap on the grounds
+    /// that resolving it meant writing a CSS evaluator. It does not: a
+    /// declaration that is exactly one `var(--x)` is a rename, and
+    /// following renames to their definition is a bounded walk. Anything
+    /// harder — a wash inside a `linear-gradient`, a value assembled from
+    /// two tokens — is still not followed, and is also not a way to paint
+    /// text at 14% opacity by accident.
     #[test]
     fn no_translucent_token_is_used_as_a_foreground_colour() {
         let sheet = include_str!("ui.css");
-        // Every token whose definition is an `rgba(...)`, read out of the
-        // vendored block rather than listed by hand — a hand-written list
-        // is a second copy of the palette to keep in step.
-        let mut washes: Vec<&str> = Vec::new();
+        // Every token the sheet defines, read out of the vendored block
+        // rather than listed by hand — a hand-written list is a second
+        // copy of the palette to keep in step.
+        let mut defined: Vec<(&str, &str)> = Vec::new();
         for line in sheet.lines() {
             for decl in line.split(';') {
                 let Some((name, value)) = decl.split_once(':') else {
                     continue;
                 };
                 let name = name.trim();
-                if name.starts_with("--") && value.trim().starts_with("rgba(") {
-                    washes.push(name);
+                if name.starts_with("--") {
+                    defined.push((name, value.trim()));
                 }
             }
         }
+        // A token is a wash if its definition is an `rgba(…)` or renames
+        // one. The cap is what keeps a cycle from hanging the suite; no
+        // chain in this sheet is anywhere near it.
+        let resolve = |mut value: &str| -> bool {
+            for _ in 0..8 {
+                if value.starts_with("rgba(") {
+                    return true;
+                }
+                let Some(alias) = value
+                    .strip_prefix("var(")
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    .filter(|alias| alias.starts_with("--"))
+                else {
+                    return false;
+                };
+                let Some((_, next)) = defined.iter().find(|(name, _)| *name == alias) else {
+                    return false;
+                };
+                value = next;
+            }
+            false
+        };
+        let washes: Vec<&str> = defined
+            .iter()
+            .filter(|(_, value)| resolve(value))
+            .map(|(name, _)| *name)
+            .collect();
         assert!(
             washes.len() > 5,
             "found only {} translucent tokens, so this test is not reading the \
@@ -1094,6 +1185,55 @@ mod tests {
                          and the wash as its background.\n{line}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Nothing below the marker pins a box to a fixed width.
+    ///
+    /// This is the guard the mutation round said had no mechanical form.
+    /// It does; the form is just narrower than "a fixed-width gutter
+    /// overflows past four digits". `pre.code .ln` was `width:var(--sp-10)`
+    /// — a token, so `the_component_sheet_authors_no_raw_values` passed —
+    /// and a token is a fixed length, which is exactly the property that
+    /// broke: five-digit line numbers ran into their own source.
+    ///
+    /// `max-width` and `min-width` are deliberately fine. A cap leaves the
+    /// box free to be narrower and a floor leaves it free to be wider;
+    /// only `width` refuses both, which is what makes it wrong for a box
+    /// whose contents are not a fixed size. Percentages and keywords are
+    /// fine for the same reason — `table{width:100%}` is relative to
+    /// whatever it is in.
+    ///
+    /// It is also the closest thing here to a narrow-viewport assertion.
+    /// Nothing in this crate can render a page at 375 px and measure it,
+    /// so what is checkable is the cause rather than the symptom: a page
+    /// whose every box is free to shrink has no fixed minimum to overflow
+    /// a phone with. That is why there is no media query — not because
+    /// narrow viewports went unconsidered.
+    #[test]
+    fn no_component_rule_pins_a_box_to_a_fixed_width() {
+        let sheet = include_str!("ui.css");
+        let ours = sheet
+            .rsplit_once("CHOIR COMPONENTS")
+            .expect("the provenance marker must stay in ui.css")
+            .1;
+        for (n, line) in ours.lines().enumerate() {
+            let code = line.split("/*").next().unwrap_or("");
+            for decl in code.split([';', '{']) {
+                // `strip_prefix` after `trim` is what distinguishes this
+                // from `max-width:` and `min-width:`, both of which
+                // contain the same substring and are both allowed.
+                let Some(value) = decl.trim().strip_prefix("width:") else {
+                    continue;
+                };
+                assert!(
+                    !value.contains("var("),
+                    "component line {n} sets `width` to a token, which is a fixed \
+                     length: the box can no longer shrink to its viewport or grow \
+                     to its contents. Use `min-width` for a floor, `max-width` for \
+                     a cap, or a percentage.\n{line}"
+                );
             }
         }
     }
@@ -1192,8 +1332,11 @@ mod tests {
         let cache = UiCache::new();
         let alice = cache.page(4, "alice", || r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string());
         let bob = cache.page(4, "bob", || r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string());
-        assert!(alice.contains("o/a.git") && !alice.contains("o/b.git"));
-        assert!(bob.contains("o/b.git") && !bob.contains("o/a.git"));
+        // On the repository name rather than the `.git` key it is stored
+        // under: this test is about one reader never seeing the other's
+        // page, and the negative half is stricter for the shorter string.
+        assert!(alice.contains("o/a") && !alice.contains("o/b"));
+        assert!(bob.contains("o/b") && !bob.contains("o/a"));
         let again = cache.page(4, "alice", || panic!("rebuilt a cached reader's page"));
         assert!(Arc::ptr_eq(&alice, &again), "the reader's own page was dropped");
         assert_ne!(etag(4, "alice"), etag(4, "bob"), "one ETag for two pages");
