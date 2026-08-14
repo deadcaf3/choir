@@ -1194,3 +1194,104 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// D39's tripwire applied to the page D39 added, on the node shape
+/// `noscript.rs` cannot build.
+///
+/// That module holds the rule for every read page and now includes
+/// `/account`, but its node runs no `--accounts-file`, so what it can
+/// check is the "no store" sentence. The case worth checking is the other
+/// one: an account page with credentials on it. If the passkey table were
+/// ever filled in from script rather than rendered server-side, that page
+/// would still return 200, still contain `<script`, and still look right
+/// in a browser with scripting on — and a reader with it off would be
+/// told they have no passkeys when they have two.
+///
+/// Lives here rather than in `noscript.rs` because the helper that mints
+/// a credential does, and because the rule reads better beside the page
+/// it constrains — the same reason `ui.rs` and `browse.rs` each hold
+/// their own script rule instead of one list covering both.
+#[test]
+fn the_account_page_still_lists_your_passkeys_with_scripting_disabled() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-noscript");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_accounts(work.join("accounts.json"), None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let (_, invite) = curl(&[
+        "-u", "alice:a", "-X", "POST", "--data-binary",
+        r#"{"user":"bob","grants":["agents/demo read"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    let pair = invite["invite"].as_str().expect("invite").to_string();
+    let (_, redeemed) = curl(&[
+        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    let bob = format!("bob:{}", redeemed["token"].as_str().expect("token"));
+
+    let (public_key, _secret) = credential(&work, "noscript");
+    assert_eq!(
+        curl(&[
+            "-u", &bob, "-X", "POST", "--data-binary",
+            &format!(
+                r#"{{"credential_id":"visible-without-js","public_key":"{public_key}","label":"my phone"}}"#
+            ),
+            &format!("{base}/api/accounts/passkey"),
+        ]).0,
+        200
+    );
+
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-u", &bob, &format!("{base}/account")])
+        .output()
+        .expect("curl runs");
+    let page = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // The document a browser with scripting disabled actually renders.
+    let mut readable = String::with_capacity(page.len());
+    let mut rest = page.as_str();
+    while let Some(open) = rest.find("<script") {
+        readable.push_str(&rest[..open]);
+        rest = match rest[open..].find("</script>") {
+            Some(close) => &rest[open + close + "</script>".len()..],
+            None => "",
+        };
+    }
+    readable.push_str(rest);
+
+    assert!(!readable.contains("<script"), "the stripper left script behind");
+    // The credential id is shown truncated to sixteen characters, which
+    // is a real browser's id cut to something a roster can hold. The
+    // label is what a person identifies a key by; the prefix is there to
+    // tell two keys apart, and asserting the prefix rather than the whole
+    // id is what keeps this test about visibility instead of layout.
+    for wanted in ["my phone", "visible-without-", "Passkeys"] {
+        assert!(
+            readable.contains(wanted),
+            "a reader with scripting off cannot see `{wanted}`: {readable}"
+        );
+    }
+    // And the way out is still named, so the page is not a dead end for
+    // them either.
+    assert!(
+        readable.contains("/api/accounts/passkey"),
+        "the scripting-off reader is told nothing about how to enrol"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}

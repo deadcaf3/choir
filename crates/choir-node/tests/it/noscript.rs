@@ -253,6 +253,15 @@ fn every_page_renders_its_content_with_scripting_disabled() {
             vec!["no such", "next"],
         ),
         ("/definitely-not-a-route".to_string(), vec!["next", "node state"]),
+        // D39's account page, added when it landed rather than when
+        // this list was written. This node runs no `--accounts-file`,
+        // so the page says so — and saying so is exactly the content a
+        // reader with scripting off must still get, because the
+        // alternative is a blank page that looks like a broken route.
+        (
+            "/account".to_string(),
+            vec!["account self-service", "auth file"],
+        ),
     ];
 
     for (path, wanted) in pages {
