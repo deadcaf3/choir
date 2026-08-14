@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Phase-0 spike: CoW workspace-provisioning benchmark (plan.md D8).
+# Phase-0 spike: CoW workspace-provisioning benchmark (DECISIONS.md D8).
 # Target: p50 < 50 ms warm. On macOS/APFS this uses clonefile via `cp -c`;
 # the production target is Linux btrfs/ZFS reflinks + microVM restore, so
 # these numbers are a dev-machine sanity check, not the gate measurement.

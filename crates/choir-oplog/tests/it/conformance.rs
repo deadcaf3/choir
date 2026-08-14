@@ -1,4 +1,4 @@
-//! Log-backend seam conformance suite (plan.md §E, D16).
+//! Log-backend seam conformance suite (DECISIONS.md D16).
 //! Every OpLog implementation must pass every case here.
 
 use choir_oplog::{FileLog, MemLog, OpEntry, OpLog, FORMAT_VERSION};

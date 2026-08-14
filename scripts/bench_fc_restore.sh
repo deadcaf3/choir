@@ -1,8 +1,8 @@
 #!/bin/bash
 # Phase-0 gate measurement (D8), Linux target: Firecracker microVM
 # snapshot-restore latency. Expects ~/fc/firecracker, ~/fc/vmlinux and
-# ~/fc/rootfs.ext4 (see PHASE0.md). Run with access to /dev/kvm.
-# Reference points from plan.md Key Finding 5: 4-28 ms restores reported.
+# ~/fc/rootfs.ext4 (see the build log). Run with access to /dev/kvm.
+# Reference points from the design notes: 4-28 ms restores reported.
 set -euo pipefail
 
 FC=~/fc/firecracker

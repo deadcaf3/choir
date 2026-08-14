@@ -89,7 +89,7 @@ fn is_ref(repo: &std::path::Path, name: &str, expected: &str) -> bool {
 /// 16.7 s, and the signal arrived in 32 runs out of 32 when given 30 s.
 /// Against that spread a 5 s budget failed 5 times in 30 one hour and 0
 /// times in 30 the next, which made it look like a code regression and cost
-/// a bisect that pointed at an innocent commit. `PHASE0.md` has the story.
+/// a bisect that pointed at an innocent commit. the build log has the story.
 const BARRIER_BUDGET: Duration = Duration::from_secs(60);
 
 fn wait_for(path: &std::path::Path) -> bool {

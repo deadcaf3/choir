@@ -1,4 +1,4 @@
-//! Bridge v0 (plan.md D21, read-replica stage): mirror an upstream git
+//! Bridge v0 (DECISIONS.md D21, read-replica stage): mirror an upstream git
 //! repo and record every upstream ref movement as a signed, CAS-checked
 //! op through the choir platform API.
 //!

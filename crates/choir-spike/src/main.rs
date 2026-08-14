@@ -1,4 +1,4 @@
-//! Phase-0 integrated gate spike (plan.md, Sequenced roadmap).
+//! Phase-0 integrated gate spike (DECISIONS.md).
 //!
 //! End to end on one machine: provision N workspaces from a base tree via
 //! CoW clone (macOS `clonefile(2)` here; btrfs/ZFS on the Linux target),

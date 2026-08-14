@@ -116,8 +116,8 @@ class Choir:
 
     def choir_submit_batch(self, **arguments):
         """Same, in array order; the primary path for agent workloads
-        (throughput figures live in PHASE0.md, not here, so they cannot
-        go stale)
+        (throughput figures live in the build log, not here, so they
+        cannot go stale)
 
         Arguments become the JSON request body.
         """

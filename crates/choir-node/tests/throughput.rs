@@ -1,6 +1,6 @@
 //! The repeatable submit-path harness (optimization plan S0.3).
 //!
-//! PHASE0.md records ~1,130 signed ops/s through `/api/submit-batch`, but
+//! the build log records ~1,130 signed ops/s through `/api/submit-batch`, but
 //! that run was a one-off against a real upstream: it cannot be re-run on
 //! demand, so it cannot gate anything. This is the version that can.
 //!
@@ -11,7 +11,7 @@
 //! are done up front and deliberately excluded — they are the load
 //! generator's cost, not the server's.
 //!
-//! Transport is excluded on purpose. PHASE0.md:75 records that curl per op
+//! Transport is excluded on purpose. the build log records that curl per op
 //! costs 15-20 ms and dominated the pre-batch numbers; leaving it in would
 //! measure `curl` rather than anything this workspace can optimize. The
 //! ratio between the two paths is the point of `batch_beats_single`.
@@ -46,7 +46,7 @@ const CLIENTS: usize = 32;
 /// suite. Every op here costs a real fsync.
 const OPS_PER_CLIENT: usize = 40;
 
-/// Ops per `/api/submit-batch` body. The bridge chunks at 500 (PHASE0.md
+/// Ops per `/api/submit-batch` body. The bridge chunks at 500 (the build log
 /// :76), so the batch measurement uses the same shape it was measured at.
 const BATCH: usize = 500;
 
@@ -78,7 +78,7 @@ impl Drop for Scratch {
 
 /// Nearest-rank percentile over a sorted slice — the same shape
 /// `choir-spike` and `concurrency.rs` already use, so the numbers this
-/// prints are comparable with the ones PHASE0.md records.
+/// prints are comparable with the ones the build log records.
 fn percentile(sorted: &[Duration], q: f64) -> Duration {
     sorted[((sorted.len() - 1) as f64 * q) as usize]
 }
@@ -227,7 +227,7 @@ fn single_submit_throughput_and_latency() {
 }
 
 /// The `/api/submit-batch` path, in the 500-op chunks the bridge uses —
-/// the configuration PHASE0.md:76 measured at ~1,130 signed ops/s.
+/// the configuration the build log measured at ~1,130 signed ops/s.
 ///
 /// Single-threaded on purpose: the batch endpoint is what the bridge
 /// drives, and the bridge is one process feeding one daemon.

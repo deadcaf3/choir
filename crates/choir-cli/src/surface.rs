@@ -442,7 +442,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
         method: "POST",
         path: "/api/submit-batch",
         purpose: "Same, in array order; the primary path for agent workloads \
-                  (throughput figures live in PHASE0.md, not here, so they cannot go stale)",
+                  (throughput figures live in the build log, not here, so they cannot go stale)",
         mcp: Some(McpTool {
             name: "choir_submit_batch",
             input_schema: BATCH_MCP_SCHEMA,

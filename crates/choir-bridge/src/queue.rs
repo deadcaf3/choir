@@ -1,4 +1,4 @@
-//! Queue-as-bot v0 (plan.md D21, queue stage): speculative merge
+//! Queue-as-bot v0 (DECISIONS.md D21, queue stage): speculative merge
 //! trains with the host forge's CI as the check signal.
 //!
 //! v0 is verdict-only: it builds a train commit (base tip + each open

@@ -1,4 +1,4 @@
-//! Merge-strategy pipeline seam (plan.md §E seam 2, D4/D19).
+//! Merge-strategy pipeline seam (DECISIONS.md D4/D19).
 //!
 //! Ordered strategies, cheapest first; each maps (base, left, right) to
 //! Resolved or Conflict. LLM resolution and Mergiraf are just strategy slots,
@@ -221,7 +221,7 @@ impl MergeStrategy for MergirafMerge {
 
 /// The position-independent content of a change: the deleted and
 /// inserted lines of its diff, with hunk positions and context stripped —
-/// the cheap analog of `git patch-id --stable` (Pijul item 4, plan.md
+/// the cheap analog of `git patch-id --stable` (Pijul item 4, DECISIONS.md
 /// D15: metadata, never a new merge substrate). Two authorings of the
 /// same edit on different bases — the change before and after the train
 /// rewrites or rebases it — normalize to the same string, which is what

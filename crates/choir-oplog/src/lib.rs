@@ -1,6 +1,6 @@
 //! Append-only operation log: the L1 wire format and the log-backend seam.
 //!
-//! One-way-door rules (plan.md §E) enforced here:
+//! One-way-door rules (DECISIONS.md) enforced here:
 //! - every persisted entry carries `format_version`
 //! - hashes are self-describing (codec byte + digest), so the hash function
 //!   can change under the same envelope (D6)
@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 pub use choir_hash::ContentHash;
 
 /// Current wire-format version. Bump on any incompatible change; additive
-/// changes keep the version (plan.md §E evolution policy).
+/// changes keep the version (DECISIONS.md).
 pub const FORMAT_VERSION: u16 = 1;
 
 /// Signature scheme identifiers for [`Witness::scheme`] (D39).

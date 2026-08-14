@@ -1,6 +1,6 @@
-//! L0 content-addressed store: BLAKE3 + FastCDC chunking (plan.md L0, D6).
+//! L0 content-addressed store: BLAKE3 + FastCDC chunking (DECISIONS.md D6).
 //!
-//! One-way-door rules (plan.md §E) enforced here:
+//! One-way-door rules (DECISIONS.md) enforced here:
 //! - manifests carry `format_version` and record the exact chunking
 //!   parameters used, per object, so parameter changes never orphan data
 //! - all identifiers are self-describing [`ContentHash`] envelopes
@@ -24,7 +24,7 @@ use choir_hash::ContentHash;
 use serde::{Deserialize, Serialize};
 
 /// Current manifest-format version. Bump on any incompatible change;
-/// additive changes keep the version (plan.md §E evolution policy).
+/// additive changes keep the version (DECISIONS.md).
 pub const FORMAT_VERSION: u16 = 1;
 
 /// FastCDC parameters, recorded per object (one-way-door rule, D6): a blob

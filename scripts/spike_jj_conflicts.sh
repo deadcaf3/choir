@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Phase-0 task 7 (plan.md roadmap): reproduce jj first-class conflicts on a
+# Phase-0 task 7 (the Phase-0 roadmap): reproduce jj first-class conflicts on a
 # many-agent workload. Three workspaces edit the same file divergently; the
 # merge commits a *conflicted state as a valid commit* (the L1 property the
 # platform relies on: agents keep working, resolution is deferred).

@@ -1,4 +1,4 @@
-//! Single-writer per-repo sequencer (plan.md D2): the Phase-0 spike.
+//! Single-writer per-repo sequencer (DECISIONS.md D2): the Phase-0 spike.
 //!
 //! One OS thread owns the op log; all workspaces submit ops through cloned
 //! handles and receive the assigned (seq, hash) synchronously. This is the

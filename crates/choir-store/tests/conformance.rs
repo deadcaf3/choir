@@ -1,4 +1,4 @@
-//! Chunk-store seam conformance (plan.md §E, D7) plus blob roundtrip and
+//! Chunk-store seam conformance (DECISIONS.md D7) plus blob roundtrip and
 //! dedup behavior of the FastCDC layer.
 
 use choir_store::{

@@ -1,5 +1,5 @@
 //! Resolution memory keyed by the conflict triple (Pijul item 1,
-//! rerere-shaped; plan.md D15: metadata on existing shapes, never a new
+//! rerere-shaped; DECISIONS.md D15: metadata on existing shapes, never a new
 //! merge substrate).
 //!
 //! A conflict's identity already exists in the model: the

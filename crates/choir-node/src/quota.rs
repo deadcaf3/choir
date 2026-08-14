@@ -41,7 +41,7 @@
 //! folded out of the op log during the replay the platform already
 //! performs at startup, keyed on the attribution channel each
 //! workspace-creating entry already carries in its signature-covered
-//! `channel` field. `PHASE0.md` left this item out of D33 calling a
+//! `channel` field. the build log left this item out of D33 calling a
 //! surviving tally "a persisted-state question"; it is one, and the
 //! answer is that the persisted state already exists and needed a reader
 //! rather than a writer. A restart rebuilds the tally from the same log

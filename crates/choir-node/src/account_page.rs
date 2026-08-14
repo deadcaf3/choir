@@ -138,7 +138,7 @@ fn close(mut h: String) -> String {
 /// D39 scoped a CBOR reader out deliberately, and the consequence — that
 /// enrolment trusts the authenticated channel rather than proving
 /// possession — is recorded on `Accounts::enroll_passkey` and in
-/// `PHASE0.md`. A challenge that looked verified would be the worse
+/// the build log. A challenge that looked verified would be the worse
 /// version of the same limitation.
 pub(crate) const ENROL_SCRIPT: &str = r#"<script>
 (function () {

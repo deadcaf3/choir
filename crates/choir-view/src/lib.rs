@@ -1,5 +1,5 @@
 //! L1 view/workspace model: typed operations over the op log and the
-//! materialized repo state they fold into (plan.md L1, jj-style).
+//! materialized repo state they fold into (DECISIONS.md jj-style).
 //!
 //! The op log ([`choir_oplog`]) stores opaque payloads; this crate gives
 //! them a versioned schema ([`ViewOp`]) and a deterministic fold
@@ -10,10 +10,10 @@
 //! Commits are content-addressed objects in the chunk store
 //! ([`Commit`]/[`TreeEntry`]). A conflicted merge is a *valid* commit
 //! ([`TreeEntry::Conflict`]): work continues on top of it and the
-//! resolution is a later commit, never a blocked workspace (plan.md
+//! resolution is a later commit, never a blocked workspace (DECISIONS.md
 //! first-class conflicts, D9).
 //!
-//! One-way-door rules (plan.md §E): every persisted shape here
+//! One-way-door rules (DECISIONS.md): every persisted shape here
 //! ([`ViewOp`], [`Commit`]) carries `format_version`, and all identifiers
 //! are self-describing [`ContentHash`] envelopes.
 //!
@@ -43,7 +43,7 @@ use choir_store::{ChunkStore, StoreError};
 use serde::{Deserialize, Serialize};
 
 /// Current view-op and commit wire-format version. Bump on any
-/// incompatible change; additive changes keep the version (plan.md §E).
+/// incompatible change; additive changes keep the version (DECISIONS.md).
 pub const FORMAT_VERSION: u16 = 1;
 
 /// Where and when an op is admissible: the author's own statement of
@@ -1107,7 +1107,7 @@ pub struct Commit {
     pub message: String,
     /// The commit whose [`TreeEntry::Conflict`] this commit resolves,
     /// when it is a resolution — Pijul's resolution-as-linked-change,
-    /// as metadata on the existing shape (plan.md D15: never a new merge
+    /// as metadata on the existing shape (DECISIONS.md D15: never a new merge
     /// substrate). A conflict is a value (invariant 6): the link points
     /// *at* the conflicted commit, which stays in history untouched.
     /// Additive (`default` + `skip_serializing_if`), so commits written

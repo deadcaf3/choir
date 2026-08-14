@@ -1,4 +1,4 @@
-//! Self-describing content addressing (plan.md §E one-way door D6).
+//! Self-describing content addressing (DECISIONS.md D6).
 //!
 //! The codec byte names the hash function, so a future hash migration adds a
 //! codec instead of rewriting stored identifiers. Shared by L0 (store) and

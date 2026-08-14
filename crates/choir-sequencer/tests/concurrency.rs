@@ -1,4 +1,4 @@
-//! Phase-0 gate evidence (plan.md, Sequenced roadmap):
+//! Phase-0 gate evidence (DECISIONS.md):
 //! ">10 concurrent workspaces/repo with <100 ms merge-decision latency".
 //! 32 workspaces x 100 ops each; asserts total order, zero loss, per-client
 //! FIFO, and prints decision-latency percentiles.

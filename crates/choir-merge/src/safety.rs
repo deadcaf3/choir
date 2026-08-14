@@ -17,7 +17,7 @@
 //! repeated line, is bag-neutral and passes. That misplacement class is
 //! CI's and review's to catch; this check exists for the reversion class,
 //! which CI misses precisely because reverted code still compiles and its
-//! tests were green before the work it reverts landed (plan.md D23).
+//! tests were green before the work it reverts landed (DECISIONS.md D23).
 //!
 //! A violation is not a conflict. A conflict is the pipeline saying "I
 //! cannot resolve this"; a violation is a strategy claiming it resolved

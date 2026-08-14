@@ -42,7 +42,7 @@ pub struct BlastRadius {
     /// Workspace packages in total, the denominator of [`Self::fraction`].
     pub total: usize,
     /// Changed files that fell outside every package (workspace-root
-    /// files like `plan.md`, or a path from another repo), sorted.
+    /// files like `DECISIONS.md`, or a path from another repo), sorted.
     ///
     /// Kept rather than dropped: a change that is *entirely* unattributed
     /// scores zero, and zero should be distinguishable from "touched

@@ -110,7 +110,19 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
 #[test]
 fn local_only_files_stay_ignored() {
     let root = repo_root();
-    for local in ["internal/STATUS.md", ".codex/config.toml"] {
+    // `internal/` is private in full, with no allowlist. The four files
+    // below were once excepted back into the public set, which is exactly
+    // how they came to be tracked; naming them here means re-adding any
+    // such exception fails rather than being noticed after publication.
+    for local in [
+        "internal/STATUS.md",
+        "internal/design.md",
+        "internal/integration-workflows.md",
+        "internal/measurements.md",
+        "internal/plan.md",
+        "internal/PHASE0.md",
+        ".codex/config.toml",
+    ] {
         let ignored = std::process::Command::new("git")
             .args(["check-ignore", "--no-index", local])
             .current_dir(&root)
@@ -119,21 +131,26 @@ fn local_only_files_stay_ignored() {
         assert!(ignored.status.success(), "local file became publishable: {local}");
     }
 
-    for public in [
-        "agents.md",
-        "internal/design.md",
-        "internal/integration-workflows.md",
-        "internal/measurements.md",
-    ] {
+    // Nothing under `internal/` may be tracked, whatever the ignore rules
+    // say: a file added before a rule exists stays tracked forever.
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files", "internal/"])
+        .current_dir(&root)
+        .output()
+        .expect("git ls-files runs");
+    assert!(
+        tracked.stdout.is_empty(),
+        "private files are tracked: {}",
+        String::from_utf8_lossy(&tracked.stdout)
+    );
+
+    for public in ["agents.md", "DECISIONS.md", "LICENSE-MIT", "LICENSE-APACHE"] {
         let check = std::process::Command::new("git")
             .args(["check-ignore", "--no-index", public])
             .current_dir(&root)
             .output()
             .expect("git check-ignore runs");
-        assert!(
-            !check.status.success(),
-            "tracked design doc is ignored: {public}"
-        );
+        assert!(!check.status.success(), "public file is ignored: {public}");
     }
     assert!(root.join("agents.md").is_file(), "generated agents.md is missing");
     assert!(

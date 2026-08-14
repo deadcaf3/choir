@@ -17,7 +17,7 @@
 //! type — so the tripwire is that they never name the type.
 //!
 //! A failure here is not a bug to route around: it means a one-way
-//! door is being opened. Update D40 in `plan.md` deliberately or
+//! door is being opened. Update D40 in `DECISIONS.md` deliberately or
 //! remove the new edge.
 
 use std::fs;

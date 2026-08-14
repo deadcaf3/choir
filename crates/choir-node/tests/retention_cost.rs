@@ -12,7 +12,7 @@
 //!
 //! This asserts a ratio rather than a duration. Wall-clock figures on this
 //! machine carry a documented thermal spread of several times (see
-//! PHASE0.md), which would make an absolute threshold either flaky or
+//! the build log), which would make an absolute threshold either flaky or
 //! useless; two phases measured back-to-back in one process share their
 //! thermal state, and the ceiling is loose enough to only ever fire on a
 //! structural regression.

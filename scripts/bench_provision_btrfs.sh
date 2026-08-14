@@ -2,7 +2,7 @@
 # Phase-0 gate measurement (D8), Linux target: workspace provisioning via
 # btrfs subvolume snapshots. Run on a btrfs mount, e.g.:
 #   ./bench_provision_btrfs.sh /mnt/choir 2000 20
-# Companion to the macOS clonefile results in PHASE0.md; this is the number
+# Companion to the macOS clonefile results in the build log; this is the number
 # the gate formally wants (target p50 < 50 ms warm).
 set -euo pipefail
 

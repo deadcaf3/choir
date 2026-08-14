@@ -1,4 +1,4 @@
-//! Speculative merge-queue behavior (plan.md D5): green-keeping, first-class
+//! Speculative merge-queue behavior (DECISIONS.md D5): green-keeping, first-class
 //! conflict eviction, TCP window dynamics, retest-behind-failure.
 
 use choir_queue::{run_batch, Change, Rejection, DEFAULT_WINDOW};

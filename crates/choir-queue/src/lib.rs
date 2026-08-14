@@ -1,4 +1,4 @@
-//! L2 speculative merge queue (plan.md D5, Key Finding 4).
+//! L2 speculative merge queue (DECISIONS.md D5).
 //!
 //! Zuul-style dependent pipeline: changes are tested in parallel against the
 //! speculative future state produced by everything queued ahead of them,
@@ -6,7 +6,7 @@
 //! the TCP-flow-control-inspired algorithm from Zuul's docs: start at 20,
 //! +1 per successful merge, halved per failure.
 //!
-//! Conflict policy (plan.md §B): a change whose merge conflicts is evicted as
+//! Conflict policy (DECISIONS.md): a change whose merge conflicts is evicted as
 //! a first-class conflict for its author to resolve; it is never silently
 //! resolved and never blocks the changes behind it, which are retested
 //! against a speculative state without it.

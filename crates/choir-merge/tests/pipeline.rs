@@ -1,4 +1,4 @@
-//! Merge-strategy seam conformance (plan.md §E seam 2) plus the Phase-0
+//! Merge-strategy seam conformance (DECISIONS.md) plus the Phase-0
 //! "reproduce Mergiraf + first-class conflicts" spike check.
 
 use choir_merge::{MergeOutcome, MergirafMerge, MergeStrategy, Pipeline};

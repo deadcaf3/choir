@@ -1,5 +1,5 @@
 //! Rivet-backed sequencer: the second implementation of the
-//! actor-runtime seam (plan.md D3).
+//! actor-runtime seam (DECISIONS.md D3).
 //!
 //! The in-process [`choir_sequencer`] gets its single-writer guarantee
 //! from owning an OS thread; here the same guarantee comes from Rivet's

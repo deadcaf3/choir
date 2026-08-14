@@ -1,5 +1,5 @@
 //! L8 identity: one ed25519 key per actor, signatures over op entries
-//! (plan.md L8, D13 radicle-style key-per-agent).
+//! (DECISIONS.md D13 radicle-style key-per-agent).
 //!
 //! An actor's id is the self-describing [`ContentHash`] of its public
 //! key, so ids survive a future signature-scheme change the same way

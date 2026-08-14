@@ -11,7 +11,7 @@ Agent-first code collaboration: many agents on one repo, one total order from a 
 | Run a local node | [Run a node](#run-a-node) |
 | Push, review, provision workspaces | [Use the node](#use-the-node) |
 | Wire coding agents | [Agent templates](#agent-templates) |
-| Design / numbers / invariants | [`internal/`](internal/design.md) |
+| Why a decision was made the way it was | [`DECISIONS.md`](DECISIONS.md) |
 
 ## Prerequisites
 
@@ -395,7 +395,7 @@ Before deploying it, three limits:
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
-| `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale) |
+| `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in the build log, not here, so they cannot go stale) |
 | `GET /api/view?limit=N&offset=M` | The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone. Every map-shaped section is bounded: `limit` rows each (200 by default, 1000 at most), `offset` rows skipped in key order, `<section>_omitted` counting what this page left out, and `paging.next` naming the request that fetches the rest or being null when there is none |
 | `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege |
 | `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
@@ -506,9 +506,9 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 - `choir view` reports `newcomer_harm` when the operator enables the two 0600 audit files. A rejected signed-API newcomer can run `choir appeal <api> <attempt-id>`; the appeal requests separate operator adjudication and never grants privilege. Thresholds stay unset until the first real adoption-gate measurement.
 - Prefer `POST /api/submit-batch` for multiple ops (one durability barrier).
 
-Optional forge follower / speculative GitHub queue: `choir-bridge` — see [`internal/design.md`](internal/design.md#bridge).
+Optional forge follower / speculative GitHub queue: `choir-bridge` — see the crate docs (`cargo doc -p choir-bridge`).
 
-Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), exercise one commit-status write (`post-status`), replay existing merge commits for offline D23 calibration (`calibrate`), and mine a mirrored foreign history for real semantic-conflict specimens (`harvest`, D27 — offline, no forge access, landing policy untouched). Queue mode can optionally run the advisory three-worktree D23 detector documented in `internal/design.md`; it never changes the landing condition. Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
+Bridge utility modes mint or inspect its identity (`--pubkey`), inspect GitHub App installations (`app-debug`), exercise one commit-status write (`post-status`), replay existing merge commits for offline D23 calibration (`calibrate`), and mine a mirrored foreign history for real semantic-conflict specimens (`harvest`, D27 — offline, no forge access, landing policy untouched). Queue mode can optionally run the advisory three-worktree D23 detector; it never changes the landing condition. Grant only the permissions in the [bridge permission model](crates/choir-bridge/PERMISSIONS.md); `queue --land` is the only routine mode that needs contents write access.
 
 ### Agent templates
 
@@ -526,7 +526,7 @@ source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `cargo build` pulls huge tree / sqlite errors | `choir-actor` / rivetkit | Keep `.cargo/config.toml`. Default members already exclude actor; use `-p choir-actor` only when needed. |
-| `choir-actor` ignored test fails / download broken | rivetkit 2.3.10 auto-download | Workarounds in `PHASE0.md`. Run: `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored` |
+| `choir-actor` ignored test fails / download broken | rivetkit 2.3.10 auto-download | Run: `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1 cargo test -p choir-actor -- --ignored` |
 | Node refuses bind address | Non-loopback without TLS | Add `--tls-cert` / `--tls-key`, or stay on `127.0.0.1` / SSH tunnel |
 | `/api/view` → 401 | Auth enabled (expected) | Pass `-u user:token` or `--auth-file` / `--auth-user` |
 | Browser asks for a username/password | Auth is mandatory on every endpoint, including public TLS binds | Enter a user and token from `--auth-file`. Nothing is served anonymously by design |
@@ -536,7 +536,7 @@ source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key
 | `stale_head` | CAS lost the race | Re-read `/api/view`, rebase on `actual`, resubmit |
 | `assignment_error` / empty reviewers | Empty `--reviewers-file` | Add at least two `operator/…` channels for meaningful review |
 | `review_required` | Protected ref, insufficient weight | Node-drawn review + two operators approve, then push |
-| Workspace slow / fails | No CoW FS | Use APFS or btrfs; see `internal/measurements.md` |
+| Workspace slow / fails | No CoW FS | Use APFS or btrfs |
 | Lost submit response | Network blip after accept | Resubmit **identical** signed bytes → `already_applied: true` (`ERRORS.md`) |
 
 Rejection code table: [`ERRORS.md`](ERRORS.md).
@@ -551,12 +551,8 @@ Rejection code table: [`ERRORS.md`](ERRORS.md).
 | [`templates/`](templates/README.md) | Drop-in agent harness snippets |
 | [`scripts/choirctl`](scripts/choirctl) | Dogfood node operator entrypoint |
 | [`scripts/flip/RUNBOOK.md`](scripts/flip/RUNBOOK.md) | Supervised install + protected-ref gates |
-| [`PHASE0.md`](PHASE0.md) | Build log and gate status (source of truth) |
-| [`plan.md`](plan.md) | Design blueprint + decision register |
-| [`internal/design.md`](internal/design.md) | Architecture, invariants, conventions |
-| [`internal/integration-workflows.md`](internal/integration-workflows.md) | Agent workflow targets, identifier contract, implementation order |
-| [`internal/measurements.md`](internal/measurements.md) | Phase-0 numbers |
+| [`DECISIONS.md`](DECISIONS.md) | Decision register: what was decided, and which choices are one-way |
 
 ## License
 
-Workspace crates: `MIT OR Apache-2.0` (declared in the manifest; license files not yet in-tree). Mergiraf (optional subprocess) is GPLv3 and is never linked.
+Workspace crates: [`MIT`](LICENSE-MIT) OR [`Apache-2.0`](LICENSE-APACHE), at your option. Mergiraf (optional subprocess) is GPLv3 and is never linked, only executed.
