@@ -199,6 +199,13 @@ impl Node {
             ));
         }
         std::fs::create_dir_all(root)?;
+        // Hash the inline scripts now rather than on the first request
+        // that needs the header (D39). Three `openssl` invocations,
+        // measured at ~7 ms each, paid once at bind so no reader's page
+        // load pays them. The cost is process spawn rather than hashing,
+        // so it scales with the number of scripts and not their size.
+        let _ = review_page_csp();
+        let _ = account_page_csp();
         let scheme = if tls.is_some() { "https" } else { "http" };
         let server = match tls {
             Some((certificate, private_key)) => tiny_http::Server::https(
@@ -929,12 +936,37 @@ impl Node {
                 if request.url().split('?').next().unwrap_or("") == "/account" {
                     let page = account_page::render(accounts.as_deref(), &user);
                     let bytes = page.html.len() as u64;
+                    // The same headers every other browser surface
+                    // carries, which this page was missing entirely: it
+                    // was the one page in the node running script with
+                    // nothing constraining it.
                     let response = tiny_http::Response::from_string(page.html)
                         .with_status_code(page.status)
                         .with_header(
                             tiny_http::Header::from_bytes(
                                 &b"Content-Type"[..],
                                 &b"text/html; charset=utf-8"[..],
+                            )
+                            .expect("static header"),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Cache-Control"[..],
+                                &b"private, no-cache"[..],
+                            )
+                            .expect("static header"),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Security-Policy"[..],
+                                account_page_csp(),
+                            )
+                            .expect("static header"),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"X-Content-Type-Options"[..],
+                                &b"nosniff"[..],
                             )
                             .expect("static header"),
                         );
@@ -1217,6 +1249,89 @@ fn respond_push_too_large(
 /// holds if the escaper ever misses something, and a fifth hand-typed
 /// copy is how one of them ends up subtly weaker than the rest.
 const BROWSER_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+
+/// The body of one inline script: what a CSP hash is computed over, which
+/// is the bytes *between* the tags and not the tags.
+fn script_body(script: &str) -> &str {
+    script
+        .strip_prefix("<script>")
+        .and_then(|rest| rest.strip_suffix("</script>"))
+        .expect("an inline script constant is wrapped in bare script tags")
+}
+
+/// `'sha256-…'` for one inline script, as CSP spells it.
+///
+/// Through `openssl`, like every other hash this workspace needs outside
+/// BLAKE3 (`choir-bridge`'s RS256, `choir-identity`'s WebAuthn path). No
+/// hash crate for one header, and no hand-rolled compression function for
+/// something a browser will enforce.
+///
+/// Falls back to `'unsafe-inline'` if `openssl` cannot be run at all.
+/// That is a deliberate choice between two bad answers: a node whose
+/// review pages silently do nothing, or one whose CSP is weaker than
+/// intended on a host with no `openssl`. The second is visible in the
+/// served header and the first is not, and every other path in this crate
+/// already requires `openssl` to exist.
+fn script_hash(script: &str) -> String {
+    use std::io::Write as _;
+    let body = script_body(script);
+    let run = || -> std::io::Result<Vec<u8>> {
+        let mut child = std::process::Command::new("openssl")
+            .args(["dgst", "-sha256", "-binary"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("openssl stdin unavailable"))?
+            .write_all(body.as_bytes())?;
+        Ok(child.wait_with_output()?.stdout)
+    };
+    match run() {
+        Ok(digest) if digest.len() == 32 => format!("'sha256-{}'", base64_encode(&digest)),
+        _ => {
+            eprintln!("warning: openssl unavailable; page CSP falls back to 'unsafe-inline'");
+            "'unsafe-inline'".to_string()
+        }
+    }
+}
+
+/// [`BROWSER_CSP`] plus permission for exactly these inline scripts, and
+/// for the same-origin `fetch` they make (D39).
+///
+/// **Per page, never node-wide.** A single header carrying every hash
+/// would license three scripts on a dozen pages that must never run any,
+/// and the read surface's whole guarantee is that it runs none. Pages
+/// with no script keep [`BROWSER_CSP`] untouched.
+///
+/// Hashes rather than `'unsafe-inline'` because the scripts are constants
+/// with nothing interpolated into them. That makes the browser the
+/// enforcer of a property the tests also assert: interpolate a value
+/// later and the hash stops matching and the page stops working, loudly,
+/// instead of the assertion quietly becoming the only thing holding it.
+fn csp_with_scripts(scripts: &[&str]) -> Vec<u8> {
+    let hashes: Vec<String> = scripts.iter().map(|s| script_hash(s)).collect();
+    let mut header = String::from_utf8(BROWSER_CSP.to_vec()).expect("the base CSP is ASCII");
+    header.push_str("; script-src ");
+    header.push_str(&hashes.join(" "));
+    // The three scripts POST to this node and nowhere else.
+    header.push_str("; connect-src 'self'");
+    header.into_bytes()
+}
+
+/// The CSP for `/r/<owner>/<repo>/review/<id>`, which carries D39's
+/// verdict and comment scripts. Computed once, warmed at bind.
+fn review_page_csp() -> &'static [u8] {
+    static CSP: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    CSP.get_or_init(|| csp_with_scripts(&[browse::VERDICT_SCRIPT, browse::COMMENT_SCRIPT]))
+}
+
+/// The CSP for `/account`, which carries D39's enrolment script.
+fn account_page_csp() -> &'static [u8] {
+    static CSP: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    CSP.get_or_init(|| csp_with_scripts(&[account_page::ENROL_SCRIPT]))
+}
 
 /// Whether this URL is one a person is reading in a browser.
 ///
@@ -1852,9 +1967,20 @@ fn handle_browse(
         // The same defence in depth the D28 page carries: file contents
         // are attacker-supplied by definition here, so even an escaping
         // miss must not be able to run or fetch anything.
+        //
+        // The review page is the one exception and it is narrow by
+        // construction: the strict header plus the hashes of exactly its
+        // two scripts, so every other page under `/r/` still runs
+        // nothing at all (D39).
         .with_header(
-            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
-                .expect("static header"),
+            tiny_http::Header::from_bytes(
+                &b"Content-Security-Policy"[..],
+                match page {
+                    browse::Page::Review { .. } => review_page_csp(),
+                    _ => BROWSER_CSP,
+                },
+            )
+            .expect("static header"),
         )
         .with_header(
             tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])

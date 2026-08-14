@@ -134,7 +134,7 @@ fn close(mut h: String) -> String {
 /// possession — is recorded on `Accounts::enroll_passkey` and in
 /// `PHASE0.md`. A challenge that looked verified would be the worse
 /// version of the same limitation.
-const ENROL_SCRIPT: &str = r#"<script>
+pub(crate) const ENROL_SCRIPT: &str = r#"<script>
 (function () {
   var box = document.getElementById('enrol');
   var said = document.getElementById('enrol-said');

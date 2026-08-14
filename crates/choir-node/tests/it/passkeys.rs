@@ -1070,3 +1070,106 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The header that decides whether any of D39's write path works in a
+/// real browser, read off the wire rather than inferred from routing.
+///
+/// Every test in this file drives the node with `curl`, which does not
+/// enforce CSP — so all of them passed while the scripts were blocked in
+/// every actual browser. That is the gap this closes, and the reason it
+/// asserts on the served header rather than on the constant.
+#[test]
+fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
+    use choir_view::{OpKind, ViewOp};
+
+    let work = std::env::temp_dir().join("choir-node-passkeys-csp");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).expect("key");
+
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.create_repo("agents/demo.git").expect("repo created");
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_accounts(work.join("accounts.json"), None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-csp".into(),
+        target: choir_oplog::ContentHash::blake3(b"a proposal"),
+        reviewers: vec!["alice".into()],
+        target_ref: Some("agents/demo.git:refs/heads/main".into()),
+    });
+    assert_eq!(
+        curl(&[
+            "-u", "alice:a", "-X", "POST", "-d",
+            &crate::support::submit_body(&author, "alice", &request),
+            &format!("{base}/api/submit"),
+        ]).0,
+        200
+    );
+
+    /// The `Content-Security-Policy` a URL actually answers with.
+    let csp = |path: &str| {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-D", "-", "-o", "/dev/null", "-u", "alice:a", &format!("{base}{path}")])
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("content-security-policy:"))
+            .map(|line| line[line.find(':').expect("a header colon") + 1..].trim().to_string())
+    };
+
+    // The two script-bearing pages, and the hashes they must carry.
+    // Computed here from the served scripts would be the same mechanism
+    // the node uses; these constants come from an independent SHA-256
+    // (Python's hashlib) so the two derivations have to agree.
+    let verdict = "'sha256-7EGlzCX77Fq0Dv7W6kFGtGfAh/m7JGJL8Ko9o8yEuo0='";
+    let comment = "'sha256-p6kALqNE2wazCGuVLbD3pSO+Ul4HNDFhIidwQ3PaGak='";
+    let enrol = "'sha256-+eHBwQ+sINOtDs9/x5LGhej3ZINumisaDBHssA+AA6I='";
+
+    let review = csp("/r/agents/demo/review/r-csp").expect("the review page sends a CSP");
+    assert!(review.contains(verdict), "no verdict hash: {review}");
+    assert!(review.contains(comment), "no comment hash: {review}");
+    assert!(review.contains("connect-src 'self'"), "fetch is blocked: {review}");
+    assert!(
+        !review.contains("'unsafe-inline'; script-src") && !review.contains("script-src 'unsafe"),
+        "the review page permits any inline script: {review}"
+    );
+
+    let account = csp("/account").expect("the account page sends a CSP");
+    assert!(account.contains(enrol), "no enrolment hash: {account}");
+    assert!(account.contains("connect-src 'self'"), "fetch is blocked: {account}");
+    // Each page carries only its own script. A node-wide header would
+    // license the review scripts here and the enrolment script there,
+    // on pages that must never run them.
+    assert!(!account.contains(verdict), "the account page licenses a review script");
+    assert!(!review.contains(enrol), "the review page licenses the enrolment script");
+
+    // And every other browser surface still runs nothing at all. This is
+    // the property the read path has always had and the one a single
+    // shared header would have quietly spent.
+    for path in ["/", "/r/", "/r/agents/demo", "/r/agents/demo/reviews"] {
+        let header = csp(path).unwrap_or_else(|| panic!("{path} sends no CSP"));
+        assert!(
+            !header.contains("script-src"),
+            "{path} may run script: {header}"
+        );
+        assert!(header.contains("default-src 'none'"), "{path}: {header}");
+    }
+
+    std::fs::remove_dir_all(&work).ok();
+}

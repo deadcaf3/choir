@@ -1098,7 +1098,7 @@ fn comment_box(h: &mut String, id: &str, state: &serde_json::Value, user: &str) 
 /// The comment ceremony: prepare, sign, submit. Inline, no `src`, no
 /// library, no build step — the same scope as the verdict script, and
 /// held by the same test.
-const COMMENT_SCRIPT: &str = r#"<script>
+pub(crate) const COMMENT_SCRIPT: &str = r#"<script>
 (function () {
   var box = document.getElementById('comment');
   var said = document.getElementById('comment-said');
@@ -1159,7 +1159,7 @@ const COMMENT_SCRIPT: &str = r#"<script>
 /// step — the scope the decision register approved, and the reason
 /// `the_page_references_no_external_resource` narrows rather than
 /// disappears.
-const VERDICT_SCRIPT: &str = r#"<script>
+pub(crate) const VERDICT_SCRIPT: &str = r#"<script>
 (function () {
   var box = document.getElementById('verdict');
   var said = document.getElementById('verdict-said');
