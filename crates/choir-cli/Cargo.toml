@@ -18,11 +18,14 @@ choir-hash = { path = "../choir-hash" }
 # of the agent surface so one staleness test covers all of it.
 choir-node = { path = "../choir-node" }
 choir-identity = { path = "../choir-identity" }
+# Promoted from a dev-dependency for `choir log --verify`, which rebuilds
+# the hashed form from a served page. Not a new dependency to the
+# workspace: choir-identity, already here, is built on it.
+choir-oplog = { path = "../choir-oplog" }
 choir-view = { path = "../choir-view" }
 serde_json = "1"
 
 [dev-dependencies]
-choir-oplog = { path = "../choir-oplog" }
 
 [lints]
 workspace = true

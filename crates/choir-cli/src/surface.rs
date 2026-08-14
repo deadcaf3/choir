@@ -273,6 +273,13 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: false,
     },
     Command {
+        name: "log",
+        args: "<api> [--from <n>] [--verify] [--keys <file>]",
+        summary: "read log entries from a cursor; --verify checks continuity, recomputes every \
+                  hash, and verifies the signatures whose keys you hold — SYNC.md as a flag",
+        agent_facing: true,
+    },
+    Command {
         name: "batch",
         args: "<api> <key-file> <channel> <ops-file>",
         summary: "sign and submit many operations as one batch — the primary path for agent \

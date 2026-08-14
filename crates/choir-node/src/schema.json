@@ -39,6 +39,12 @@
     },
     {
       "agent_facing": true,
+      "args": "<api> [--from <n>] [--verify] [--keys <file>]",
+      "name": "log",
+      "summary": "read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag"
+    },
+    {
+      "agent_facing": true,
       "args": "<api> <key-file> <channel> <ops-file>",
       "name": "batch",
       "summary": "sign and submit many operations as one batch — the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op in order"
