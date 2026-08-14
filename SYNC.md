@@ -136,6 +136,24 @@ lie about ordering:
 `author_key` is `"1e-" + hex(blake3(public_key_32_bytes))`, so it also
 tells you which key to look up, and binds the id to the key material.
 
+**A passkey signature (D39) carries three more fields, and they are
+inside the hashed form.** When `author_scheme` is present the signature
+is not raw ed25519 over the signing hash: `2` means WebAuthn ES256, an
+ECDSA P-256 signature over `authenticator_data ‖ SHA-256(client_data_json)`,
+where the `challenge` member inside `client_data_json` is the base64url
+of the signing hash from step 2. Both byte strings are served, hex, as
+`authenticator_data_hex` and `client_data_json_hex`.
+
+They are omitted entirely when absent, exactly as they are in the hashed
+form, so an ed25519 entry's JSON is unchanged and an older client sees
+no new keys. **But a client that ignores them cannot recompute the hash
+of a passkey-signed entry** — they are in the canonical bytes, so
+leaving them out yields a different digest and a legitimate entry looks
+tampered with. Absent `author_scheme` means ed25519, which is the only
+scheme that existed before D39; an unrecognised value is a scheme this
+client cannot check, which is a different thing from a bad signature and
+should be reported as such.
+
 An entry with `author_key: null` is unsigned. The API admits no such
 op — even the node's own housekeeping (ref updates converted from a git
 push, reviewer draws) is signed with the node's key — so in practice

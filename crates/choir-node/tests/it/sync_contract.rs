@@ -100,10 +100,29 @@ fn canonical(e: &serde_json::Value) -> Vec<u8> {
         e["author_sig_hex"].as_str(),
     ) {
         s.push_str(&format!(
-            ",\"author_sig\":{{\"key_id\":\"{}\",\"signature\":{}}}",
+            ",\"author_sig\":{{\"key_id\":\"{}\",\"signature\":{}",
             key_id,
             byte_array(&hex_decode(sig).expect("signature hex"))
         ));
+        // D39's fields, in declaration order, each omitted when absent
+        // for the same reason `author_sig` itself is. A client that
+        // stops here recomputes the wrong hash for a passkey-signed
+        // entry — they are inside the canonical bytes.
+        if let Some(scheme) = e["author_scheme"].as_u64() {
+            s.push_str(&format!(",\"scheme\":{scheme}"));
+        }
+        for (served, field) in [
+            ("authenticator_data_hex", "authenticator_data"),
+            ("client_data_json_hex", "client_data_json"),
+        ] {
+            if let Some(hex) = e[served].as_str() {
+                s.push_str(&format!(
+                    ",\"{field}\":{}",
+                    byte_array(&hex_decode(hex).expect("hex"))
+                ));
+            }
+        }
+        s.push('}');
     }
     s.push('}');
     s.into_bytes()

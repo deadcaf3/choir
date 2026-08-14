@@ -710,6 +710,64 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["seq"], 0, "{body}");
 
+    // And the entry it produced is still verifiable by a third party.
+    //
+    // D39 put three fields inside `Witness` and therefore inside the
+    // hashed form, and `/api/log` did not serve them: a client
+    // rebuilding the canonical bytes from the served fields computed a
+    // different hash, so a legitimate passkey-signed entry was
+    // indistinguishable from a node lying about its log. Found by
+    // building the verifier that would have reported it, not by any
+    // test — `sync_contract.rs` exercises the recipe only over ed25519
+    // entries, which are unaffected.
+    // Read as alice: the op log is a node-wide read (D29), which bob's
+    // repository grant does not carry.
+    let (status, page) = curl(&["-u", "alice:a", &format!("{base}/api/log?from=0")]);
+    assert_eq!(status, 200, "{page}");
+    let entry = page["entries"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|e| e["author_scheme"].as_u64() == Some(2)))
+        .unwrap_or_else(|| panic!("no passkey-signed entry in the page: {page}"));
+    for field in ["authenticator_data_hex", "client_data_json_hex"] {
+        assert!(
+            entry[field].as_str().is_some_and(|hex| !hex.is_empty()),
+            "the served entry omits `{field}`, so its hash cannot be recomputed: {entry}"
+        );
+    }
+    // The whole point, checked the way a third party would: rebuild the
+    // signature from what was served and confirm the hash the node
+    // claims is the hash of what it sent.
+    let rebuilt = choir_oplog::Witness::webauthn_es256(
+        entry["author_key"].as_str().expect("author key"),
+        choir_node::platform::hex_decode(entry["author_sig_hex"].as_str().expect("sig")).expect("hex"),
+        choir_node::platform::hex_decode(entry["authenticator_data_hex"].as_str().expect("auth"))
+            .expect("hex"),
+        choir_node::platform::hex_decode(entry["client_data_json_hex"].as_str().expect("client"))
+            .expect("hex"),
+    );
+    let recomputed = choir_oplog::OpEntry {
+        format_version: entry["format_version"].as_u64().expect("version") as u16,
+        parent: entry["parent"].as_str().and_then(|hex| {
+            let (codec, digest) = hex.split_once('-')?;
+            Some(choir_oplog::ContentHash {
+                codec: u8::from_str_radix(codec, 16).ok()?,
+                digest: choir_node::platform::hex_decode(digest)?,
+            })
+        }),
+        seq: entry["seq"].as_u64().expect("seq"),
+        channel: entry["workspace"].as_str().expect("channel").to_string(),
+        payload: choir_node::platform::hex_decode(entry["payload_hex"].as_str().expect("payload"))
+            .expect("hex"),
+        witnesses: serde_json::from_value(entry["witnesses"].clone()).expect("witnesses"),
+        author_sig: Some(rebuilt),
+    }
+    .content_hash();
+    assert_eq!(
+        recomputed.to_hex(),
+        entry["hash"].as_str().expect("hash"),
+        "a passkey-signed entry does not hash to what the node claims: {entry}"
+    );
+
     // It is in the log as bob's, signed by the credential he enrolled.
     let (status, view) = curl(&["-u", "alice:a", &format!("{base}/api/view")]);
     assert_eq!(status, 200, "{view}");
