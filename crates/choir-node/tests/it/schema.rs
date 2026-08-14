@@ -134,9 +134,30 @@ fn the_capabilities_describe_the_node_rather_than_the_build() {
     }
 
     // The static half is identical across the two nodes: the same build
-    // describes the same API, and only the deployment differs. Without
-    // this a capability could quietly be baked into the generated file.
+    // describes the same API, and only the deployment differs.
     for key in ["api_version", "endpoints", "commands", "deprecations"] {
         assert_eq!(bare[key], full[key], "`{key}` differs between two nodes of one build");
+    }
+
+    // The live object *replaces* whatever the generated file carried
+    // rather than filling gaps in it, so a capability committed by
+    // mistake can never be served. Written after a mutation that baked
+    // `"accounts": true` into the generated schema and changed nothing
+    // observable: the code was safe, but only because the overwrite is
+    // unconditional, and nothing said so. A merge that filled instead of
+    // replaced would leak the baked key, and this is the assertion that
+    // notices.
+    for doc in [&bare, &full] {
+        let keys: Vec<&str> = doc["capabilities"]
+            .as_object()
+            .expect("a capabilities object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["accounts", "acl", "platform"],
+            "the served capabilities are not exactly what the node computed: {doc}"
+        );
     }
 }
