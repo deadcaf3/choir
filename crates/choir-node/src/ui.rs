@@ -1026,6 +1026,17 @@ mod tests {
     /// that probe list when it adds the first script, and a shared list
     /// would narrow this one silently at the same moment. Two lists means
     /// two decisions.
+    ///
+    /// **The decision, taken rather than deferred:** this list stays
+    /// strict, `<script` included, where D39 scoped its reversal to the
+    /// review page. A refusal page is a dead end by construction — its
+    /// entire content is what happened and the one action that changes
+    /// it, and there is no interaction on it to progressively enhance.
+    /// So the probe list here is the rule for this surface rather than a
+    /// lagging copy of another surface's. If a later change wants script
+    /// on a refusal page, this test failing is the point: the question is
+    /// worth asking then, and answering it by matching the other list is
+    /// how a rule turns into a habit.
     #[test]
     fn a_refusal_page_references_no_external_resource() {
         let page = refusal(
