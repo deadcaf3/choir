@@ -366,6 +366,29 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "triage",
+        args: "<api>",
+        summary: "every review and change classified into a bucket — landed, awaiting \
+                  verdicts, changes requested, approved awaiting landing — ranked \
+                  most-actionable-first, capped, with truncation marked in-band",
+        agent_facing: true,
+    },
+    Command {
+        name: "state",
+        args: "<api> <channel>",
+        summary: "your bounded next-actions document: verdicts you owe, what your changes \
+                  need, what you are waiting on, each with a command and its risk",
+        agent_facing: true,
+    },
+    Command {
+        name: "skill",
+        args: "install [--into <dir>]",
+        summary: "install the choir agent skill (default .claude/skills), rendered from \
+                  this binary's own surface table so it can never document another version; \
+                  re-run after upgrading and unchanged files are left alone",
+        agent_facing: true,
+    },
+    Command {
         name: "view",
         args: "<api>",
         summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate",
@@ -800,6 +823,26 @@ pub fn shell_functions() -> String {
         ));
     }
     out
+}
+
+/// Directory name the agent skill installs under; the skill frontmatter's
+/// `name:` must equal it, because skill loaders resolve by directory.
+pub const SKILL_DIR: &str = "choir";
+
+/// The installable agent skill (internal/oak.md item 5).
+///
+/// Rendered from the same table as `--help` and `agents.md` at the moment
+/// of installation, so — unlike docs baked in as static files — the
+/// installed skill can never describe a different version than the binary
+/// that wrote it. Re-installing after an upgrade refreshes it.
+#[must_use]
+pub fn skill_md() -> String {
+    format!(
+        "---\nname: {SKILL_DIR}\ndescription: Drive a choir node — signed operations, \
+         workspaces, reviews, triage and next actions. Use when working in a repository \
+         served by a choir node, or when asked to run choir commands.\n---\n\n{}",
+        agents_md()
+    )
 }
 
 /// The generated half of `templates/python/choir.py`: one method per

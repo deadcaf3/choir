@@ -7,9 +7,11 @@
 mod claude_hooks;
 mod batch;
 mod cli;
+mod insight;
 mod install_policy;
 mod mcp;
 mod python;
 mod runner;
+mod skill;
 mod surface;
 mod symphony_backend;

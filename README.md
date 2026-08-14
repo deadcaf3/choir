@@ -439,6 +439,9 @@ commands:
   choir appeal <api> <attempt-id>
   choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
   choir reviews <api> <reviewer>
+  choir triage <api>
+  choir state <api> <channel>
+  choir skill install [--into <dir>]
   choir view <api>
 
 Exit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), 2 usage error.

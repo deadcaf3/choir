@@ -21,6 +21,9 @@
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 //! choir reviews <api> <reviewer>
 //! choir view <api>
+//! choir triage <api>
+//! choir state <api> <channel>
+//! choir skill install [--into <dir>]
 //! ```
 //!
 //! Exit codes: 0 = the node accepted, 1 = the node rejected (the JSON
@@ -133,6 +136,32 @@ fn http(
             std::process::exit(1);
         }
     }
+}
+
+/// Fetches `/api/view` and applies a pure derivation to it, pretty-printed.
+///
+/// A non-2xx or non-JSON response is fatal before the derivation runs:
+/// classifying an error body would produce a confidently empty document,
+/// which reads as "nothing to do" — the worst possible failure mode for
+/// a next-actions surface.
+fn derived_view(
+    api: &str,
+    auth: AuthOptions<'_>,
+    derive: impl Fn(&serde_json::Value) -> serde_json::Value,
+) -> String {
+    let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
+    if !(200..300).contains(&status) {
+        eprintln!("choir: GET /api/view returned {status}: {body}");
+        std::process::exit(1);
+    }
+    let view: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(view) => view,
+        Err(error) => {
+            eprintln!("choir: /api/view response is not JSON: {error}");
+            std::process::exit(1);
+        }
+    };
+    serde_json::to_string_pretty(&derive(&view)).expect("derived documents are serializable")
 }
 
 /// Prints the response body and exits nonzero unless the status is 2xx.
@@ -1081,6 +1110,40 @@ fn main() {
         ["view", api] => {
             let (status, resp) = http(api, auth, "choir_view", serde_json::json!({}));
             finish(status, &resp);
+        }
+        ["skill", "install", rest @ ..] => {
+            let into = match rest {
+                [] => ".claude/skills",
+                ["--into", dir] => dir,
+                _ => usage(),
+            };
+            let dir = std::path::Path::new(into).join(choir_cli::surface::SKILL_DIR);
+            let path = dir.join("SKILL.md");
+            let rendered = choir_cli::surface::skill_md();
+            // Byte-compare before writing: a re-install after `cargo
+            // install` refreshes a stale skill and leaves a current one
+            // untouched, so repeated installs produce no churn.
+            let wrote = std::fs::read_to_string(&path).ok().as_deref() != Some(rendered.as_str());
+            if wrote {
+                if let Err(error) =
+                    std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &rendered))
+                {
+                    eprintln!("choir: cannot write {}: {error}", path.display());
+                    std::process::exit(1);
+                }
+            }
+            let doc = serde_json::json!({ "path": path.display().to_string(), "wrote": wrote });
+            finish(200, &doc.to_string());
+        }
+        ["triage", api] => {
+            let doc = derived_view(api, auth, choir_cli::triage::triage);
+            finish(200, &doc);
+        }
+        ["state", api, channel] => {
+            let doc = derived_view(api, auth, |view| {
+                choir_cli::triage::next_actions(view, api, channel)
+            });
+            finish(200, &doc);
         }
         _ => usage(),
     }
