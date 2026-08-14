@@ -144,6 +144,45 @@ impl DifferentialReport {
     }
 }
 
+/// Ends a timed-out run and everything it spawned.
+///
+/// `Child::kill` signals one pid. The commands this module runs are whole
+/// test invocations, and a shell forks rather than execs anything that is
+/// not its tail call, so the pid we hold is usually a shell whose death
+/// leaves the real work running. Signalling the group covers the
+/// descendants; the direct kill after it is the fallback for a child that
+/// never got a group of its own. Without this the deadline bounded the
+/// verdict but not the machine: each timeout left a live process behind.
+fn kill_run_and_descendants(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // std has no `killpg` and the workspace has no libc dependency, so
+        // the one call is declared here — the trade `choir-spike` already
+        // makes for `clonefile`. It has to be a syscall rather than a
+        // spawned `kill`: what this recovers from is a machine filling with
+        // survivors, which is exactly when spawning anything is least
+        // likely to work.
+        extern "C" {
+            fn killpg(pgrp: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+            fn getpgid(pid: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        // `process_group(0)` above made the child its own group leader.
+        // Checked rather than assumed, because the two live thirty lines
+        // apart and the failure is not local: a pid that is *not* also a
+        // group id names some other group, and signalling that would kill
+        // processes this module never started. If the spawn ever stops
+        // setting the group, this degrades to the direct kill below.
+        if let Ok(pid) = std::ffi::c_int::try_from(child.id()) {
+            if unsafe { getpgid(pid) } == pid {
+                // SIGKILL, not SIGTERM: the run has already ignored its
+                // deadline, so this is the reap, not a wind-down request.
+                unsafe { killpg(pid, 9) };
+            }
+        }
+    }
+    child.kill().ok();
+}
+
 fn run_one(
     program: &str,
     args: &[String],
@@ -151,13 +190,24 @@ fn run_one(
     env: &BTreeMap<String, String>,
     timeout: Option<std::time::Duration>,
 ) -> Result<Observation, String> {
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .env_clear()
         .envs(env)
         .current_dir(dir)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Its own process group, so a deadline can reach what the command
+    // spawned and not only the command. The cost is that the child no
+    // longer shares this process's terminal group, so an interactive
+    // Ctrl-C reaches it through us rather than directly.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("run differential command in {}: {error}", dir.display()))?;
     let status = match timeout {
@@ -173,7 +223,7 @@ fn run_one(
                 match child.try_wait() {
                     Ok(Some(status)) => break status,
                     Ok(None) if std::time::Instant::now() >= deadline => {
-                        child.kill().ok();
+                        kill_run_and_descendants(&mut child);
                         child.wait().ok();
                         // Operational error, never a verdict: a timeout cannot
                         // distinguish a hang from a slow run, so it must not
