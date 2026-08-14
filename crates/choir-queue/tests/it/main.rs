@@ -9,5 +9,6 @@ mod corpus;
 mod differential;
 mod differential_runner;
 mod envelope;
+mod memory;
 mod queue;
 mod safety;

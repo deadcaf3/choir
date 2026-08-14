@@ -20,6 +20,7 @@ pub mod corpus;
 pub mod differential;
 pub mod differential_ledger;
 pub mod envelope;
+pub mod memory;
 
 use choir_merge::{safety, MergeOutcome, Pipeline};
 use choir_oplog::MemLog;
@@ -92,6 +93,14 @@ pub struct QueueReport {
     pub window_trace: Vec<usize>,
     /// Total CI executions, including retests behind failures.
     pub ci_runs: usize,
+    /// Total strategy-pipeline invocations. A change resolved from
+    /// [`memory::ResolutionMemory`] does not invoke the pipeline, which
+    /// is what a test counts to prove a replay happened.
+    pub merge_invocations: usize,
+    /// Changes whose conflict was resolved from memory, in train order.
+    /// Every one of them still ran CI: replay produces a candidate,
+    /// never a landing.
+    pub replayed: Vec<u64>,
 }
 
 /// Single-shard speculative merge queue over one file.
@@ -100,6 +109,7 @@ pub struct MergeQueue {
     pipeline: Pipeline,
     window: usize,
     queue: std::collections::VecDeque<Change>,
+    memory: memory::ResolutionMemory,
 }
 
 impl MergeQueue {
@@ -118,7 +128,15 @@ impl MergeQueue {
             pipeline,
             window: DEFAULT_WINDOW,
             queue: std::collections::VecDeque::new(),
+            memory: memory::ResolutionMemory::new(),
         }
+    }
+
+    /// Installs a resolution memory (item B): a conflict whose triple it
+    /// remembers is replayed as a candidate instead of re-conflicting.
+    /// The default is an empty memory, which changes nothing.
+    pub fn set_memory(&mut self, memory: memory::ResolutionMemory) {
+        self.memory = memory;
     }
 
     /// Enqueues a change.
@@ -147,6 +165,8 @@ impl MergeQueue {
         let mut rejected = Vec::new();
         let mut window_trace = Vec::new();
         let mut ci_runs = 0usize;
+        let mut merge_invocations = 0usize;
+        let mut replayed = Vec::new();
         let handle = sequencer.handle();
 
         while !self.queue.is_empty() {
@@ -158,6 +178,23 @@ impl MergeQueue {
             let mut train_rejects: Vec<(u64, Rejection)> = Vec::new();
             for _ in 0..take {
                 let change = self.queue.pop_front().unwrap();
+                // Resolution memory (item B): a remembered triple is
+                // replayed without re-invoking the strategy pipeline.
+                // The replay is a *candidate* — it joins the train and
+                // runs the same CI verdict as everything else, and it
+                // can only exist because an author already committed
+                // this exact resolution as a value (item A's link).
+                if let Some(remembered) =
+                    self.memory
+                        .recall(&change.base, &speculative, &change.proposed)
+                {
+                    let next = remembered.to_string();
+                    speculative = next.clone();
+                    replayed.push(change.id);
+                    train.push((change, next));
+                    continue;
+                }
+                merge_invocations += 1;
                 let resolution = self
                     .pipeline
                     .merge(&change.base, &speculative, &change.proposed);
@@ -240,6 +277,8 @@ impl MergeQueue {
             final_state: self.base.clone(),
             window_trace,
             ci_runs,
+            merge_invocations,
+            replayed,
         }
     }
 }

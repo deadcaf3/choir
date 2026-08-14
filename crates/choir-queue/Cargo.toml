@@ -5,9 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+choir-hash = { path = "../choir-hash" }
 choir-merge = { path = "../choir-merge" }
 choir-oplog = { path = "../choir-oplog" }
 choir-sequencer = { path = "../choir-sequencer" }
+choir-store = { path = "../choir-store" }
+choir-view = { path = "../choir-view" }
 serde_json = { workspace = true }
 
 [lints]

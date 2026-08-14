@@ -316,9 +316,12 @@ dependencies = [
 name = "choir-queue"
 version = "0.0.1"
 dependencies = [
+ "choir-hash",
  "choir-merge",
  "choir-oplog",
  "choir-sequencer",
+ "choir-store",
+ "choir-view",
  "serde_json",
 ]
 
