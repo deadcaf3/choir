@@ -8,3 +8,10 @@ internal/*
 !internal/integration-workflows.md
 !internal/measurements.md
 !internal/oak.md
+
+# Python bytecode. `templates/python/choir.py` is a shipped artifact and
+# its tests import it, so running them leaves a __pycache__ beside it;
+# one got committed by a `git add -A` during a merge before this line
+# existed.
+__pycache__/
+*.pyc
