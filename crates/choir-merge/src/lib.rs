@@ -20,6 +20,8 @@
 //! }
 //! ```
 
+pub mod safety;
+
 /// Result of one strategy's attempt at a 3-way merge.
 pub enum MergeOutcome {
     /// Strategy produced a clean merge.

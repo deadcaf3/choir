@@ -21,7 +21,7 @@ pub mod differential;
 pub mod differential_ledger;
 pub mod envelope;
 
-use choir_merge::{MergeOutcome, Pipeline};
+use choir_merge::{safety, MergeOutcome, Pipeline};
 use choir_oplog::MemLog;
 use choir_sequencer::Sequencer;
 
@@ -54,6 +54,17 @@ pub enum Rejection {
     Conflict,
     /// CI failed for this change on its speculative state.
     CiFailure,
+    /// A strategy resolved, but its output edits the speculative state beyond
+    /// what the change proposed (internal/oak.md item 1): silently reverted
+    /// or injected lines. Treated like a conflict — evicted first-class,
+    /// never landed, never blocking the train — but reported separately
+    /// because the author's change may be fine and the *strategy* at fault.
+    SafetyViolation {
+        /// The strategy whose resolution violated the invariant.
+        strategy: &'static str,
+        /// The unattributable lines, as evidence for escalation.
+        violation: choir_merge::safety::Violation,
+    },
 }
 
 /// The CI executor seam (D18): pass/fail verdict for a candidate state.
@@ -94,9 +105,17 @@ pub struct MergeQueue {
 impl MergeQueue {
     /// Creates a queue over `base` content with the default window.
     pub fn new(base: &str) -> Self {
+        Self::with_pipeline(base, Pipeline::default_v1())
+    }
+
+    /// Creates a queue with a caller-supplied strategy pipeline — the D4/D19
+    /// widening seam (structured or LLM slots appended by the caller). Every
+    /// resolution is still safety-checked in [`MergeQueue::drain`], which is
+    /// what makes the non-deterministic slots admissible at all.
+    pub fn with_pipeline(base: &str, pipeline: Pipeline) -> Self {
         Self {
             base: base.to_string(),
-            pipeline: Pipeline::default_v1(),
+            pipeline,
             window: DEFAULT_WINDOW,
             queue: std::collections::VecDeque::new(),
         }
@@ -139,14 +158,31 @@ impl MergeQueue {
             let mut train_rejects: Vec<(u64, Rejection)> = Vec::new();
             for _ in 0..take {
                 let change = self.queue.pop_front().unwrap();
-                match self
+                let resolution = self
                     .pipeline
-                    .merge(&change.base, &speculative, &change.proposed)
-                    .outcome
-                {
+                    .merge(&change.base, &speculative, &change.proposed);
+                match resolution.outcome {
                     MergeOutcome::Resolved(next) => {
-                        speculative = next.clone();
-                        train.push((change, next));
+                        // Merge-safety invariant (internal/oak.md item 1):
+                        // a resolution may only apply edits the change
+                        // proposed. A strategy that quietly reverts work
+                        // already in the speculative state is evicted like
+                        // a conflict, before CI ever sees it.
+                        match safety::check(&change.base, &speculative, &change.proposed, &next) {
+                            safety::SafetyVerdict::Upholds => {
+                                speculative = next.clone();
+                                train.push((change, next));
+                            }
+                            safety::SafetyVerdict::Violation(violation) => {
+                                train_rejects.push((
+                                    change.id,
+                                    Rejection::SafetyViolation {
+                                        strategy: resolution.strategy,
+                                        violation,
+                                    },
+                                ));
+                            }
+                        }
                     }
                     MergeOutcome::Conflict { .. } => {
                         // First-class conflict: evict, do not block the train.
