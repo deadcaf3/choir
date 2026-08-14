@@ -275,6 +275,23 @@ fn refs_section(h: &mut String, v: &serde_json::Value) {
         h.push_str("</section>");
         return;
     }
+    // Open reviews, counted against the ref they target, so the status
+    // rides the row a reader is already looking at instead of waiting on
+    // a section they have to remember to scroll to. Same payload as the
+    // reviews section below — a chip here can never disagree with it.
+    let mut pending: HashMap<&str, usize> = HashMap::new();
+    if let Some(reviews) = v.get("reviews").and_then(serde_json::Value::as_object) {
+        for r in reviews.values() {
+            let complete = r.get("complete").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let archived = r.get("archived").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            if complete || archived {
+                continue;
+            }
+            if let Some(target) = r.get("target_ref").and_then(serde_json::Value::as_str) {
+                *pending.entry(target).or_default() += 1;
+            }
+        }
+    }
     let mut current = "";
     h.push_str("<table><tbody>");
     for (full, target) in refs {
@@ -298,6 +315,11 @@ fn refs_section(h: &mut String, v: &serde_json::Value) {
         }
         h.push_str("<tr><td>");
         h.push_str(&esc(name));
+        if let Some(open) = pending.get(full.as_str()) {
+            h.push_str(" <b class=\"tag pending\">");
+            h.push_str(&open.to_string());
+            h.push_str(" pending</b>");
+        }
         h.push_str("</td><td class=\"mono\">");
         h.push_str(&esc(&short(target.as_str().unwrap_or("—"))));
         h.push_str("</td></tr>");
@@ -448,7 +470,11 @@ fn review_table(h: &mut String, rows: &[(&String, &serde_json::Value)]) {
 }
 
 /// One reviewer's answer per line, with the note when there is one.
-fn verdicts(h: &mut String, r: &serde_json::Value) {
+///
+/// `pub(crate)` because the D34 review list folds the same rendering
+/// into each row's `<details>`: one function is how "what a verdict
+/// looks like" stays one answer across both surfaces.
+pub(crate) fn verdicts(h: &mut String, r: &serde_json::Value) {
     let assigned = r
         .get("reviewers")
         .and_then(serde_json::Value::as_array)
@@ -861,6 +887,36 @@ mod tests {
             page.matches("<a href=\"/r/agents/one\">").count(),
             1,
             "a repository is headed more than once: {page}"
+        );
+    }
+
+    /// Status lives where the work is: a ref with an open review says so
+    /// on its own row, and a ref with none stays quiet — a chip that is
+    /// always there is a chip nobody reads.
+    #[test]
+    fn a_ref_with_an_open_review_carries_a_pending_chip() {
+        let json = serde_json::json!({
+            "refs": {
+                "o/r.git:refs/heads/main": "11-deadbeefdeadbeef",
+                "o/r.git:refs/heads/side": "11-deadbeefdeadbeef",
+            },
+            "reviews": {
+                "rv1": {"target_ref": "o/r.git:refs/heads/main", "complete": false},
+                "rv2": {"target_ref": "o/r.git:refs/heads/main", "complete": true,
+                        "approved": true},
+                "rv3": {"target_ref": "o/r.git:refs/heads/main", "complete": false,
+                        "archived": true},
+            }
+        })
+        .to_string();
+        let page = render(&json, 1);
+        assert!(
+            page.contains("refs/heads/main <b class=\"tag pending\">1 pending</b>"),
+            "the open review is not on its ref's row: {page}"
+        );
+        assert!(
+            !page.contains("refs/heads/side <b"),
+            "a ref nothing targets grew a chip: {page}"
         );
     }
 
