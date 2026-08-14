@@ -274,9 +274,10 @@ fn code_all_lists_every_variant() {
             Code::StaleScope => 21,
             Code::BadSignature => 22,
             Code::Unclassified => 23,
+            Code::QuotaExceeded => 24,
         }
     }
-    const COUNT: usize = 24;
+    const COUNT: usize = 25;
 
     let all = Code::all();
     assert_eq!(
