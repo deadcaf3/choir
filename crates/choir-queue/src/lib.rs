@@ -46,6 +46,12 @@ pub struct Change {
     pub base: String,
     /// The file content this change proposes.
     pub proposed: String,
+    /// Ids of queued changes this one declares it depends on (Pijul
+    /// item 2). Declared-only — the queue never infers dependencies
+    /// from overlap; inference is a separate decision. Empty (the
+    /// default for all existing traffic) keeps the legacy
+    /// halve-and-retest behavior on failure; see [`MergeQueue::drain`].
+    pub depends: Vec<u64>,
 }
 
 /// Why a change left the queue without merging.
@@ -65,6 +71,13 @@ pub enum Rejection {
         strategy: &'static str,
         /// The unattributable lines, as evidence for escalation.
         violation: choir_merge::safety::Violation,
+    },
+    /// Ejected because it (transitively) declared a dependency on a
+    /// change whose combined build failed (Pijul item 2). Not a verdict
+    /// on this change itself: resubmit once the dependency is fixed.
+    DependencyEjection {
+        /// The CI-failing change this one depends on.
+        on: u64,
     },
 }
 
@@ -261,10 +274,68 @@ impl MergeQueue {
                         self.window += 1;
                     }
                     let (failed, _) = train.remove(0);
-                    rejected.push((failed.id, Rejection::CiFailure));
-                    self.window = (self.window / 2).max(1);
-                    for (change, _) in train.into_iter().rev() {
-                        self.queue.push_front(change);
+                    let failed_id = failed.id;
+                    rejected.push((failed_id, Rejection::CiFailure));
+
+                    // Dependency-aware ejection (Pijul item 2): when any
+                    // waiting change declares dependencies, the failure
+                    // ejects exactly the failing change plus everything
+                    // that (transitively) depends on it, and the window
+                    // is not halved — the blast radius is named by the
+                    // declarations, not guessed by shrinking the train.
+                    // Survivors are requeued in order and land in this
+                    // same drain. With no declarations anywhere (all
+                    // existing traffic) the legacy halving path runs
+                    // unchanged.
+                    let declares = |c: &Change| !c.depends.is_empty();
+                    let dependency_mode = declares(&failed)
+                        || train.iter().any(|(c, _)| declares(c))
+                        || self.queue.iter().any(declares);
+                    if dependency_mode {
+                        let mut ejected = std::collections::BTreeSet::from([failed_id]);
+                        loop {
+                            let dependent = |c: &Change| {
+                                !ejected.contains(&c.id)
+                                    && c.depends.iter().any(|d| ejected.contains(d))
+                            };
+                            let next: Vec<u64> = train
+                                .iter()
+                                .map(|(c, _)| c)
+                                .chain(self.queue.iter())
+                                .filter(|c| dependent(c))
+                                .map(|c| c.id)
+                                .collect();
+                            if next.is_empty() {
+                                break;
+                            }
+                            ejected.extend(next);
+                        }
+                        for (change, _) in train.into_iter().rev() {
+                            if ejected.contains(&change.id) {
+                                rejected.push((
+                                    change.id,
+                                    Rejection::DependencyEjection { on: failed_id },
+                                ));
+                            } else {
+                                self.queue.push_front(change);
+                            }
+                        }
+                        let waiting = std::mem::take(&mut self.queue);
+                        for change in waiting {
+                            if ejected.contains(&change.id) {
+                                rejected.push((
+                                    change.id,
+                                    Rejection::DependencyEjection { on: failed_id },
+                                ));
+                            } else {
+                                self.queue.push_back(change);
+                            }
+                        }
+                    } else {
+                        self.window = (self.window / 2).max(1);
+                        for (change, _) in train.into_iter().rev() {
+                            self.queue.push_front(change);
+                        }
                     }
                 }
             }

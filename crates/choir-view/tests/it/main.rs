@@ -6,6 +6,7 @@
 
 mod canonical;
 mod comments;
+mod depends;
 mod golden;
 mod operator_identity;
 mod quarantine;

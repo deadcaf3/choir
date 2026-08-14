@@ -358,6 +358,7 @@ name = "choir-view"
 version = "0.0.1"
 dependencies = [
  "choir-hash",
+ "choir-identity",
  "choir-oplog",
  "choir-store",
  "serde",

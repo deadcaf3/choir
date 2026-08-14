@@ -118,6 +118,17 @@ pub struct ViewOp {
     /// byte-identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
+    /// Explicit change dependencies (Pijul item 2): content hashes of
+    /// the changes this op declares it builds on. Declared-only — the
+    /// platform never infers dependencies from file overlap; inference
+    /// is a separate decision. Additive under the same rule as `scope`
+    /// (an empty list is not serialized), and because it sits inside
+    /// the payload it is covered by the author's `(channel, payload)`
+    /// signature (invariant 4) with no change to the signing scheme:
+    /// ops written before the field existed re-serialize
+    /// byte-identically, so their signatures still verify.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends: Vec<ContentHash>,
 }
 
 impl ViewOp {
@@ -129,7 +140,16 @@ impl ViewOp {
             kind,
             scope: None,
             provenance: None,
+            depends: Vec::new(),
         }
+    }
+
+    /// Declares the changes this op builds on. The list rides inside
+    /// the signed payload, so a relay can neither strip nor extend it.
+    #[must_use]
+    pub fn with_depends(mut self, depends: Vec<ContentHash>) -> Self {
+        self.depends = depends;
+        self
     }
 
     /// Labels this op with a non-default provenance class. Only the

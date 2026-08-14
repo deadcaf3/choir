@@ -33,6 +33,7 @@ fn disjoint_change(id: u64) -> Change {
         workspace: format!("ws-{id}"),
         base: base(),
         proposed: lines.join("\n") + "\n",
+        depends: vec![],
     }
 }
 

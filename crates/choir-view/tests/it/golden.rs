@@ -511,6 +511,26 @@ fn commit_is_frozen() {
     );
 }
 
+/// `depends` is the additive dependency declaration on `ViewOp` (Pijul
+/// item 2). `depends.rs` proves an old signed payload round-trips and
+/// verifies; this freezes the declared form's exact bytes, and
+/// `view_op_variants_are_frozen` staying green is the proof the
+/// undeclared form's bytes never moved.
+#[test]
+fn view_op_depends_additive_field_is_frozen() {
+    assert_golden(
+        "SetRef with a declared dependency",
+        &ViewOp::new(OpKind::SetRef {
+            name: "main".into(),
+            commit: h(b"tip commit"),
+            prev: None,
+        })
+        .with_depends(vec![h(b"prerequisite change")]),
+        r#"{"format_version":1,"kind":{"SetRef":{"name":"main","commit":{"codec":30,"digest":[239,87,168,18,186,232,118,134,82,140,184,116,218,198,85,113,117,24,5,65,86,95,180,215,174,114,98,142,43,93,135,236]},"prev":null}},"depends":[{"codec":30,"digest":[85,75,133,213,8,99,241,4,4,204,255,174,254,77,73,196,21,228,237,223,253,185,127,181,13,129,103,119,212,174,197,159]}]}"#,
+        "1e-4cf0b7f667961e1ab914ea083b5cb80e4e76e565affd10d77bad96e14434f6dc",
+    );
+}
+
 /// `resolves` is the additive field on `Commit` (Pijul's
 /// resolution-as-linked-change). `resolution.rs` proves an old commit
 /// round-trips; this freezes the linked form's exact bytes, and

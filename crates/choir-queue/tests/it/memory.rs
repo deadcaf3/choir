@@ -20,6 +20,7 @@ fn stale_change() -> Change {
         workspace: "ws-stale".into(),
         base: "a\n".into(),
         proposed: "x\n".into(),
+        depends: vec![],
     }
 }
 
@@ -108,6 +109,7 @@ fn second_run_replays_the_remembered_triple_without_the_pipeline() {
         workspace: "ws-flaky".into(),
         base: "b\n".into(),
         proposed: "b\nf\n".into(),
+        depends: vec![],
     });
     let report = drain(&mut queue, &mut |c: &Change, _: &str| c.id != 2);
     assert_eq!(report.merged, Vec::<u64>::new());
