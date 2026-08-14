@@ -10,6 +10,7 @@ mod depends;
 mod golden;
 mod operator_identity;
 mod quarantine;
+mod receipts;
 mod resolution;
 mod snapshot;
 mod validate;

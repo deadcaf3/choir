@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+choir-fs = { path = "../choir-fs" }
 choir-identity = { path = "../choir-identity" }
 choir-oplog = { path = "../choir-oplog" }
 choir-sequencer = { path = "../choir-sequencer" }

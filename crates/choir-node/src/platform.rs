@@ -2330,12 +2330,31 @@ impl SubmitPolicy for ChoirPolicy {
                 .encode());
             }
         }
+        // A receipt's claimed viewer is bound the same way: the receipt
+        // exists to attribute attention, and attention recorded in
+        // somebody else's name is exactly the false "it was looked at"
+        // signal the op exists to remove.
+        if let OpKind::ViewedReview { viewer, .. } = &op.kind {
+            if *viewer != sub.channel {
+                return Err(Rejection::new(
+                    Code::ReviewerMismatch,
+                    "a receipt's viewer must be the channel it was signed on",
+                    "resubmit on your own channel: `choir viewed` signs on the viewer name by \
+                     construction",
+                )
+                .with_states(Some(sub.channel.clone()), Some(viewer.clone()))
+                .encode());
+            }
+        }
         // ...and the channel itself must belong to the signing key, or
         // the check above only proves a claim is self-consistent, not
         // that it is true. Review ops only: see `channel_is_owned`.
         if matches!(
             op.kind,
-            OpKind::PostVerdict { .. } | OpKind::RequestReview { .. } | OpKind::PostComment { .. }
+            OpKind::PostVerdict { .. }
+                | OpKind::RequestReview { .. }
+                | OpKind::PostComment { .. }
+                | OpKind::ViewedReview { .. }
         ) {
             self.channel_is_owned(&actor_id, &sub.channel)?;
         }
@@ -5493,6 +5512,9 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
         "reviewers": r.reviewers,
         "comments": comments,
         "verdicts": verdicts,
+        // viewer → fold position of that viewer's first read. What lets
+        // an author tell "reviewed and ignored" from "nobody looked".
+        "viewed": r.viewed,
         "slashes": r.slashes,
         "complete": r.complete(),
         "approved": r.approved(),

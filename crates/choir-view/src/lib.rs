@@ -675,6 +675,32 @@ pub enum OpKind {
         /// canonical bytes, never a second schema.
         snapshot: RefSnapshot,
     },
+    /// Record that `viewer` read review `id` (a read receipt; additive
+    /// variant, wire-format unchanged; internal/oak.md item 7).
+    ///
+    /// The receipt is what lets an author distinguish "reviewed and
+    /// ignored" from "nobody has looked yet". The fact recorded is the
+    /// *first* read per viewer -- when this review first got that
+    /// reader's attention -- so the fold refuses a viewer the review
+    /// already holds, and that refusal doubles as the replay defence,
+    /// exactly as a comment id does for [`OpKind::PostComment`]: nothing
+    /// positional is signed, so the payload's (review, viewer) pair is
+    /// its own retry identity.
+    ///
+    /// A receipt moves no ref, changes no verdict and carries no
+    /// authorization weight; it is bulk in [`OpKind::ArchiveReview`]'s
+    /// sense and is dropped with the rest of it.
+    ///
+    /// `viewer` is payload data covered by the author signature; binding
+    /// it to the submitting channel is admission policy (L2), exactly as
+    /// for [`OpKind::PostVerdict`]'s `reviewer`.
+    ViewedReview {
+        /// The review that was read.
+        id: String,
+        /// The channel that read it (must be the submitting channel,
+        /// enforced at admission).
+        viewer: String,
+    },
 }
 
 /// A signed attestation that the complete ref-state at log position
@@ -858,6 +884,10 @@ pub struct ReviewState {
     /// The discussion, in the order the sequencer admitted it (D38).
     /// Emptied by [`OpKind::ArchiveReview`] with the rest of the bulk.
     pub comments: Vec<CommentState>,
+    /// viewer → fold position of that viewer's first recorded read
+    /// (internal/oak.md item 7). Emptied by [`OpKind::ArchiveReview`]
+    /// with the rest of the bulk.
+    pub viewed: BTreeMap<String, u64>,
     /// Live, or settled with its outcome retained. Defaults to
     /// [`ReviewStatus::Live`], so replaying a log written before
     /// archiving existed yields exactly the previous behaviour.
@@ -1387,6 +1417,32 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::ViewedReview { id, viewer } => {
+                if viewer.is_empty() {
+                    return Err(ViewError::Review(
+                        "a read receipt must name its viewer".to_string(),
+                    ));
+                }
+                let review = self
+                    .reviews
+                    .get(id)
+                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if matches!(review.status, ReviewStatus::Archived { .. }) {
+                    // Archiving dropped the receipts, so a viewer that was
+                    // recorded no longer looks recorded; refusing receipts
+                    // on an archived review keeps the first-read rule true
+                    // for the whole life of the review, as for comments.
+                    return Err(ViewError::Review(format!(
+                        "review {id} is archived and accepts no further receipts"
+                    )));
+                }
+                if review.viewed.contains_key(viewer) {
+                    return Err(ViewError::Review(format!(
+                        "viewer {viewer} already holds a receipt on review {id}"
+                    )));
+                }
+                Ok(())
+            }
             OpKind::RecordProvenance { subject, kind, .. } => {
                 if subject.is_empty() || kind.is_empty() {
                     return Err(ViewError::Provenance(
@@ -1657,6 +1713,7 @@ impl View {
                         slashes: BTreeMap::new(),
                         target_ref: target_ref.clone(),
                         comments: Vec::new(),
+                        viewed: BTreeMap::new(),
                         status: ReviewStatus::Live,
                     },
                 );
@@ -1699,6 +1756,7 @@ impl View {
                 review.reviewers = Vec::new();
                 review.verdicts = BTreeMap::new();
                 review.comments = Vec::new();
+                review.viewed = BTreeMap::new();
             }
             OpKind::PostVerdict {
                 id,
@@ -1740,6 +1798,14 @@ impl View {
                         body: body.clone(),
                         at,
                     });
+            }
+            OpKind::ViewedReview { id, viewer } => {
+                let at = self.next_seq;
+                self.reviews
+                    .get_mut(id)
+                    .expect("validate proved the review is live and new to this viewer")
+                    .viewed
+                    .insert(viewer.clone(), at);
             }
             OpKind::RecordProvenance { subject, kind, body } => {
                 self.provenance

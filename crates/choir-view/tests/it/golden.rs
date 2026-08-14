@@ -272,6 +272,19 @@ fn view_op_variants_are_frozen() {
         r#"{"format_version":1,"kind":{"PostComment":{"id":"review-1","comment":"c1","author":"alice/agent","body":"why this base?"}}}"#,
         "1e-5b0fdd7cbf9cc5457742f8fd471b6a85118b3f6a6aed6e1b9c31e7c74184eab9",
     );
+    // A read receipt (internal/oak.md item 7): two `String` fields in
+    // declaration order. The (review, viewer) pair is the op's whole
+    // identity — the fold refuses a viewer the review already holds —
+    // so these bytes are what a client re-serializes on a safe retry.
+    assert_golden(
+        "ViewedReview",
+        &ViewOp::new(OpKind::ViewedReview {
+            id: "review-1".into(),
+            viewer: "alice/agent".into(),
+        }),
+        r#"{"format_version":1,"kind":{"ViewedReview":{"id":"review-1","viewer":"alice/agent"}}}"#,
+        "1e-829c3a0c5e0ed2b2bd6084ab67c80c103d6ae2284b27586b51ed35934c1c6671",
+    );
     assert_golden(
         "SlashApproval",
         &ViewOp::new(OpKind::SlashApproval {

@@ -55,6 +55,7 @@ mod smart_http;
 mod snapshot_admission;
 mod snapshot_emission;
 mod ssh;
+mod state_lock;
 mod sync_contract;
 mod t1_attack_edge;
 mod tls;

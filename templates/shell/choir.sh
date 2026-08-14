@@ -183,6 +183,12 @@ choir_comment() {
 	choir_run comment "$@"
 }
 
+# choir viewed <api> <key-file> <viewer> <review-id>
+#   record that you read a review, so its author can tell "reviewed and ignored" from "nobody looked"; first read only, resubmitting is refused
+choir_viewed() {
+	choir_run viewed "$@"
+}
+
 # choir appeal <api> <attempt-id>
 #   appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 choir_appeal() {

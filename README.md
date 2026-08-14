@@ -432,6 +432,7 @@ commands:
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
   choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
   choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'
+  choir viewed <api> <key-file> <viewer> <review-id>
   choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
   choir abandon <api> <node-key-file> <id>
   choir bind <api> <node-key-file> <operator> <key-hex> [channel]

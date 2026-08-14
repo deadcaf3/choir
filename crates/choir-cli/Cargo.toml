@@ -13,6 +13,7 @@ name = "choir"
 path = "src/main.rs"
 
 [dependencies]
+choir-fs = { path = "../choir-fs" }
 choir-hash = { path = "../choir-hash" }
 # For the rejection-code table: ERRORS.md is generated alongside the rest
 # of the agent surface so one staleness test covers all of it.
