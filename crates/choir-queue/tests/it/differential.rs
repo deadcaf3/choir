@@ -85,6 +85,24 @@ fn same_command_finds_behavior_that_only_the_merge_breaks() {
     std::fs::remove_dir_all(work).ok();
 }
 
+/// Whether a pid is still around, via the shell rather than a libc dep.
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("kill -0 {pid} 2>/dev/null"))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn kill(pid: u32) {
+    std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("kill -KILL {pid} 2>/dev/null"))
+        .status()
+        .ok();
+}
+
 #[test]
 fn a_hung_run_times_out_as_an_error_never_a_verdict() {
     let work =
@@ -103,7 +121,16 @@ fn a_hung_run_times_out_as_an_error_never_a_verdict() {
     // failure mode an unattended corpus walk cannot afford.
     std::fs::write(trees[2].join("hang"), "").unwrap();
     let script = work.join("check.sh");
-    std::fs::write(&script, "#!/bin/sh\nif [ -f hang ]; then sleep 600; fi\n").unwrap();
+    // The hang is a *child* of the shell, and its pid is written down. Both
+    // halves matter: forking is what a real test command does, and naming
+    // the pid is the only way an assertion can see whether the deadline
+    // reached it. The sleep is long enough to outlive the poll below and
+    // short enough that a regression costs seconds rather than minutes.
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nif [ -f hang ]; then sleep 20 & echo $! > spawned.pid; wait; fi\n",
+    )
+    .unwrap();
 
     let args = vec![script.display().to_string()];
     let env = effective_environment(&BTreeMap::new());
@@ -122,6 +149,35 @@ fn a_hung_run_times_out_as_an_error_never_a_verdict() {
     assert!(
         started.elapsed() < std::time::Duration::from_secs(30),
         "the deadline must actually bound the wait"
+    );
+
+    // A deadline is worth what it kills. Killing the pid we hold reaps the
+    // shell and orphans the work it forked, and every assertion above
+    // passes with that leak in place: the verdict is bounded while the
+    // machine is not, so an unattended corpus walk leaves one survivor per
+    // timeout, each running for as long as the command it came from meant
+    // to, competing with every later run.
+    let spawned: u32 = std::fs::read_to_string(trees[2].join("spawned.pid"))
+        .expect("the hung fixture records the pid it spawned")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let mut alive = true;
+    for _ in 0..50 {
+        if !pid_alive(spawned) {
+            alive = false;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if alive {
+        // Clean up before failing, so a regression here does not also leak
+        // the process it is complaining about.
+        kill(spawned);
+    }
+    assert!(
+        !alive,
+        "the deadline kills what the command spawned, not only the command"
     );
 
     // The same deadline leaves a fast command untouched.
