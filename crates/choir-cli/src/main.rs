@@ -29,7 +29,6 @@
 use choir_hash::ContentHash;
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_decode;
-use choir_oplog::{OpEntry, Witness};
 use choir_view::{ArchiveAuthorization, CreateAuthorization, OpKind, Verdict, ViewOp};
 
 #[derive(Clone, Copy)]
@@ -298,152 +297,6 @@ fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptio
 /// `choir-node/tests/it/sync_contract.rs` is the independent one: it
 /// rebuilds the canonical bytes by hand and deliberately never calls
 /// `content_hash`.
-fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions<'_>) -> ! {
-    let (status, body) = http(api, auth, "choir_log", serde_json::json!({ "from": from }));
-    if !(200..300).contains(&status) {
-        // A 409 is the gap rule in `SYNC.md`: this node cannot reach
-        // back that far. Pass its own words through rather than
-        // paraphrasing a refusal that names the window it does have.
-        println!("{body}");
-        std::process::exit(1);
-    }
-    let page: serde_json::Value = match serde_json::from_str(&body) {
-        Ok(page) => page,
-        Err(error) => {
-            eprintln!("choir log: response is not JSON: {error}");
-            std::process::exit(1);
-        }
-    };
-    let entries = page["entries"].as_array().cloned().unwrap_or_default();
-    for entry in &entries {
-        println!("{entry}");
-    }
-    if !verify {
-        eprintln!("choir log: {} entries, not verified", entries.len());
-        std::process::exit(0);
-    }
-
-    let registry = keys.map(load_registry).unwrap_or_default();
-    let mut failures: Vec<String> = Vec::new();
-    let mut checked = 0usize;
-    let mut unverified = 0usize;
-    let mut previous: Option<(u64, String)> = None;
-    for entry in &entries {
-        let seq = entry["seq"].as_u64().unwrap_or_default();
-        let claimed = entry["hash"].as_str().unwrap_or_default().to_string();
-
-        // 1. Continuity, within the page.
-        if let Some((last_seq, last_hash)) = &previous {
-            if seq != last_seq + 1 {
-                failures.push(format!("seq {seq}: follows {last_seq}, so an entry is missing"));
-            }
-            if entry["parent"].as_str() != Some(last_hash.as_str()) {
-                failures.push(format!("seq {seq}: parent is not the previous entry's hash"));
-            }
-        }
-
-        // 2. Recomputation.
-        match rebuild(entry) {
-            Some(rebuilt) if rebuilt.content_hash().to_hex() == claimed => {}
-            Some(_) => failures.push(format!("seq {seq}: does not hash to the hash it claims")),
-            None => failures.push(format!("seq {seq}: cannot be rebuilt from the fields served")),
-        }
-
-        // 3. Authorship, only where a key is actually held.
-        match (entry["author_key"].as_str(), rebuild(entry)) {
-            (None, _) => {
-                unverified += 1;
-                eprintln!("choir log: seq {seq}: unsigned, so authorship is unverified");
-            }
-            (Some(key_id), Some(rebuilt)) => match rebuilt.author_sig.as_ref() {
-                None => unverified += 1,
-                Some(sig) => {
-                    // The three outcomes are already distinct in the
-                    // error type, and keeping them distinct here is the
-                    // whole honesty of this command: a claim that
-                    // failed, a claim never examined, and a claim
-                    // checked. Collapsing the middle one into either
-                    // neighbour is how a verifier starts lying.
-                    match registry.verify_signing_hash(&rebuilt.signing_hash(), sig) {
-                        Ok(_) => checked += 1,
-                        Err(choir_identity::IdentityError::UnknownKey(_)) => {
-                            unverified += 1;
-                            eprintln!(
-                                "choir log: seq {seq}: no key held for {key_id}, authorship unverified"
-                            );
-                        }
-                        Err(choir_identity::IdentityError::UnsupportedScheme(scheme)) => {
-                            unverified += 1;
-                            eprintln!(
-                                "choir log: seq {seq}: signed with scheme {scheme}, which this \
-                                 client cannot check; authorship unverified"
-                            );
-                        }
-                        Err(error) => {
-                            failures.push(format!("seq {seq}: signature does not verify ({error:?})"));
-                        }
-                    }
-                }
-            },
-            (Some(_), None) => unverified += 1,
-        }
-        previous = Some((seq, claimed));
-    }
-
-    for failure in &failures {
-        eprintln!("choir log: {failure}");
-    }
-    eprintln!(
-        "choir log: {} entries, chain {}, {checked} signatures verified, {unverified} unverified",
-        entries.len(),
-        if failures.is_empty() { "holds" } else { "BROKEN" }
-    );
-    std::process::exit(i32::from(!failures.is_empty()));
-}
-
-/// Rebuilds the hashed form from the fields `/api/log` serves.
-///
-/// Every field of the canonical form is on the wire, which is what makes
-/// the chain checkable by someone who does not trust the node — so a
-/// `None` here means the node sent a page this client cannot verify,
-/// which is itself the finding.
-fn rebuild(entry: &serde_json::Value) -> Option<OpEntry> {
-    let author_sig = match entry["author_key"].as_str() {
-        None => None,
-        Some(key_id) => {
-            let signature = hex_decode(entry["author_sig_hex"].as_str()?)?;
-            Some(match entry["author_scheme"].as_u64() {
-                None => Witness::ed25519(key_id, signature),
-                Some(scheme) => Witness {
-                    key_id: key_id.to_string(),
-                    signature,
-                    scheme: Some(u16::try_from(scheme).ok()?),
-                    authenticator_data: entry["authenticator_data_hex"]
-                        .as_str()
-                        .and_then(hex_decode),
-                    client_data_json: entry["client_data_json_hex"].as_str().and_then(hex_decode),
-                },
-            })
-        }
-    };
-    Some(OpEntry {
-        format_version: u16::try_from(entry["format_version"].as_u64()?).ok()?,
-        parent: match entry["parent"].as_str() {
-            None => None,
-            Some(hex) => Some(hash_from_hex(hex)?),
-        },
-        seq: entry["seq"].as_u64()?,
-        channel: entry["workspace"].as_str()?.to_string(),
-        payload: hex_decode(entry["payload_hex"].as_str()?)?,
-        witnesses: serde_json::from_value(entry["witnesses"].clone()).ok()?,
-        author_sig,
-    })
-}
-
-/// The trusted keys this client holds, in the operator's own file format:
-/// one key per line, hex, with an optional channel name before it.
-///
-/// Reusing that spelling means the file an operator already keeps is the
 /// file a verifying client already has, rather than a second format that
 /// can disagree with the first.
 fn load_registry(path: &str) -> Registry {
@@ -474,6 +327,59 @@ fn load_registry(path: &str) -> Registry {
     }
     registry
 }
+
+fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions<'_>) -> ! {
+    let (status, body) = http(api, auth, "choir_log", serde_json::json!({ "from": from }));
+    if !(200..300).contains(&status) {
+        // A 409 is the gap rule in `SYNC.md`: this node cannot reach
+        // back that far. Pass its own words through rather than
+        // paraphrasing a refusal that names the window it does have.
+        println!("{body}");
+        std::process::exit(1);
+    }
+    let page: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(page) => page,
+        Err(error) => {
+            eprintln!("choir log: response is not JSON: {error}");
+            std::process::exit(1);
+        }
+    };
+    let entries = page["entries"].as_array().cloned().unwrap_or_default();
+    for entry in &entries {
+        println!("{entry}");
+    }
+    if !verify {
+        eprintln!("choir log: {} entries, not verified", entries.len());
+        std::process::exit(0);
+    }
+
+    let registry = keys.map(load_registry).unwrap_or_default();
+    let report = choir_cli::verify::page(&entries, &registry);
+    for note in &report.notes {
+        eprintln!("choir log: {note}");
+    }
+    for failure in &report.failures {
+        eprintln!("choir log: {failure}");
+    }
+    eprintln!(
+        "choir log: {} entries, chain {}, {} signatures verified, {} unverified",
+        entries.len(),
+        if report.failures.is_empty() { "holds" } else { "BROKEN" },
+        report.checked,
+        report.unverified
+    );
+    std::process::exit(i32::from(!report.failures.is_empty()));
+}
+
+/// Rebuilds the hashed form from the fields `/api/log` serves.
+///
+/// Every field of the canonical form is on the wire, which is what makes
+/// the chain checkable by someone who does not trust the node — so a
+
+/// The trusted keys this client holds, in the operator's own file format:
+/// one key per line, hex, with an optional channel name before it.
+///
+/// Reusing that spelling means the file an operator already keeps is the
 
 fn batch(api: &str, key_file: &str, channel: &str, source: &str, auth: AuthOptions<'_>) -> ! {
     let text = if source == "-" {
