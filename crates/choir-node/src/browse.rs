@@ -1487,7 +1487,14 @@ fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, her
 
 /// Closing tags and the same footer promise the D28 page makes.
 fn close(mut h: String) -> String {
-    h.push_str("</main><footer>Read-only. Every write goes through the signed-op API.</footer>");
+    // Not "read-only" any more, and the merge is where that became
+    // false: the review page now carries D39's verdict and comment
+    // controls, so a footer under them claiming the surface takes no
+    // writes contradicts the buttons directly above it. The half that is
+    // still true is the half worth keeping — those buttons do not bypass
+    // the signed-op API, they use it. The D28 node page keeps the full
+    // sentence, because that page really does offer nothing.
+    h.push_str("</main><footer>Every write here is a signed operation.</footer>");
     h.push_str("</body></html>");
     h
 }

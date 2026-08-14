@@ -810,6 +810,20 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
     // landed; the workspace gate caught it, the crate-scoped run did not.
     assert!(alices.contains("Say something"), "a writer was offered no way to discuss");
 
+    // A page offering a control must not also claim it takes no writes.
+    // Found by reading the rendered page rather than by any assertion:
+    // the browse footer said "Read-only" directly beneath Approve,
+    // Request changes and Sign and post. Every assertion passed, because
+    // each one asked whether the right words were present and none could
+    // ask what else was.
+    for page in [&bobs, &alices] {
+        assert!(
+            !page.contains("Read-only"),
+            "a page offering a write control still claims to be read-only: {page}"
+        );
+    }
+    assert!(bobs.contains("signed operation"), "the footer lost the half that is true");
+
     // And the read surface is the same page for both: the enhancement
     // added a section, it did not change what was already there.
     for marker in ["Proposal", "Reviewers", "Discussion", "Changes"] {
@@ -862,6 +876,13 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     assert!(
         operators.contains("cannot hold a passkey"),
         "the operator was not told why: {operators}"
+    );
+    // ...and told what they can do. A page that says only what somebody
+    // cannot do is a dead end, which is what this was until it was read
+    // rather than asserted on.
+    assert!(
+        operators.contains("write path is the CLI"),
+        "the operator was left with no way forward: {operators}"
     );
 
     let (_, invite) = curl(&[

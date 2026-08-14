@@ -80,7 +80,13 @@ pub(crate) fn render(store: Option<&Accounts>, user: &str) -> Page {
         // would invite an enrolment that always fails.
         h.push_str("<p class=\"note\">This credential was written by the operator into the ");
         h.push_str("node's auth file rather than issued as an account, so it cannot hold a ");
-        h.push_str("passkey. Passkeys are enrolled on issued accounts.</p></section>");
+        h.push_str("passkey. Passkeys are enrolled on issued accounts.</p>");
+        // Saying only what someone cannot do is a dead end, and this
+        // page had no way out of it. An operator's write path is the one
+        // it always was, which is worth saying rather than leaving them
+        // to infer.
+        h.push_str("<p class=\"note\">Your write path is the CLI, signed with your actor key. ");
+        h.push_str("That is unchanged and stays available whatever anyone enrols.</p></section>");
         return Page { status: 200, html: close(h) };
     }
     if enrolled.is_empty() {
