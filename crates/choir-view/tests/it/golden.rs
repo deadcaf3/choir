@@ -708,3 +708,31 @@ fn build_stored_log() -> String {
     out.push('\n');
     out
 }
+
+/// An op variant an older binary does not know does not decode, and the
+/// failure ends the replay rather than skipping the op.
+///
+/// This is the third exposure, alongside the two in the module doc above.
+/// `OpKind` is an externally tagged `serde` enum with no `serde(other)`
+/// arm, so `from_payload` refuses a name it has never heard of, and
+/// `View::at` folds through `ViewOp::from_payload(..)?` — one unrecognized
+/// op is not stepped over, it ends the fold. So adding a variant costs
+/// exactly this: old *entries* keep hashing identically, because
+/// `OpEntry::payload` is opaque bytes, while old *readers* stop dead at the
+/// first op carrying the new name.
+///
+/// Pinned because that door swings on a `serde` attribute. Adding
+/// `#[serde(other)]`, or moving to an untagged or internally tagged
+/// representation, turns new variants from a reader break into a
+/// compatible extension — silently, inside a derive, with no other test in
+/// the workspace noticing.
+#[test]
+fn an_unknown_op_variant_refuses_to_decode() {
+    let payload = br#"{"format_version":1,"kind":{"FutureOp":{"id":"x"}}}"#;
+    let error = ViewOp::from_payload(payload).expect_err("an unknown variant does not decode");
+    let error = format!("{error:?}");
+    assert!(
+        error.contains("unknown variant") && error.contains("FutureOp"),
+        "the decoder names the variant it did not recognize: {error}"
+    );
+}
