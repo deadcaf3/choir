@@ -36,6 +36,7 @@ mod landing;
 mod newcomer_config;
 mod newcomer_harm;
 mod observability;
+mod passkeys;
 mod policy_hardening;
 mod quotas;
 mod reconcile_refs;

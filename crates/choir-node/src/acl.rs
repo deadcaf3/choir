@@ -559,6 +559,15 @@ pub fn api_denial(
             vec![(Scope::Node, Level::Write)]
         }
         ("GET", "/api/accounts") => vec![(Scope::Node, Level::Read)],
+        // Enrolling and removing a passkey act on the caller's own
+        // account and no one else's (D39): the handler never reads a
+        // user from the body, so there is no scope here to check that
+        // would not simply be "you are authenticated". A grant
+        // requirement would be worse than none — `@node write` would
+        // mean only operators could enrol, which is the opposite of the
+        // point, and a repo scope would tie a fact about a person to a
+        // repository they may not have.
+        ("POST", "/api/accounts/passkey" | "/api/accounts/passkey/remove") => Vec::new(),
         // Redemption is reached by a principal that holds no grant at
         // all — an unredeemed invite — so there is nothing here to check.
         // What keeps it from being an open door is that the invite is

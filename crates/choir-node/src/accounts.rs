@@ -68,6 +68,20 @@ pub const MAX_INVITE_SECS: u64 = 30 * 86_400;
 /// does.
 pub const INVITE_PREFIX: &str = "invite-";
 
+/// Most WebAuthn credentials one account may enrol (D39). A person has a
+/// laptop, a phone and a hardware key; a hundred is not a person with
+/// many devices, it is a store being filled by something automated.
+pub const MAX_PASSKEYS: usize = 8;
+
+/// Longest credential id accepted. The spec allows up to 1023 raw bytes;
+/// this is that ceiling in base64url, so nothing legitimate is refused
+/// and an unbounded string is.
+pub const MAX_CREDENTIAL_ID_CHARS: usize = 1364;
+
+/// Longest passkey label. Long enough to say "work laptop, touch id",
+/// short enough that a roster stays a roster.
+pub const MAX_LABEL_CHARS: usize = 64;
+
 /// Who a set of presented credentials turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
@@ -112,7 +126,33 @@ struct Account {
     /// `ssh-ed25519 <base64>` pairs, comment deliberately dropped — see
     /// [`validate_ssh_key`].
     ssh_keys: Vec<String>,
+    /// Enrolled WebAuthn credentials (D39). Held inside the account
+    /// rather than in a table beside it, so revocation — which deletes
+    /// the account — cannot forget to forget them.
+    passkeys: Vec<Passkey>,
     /// Unix seconds at redemption.
+    created_at: u64,
+}
+
+/// One enrolled WebAuthn credential (D39).
+///
+/// Both byte strings are public: a credential id is an opaque handle the
+/// browser hands back, and the key is a public key. Nothing here is a
+/// secret, which is why this record — unlike [`Account::token_hash`] —
+/// stores values rather than hashes of them. A verifier needs the key
+/// itself, so hashing it would make it useless.
+#[derive(Debug, Clone)]
+struct Passkey {
+    /// The credential id as the browser reports it, base64url. Used to
+    /// pick which enrolled key an assertion claims to come from.
+    credential_id: String,
+    /// The credential public key, base64url of SubjectPublicKeyInfo DER
+    /// — exactly what `getPublicKey()` returns. D39 scoped a CBOR reader
+    /// out, so nothing here parses an attestation object.
+    public_key: String,
+    /// What the holder called it, so a roster of three keys is legible.
+    label: String,
+    /// Unix seconds at enrolment.
     created_at: u64,
 }
 
@@ -465,6 +505,10 @@ impl Accounts {
                 token_hash: hash(&token),
                 grants: invite.grants.clone(),
                 ssh_keys: ssh_key.into_iter().collect(),
+                // Enrolment is a later, separately authenticated act:
+                // redemption proves you hold the invite, not that you
+                // hold an authenticator.
+                passkeys: Vec::new(),
                 created_at: now_secs(),
             },
         );
@@ -533,6 +577,164 @@ impl Accounts {
         )
     }
 
+    /// Enrols a WebAuthn credential on `user`'s own account (D39).
+    ///
+    /// The caller is the account: this never takes a `user` from the
+    /// body, so holding a credential is the whole authorization story
+    /// and there is no way to spell "enrol a key on someone else".
+    ///
+    /// **What this does not check, said plainly rather than implied by
+    /// silence: possession.** D39 scoped out a CBOR reader, so nothing
+    /// here parses or verifies an attestation object; the node takes the
+    /// public key the authenticated caller sends. Enrolling a key you do
+    /// not hold gains you nothing — you still cannot sign with it — but
+    /// a *stolen token* can enrol an attacker's own authenticator and
+    /// keep it. Two things bound that: the roster lists every enrolled
+    /// credential, so it is visible rather than silent, and revocation
+    /// deletes the account and its keys with it.
+    ///
+    /// # Errors
+    ///
+    /// 400 for a missing or malformed field, a public key that is not a
+    /// P-256 SubjectPublicKeyInfo, or a credential id already enrolled
+    /// on this account; 404 when the caller has no account record, which
+    /// is the case for an `--auth-file` operator.
+    #[must_use]
+    pub fn enroll_passkey(&self, user: &str, body: &serde_json::Value) -> (u16, String) {
+        let field = |name: &str| {
+            body.get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let (Some(credential_id), Some(public_key)) = (field("credential_id"), field("public_key"))
+        else {
+            return bad_request("`credential_id` and `public_key` are required");
+        };
+        let label = field("label").unwrap_or("passkey");
+        if let Err(e) = validate_passkey_id(credential_id) {
+            return bad_request(&e);
+        }
+        if let Err(e) = validate_label(label) {
+            return bad_request(&e);
+        }
+        if let Err(e) = validate_p256_spki(public_key) {
+            return bad_request(&e);
+        }
+
+        let mut state = self.state.write().expect("accounts write lock");
+        let Some(account) = state.accounts.get_mut(user) else {
+            return (
+                404,
+                error_json(
+                    "no account record for this credential; passkeys are enrolled on issued \
+                     accounts, and an operator credential from the auth file is not one",
+                ),
+            );
+        };
+        if account
+            .passkeys
+            .iter()
+            .any(|k| k.credential_id == credential_id)
+        {
+            return conflict("that credential is already enrolled");
+        }
+        if account.passkeys.len() >= MAX_PASSKEYS {
+            return conflict("this account already holds the maximum number of passkeys");
+        }
+        account.passkeys.push(Passkey {
+            credential_id: credential_id.to_string(),
+            public_key: public_key.to_string(),
+            label: label.to_string(),
+            created_at: now_secs(),
+        });
+        let enrolled = account.passkeys.len();
+        if let Err(e) = self.commit(&state) {
+            return server_error(&e);
+        }
+        drop(state);
+        (
+            200,
+            serde_json::json!({
+                "format_version": FORMAT_VERSION,
+                "user": user,
+                "credential_id": credential_id,
+                "label": label,
+                "enrolled": enrolled,
+            })
+            .to_string(),
+        )
+    }
+
+    /// Removes one of `user`'s own enrolled credentials (D39).
+    ///
+    /// The mirror of enrolment, and it exists for the same reason
+    /// revocation does: a credential that cannot be withdrawn is not a
+    /// credential, it is a permanent fact. A lost authenticator has to be
+    /// removable by the person who still holds the token.
+    ///
+    /// # Errors
+    ///
+    /// 400 without `credential_id`, and 404 when this account has no such
+    /// credential enrolled.
+    #[must_use]
+    pub fn remove_passkey(&self, user: &str, body: &serde_json::Value) -> (u16, String) {
+        let Some(credential_id) = body
+            .get("credential_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return bad_request("`credential_id` is required");
+        };
+        let mut state = self.state.write().expect("accounts write lock");
+        let Some(account) = state.accounts.get_mut(user) else {
+            return (404, error_json("no account record for this credential"));
+        };
+        let before = account.passkeys.len();
+        account.passkeys.retain(|k| k.credential_id != credential_id);
+        if account.passkeys.len() == before {
+            return (404, error_json("no such credential on this account"));
+        }
+        let remaining = account.passkeys.len();
+        if let Err(e) = self.commit(&state) {
+            return server_error(&e);
+        }
+        drop(state);
+        (
+            200,
+            serde_json::json!({
+                "format_version": FORMAT_VERSION,
+                "user": user,
+                "credential_id": credential_id,
+                "remaining": remaining,
+            })
+            .to_string(),
+        )
+    }
+
+    /// The SubjectPublicKeyInfo DER of one enrolled credential, ready for
+    /// [`choir_identity::verify_webauthn_assertion`] (D39).
+    ///
+    /// Keyed by `(user, credential_id)` rather than by credential id
+    /// alone: an assertion names a credential, but the request already
+    /// names a principal, and looking the key up under that principal is
+    /// what stops one account's assertion from being spent as another's.
+    #[must_use]
+    pub fn passkey_spki(&self, user: &str, credential_id: &str) -> Option<Vec<u8>> {
+        let state = self.state.read().expect("accounts read lock");
+        let encoded = state
+            .accounts
+            .get(user)?
+            .passkeys
+            .iter()
+            .find(|k| k.credential_id == credential_id)?
+            .public_key
+            .clone();
+        drop(state);
+        base64url_decode(&encoded)
+    }
+
     /// Everything the store holds except the secrets: who has an account,
     /// what they were granted, which public keys are registered, and
     /// which invites are outstanding.
@@ -548,6 +750,7 @@ impl Accounts {
                     "user": user,
                     "grants": account.grants,
                     "ssh_keys": account.ssh_keys,
+                    "passkeys": render_passkeys(&account.passkeys),
                     "created_at": account.created_at,
                 })
             })
@@ -817,6 +1020,12 @@ fn render_state(state: &State) -> String {
                 "token_hash": account.token_hash,
                 "grants": account.grants,
                 "ssh_keys": account.ssh_keys,
+                "passkeys": account.passkeys.iter().map(|k| serde_json::json!({
+                    "credential_id": k.credential_id,
+                    "public_key": k.public_key,
+                    "label": k.label,
+                    "created_at": k.created_at,
+                })).collect::<Vec<_>>(),
                 "created_at": account.created_at,
             })
         })
@@ -898,6 +1107,7 @@ fn parse_state(text: &str) -> Result<State, String> {
                 token_hash: token_hash.to_string(),
                 grants: strings(entry.get("grants")),
                 ssh_keys: strings(entry.get("ssh_keys")),
+                passkeys: parse_passkeys(entry.get("passkeys")),
                 created_at: entry
                     .get("created_at")
                     .and_then(serde_json::Value::as_u64)
@@ -941,6 +1151,122 @@ fn parse_state(text: &str) -> Result<State, String> {
         );
     }
     Ok(state)
+}
+
+/// The enrolled credentials of one account, as the roster shows them.
+///
+/// The public key is included: it is a public key, and an operator
+/// auditing what can sign for an account needs to see the thing that
+/// signs, not a count of them.
+fn render_passkeys(passkeys: &[Passkey]) -> Vec<serde_json::Value> {
+    passkeys
+        .iter()
+        .map(|k| {
+            serde_json::json!({
+                "credential_id": k.credential_id,
+                "public_key": k.public_key,
+                "label": k.label,
+                "created_at": k.created_at,
+            })
+        })
+        .collect()
+}
+
+/// Reads the `passkeys` array of one stored account record.
+///
+/// A record written before D39 has no such member, which parses to an
+/// empty list rather than an error: the field is additive, so an older
+/// store still loads (invariant 1). A malformed entry is dropped rather
+/// than failing the whole load, because the alternative — refusing to
+/// start — would turn one bad credential into a node-wide outage, and a
+/// dropped passkey is visible in the roster.
+fn parse_passkeys(value: Option<&serde_json::Value>) -> Vec<Passkey> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            let text = |name: &str| entry.get(name).and_then(serde_json::Value::as_str);
+            Some(Passkey {
+                credential_id: text("credential_id")?.to_string(),
+                public_key: text("public_key")?.to_string(),
+                label: text("label").unwrap_or("passkey").to_string(),
+                created_at: entry
+                    .get("created_at")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Base64url, the encoding WebAuthn uses everywhere, decoded by
+/// translating into the standard alphabet and reusing the node's one
+/// decoder rather than writing a second.
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    if input.contains(['+', '/']) {
+        // Standard-alphabet input is refused rather than accepted as a
+        // courtesy: two spellings of one credential id would let the
+        // same key enrol twice and be removed once.
+        return None;
+    }
+    crate::base64_decode(&input.replace('-', "+").replace('_', "/"))
+}
+
+/// Refuses a credential id that is not a plausible base64url handle.
+fn validate_passkey_id(id: &str) -> Result<(), String> {
+    if id.len() > MAX_CREDENTIAL_ID_CHARS {
+        return Err(format!(
+            "credential id is longer than {MAX_CREDENTIAL_ID_CHARS} characters"
+        ));
+    }
+    if base64url_decode(id).is_none() {
+        return Err("credential id is not base64url".to_string());
+    }
+    Ok(())
+}
+
+/// Refuses a label that would make a roster unreadable or smuggle a
+/// control character into one.
+fn validate_label(label: &str) -> Result<(), String> {
+    if label.chars().count() > MAX_LABEL_CHARS {
+        return Err(format!("label is longer than {MAX_LABEL_CHARS} characters"));
+    }
+    if label.chars().any(char::is_control) {
+        return Err("label contains a control character".to_string());
+    }
+    Ok(())
+}
+
+/// Refuses anything that is not exactly a P-256 SubjectPublicKeyInfo.
+///
+/// Checked at enrolment rather than at first use, because the two fail in
+/// different places: a bad key caught here is a 400 on the request that
+/// sent it, while the same key caught later is a signature that will not
+/// verify for a reason the holder cannot see. The shape is the fixed
+/// 26-byte SPKI prefix followed by a 65-byte uncompressed point, which is
+/// what [`choir_identity::p256_point_to_spki`] builds and what `openssl`
+/// emits.
+fn validate_p256_spki(encoded: &str) -> Result<(), String> {
+    let Some(der) = base64url_decode(encoded) else {
+        return Err("public key is not base64url".to_string());
+    };
+    let prefix = choir_identity::P256_SPKI_PREFIX;
+    if der.len() != prefix.len() + 65 {
+        return Err(format!(
+            "public key is {} bytes; a P-256 SubjectPublicKeyInfo is {}",
+            der.len(),
+            prefix.len() + 65
+        ));
+    }
+    if der[..prefix.len()] != prefix[..] {
+        return Err("public key is not a P-256 SubjectPublicKeyInfo".to_string());
+    }
+    if der[prefix.len()] != 0x04 {
+        return Err("public key is not an uncompressed point".to_string());
+    }
+    Ok(())
 }
 
 /// One error body, in the shape every other API error uses.

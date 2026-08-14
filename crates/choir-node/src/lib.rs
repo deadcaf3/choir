@@ -1209,6 +1209,12 @@ fn handle_accounts(
                         ),
                     },
                     (Some(json), "POST", "/api/accounts/revoke") => store.revoke(&json),
+                    (Some(json), "POST", "/api/accounts/passkey") => {
+                        store.enroll_passkey(user, &json)
+                    }
+                    (Some(json), "POST", "/api/accounts/passkey/remove") => {
+                        store.remove_passkey(user, &json)
+                    }
                     (Some(_), "GET", "/api/accounts") => (200, store.list_json().to_string()),
                     _ => (404, r#"{"error":"no such endpoint"}"#.to_string()),
                 }
