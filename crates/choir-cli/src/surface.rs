@@ -349,6 +349,21 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "triage",
+        args: "<api>",
+        summary: "every review and change classified into a bucket — landed, awaiting \
+                  verdicts, changes requested, approved-but-target-moved — ranked \
+                  most-actionable-first, capped, with truncation marked in-band",
+        agent_facing: true,
+    },
+    Command {
+        name: "state",
+        args: "<api> <channel>",
+        summary: "your bounded next-actions document: verdicts you owe, what your changes \
+                  need, what you are waiting on, each with a command and its risk",
+        agent_facing: true,
+    },
+    Command {
         name: "view",
         args: "<api>",
         summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate",
