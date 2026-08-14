@@ -428,6 +428,7 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
         | OpKind::ArchiveReview { id, .. }
         | OpKind::SlashApproval { id, .. }
         | OpKind::PostComment { id, .. }
+        | OpKind::ViewedReview { id, .. }
         | OpKind::AssignReviewers { id, .. } => review_repo(id).into_iter().collect(),
         OpKind::RecordProvenance { subject, .. } => subject_repo(subject).into_iter().collect(),
         // Node-scoped by nature: these name keys, or the whole ref

@@ -74,6 +74,12 @@
       "summary": "say something on a review; append-only and permanent, and the comment id is your retry identity"
     },
     {
+      "agent_facing": true,
+      "args": "<api> <key-file> <viewer> <review-id>",
+      "name": "viewed",
+      "summary": "record that you read a review, so its author can tell \"reviewed and ignored\" from \"nobody looked\"; first read only, resubmitting is refused"
+    },
+    {
       "agent_facing": false,
       "args": "<api> <node-key-file> <id> <reviewer> '<reason>'",
       "name": "slash",

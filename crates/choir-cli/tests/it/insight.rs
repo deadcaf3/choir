@@ -141,6 +141,40 @@ fn triage_and_state_read_real_emissions() {
     let triage = json(&choir(&["triage", &api]));
     assert_eq!(triage["reviews"]["r1"]["bucket"], "awaiting-verdicts", "{triage}");
     assert_eq!(triage["changes"]["change-1"]["bucket"], "in-review");
+    assert_eq!(owner["waiting"][0]["read_by"], serde_json::json!([]), "{owner}");
+
+    // A receipt in somebody else's name is refused at admission, before
+    // any genuine receipt could shadow the refusal as a duplicate.
+    let forged = choir(&[
+        "submit", &api, key_file, "cli-agent",
+        r#"{"format_version":1,"kind":{"ViewedReview":{"id":"r1","viewer":"bot"}}}"#,
+    ]);
+    assert!(
+        !forged.status.success(),
+        "a forged receipt was admitted: {:?}",
+        String::from_utf8_lossy(&forged.stdout)
+    );
+    // Refused for being forged, not for some incidental reason that
+    // another node configuration might not share.
+    assert!(
+        String::from_utf8_lossy(&forged.stdout).contains("viewer must be the channel"),
+        "wrong refusal: {:?}",
+        String::from_utf8_lossy(&forged.stdout)
+    );
+
+    // The reviewer records a read receipt; the owner's waiting row now
+    // tells "read but unanswered" from "never looked" (oak.md item 7).
+    let out = choir(&["viewed", &api, key_file, "bot", "r1"]);
+    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    let owner = json(&choir(&["state", &api, "cli-agent"]));
+    assert_eq!(owner["waiting"][0]["read_by"], serde_json::json!(["bot"]), "{owner}");
+    // First read only: the same receipt resubmitted is refused.
+    let dup = choir(&["viewed", &api, key_file, "bot", "r1"]);
+    assert!(
+        !dup.status.success(),
+        "a duplicate receipt was admitted: {:?}",
+        String::from_utf8_lossy(&dup.stdout)
+    );
 
     // Approve. Main has not moved, so the review awaits landing and the
     // owner's one recommended action is to land it.

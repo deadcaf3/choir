@@ -9,6 +9,7 @@ mod comments;
 mod golden;
 mod operator_identity;
 mod quarantine;
+mod receipts;
 mod snapshot;
 mod validate;
 mod view;

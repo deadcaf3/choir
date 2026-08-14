@@ -75,6 +75,8 @@ struct ReviewFacts<'a> {
     reviewers: Vec<&'a str>,
     answered: Vec<&'a str>,
     changes_requested_by: Vec<&'a str>,
+    /// Channels holding a read receipt on the review (oak.md item 7).
+    viewed: Vec<&'a str>,
     /// `Some(true/false)` when the destination ref is visible in the
     /// response; `None` when it is absent — not created yet, or not
     /// granted (D29 makes those indistinguishable on purpose).
@@ -120,6 +122,10 @@ impl<'a> ReviewFacts<'a> {
             reviewers,
             answered,
             changes_requested_by,
+            viewed: row["viewed"]
+                .as_object()
+                .map(|map| map.keys().map(String::as_str).collect())
+                .unwrap_or_default(),
             landed,
         }
     }
@@ -423,9 +429,19 @@ pub fn next_actions(view: &serde_json::Value, api: &str, channel: &str) -> serde
                     ));
                 }
                 ReviewBucket::AwaitingVerdicts => {
+                    let missing = facts.missing();
+                    // Which of the awaited reviewers hold a read receipt:
+                    // "read but unanswered" and "never looked" call for
+                    // different nudges (oak.md item 7).
+                    let read: Vec<&str> = missing
+                        .iter()
+                        .filter(|r| facts.viewed.contains(r))
+                        .copied()
+                        .collect();
                     waiting.push(serde_json::json!({
                         "review": id,
-                        "why": format!("awaiting verdicts from {:?}", facts.missing()),
+                        "why": format!("awaiting verdicts from {missing:?}"),
+                        "read_by": read,
                     }));
                 }
                 ReviewBucket::Unassigned => {

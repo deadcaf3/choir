@@ -992,6 +992,19 @@ fn main() {
             // whose author differs from the signed channel.
             submit(api, key_file, channel, &op, auth);
         }
+        // A read receipt (internal/oak.md item 7): lets the review's
+        // author tell "reviewed and ignored" from "nobody looked yet".
+        // First read only; resubmitting is refused, so a lost response
+        // is safe to retry and a receipt never doubles.
+        ["viewed", api, key_file, viewer, id] => {
+            let op = ViewOp::new(OpKind::ViewedReview {
+                id: (*id).into(),
+                viewer: (*viewer).into(),
+            });
+            // The channel is the viewer: admission rejects any receipt
+            // whose viewer differs from the signed channel.
+            submit(api, key_file, viewer, &op, auth);
+        }
         ["slash", api, node_key_file, id, reviewer, reason] => {
             require_node_key_file(node_key_file);
             let op = ViewOp::new(OpKind::SlashApproval {

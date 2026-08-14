@@ -323,6 +323,14 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "viewed",
+        args: "<api> <key-file> <viewer> <review-id>",
+        summary: "record that you read a review, so its author can tell \
+                  \"reviewed and ignored\" from \"nobody looked\"; first \
+                  read only, resubmitting is refused",
+        agent_facing: true,
+    },
+    Command {
         name: "slash",
         args: "<api> <node-key-file> <id> <reviewer> '<reason>'",
         summary: "invalidate one reviewer's approval; operator-only and never moves a ref",

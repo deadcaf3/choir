@@ -434,6 +434,10 @@ fn view_ops_round_trip_byte_for_byte() {
                     verdict: Verdict::Approve,
                     note: rng.path(),
                 }),
+                ViewOp::new(OpKind::ViewedReview {
+                    id: id.clone(),
+                    viewer: rng.path(),
+                }),
                 ViewOp::new(OpKind::BindKey {
                     operator: "alice".into(),
                     key: rng.hash(),
