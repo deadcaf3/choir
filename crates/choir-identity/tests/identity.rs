@@ -327,7 +327,7 @@ fn a_valid_assertion_is_refused_when_it_attests_to_a_different_operation() {
     // A registration ceremony carrying the right challenge is not an
     // approval. Without the `type` check this signature would verify,
     // because the signed bytes are formed identically.
-    let create = String::from_utf8(client_data.clone())
+    let create = String::from_utf8(client_data)
         .unwrap()
         .replace("webauthn.get", "webauthn.create")
         .into_bytes();
@@ -336,7 +336,7 @@ fn a_valid_assertion_is_refused_when_it_attests_to_a_different_operation() {
         choir_identity::verify_webauthn_assertion(
             &spki,
             &approved,
-            &choir_oplog::Witness::webauthn_es256("cred-1", create_sig, auth_data.clone(), create),
+            &choir_oplog::Witness::webauthn_es256("cred-1", create_sig, auth_data, create),
         ),
         Err(IdentityError::BadSignature),
         "a registration ceremony must not be replayable as an approval"
