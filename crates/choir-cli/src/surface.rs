@@ -802,6 +802,109 @@ pub fn shell_functions() -> String {
     out
 }
 
+/// The generated half of `templates/python/choir.py`: one method per
+/// tool, rendered **from the schema document and nothing else** (D17).
+///
+/// This is the point of the artifact rather than an implementation
+/// detail. D17 bets that an agent writes code against a typed API, and
+/// `/api/schema` is the description that code would be generated from —
+/// but a description is only sufficient if something has actually been
+/// generated from it without reading choir's source. So this takes the
+/// parsed schema as its argument and never touches [`ENDPOINTS`] or
+/// [`COMMANDS`]. If a method comes out wrong, the schema is what was
+/// insufficient, and that is the finding.
+///
+/// The shell library is the opposite bargain and both are wanted: it
+/// wraps the binary and can therefore sign, while this needs no binary
+/// and therefore cannot.
+#[must_use]
+pub fn python_client(schema: &serde_json::Value) -> String {
+    let mut out = String::from(
+        "    # One method per tool, from the node's own description.\n\
+         \x20   # Generated; edit `crates/choir-cli/src/surface.rs`.\n",
+    );
+    let endpoints = schema["endpoints"].as_array().cloned().unwrap_or_default();
+    for endpoint in endpoints {
+        // Only the tools: an endpoint with no name is one the schema
+        // marks as not agent-facing, and a generated client offering it
+        // would be offering something the description says not to call.
+        let Some(name) = endpoint["name"].as_str() else {
+            continue;
+        };
+        let method = endpoint["method"].as_str().unwrap_or("GET");
+        let path = endpoint["path"].as_str().unwrap_or_default();
+        let purpose = endpoint["purpose"].as_str().unwrap_or_default();
+        let query: Vec<&str> = endpoint["query_parameters"]
+            .as_array()
+            .map(|values| values.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        // The schema says whether a tool takes anything at all. An
+        // endpoint whose input schema has no properties gets a method
+        // with no parameters, rather than one that accepts arguments and
+        // drops them — which is what the first generated copy did, and
+        // reading it is how that was found.
+        let takes_arguments = endpoint["input_schema"]["properties"]
+            .as_object()
+            .is_some_and(|properties| !properties.is_empty());
+
+        // A query parameter is a keyword argument; a body is one dict.
+        // `from` is a Python keyword, so every argument arrives through
+        // `**kwargs` rather than a signature this generator would have
+        // to escape — the schema names the parameters and the docstring
+        // repeats them.
+        if takes_arguments {
+            out.push_str(&format!("\n    def {name}(self, **arguments):\n"));
+        } else {
+            out.push_str(&format!("\n    def {name}(self):\n"));
+        }
+        out.push_str(&format!("        \"\"\"{}\n\n", wrap_python_doc(purpose)));
+        if !takes_arguments {
+            out.push_str("        Takes no arguments.\n");
+        } else if query.is_empty() {
+            out.push_str("        Arguments become the JSON request body.\n");
+        } else {
+            out.push_str(&format!(
+                "        Arguments become the query string: {}.\n",
+                query.join(", ")
+            ));
+        }
+        out.push_str("        \"\"\"\n");
+        if !takes_arguments {
+            out.push_str(&format!(
+                "        return self._request(\"{method}\", \"{path}\")\n"
+            ));
+        } else if query.is_empty() {
+            out.push_str(&format!(
+                "        return self._request(\"{method}\", \"{path}\", body=arguments)\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "        return self._request(\"{method}\", \"{path}\", query=arguments)\n"
+            ));
+        }
+    }
+    out
+}
+
+/// Reflows one purpose line into an indented Python docstring body.
+fn wrap_python_doc(text: &str) -> String {
+    let mut out = String::new();
+    let mut column = 0;
+    for word in text.split_whitespace() {
+        if column + word.len() > 64 && column > 0 {
+            out.push_str("\n        ");
+            column = 0;
+        } else if column > 0 {
+            out.push(' ');
+            column += 1;
+        }
+        out.push_str(word);
+        column += word.len();
+    }
+    out
+}
+
 /// Replaces the region between [`GEN_START`] and [`GEN_END`] in `doc`.
 ///
 /// # Errors
@@ -867,6 +970,21 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
                 .map_err(|e| format!("README.md: {e}"))?,
         ),
     ];
+    out.push((
+        root.join("templates/python/choir.py"),
+        splice_between(
+            &read("templates/python/choir.py")?,
+            // Fed the rendered schema, not the table it came from: a
+            // client generated from the description is the only thing
+            // that shows the description is sufficient.
+            &python_client(
+                &serde_json::from_str(&schema_json()).expect("the schema we just rendered is JSON"),
+            ),
+            SH_GEN_START,
+            SH_GEN_END,
+        )
+        .map_err(|e| format!("templates/python/choir.py: {e}"))?,
+    ));
     out.push((
         root.join("templates/shell/choir.sh"),
         splice_between(

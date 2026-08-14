@@ -9,6 +9,7 @@ mod batch;
 mod cli;
 mod install_policy;
 mod mcp;
+mod python;
 mod runner;
 mod surface;
 mod symphony_backend;
