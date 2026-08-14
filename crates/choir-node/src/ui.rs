@@ -955,6 +955,84 @@ mod tests {
         }
     }
 
+    /// A token used for the wrong property is invisible to every other
+    /// check here, and it cost the diff its two most important lines.
+    ///
+    /// `pre.diff .add` and `.del` set `--syn-added` and `--syn-removed`
+    /// as `color`. Both are `rgba(…,.14)` — washes, meant as backgrounds
+    /// — so on `--sunken`, the darkest surface in the sheet, the added
+    /// and removed lines a reader opens a diff *for* rendered at 14%
+    /// opacity. `the_component_sheet_authors_no_raw_values` passed the
+    /// whole time, correctly: the rule it enforces is "tokens only", and
+    /// this was a token.
+    ///
+    /// So the rule this adds is the narrower true one: a translucent
+    /// token is not a foreground colour. Mechanical, and it generalises
+    /// past the case that prompted it — `--ok-tint` as `color` would be
+    /// exactly as unreadable and exactly as green under every other test.
+    ///
+    /// The list is the tokens *defined* as an `rgba(…)`, so an alias like
+    /// `--info-tint: var(--accent-tint)` is not on it and would slip
+    /// through. Following one level of aliasing is a CSS evaluator, which
+    /// is more machinery than this is worth; the gap is named rather than
+    /// half-closed.
+    #[test]
+    fn no_translucent_token_is_used_as_a_foreground_colour() {
+        let sheet = include_str!("ui.css");
+        // Every token whose definition is an `rgba(...)`, read out of the
+        // vendored block rather than listed by hand — a hand-written list
+        // is a second copy of the palette to keep in step.
+        let mut washes: Vec<&str> = Vec::new();
+        for line in sheet.lines() {
+            for decl in line.split(';') {
+                let Some((name, value)) = decl.split_once(':') else {
+                    continue;
+                };
+                let name = name.trim();
+                if name.starts_with("--") && value.trim().starts_with("rgba(") {
+                    washes.push(name);
+                }
+            }
+        }
+        assert!(
+            washes.len() > 5,
+            "found only {} translucent tokens, so this test is not reading the \
+             palette it thinks it is: {washes:?}",
+            washes.len()
+        );
+
+        let ours = sheet
+            .rsplit_once("CHOIR COMPONENTS")
+            .expect("the provenance marker must stay in ui.css")
+            .1;
+        for (n, line) in ours.lines().enumerate() {
+            let code = line.split("/*").next().unwrap_or("");
+            // Split on `{` as well as `;`: this sheet writes most rules on
+            // one line, so the first declaration of a rule sits directly
+            // behind its selector and a `;`-only split never sees it. The
+            // first version of this test did exactly that and passed
+            // against the very defect it was written for.
+            for decl in code.split([';', '{']) {
+                // Must *start with* `color:`, which is what excludes
+                // `background-color`, `border-color` and
+                // `border-left-color` — the properties these tokens are
+                // actually for.
+                let Some(value) = decl.trim().strip_prefix("color:") else {
+                    continue;
+                };
+                for wash in &washes {
+                    assert!(
+                        !value.contains(wash),
+                        "component line {n} paints text with {wash}, which is a \
+                         translucent wash: it renders at its own alpha against \
+                         whatever is behind it. Use a signal token for the text \
+                         and the wash as its background.\n{line}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The vendored half must stay recognisably the design system's,
     /// so a future edit that "tidies" it is caught rather than merged.
     #[test]
