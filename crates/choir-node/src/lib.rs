@@ -1529,7 +1529,7 @@ fn handle_browse(
         }
     }
 
-    let rendered = browse::render(root, page, &readable, platform);
+    let rendered = browse::render(root, page, &readable, platform, user);
     // Revalidation happens after the ACL check and before the body is
     // written, so a `304` costs the reader nothing and still cannot be
     // obtained for a repository they may not read.

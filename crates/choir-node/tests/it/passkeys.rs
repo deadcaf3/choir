@@ -720,3 +720,96 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The human-facing half, served: a reviewer opening a review page is
+/// offered a passkey verdict, a reader is not, and the read surface below
+/// is identical either way.
+///
+/// The unit tests in `browse.rs` cover what `verdict_buttons` emits. This
+/// covers that the page actually calls it, with the authenticated user,
+/// through the real request path — the join a unit test of the renderer
+/// cannot make.
+#[test]
+fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
+    use choir_view::{OpKind, ViewOp};
+
+    let work = std::env::temp_dir().join("choir-node-passkeys-page");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(
+        work.join("acl"),
+        "alice @node write\nalice * write\nbob agents/demo write\n",
+    )
+    .expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    table.insert("bob".into(), "b".into());
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry
+        .register(&author.public_key_bytes())
+        .expect("valid key");
+
+    let root = work.join("repos");
+    let mut node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.create_repo("agents/demo.git").expect("repo created");
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // A review that asks bob. The target is a BLAKE3 hash rather than a
+    // git oid, which the page renders as "names no commit" — this test
+    // is about the verdict controls, and a diff would only add setup.
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-passkey".into(),
+        target: choir_oplog::ContentHash::blake3(b"a proposal"),
+        reviewers: vec!["bob".into()],
+        target_ref: Some("agents/demo.git:refs/heads/main".into()),
+    });
+    let (status, body) = curl(&[
+        "-u", "alice:a", "-X", "POST", "-d",
+        &crate::support::submit_body(&author, "alice", &request),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(status, 200, "{body}");
+
+    let page = |who: &str| {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-u", who, &format!("{base}/r/agents/demo/review/r-passkey")])
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // Bob was asked, so bob is offered the control — and the script that
+    // makes it work is inline, on the page, with no `src`.
+    let bobs = page("bob:b");
+    assert!(bobs.contains("Your verdict"), "the reviewer was offered nothing: {bobs}");
+    assert!(bobs.contains("button class=\"verdict"), "no verdict button");
+    assert!(bobs.contains("navigator.credentials.get"), "the script is missing");
+    assert!(!bobs.contains("src="), "the review page fetches something");
+    assert!(bobs.contains("<noscript>"), "no scripting-off fallback");
+    assert!(bobs.contains("data-user=\"bob\""), "the channel is not the caller");
+
+    // Alice can read the review and has every grant on the node, but she
+    // was not asked, so there is nothing here for her to press. Authority
+    // is not the same question as being a reviewer.
+    let alices = page("alice:a");
+    assert!(!alices.contains("Your verdict"), "a non-reviewer was offered a verdict");
+    assert!(!alices.contains("<script"), "a non-reviewer's page runs script");
+
+    // And the read surface is the same page for both: the enhancement
+    // added a section, it did not change what was already there.
+    for marker in ["Proposal", "Reviewers", "Discussion", "Changes"] {
+        assert!(bobs.contains(marker), "reviewer's page lost {marker}");
+        assert!(alices.contains(marker), "reader's page lost {marker}");
+    }
+
+    std::fs::remove_dir_all(&work).ok();
+}

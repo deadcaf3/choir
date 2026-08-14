@@ -334,6 +334,7 @@ pub(crate) fn render(
     page: &Page,
     readable: &dyn Fn(&str) -> bool,
     platform: Option<&crate::platform::Platform>,
+    user: &str,
 ) -> Rendered {
     match page {
         Page::Index => index(root, readable),
@@ -342,7 +343,7 @@ pub(crate) fn render(
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev),
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid),
         Page::Reviews { repo } => reviews(repo, platform),
-        Page::Review { repo, id } => review(&bare(root, repo), repo, id, platform),
+        Page::Review { repo, id } => review(&bare(root, repo), repo, id, platform, user),
     }
 }
 
@@ -702,6 +703,7 @@ fn review(
     repo: &str,
     id: &str,
     platform: Option<&crate::platform::Platform>,
+    user: &str,
 ) -> Rendered {
     let Some(platform) = platform else {
         return unavailable(repo);
@@ -842,8 +844,183 @@ fn review(
         }
     }
     h.push_str("</section>");
+
+    verdict_buttons(&mut h, id, &state, user);
     Rendered { status: 200, etag: None, html: close(h) }
 }
+
+/// The passkey write affordance (D39), and the one place this repository
+/// runs script in a page.
+///
+/// **Everything above this call renders identically without it.** D28's
+/// rule was "no JavaScript"; D39 reverses that in one narrow place
+/// because a browser write the node cannot forge requires the browser to
+/// *produce a signature*, and an HTML form submits values rather than
+/// computing them. The reversal buys exactly one thing and must keep
+/// buying only that: the read surface is unchanged, the script is inline,
+/// nothing is fetched, and with scripting off the section below is a
+/// sentence naming the CLI rather than a broken control.
+///
+/// The page does not know the op format. The node renders the two
+/// payloads and their challenges; the script's whole job is to hand a
+/// challenge to the authenticator and post what comes back. That is what
+/// keeps this forty lines instead of a second implementation of a hashed
+/// format in a language with no tests here.
+fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &str) {
+    // Only a reviewer on this review has a verdict to cast. Showing the
+    // buttons to anyone else would be offering an action the node will
+    // refuse, which is worse than not offering it.
+    let is_reviewer = state["reviewers"]
+        .as_array()
+        .is_some_and(|list| list.iter().any(|r| r.as_str() == Some(user)));
+    if !is_reviewer || state["archived"].as_bool().unwrap_or(false) {
+        return;
+    }
+    // Already answered: the log keeps the first verdict, so a second
+    // button press would be refused. Say so instead of offering it.
+    if state["verdicts"][user]["verdict"].as_str().is_some() {
+        return;
+    }
+
+    h.push_str("<section><h2>Your verdict</h2>");
+    h.push_str("<noscript><p class=\"note\">Casting a verdict needs a passkey, which the \
+                browser can only produce with scripting enabled. With it off, use \
+                <code>choir verdict</code> — the CLI is the write path this page is an \
+                alternative to, never a replacement for.</p></noscript>");
+    // The channel travels on the element rather than in the script, so
+    // the script is a constant with nothing interpolated into it — the
+    // one property that makes "is this page's script safe" a question you
+    // answer once instead of per render.
+    h.push_str("<div id=\"verdict\" hidden data-user=\"");
+    h.push_str(&esc(user));
+    h.push_str("\"><p class=\"note\">Signed by your passkey on this device. Nothing is sent \
+                until you approve the prompt.</p>");
+    for (verdict, label, class) in [
+        ("Approve", "Approve", "ok"),
+        ("RequestChanges", "Request changes", "danger"),
+    ] {
+        let Some((payload_hex, challenge)) = prepared_verdict(id, user, verdict) else {
+            continue;
+        };
+        h.push_str("<button class=\"verdict ");
+        h.push_str(class);
+        h.push_str("\" data-payload=\"");
+        h.push_str(&esc(&payload_hex));
+        h.push_str("\" data-challenge=\"");
+        h.push_str(&esc(&challenge));
+        h.push_str("\">");
+        h.push_str(label);
+        h.push_str("</button> ");
+    }
+    h.push_str("<p id=\"verdict-said\" class=\"note\" hidden></p></div>");
+    h.push_str(VERDICT_SCRIPT);
+    h.push_str("</section>");
+}
+
+/// One verdict as the node would accept it: the payload bytes in hex, and
+/// the base64url challenge an authenticator must sign so that the
+/// signature attests to *this* operation (D39).
+///
+/// Built here rather than in the browser so the op format has exactly one
+/// implementation. The challenge is
+/// `choir_identity::webauthn_challenge`, which is the hex form of
+/// `signing_hash(channel, payload)` — the same bytes the ed25519 path
+/// signs.
+fn prepared_verdict(id: &str, reviewer: &str, verdict: &str) -> Option<(String, String)> {
+    use choir_view::{OpKind, Verdict, ViewOp};
+    let verdict = match verdict {
+        "Approve" => Verdict::Approve,
+        "RequestChanges" => Verdict::RequestChanges,
+        _ => return None,
+    };
+    let payload = ViewOp::new(OpKind::PostVerdict {
+        id: id.to_string(),
+        reviewer: reviewer.to_string(),
+        verdict,
+        note: String::new(),
+    })
+    .to_payload();
+    let signing = choir_oplog::signing_hash(reviewer, &payload);
+    Some((
+        crate::platform::hex_encode(&payload),
+        base64url_nopad(&choir_identity::webauthn_challenge(&signing)),
+    ))
+}
+
+/// Base64url without padding, WebAuthn's challenge encoding.
+fn base64url_nopad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for i in 0..chunk.len() + 1 {
+            out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// The whole of D39's client half. Inline, no `src`, no library, no build
+/// step — the scope the decision register approved, and the reason
+/// `the_page_references_no_external_resource` narrows rather than
+/// disappears.
+const VERDICT_SCRIPT: &str = r#"<script>
+(function () {
+  var box = document.getElementById('verdict');
+  var said = document.getElementById('verdict-said');
+  if (!box || !window.PublicKeyCredential || !navigator.credentials) return;
+  box.hidden = false;
+  var bytes = function (hex) {
+    var out = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  };
+  var hex = function (buf) {
+    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+      return ('0' + b.toString(16)).slice(-2);
+    }).join('');
+  };
+  var unb64url = function (s) {
+    var t = s.replace(/-/g, '+').replace(/_/g, '/');
+    var raw = atob(t + '==='.slice(0, (4 - t.length % 4) % 4));
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  };
+  var say = function (text) { said.hidden = false; said.textContent = text; };
+  Array.prototype.forEach.call(document.querySelectorAll('button.verdict'), function (b) {
+    b.addEventListener('click', function () {
+      say('Waiting for your authenticator...');
+      navigator.credentials.get({
+        publicKey: { challenge: unb64url(b.dataset.challenge), userVerification: 'preferred' }
+      }).then(function (c) {
+        return fetch('/api/submit', {
+          method: 'POST',
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            channel: box.dataset.user,
+            payload_hex: b.dataset.payload,
+            key_id: c.id,
+            scheme: 2,
+            signature_hex: hex(c.response.signature),
+            authenticator_data_hex: hex(c.response.authenticatorData),
+            client_data_json_hex: hex(c.response.clientDataJSON)
+          })
+        });
+      }).then(function (r) {
+        if (r.ok) { location.reload(); return; }
+        return r.text().then(function (t) { say('The node refused it: ' + t); });
+      }).catch(function (e) { say('Not signed: ' + e.message); });
+    });
+  });
+})();
+</script>"#;
 
 /// The git object id inside a view hash, or `None` when the hash is not
 /// a git object at all.
@@ -1159,5 +1336,106 @@ mod tests {
         assert_eq!(human("1048576"), "1.0 MiB");
         // `ls-tree --long` prints `-` for a tree's size column.
         assert_eq!(human("-"), "-");
+    }
+
+    /// D39's reversal, held to the scope the row approved: the review
+    /// page runs script, and that script is inline, carries no `src`,
+    /// pulls in no library, and needs no build step.
+    ///
+    /// The sibling in `ui.rs` asserts the read surface still has no
+    /// script at all. Between them the rule is stated where each applies,
+    /// rather than one weakened probe covering both.
+    #[test]
+    fn the_review_page_runs_only_inline_script() {
+        // The constant is the whole client half, so probing it is
+        // probing what ships.
+        assert!(super::VERDICT_SCRIPT.starts_with("<script>"));
+        assert!(!super::VERDICT_SCRIPT.contains("src="), "the script is fetched");
+        for probe in ["http://", "https://", "//cdn", "@import", "import ", "require("] {
+            assert!(
+                !super::VERDICT_SCRIPT.contains(probe),
+                "the review script reaches out via {probe}"
+            );
+        }
+        // Exactly one script element: two would mean somebody added a
+        // second surface without reading this.
+        assert_eq!(super::VERDICT_SCRIPT.matches("<script").count(), 1);
+        // Nothing is interpolated into it, which is why "is this script
+        // safe" is a question answered once rather than per render.
+        assert!(!super::VERDICT_SCRIPT.contains("{}"));
+    }
+
+    /// The write affordance is offered only to someone who can actually
+    /// use it, and never to a reader.
+    #[test]
+    fn verdict_buttons_appear_only_for_a_reviewer_who_has_not_voted() {
+        let state = serde_json::json!({
+            "reviewers": ["carol", "dave"],
+            "verdicts": { "dave": { "verdict": "Approve", "note": "" } },
+            "archived": false,
+        });
+        let rendered = |user: &str| {
+            let mut h = String::new();
+            super::verdict_buttons(&mut h, "review-1", &state, user);
+            h
+        };
+        assert!(rendered("carol").contains("button class=\"verdict"), "an asked reviewer");
+        assert!(rendered("dave").is_empty(), "dave already answered");
+        assert!(rendered("mallory").is_empty(), "not a reviewer on this review");
+
+        let archived = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": true,
+        });
+        let mut h = String::new();
+        super::verdict_buttons(&mut h, "review-1", &archived, "carol");
+        assert!(h.is_empty(), "an archived review takes no more verdicts");
+    }
+
+    /// With scripting off the section is a sentence, not a dead control.
+    /// D39 carries this as a tripwire: the enhancement must never become
+    /// a dependency.
+    #[test]
+    fn the_verdict_section_says_what_to_do_without_script() {
+        let state = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": false,
+        });
+        let mut h = String::new();
+        super::verdict_buttons(&mut h, "review-1", &state, "carol");
+        assert!(h.contains("<noscript>"), "no fallback at all");
+        assert!(h.contains("choir verdict"), "the fallback must name the CLI");
+        // The controls start hidden and are revealed by the script, so a
+        // reader with scripting off is never shown a button that cannot
+        // work.
+        assert!(h.contains("id=\"verdict\" hidden"), "the controls are not hidden by default");
+    }
+
+    /// The payload the page hands the authenticator is the one the node
+    /// would accept, and the challenge is that payload's `signing_hash`.
+    /// Built in one place, so this is the assertion that the one place is
+    /// right.
+    #[test]
+    fn a_prepared_verdict_carries_the_challenge_its_payload_hashes_to() {
+        let (payload_hex, challenge) =
+            super::prepared_verdict("review-1", "carol", "Approve").expect("a known verdict");
+        let payload = crate::platform::hex_decode(&payload_hex).expect("hex");
+        let op = choir_view::ViewOp::from_payload(&payload).expect("a ViewOp");
+        match op.kind {
+            choir_view::OpKind::PostVerdict { id, reviewer, .. } => {
+                assert_eq!(id, "review-1");
+                // The reviewer in the payload and the channel the
+                // challenge is computed over must be the same name, or
+                // the node's own `ReviewerMismatch` check refuses it.
+                assert_eq!(reviewer, "carol");
+            }
+            other => panic!("wrong op kind: {other:?}"),
+        }
+        let signing = choir_oplog::signing_hash("carol", &payload);
+        assert_eq!(
+            challenge,
+            super::base64url_nopad(&choir_identity::webauthn_challenge(&signing)),
+            "the challenge must be this payload's signing hash, or the signature attests to \
+             an operation nobody asked about"
+        );
+        assert!(super::prepared_verdict("review-1", "carol", "Maybe").is_none());
     }
 }
