@@ -369,7 +369,7 @@ pub const COMMANDS: &[Command] = &[
         name: "triage",
         args: "<api>",
         summary: "every review and change classified into a bucket — landed, awaiting \
-                  verdicts, changes requested, approved-but-target-moved — ranked \
+                  verdicts, changes requested, approved awaiting landing — ranked \
                   most-actionable-first, capped, with truncation marked in-band",
         agent_facing: true,
     },

@@ -7,6 +7,7 @@
 mod claude_hooks;
 mod batch;
 mod cli;
+mod insight;
 mod install_policy;
 mod mcp;
 mod runner;

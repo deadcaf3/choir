@@ -31,11 +31,11 @@ enum ReviewBucket {
     ReReviewRequired,
     /// Complete with at least one standing `RequestChanges`.
     ChangesRequested,
-    /// Approved, but the destination ref has moved past the reviewed
-    /// commit; landing would CAS-fail, and a fresh review at the new
-    /// head is the path forward.
-    ApprovedTargetMoved,
-    /// Approved and the destination ref has not landed it yet.
+    /// Approved and the destination ref does not point at the reviewed
+    /// commit. The view holds no commit graph, so "not landed yet" and
+    /// "the ref moved past it" are deliberately one bucket — deciding
+    /// between them takes ancestry only git can answer, and a guess here
+    /// would read as a fact.
     ApprovedAwaitingLanding,
     /// Assigned reviewers have not all answered.
     AwaitingVerdicts,
@@ -54,7 +54,6 @@ impl ReviewBucket {
         match self {
             Self::ReReviewRequired => "re-review-required",
             Self::ChangesRequested => "changes-requested",
-            Self::ApprovedTargetMoved => "approved-target-moved",
             Self::ApprovedAwaitingLanding => "approved-awaiting-landing",
             Self::AwaitingVerdicts => "awaiting-verdicts",
             Self::Unassigned => "unassigned",
@@ -144,13 +143,12 @@ impl<'a> ReviewFacts<'a> {
             return ReviewBucket::Archived;
         }
         if self.approved {
-            return match (self.target_ref, self.landed) {
-                (None, _) => ReviewBucket::ApprovedUnbound,
-                (Some(_), Some(false)) => ReviewBucket::ApprovedTargetMoved,
-                // Ref not visible: first landing still pending, or not
-                // granted. Awaiting-landing is the honest larger class.
-                (Some(_), None) => ReviewBucket::ApprovedAwaitingLanding,
-                (Some(_), Some(true)) => unreachable!("handled above"),
+            // Landed was handled above, so a bound review here is either
+            // unlanded or its ref is not visible; both are awaiting.
+            return if self.target_ref.is_none() {
+                ReviewBucket::ApprovedUnbound
+            } else {
+                ReviewBucket::ApprovedAwaitingLanding
             };
         }
         if self.reviewers.is_empty() {
@@ -286,8 +284,6 @@ enum ActionKind {
     AnswerReview,
     /// Your approved review is unlanded; submit the landing.
     Land,
-    /// Your approved review's destination moved; open a fresh review.
-    ReReview,
     /// A reviewer requested changes; revise and checkpoint again.
     Revise,
     /// Your checkpointed revision has no review; open one.
@@ -301,7 +297,6 @@ impl ActionKind {
         match self {
             Self::AnswerReview => ("answer-review", true, true),
             Self::Land => ("land", true, true),
-            Self::ReReview => ("re-review", true, true),
             Self::Revise => ("revise", true, false),
             Self::RequestReview => ("request-review", true, true),
             Self::Checkpoint => ("checkpoint", true, true),
@@ -420,19 +415,10 @@ pub fn next_actions(view: &serde_json::Value, api: &str, channel: &str) -> serde
                             format!(
                                 "choir submit {api} <key-file> {channel} '{{\"format_version\":1,\"kind\":{{\"SetRef\":{{\"name\":\"{target_ref}\",\"commit\":\"{revision}\",\"prev\":<current-or-null>}}}}}}'"
                             ),
-                            "approved and unlanded; a protected ref needs this exact (ref, commit) and CAS-fails if the ref moved".into(),
-                        ),
-                    ));
-                }
-                ReviewBucket::ApprovedTargetMoved => {
-                    actions.push((
-                        ActionKind::ReReview,
-                        change_id,
-                        action_json(
-                            ActionKind::ReReview,
-                            ("review", id),
-                            format!("choir review {api} <key-file> {channel} <review-id> {revision} --ref {}", facts.target_ref.unwrap_or_default()),
-                            "approved, but the destination ref moved past the reviewed commit; open a fresh review".into(),
+                            "approved and unlanded; check the ref has not moved past work \
+                             this commit lacks (the view holds no commit graph) before \
+                             landing — a protected ref needs this exact (ref, commit)"
+                                .into(),
                         ),
                     ));
                 }
@@ -517,7 +503,7 @@ mod tests {
         let doc = triage(&sample_view());
         let bucket = |id: &str| doc["reviews"][id]["bucket"].as_str().unwrap().to_string();
         assert_eq!(bucket("r-landed"), "landed");
-        assert_eq!(bucket("r-moved"), "approved-target-moved");
+        assert_eq!(bucket("r-moved"), "approved-awaiting-landing");
         assert_eq!(bucket("r-pending"), "awaiting-verdicts");
         assert_eq!(bucket("r-rejected"), "changes-requested");
         assert_eq!(bucket("r-unassigned"), "unassigned");

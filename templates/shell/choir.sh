@@ -202,7 +202,7 @@ choir_reviews() {
 }
 
 # choir triage <api>
-#   every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved-but-target-moved — ranked most-actionable-first, capped, with truncation marked in-band
+#   every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
 choir_triage() {
 	choir_run triage "$@"
 }
