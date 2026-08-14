@@ -228,6 +228,32 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
         id: "rev".into(), reviewer: "ana".into(), verdict: Verdict::Approve,
         note: String::new() });
 
+    // Comments (D38). `discussed` holds one so the duplicate-id arm --
+    // which is the replay defence -- has a view that reaches it.
+    let discussed = {
+        let mut v = populated.clone();
+        v.apply(&ViewOp::new(OpKind::PostComment {
+            id: "rev".into(), comment: "c1".into(), author: "ana".into(),
+            body: "said once".into() })).expect("setup");
+        v
+    };
+    push("comment on a live review", &populated, OpKind::PostComment {
+        id: "rev".into(), comment: "c1".into(), author: "ana".into(), body: "b".into() });
+    push("comment from a non-reviewer", &populated, OpKind::PostComment {
+        id: "rev".into(), comment: "c2".into(), author: "mal".into(), body: "b".into() });
+    push("comment with a taken id", &discussed, OpKind::PostComment {
+        id: "rev".into(), comment: "c1".into(), author: "ana".into(), body: "again".into() });
+    push("comment on an unknown review", &populated, OpKind::PostComment {
+        id: "ghost".into(), comment: "c1".into(), author: "ana".into(), body: "b".into() });
+    push("comment on an archived review", &archived, OpKind::PostComment {
+        id: "rev".into(), comment: "c9".into(), author: "ana".into(), body: "b".into() });
+    push("comment with no id", &populated, OpKind::PostComment {
+        id: "rev".into(), comment: String::new(), author: "ana".into(), body: "b".into() });
+    push("comment with no author", &populated, OpKind::PostComment {
+        id: "rev".into(), comment: "c1".into(), author: String::new(), body: "b".into() });
+    push("comment with no body", &populated, OpKind::PostComment {
+        id: "rev".into(), comment: "c1".into(), author: "ana".into(), body: String::new() });
+
     // Provenance.
     push("provenance ok", &populated, OpKind::RecordProvenance {
         subject: "ws".into(), kind: "plan".into(), body: "b".into() });

@@ -704,6 +704,21 @@ fn main() {
             // any verdict whose reviewer differs from the signed channel.
             submit(api, key_file, reviewer, &op, auth);
         }
+        // D38. The comment id is caller-chosen and refused if the review
+        // already holds it, so resubmitting a comment whose response was
+        // lost is safe and never doubles it. Nothing here can be edited
+        // or deleted afterwards: a correction is another comment.
+        ["comment", api, key_file, channel, id, comment, body] => {
+            let op = ViewOp::new(OpKind::PostComment {
+                id: (*id).into(),
+                comment: (*comment).into(),
+                author: (*channel).into(),
+                body: (*body).into(),
+            });
+            // The channel is the author: admission rejects any comment
+            // whose author differs from the signed channel.
+            submit(api, key_file, channel, &op, auth);
+        }
         ["slash", api, node_key_file, id, reviewer, reason] => {
             require_node_key_file(node_key_file);
             let op = ViewOp::new(OpKind::SlashApproval {

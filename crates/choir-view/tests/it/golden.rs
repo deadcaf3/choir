@@ -262,6 +262,22 @@ fn view_op_variants_are_frozen() {
         r#"{"format_version":1,"kind":{"PostVerdict":{"id":"review-1","reviewer":"alice","verdict":"Approve","note":"looks right"}}}"#,
         "1e-a6fb60395b7baf9077da33bb41ea8e1edfc299f489979742702c4f282a264545",
     );
+    // D38. A comment is signed like any other op, so its canonical bytes
+    // are what a client re-serializes when it retries and what the
+    // signature covers. Four `String` fields in declaration order, and no
+    // map anywhere in the payload -- the ordering that matters lives in
+    // the fold, where the thread is a `Vec` rather than a map.
+    assert_golden(
+        "PostComment",
+        &ViewOp::new(OpKind::PostComment {
+            id: "review-1".into(),
+            comment: "c1".into(),
+            author: "alice/agent".into(),
+            body: "why this base?".into(),
+        }),
+        r#"{"format_version":1,"kind":{"PostComment":{"id":"review-1","comment":"c1","author":"alice/agent","body":"why this base?"}}}"#,
+        "1e-5b0fdd7cbf9cc5457742f8fd471b6a85118b3f6a6aed6e1b9c31e7c74184eab9",
+    );
     assert_golden(
         "SlashApproval",
         &ViewOp::new(OpKind::SlashApproval {

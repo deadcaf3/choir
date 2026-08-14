@@ -43,7 +43,8 @@ pub enum Code {
     MalformedOp,
     /// The request body was missing fields or badly encoded.
     MalformedRequest,
-    /// A verdict claimed a reviewer other than the signed channel.
+    /// A verdict or comment claimed an attribution other than the
+    /// signed channel.
     ReviewerMismatch,
     /// The signing key is bound to a different channel name.
     ChannelNotOwned,
@@ -334,7 +335,7 @@ impl Code {
             Self::UnknownKey => "The signature names a key id this node has no record of",
             Self::MalformedOp => "The payload did not decode as a `ViewOp`",
             Self::MalformedRequest => "The request body was missing fields or badly encoded",
-            Self::ReviewerMismatch => "A verdict claimed a reviewer other than the signed channel",
+            Self::ReviewerMismatch => "A verdict or comment claimed an attribution other than the signed channel",
             Self::ChannelNotOwned => "The signing key is bound to a different channel name",
             Self::NodeOnly => "Only the node's own key may author this operation",
             Self::AssignmentRequired => "This node assigns reviewers; a self-named list was refused",
@@ -365,7 +366,7 @@ impl Code {
             Self::UnknownKey => "Ask the operator to register your public key.                 `choir key <file> <you>` prints the line; it takes effect on the next request.",
             Self::MalformedOp => "Serialize a `ViewOp` and sign its bytes. `choir submit` does                 this correctly; `GET /llms.txt` lists the operations.",
             Self::MalformedRequest => "Send a JSON object with the fields the endpoint wants.                 `GET /llms.txt` lists them.",
-            Self::ReviewerMismatch => "Resubmit on your own channel. `choir verdict` signs on                 the reviewer name by construction, so use it rather than hand-rolling.",
+            Self::ReviewerMismatch => "Resubmit on your own channel. `choir verdict` and                 `choir comment` sign on the attribution name by construction, so use them rather                 than hand-rolling.",
             Self::ChannelNotOwned => "Submit on the channel your key is bound to — it is in                 `expected`. Or ask the operator to bind a key to the channel you want.",
             Self::NodeOnly => "Nothing to retry: this operation is the node's to author. For                 reviewer assignment, request a review with an empty reviewer list.",
             Self::AssignmentRequired => "Resubmit with an empty reviewer list. The node draws                 reviewers and returns their names in the response.",

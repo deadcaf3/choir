@@ -382,6 +382,53 @@ pub enum OpKind {
         /// Free-text rationale (may be empty).
         note: String,
     },
+    /// Append one comment to the discussion on review `id` (D38).
+    ///
+    /// This is the half D34 deferred: a review page could show what was
+    /// proposed and what was decided, and had nowhere to put the
+    /// conversation that produced the decision. Discussion is a persisted
+    /// operation like any other, so it is sequenced, replayable and
+    /// append-only rather than a mutable side table.
+    ///
+    /// Three properties live in the fold, and each is load-bearing:
+    ///
+    /// 1. **Order is the log's order.** The thread is a `Vec` appended in
+    ///    fold order, not a map keyed by id, because a total order over a
+    ///    conversation is the one thing a single-writer sequencer offers
+    ///    that a mutable comment table cannot.
+    /// 2. **`comment` is the replay defence.** `seq` and `parent` are
+    ///    assigned after signing (invariant 4), so nothing positional is
+    ///    covered by the author's signature; the payload carries its own
+    ///    identity instead and the fold refuses an id the review already
+    ///    holds. That is the CAS `prev` in the only shape a comment can
+    ///    take, since a comment moves no head. The ABA hole `prev` leaves
+    ///    for refs does not open here: an id is never released, because
+    ///    an archived review accepts no comments at all.
+    /// 3. **Nothing is ever edited.** There is no edit and no delete;
+    ///    a correction is a later comment. Removing one is a question
+    ///    about persisted history rather than about presentation, and it
+    ///    needs its own decision row (D38's tripwire).
+    ///
+    /// `author` is payload data and therefore covered by the author
+    /// signature; binding it to the submitting channel is admission
+    /// policy (L2), exactly as for [`OpKind::PostVerdict`]'s `reviewer`.
+    /// Without that binding the log's author attribution and the view's
+    /// comment attribution could disagree, which on a discussion surface
+    /// means words in somebody else's name.
+    PostComment {
+        /// The review being discussed.
+        id: String,
+        /// Caller-chosen comment id, unique within that review. It is the
+        /// author's retry identity — resubmitting the same comment is
+        /// refused rather than duplicated — and the anchor a later reply
+        /// or reaction would name.
+        comment: String,
+        /// The channel making the statement (must be the submitting
+        /// channel, enforced at admission).
+        author: String,
+        /// The comment text (non-empty).
+        body: String,
+    },
     /// Remove named ref `name` under the same CAS rule (additive
     /// variant, added for git branch deletion; wire-format unchanged).
     DeleteRef {
@@ -709,8 +756,29 @@ pub fn reviewer_operator(name: &str) -> &str {
     name.split_once('/').map_or(name, |(operator, _)| operator)
 }
 
+/// One comment on a review, as the fold sees it after replaying
+/// [`OpKind::PostComment`] (D38).
+///
+/// There is no timestamp. A pure fold has no clock, so `at` counts
+/// sequenced ops exactly as [`KeyBinding::bound_at`] does: it orders the
+/// thread, it is monotonic, and replay reproduces it from the log alone.
+/// Anything phrased in minutes or days needs a durable timestamp this
+/// crate does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentState {
+    /// The author's chosen id, unique within the review.
+    pub id: String,
+    /// Channel that made the statement.
+    pub author: String,
+    /// The comment text.
+    pub body: String,
+    /// Fold position the comment was applied at, which is the log
+    /// sequence its op occupies.
+    pub at: u64,
+}
+
 /// Materialized state of one review: what is under review, who was
-/// asked, who has answered what.
+/// asked, who has answered what, and what was said about it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReviewState {
     /// The commit under review.
@@ -727,6 +795,9 @@ pub struct ReviewState {
     /// `None` for a review that named no destination. Policy reads this
     /// to decide whether a review is privilege-bearing.
     pub target_ref: Option<String>,
+    /// The discussion, in the order the sequencer admitted it (D38).
+    /// Emptied by [`OpKind::ArchiveReview`] with the rest of the bulk.
+    pub comments: Vec<CommentState>,
     /// Live, or settled with its outcome retained. Defaults to
     /// [`ReviewStatus::Live`], so replaying a log written before
     /// archiving existed yields exactly the previous behaviour.
@@ -1180,6 +1251,38 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::PostComment {
+                id,
+                comment,
+                author,
+                body,
+            } => {
+                if comment.is_empty() || author.is_empty() || body.is_empty() {
+                    return Err(ViewError::Review(
+                        "a comment must carry an id, an author and a body".to_string(),
+                    ));
+                }
+                let review = self
+                    .reviews
+                    .get(id)
+                    .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
+                if matches!(review.status, ReviewStatus::Archived { .. }) {
+                    // Archiving dropped the thread, so an id that was
+                    // taken no longer looks taken. Refusing every comment
+                    // on an archived review is what keeps the uniqueness
+                    // rule -- and with it the replay defence -- true for
+                    // the whole life of the review.
+                    return Err(ViewError::Review(format!(
+                        "review {id} is archived and accepts no further comments"
+                    )));
+                }
+                if review.comments.iter().any(|held| held.id == *comment) {
+                    return Err(ViewError::Review(format!(
+                        "comment {comment} already exists on review {id}"
+                    )));
+                }
+                Ok(())
+            }
             OpKind::RecordProvenance { subject, kind, .. } => {
                 if subject.is_empty() || kind.is_empty() {
                     return Err(ViewError::Provenance(
@@ -1449,6 +1552,7 @@ impl View {
                         verdicts: BTreeMap::new(),
                         slashes: BTreeMap::new(),
                         target_ref: target_ref.clone(),
+                        comments: Vec::new(),
                         status: ReviewStatus::Live,
                     },
                 );
@@ -1485,8 +1589,12 @@ impl View {
                 };
                 // The bulk goes; the gate's compact authorization row
                 // (target_ref, target, outcome, approval weight) stays.
+                // Discussion is bulk by the same measure -- it is the
+                // part that grows without bound -- and it informs no
+                // authorization decision, so it goes with the verdicts.
                 review.reviewers = Vec::new();
                 review.verdicts = BTreeMap::new();
+                review.comments = Vec::new();
             }
             OpKind::PostVerdict {
                 id,
@@ -1510,6 +1618,24 @@ impl View {
                     .expect("validate proved the review has an approval to slash")
                     .slashes
                     .insert(reviewer.clone(), reason.clone());
+            }
+            OpKind::PostComment {
+                id,
+                comment,
+                author,
+                body,
+            } => {
+                let at = self.next_seq;
+                self.reviews
+                    .get_mut(id)
+                    .expect("validate proved the review is live and free of this comment id")
+                    .comments
+                    .push(CommentState {
+                        id: comment.clone(),
+                        author: author.clone(),
+                        body: body.clone(),
+                        at,
+                    });
             }
             OpKind::RecordProvenance { subject, kind, body } => {
                 self.provenance

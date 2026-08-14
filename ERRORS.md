@@ -11,7 +11,7 @@ Every rejection body carries `code`, `error` and `next`. `expected` and `actual`
 | `unknown_key` | The signature names a key id this node has no record of | Ask the operator to register your public key. `choir key <file> <you>` prints the line; it takes effect on the next request. |
 | `malformed_op` | The payload did not decode as a `ViewOp` | Serialize a `ViewOp` and sign its bytes. `choir submit` does this correctly; `GET /llms.txt` lists the operations. |
 | `malformed_request` | The request body was missing fields or badly encoded | Send a JSON object with the fields the endpoint wants. `GET /llms.txt` lists them. |
-| `reviewer_mismatch` | A verdict claimed a reviewer other than the signed channel | Resubmit on your own channel. `choir verdict` signs on the reviewer name by construction, so use it rather than hand-rolling. |
+| `reviewer_mismatch` | A verdict or comment claimed an attribution other than the signed channel | Resubmit on your own channel. `choir verdict` and `choir comment` sign on the attribution name by construction, so use them rather than hand-rolling. |
 | `channel_not_owned` | The signing key is bound to a different channel name | Submit on the channel your key is bound to — it is in `expected`. Or ask the operator to bind a key to the channel you want. |
 | `node_only` | Only the node's own key may author this operation | Nothing to retry: this operation is the node's to author. For reviewer assignment, request a review with an empty reviewer list. |
 | `assignment_required` | This node assigns reviewers; a self-named list was refused | Resubmit with an empty reviewer list. The node draws reviewers and returns their names in the response. |
