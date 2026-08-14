@@ -20,6 +20,8 @@ pub mod corpus;
 pub mod differential;
 pub mod differential_ledger;
 pub mod envelope;
+pub mod identity;
+pub mod memory;
 
 use choir_merge::{safety, MergeOutcome, Pipeline};
 use choir_oplog::MemLog;
@@ -45,6 +47,12 @@ pub struct Change {
     pub base: String,
     /// The file content this change proposes.
     pub proposed: String,
+    /// Ids of queued changes this one declares it depends on (Pijul
+    /// item 2). Declared-only — the queue never infers dependencies
+    /// from overlap; inference is a separate decision. Empty (the
+    /// default for all existing traffic) keeps the legacy
+    /// halve-and-retest behavior on failure; see [`MergeQueue::drain`].
+    pub depends: Vec<u64>,
 }
 
 /// Why a change left the queue without merging.
@@ -65,6 +73,18 @@ pub enum Rejection {
         /// The unattributable lines, as evidence for escalation.
         violation: choir_merge::safety::Violation,
     },
+    /// Ejected because it (transitively) declared a dependency on a
+    /// change whose combined build failed (Pijul item 2). Not a verdict
+    /// on this change itself: resubmit once the dependency is fixed.
+    DependencyEjection {
+        /// The CI-failing change this one depends on.
+        on: u64,
+    },
+    /// A change with this [`identity::change_identity`] already landed
+    /// through this queue (Pijul item 4): the resubmission — typically
+    /// the same edit rebased after the train rewrote the tip — is
+    /// refused without re-merging, so it cannot land twice.
+    AlreadyLanded,
 }
 
 /// The CI executor seam (D18): pass/fail verdict for a candidate state.
@@ -92,6 +112,14 @@ pub struct QueueReport {
     pub window_trace: Vec<usize>,
     /// Total CI executions, including retests behind failures.
     pub ci_runs: usize,
+    /// Total strategy-pipeline invocations. A change resolved from
+    /// [`memory::ResolutionMemory`] does not invoke the pipeline, which
+    /// is what a test counts to prove a replay happened.
+    pub merge_invocations: usize,
+    /// Changes whose conflict was resolved from memory, in train order.
+    /// Every one of them still ran CI: replay produces a candidate,
+    /// never a landing.
+    pub replayed: Vec<u64>,
 }
 
 /// Single-shard speculative merge queue over one file.
@@ -100,6 +128,8 @@ pub struct MergeQueue {
     pipeline: Pipeline,
     window: usize,
     queue: std::collections::VecDeque<Change>,
+    memory: memory::ResolutionMemory,
+    landed: std::collections::BTreeSet<String>,
 }
 
 impl MergeQueue {
@@ -118,7 +148,23 @@ impl MergeQueue {
             pipeline,
             window: DEFAULT_WINDOW,
             queue: std::collections::VecDeque::new(),
+            memory: memory::ResolutionMemory::new(),
+            landed: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Installs a resolution memory (item B): a conflict whose triple it
+    /// remembers is replayed as a candidate instead of re-conflicting.
+    /// The default is an empty memory, which changes nothing.
+    pub fn set_memory(&mut self, memory: memory::ResolutionMemory) {
+        self.memory = memory;
+    }
+
+    /// Seeds a landed change identity (item 4), for a queue picking up
+    /// where an earlier instance left off. `drain` records identities of
+    /// everything it lands through the same set.
+    pub fn mark_landed(&mut self, identity: String) {
+        self.landed.insert(identity);
     }
 
     /// Enqueues a change.
@@ -147,6 +193,8 @@ impl MergeQueue {
         let mut rejected = Vec::new();
         let mut window_trace = Vec::new();
         let mut ci_runs = 0usize;
+        let mut merge_invocations = 0usize;
+        let mut replayed = Vec::new();
         let handle = sequencer.handle();
 
         while !self.queue.is_empty() {
@@ -158,6 +206,31 @@ impl MergeQueue {
             let mut train_rejects: Vec<(u64, Rejection)> = Vec::new();
             for _ in 0..take {
                 let change = self.queue.pop_front().unwrap();
+                // Stable change identity (item 4): a resubmission of an
+                // already-landed change — the same position-independent
+                // edit, however rebased — is refused before any merge
+                // work, so the train neither re-merges nor duplicates it.
+                if self.landed.contains(&identity::change_identity(&change)) {
+                    train_rejects.push((change.id, Rejection::AlreadyLanded));
+                    continue;
+                }
+                // Resolution memory (item B): a remembered triple is
+                // replayed without re-invoking the strategy pipeline.
+                // The replay is a *candidate* — it joins the train and
+                // runs the same CI verdict as everything else, and it
+                // can only exist because an author already committed
+                // this exact resolution as a value (item A's link).
+                if let Some(remembered) =
+                    self.memory
+                        .recall(&change.base, &speculative, &change.proposed)
+                {
+                    let next = remembered.to_string();
+                    speculative = next.clone();
+                    replayed.push(change.id);
+                    train.push((change, next));
+                    continue;
+                }
+                merge_invocations += 1;
                 let resolution = self
                     .pipeline
                     .merge(&change.base, &speculative, &change.proposed);
@@ -209,6 +282,7 @@ impl MergeQueue {
                     // Whole train is green: merge it all.
                     for (change, state) in train {
                         self.base = state.clone();
+                        self.landed.insert(identity::change_identity(&change));
                         handle.submit(&change.workspace, state.into_bytes());
                         merged.push(change.id);
                         self.window += 1;
@@ -219,15 +293,74 @@ impl MergeQueue {
                     // rest for retesting against a state without the failure.
                     for (change, state) in train.drain(..i) {
                         self.base = state.clone();
+                        self.landed.insert(identity::change_identity(&change));
                         handle.submit(&change.workspace, state.into_bytes());
                         merged.push(change.id);
                         self.window += 1;
                     }
                     let (failed, _) = train.remove(0);
-                    rejected.push((failed.id, Rejection::CiFailure));
-                    self.window = (self.window / 2).max(1);
-                    for (change, _) in train.into_iter().rev() {
-                        self.queue.push_front(change);
+                    let failed_id = failed.id;
+                    rejected.push((failed_id, Rejection::CiFailure));
+
+                    // Dependency-aware ejection (Pijul item 2): when any
+                    // waiting change declares dependencies, the failure
+                    // ejects exactly the failing change plus everything
+                    // that (transitively) depends on it, and the window
+                    // is not halved — the blast radius is named by the
+                    // declarations, not guessed by shrinking the train.
+                    // Survivors are requeued in order and land in this
+                    // same drain. With no declarations anywhere (all
+                    // existing traffic) the legacy halving path runs
+                    // unchanged.
+                    let declares = |c: &Change| !c.depends.is_empty();
+                    let dependency_mode = declares(&failed)
+                        || train.iter().any(|(c, _)| declares(c))
+                        || self.queue.iter().any(declares);
+                    if dependency_mode {
+                        let mut ejected = std::collections::BTreeSet::from([failed_id]);
+                        loop {
+                            let dependent = |c: &Change| {
+                                !ejected.contains(&c.id)
+                                    && c.depends.iter().any(|d| ejected.contains(d))
+                            };
+                            let next: Vec<u64> = train
+                                .iter()
+                                .map(|(c, _)| c)
+                                .chain(self.queue.iter())
+                                .filter(|c| dependent(c))
+                                .map(|c| c.id)
+                                .collect();
+                            if next.is_empty() {
+                                break;
+                            }
+                            ejected.extend(next);
+                        }
+                        for (change, _) in train.into_iter().rev() {
+                            if ejected.contains(&change.id) {
+                                rejected.push((
+                                    change.id,
+                                    Rejection::DependencyEjection { on: failed_id },
+                                ));
+                            } else {
+                                self.queue.push_front(change);
+                            }
+                        }
+                        let waiting = std::mem::take(&mut self.queue);
+                        for change in waiting {
+                            if ejected.contains(&change.id) {
+                                rejected.push((
+                                    change.id,
+                                    Rejection::DependencyEjection { on: failed_id },
+                                ));
+                            } else {
+                                self.queue.push_back(change);
+                            }
+                        }
+                    } else {
+                        self.window = (self.window / 2).max(1);
+                        for (change, _) in train.into_iter().rev() {
+                            self.queue.push_front(change);
+                        }
                     }
                 }
             }
@@ -240,6 +373,8 @@ impl MergeQueue {
             final_state: self.base.clone(),
             window_trace,
             ci_runs,
+            merge_invocations,
+            replayed,
         }
     }
 }

@@ -504,9 +504,63 @@ fn commit_is_frozen() {
             tree,
             author: "agent-1".into(),
             message: "first".into(),
+            resolves: None,
         },
         r#"{"format_version":1,"parents":[{"codec":30,"digest":[181,29,25,42,145,146,193,233,221,0,91,242,175,23,170,249,126,21,248,248,86,164,241,121,105,3,42,152,184,107,133,72]}],"tree":{".gitignore":{"File":{"blob":{"codec":30,"digest":[208,172,129,59,103,228,188,228,200,33,179,182,169,27,1,87,16,150,73,242,110,15,34,0,137,181,172,93,15,142,151,35]}}},"Cargo.toml":{"File":{"blob":{"codec":30,"digest":[129,181,50,104,117,216,204,114,155,68,140,215,2,32,92,107,90,96,181,93,215,31,108,217,51,203,210,126,36,60,109,119]}}},"README.md":{"File":{"blob":{"codec":30,"digest":[205,231,220,112,13,97,181,12,170,86,12,215,38,191,148,115,35,165,189,138,73,130,144,50,195,243,41,144,68,212,227,240]}}},"docs/plan.md":{"File":{"blob":{"codec":30,"digest":[229,205,201,63,64,55,171,12,216,52,41,1,218,228,77,51,79,142,163,144,50,85,6,212,16,55,101,250,162,26,39,14]}}},"src/bin/tool.rs":{"File":{"blob":{"codec":30,"digest":[43,186,71,245,80,128,7,16,113,170,180,172,101,242,175,191,223,215,171,66,47,1,27,31,246,107,63,167,254,102,176,244]}}},"src/lib.rs":{"File":{"blob":{"codec":30,"digest":[70,136,166,203,46,155,175,8,195,156,128,172,70,185,16,166,96,33,255,27,234,254,245,119,121,54,110,37,89,189,38,130]}}},"src/main.rs":{"Conflict":{"base":{"codec":30,"digest":[63,22,247,85,132,83,32,39,61,145,212,49,68,10,41,113,121,104,120,151,151,95,228,208,68,94,95,222,234,214,57,93]},"left":{"codec":30,"digest":[10,43,38,88,220,53,61,166,22,247,60,111,223,168,166,113,62,121,83,174,80,191,136,145,27,88,54,79,85,17,47,14]},"right":{"codec":30,"digest":[50,123,238,170,124,35,217,21,238,4,66,157,14,52,215,172,131,166,192,43,60,72,160,145,243,53,142,120,213,147,8,36]}}},"tests/view.rs":{"File":{"blob":{"codec":30,"digest":[127,41,192,24,185,72,75,57,5,172,183,84,100,207,125,86,0,108,52,138,240,252,204,120,73,125,158,109,116,119,90,184]}}}},"author":"agent-1","message":"first"}"#,
         "1e-2fa60bc4fac48afaa2c476babd36c77cbff607c548dd23e3b1b15ef11389837a",
+    );
+}
+
+/// `depends` is the additive dependency declaration on `ViewOp` (Pijul
+/// item 2). `depends.rs` proves an old signed payload round-trips and
+/// verifies; this freezes the declared form's exact bytes, and
+/// `view_op_variants_are_frozen` staying green is the proof the
+/// undeclared form's bytes never moved.
+#[test]
+fn view_op_depends_additive_field_is_frozen() {
+    assert_golden(
+        "SetRef with a declared dependency",
+        &ViewOp::new(OpKind::SetRef {
+            name: "main".into(),
+            commit: h(b"tip commit"),
+            prev: None,
+        })
+        .with_depends(vec![h(b"prerequisite change")]),
+        r#"{"format_version":1,"kind":{"SetRef":{"name":"main","commit":{"codec":30,"digest":[239,87,168,18,186,232,118,134,82,140,184,116,218,198,85,113,117,24,5,65,86,95,180,215,174,114,98,142,43,93,135,236]},"prev":null}},"depends":[{"codec":30,"digest":[85,75,133,213,8,99,241,4,4,204,255,174,254,77,73,196,21,228,237,223,253,185,127,181,13,129,103,119,212,174,197,159]}]}"#,
+        "1e-4cf0b7f667961e1ab914ea083b5cb80e4e76e565affd10d77bad96e14434f6dc",
+    );
+}
+
+/// `resolves` is the additive field on `Commit` (Pijul's
+/// resolution-as-linked-change). `resolution.rs` proves an old commit
+/// round-trips; this freezes the linked form's exact bytes, and
+/// `commit_is_frozen` above staying green is the proof the unlinked
+/// form's bytes never moved.
+#[test]
+fn commit_resolves_additive_field_is_frozen() {
+    let mut tree = BTreeMap::new();
+    tree.insert(
+        "src/main.rs".to_string(),
+        TreeEntry::File { blob: h(b"blob resolved") },
+    );
+    let linked = Commit {
+        format_version: VIEW_FORMAT_VERSION,
+        parents: vec![h(b"conflicted commit")],
+        tree,
+        author: "agent-1".into(),
+        message: "resolve".into(),
+        resolves: Some(h(b"conflicted commit")),
+    };
+    assert_golden(
+        "Commit with a resolves link",
+        &linked,
+        r#"{"format_version":1,"parents":[{"codec":30,"digest":[158,88,178,142,14,97,64,170,144,53,214,249,211,140,203,122,104,251,114,190,138,56,225,108,150,242,138,31,47,24,47,61]}],"tree":{"src/main.rs":{"File":{"blob":{"codec":30,"digest":[117,53,3,227,181,133,221,21,27,184,36,159,127,115,56,139,179,121,136,176,118,29,23,43,237,74,196,33,170,153,68,223]}}}},"author":"agent-1","message":"resolve","resolves":{"codec":30,"digest":[158,88,178,142,14,97,64,170,144,53,214,249,211,140,203,122,104,251,114,190,138,56,225,108,150,242,138,31,47,24,47,61]}}"#,
+        "1e-9291fcce721a687acc12c766a36bf3fab3041a7801ffa3e403228a4dded5610b",
+    );
+    let unlinked = Commit { resolves: None, ..linked };
+    assert!(
+        !serde_json::to_string(&unlinked).expect("serializes").contains("resolves"),
+        "a commit that resolves nothing must not emit the additive field"
     );
 }
 

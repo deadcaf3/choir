@@ -71,6 +71,7 @@ fn main() {
         tree,
         author: short(&alice.actor_id()),
         message: "base".into(),
+        resolves: None,
     }
     .put(&mut store)
     .unwrap();
@@ -170,6 +171,7 @@ fn main() {
         tree,
         author: "merge".into(),
         message: "conflicted merge (first-class)".into(),
+        resolves: None,
     }
     .put(&mut store)
     .unwrap();

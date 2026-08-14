@@ -6,8 +6,11 @@
 
 mod blast;
 mod corpus;
+mod depends;
 mod differential;
 mod differential_runner;
 mod envelope;
+mod identity;
+mod memory;
 mod queue;
 mod safety;

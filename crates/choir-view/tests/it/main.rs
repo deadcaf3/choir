@@ -6,9 +6,11 @@
 
 mod canonical;
 mod comments;
+mod depends;
 mod golden;
 mod operator_identity;
 mod quarantine;
+mod resolution;
 mod snapshot;
 mod validate;
 mod view;

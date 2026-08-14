@@ -17,6 +17,7 @@ fn disjoint_change(id: u64) -> Change {
         workspace: format!("ws-{id}"),
         base: base(),
         proposed: lines.join("\n") + "\n",
+        depends: vec![],
     }
 }
 
@@ -68,6 +69,7 @@ fn conflicting_change_evicted_first_class_without_blocking() {
         workspace: "ws-99".into(),
         base: base(),
         proposed: lines.join("\n") + "\n",
+        depends: vec![],
     });
 
     let (report, ops) = run_batch(&base(), changes, &mut |_: &Change, _: &str| true);

@@ -218,3 +218,36 @@ impl MergeStrategy for MergirafMerge {
         }
     }
 }
+
+/// The position-independent content of a change: the deleted and
+/// inserted lines of its diff, with hunk positions and context stripped —
+/// the cheap analog of `git patch-id --stable` (Pijul item 4, plan.md
+/// D15: metadata, never a new merge substrate). Two authorings of the
+/// same edit on different bases — the change before and after the train
+/// rewrites or rebases it — normalize to the same string, which is what
+/// lets a queue or bridge recognize an already-landed change instead of
+/// re-merging it. It lives here because this crate already owns the diff
+/// dependency; callers hash the result.
+pub fn normalized_diff(base: &str, proposed: &str) -> String {
+    let patch = diffy::create_patch(base, proposed);
+    let mut out = String::new();
+    let mut push = |marker: char, text: &str| {
+        out.push(marker);
+        out.push_str(text);
+        // A final line without a terminating newline would otherwise
+        // fuse with the next marker and alias a different change.
+        if !text.ends_with('\n') {
+            out.push('\n');
+        }
+    };
+    for hunk in patch.hunks() {
+        for line in hunk.lines() {
+            match line {
+                diffy::Line::Delete(text) => push('-', text),
+                diffy::Line::Insert(text) => push('+', text),
+                diffy::Line::Context(_) => {}
+            }
+        }
+    }
+    out
+}

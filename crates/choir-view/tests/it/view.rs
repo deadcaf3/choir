@@ -33,6 +33,7 @@ fn commit(
         tree,
         author: "test".into(),
         message: message.into(),
+        resolves: None,
     }
     .put(store)
     .unwrap()
@@ -242,6 +243,7 @@ fn conflicted_commit_is_valid_and_buildable_upon() {
         tree,
         author: "test".into(),
         message: "conflicted merge".into(),
+        resolves: None,
     };
     assert!(merge.is_conflicted());
     let merge_id = merge.put(&mut store).unwrap();
