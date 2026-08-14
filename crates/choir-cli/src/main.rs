@@ -893,6 +893,14 @@ fn main() {
             finish(status, &resp);
         }
         ["runner", config_file] => runner(config_file, auth),
+        // The description a client generates against, and what this
+        // node will accept. In the CLI so the shell library never needs
+        // raw `curl` with a credential on its command line — a secret on
+        // an argv is visible to every process through `ps`.
+        ["schema", api] => {
+            let (status, body) = http(api, auth, "choir_schema", serde_json::json!({}));
+            finish(status, &body);
+        }
         ["log", api, rest @ ..] => {
             let (mut from, mut verify, mut keys) = (0u64, false, None);
             let mut it = rest.iter();

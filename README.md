@@ -426,6 +426,7 @@ commands:
   choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
   choir runner <config-file>
   choir submit <api> <key-file> <channel> '<op-json>'
+  choir schema <api>
   choir log <api> [--from <n>] [--verify] [--keys <file>]
   choir batch <api> <key-file> <channel> <ops-file>
   choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
