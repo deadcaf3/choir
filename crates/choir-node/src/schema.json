@@ -1,0 +1,591 @@
+{
+  "api_version": 1,
+  "commands": [
+    {
+      "agent_facing": true,
+      "args": "<key-file> [name]",
+      "name": "key",
+      "summary": "mint a key and print the line the operator registers; pass your channel name to print the bound form"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]",
+      "name": "workspace",
+      "summary": "provision a CoW workspace; advanced flags owner-sign an exact base and stable change"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <key-file> <channel> <change-id> <workspace-id> <git-oid>",
+      "name": "checkpoint",
+      "summary": "publish an immutable change revision after committing and pushing its Git object"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>",
+      "name": "workspace-archive",
+      "summary": "owner-sign and recoverably archive a bound workspace; exact retries are idempotent"
+    },
+    {
+      "agent_facing": false,
+      "args": "<config-file>",
+      "name": "runner",
+      "summary": "drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api> <key-file> <channel> '<op-json>'",
+      "name": "submit",
+      "summary": "sign and submit one raw operation"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...",
+      "name": "review",
+      "summary": "request review on a commit; name no reviewers and the node draws them"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <key-file> <reviewer> <id> approve|request-changes [note]",
+      "name": "verdict",
+      "summary": "answer a review you were assigned"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <key-file> <channel> <review-id> <comment-id> '<body>'",
+      "name": "comment",
+      "summary": "say something on a review; append-only and permanent, and the comment id is your retry identity"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api> <node-key-file> <id> <reviewer> '<reason>'",
+      "name": "slash",
+      "summary": "invalidate one reviewer's approval; operator-only and never moves a ref"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api> <node-key-file> <id>",
+      "name": "abandon",
+      "summary": "archive a stale incomplete review as lapsed, settling it unapproved; operator-only and never moves a ref"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api> <node-key-file> <operator> <key-hex> [channel]",
+      "name": "bind",
+      "summary": "record in the log that a key belongs to an operator; operator-only and never moves a ref"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api> <node-key-file> <key-hex> '<reason>'",
+      "name": "revoke",
+      "summary": "withdraw a key binding; terminal, and the attribution row survives"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <attempt-id>",
+      "name": "appeal",
+      "summary": "appeal a rejected newcomer attempt for operator adjudication; never grants privilege"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <key-file> <channel> <subject> <kind> '<body>'",
+      "name": "intent",
+      "summary": "publish a task spec or plan so other agents can see intent"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <reviewer>",
+      "name": "reviews",
+      "summary": "your pending review queue"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api>",
+      "name": "view",
+      "summary": "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate"
+    }
+  ],
+  "deprecations": [
+    {
+      "name": "workspace",
+      "note": "v1 alias for the signature-covered attribution channel; accepted on submission for compatibility, and refused when it disagrees with `channel` rather than one silently winning",
+      "replaced_by": "channel"
+    }
+  ],
+  "endpoints": [
+    {
+      "agent_facing": true,
+      "documented_as": "/api/submit",
+      "input_schema": {
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "channel"
+            ]
+          },
+          {
+            "required": [
+              "workspace"
+            ]
+          }
+        ],
+        "properties": {
+          "channel": {
+            "description": "Signature-covered attribution channel",
+            "type": "string"
+          },
+          "key_id": {
+            "description": "Actor key id",
+            "type": "string"
+          },
+          "payload_hex": {
+            "description": "Hex-encoded ViewOp payload bytes",
+            "type": "string"
+          },
+          "signature_hex": {
+            "description": "Hex-encoded submission signature",
+            "type": "string"
+          },
+          "workspace": {
+            "description": "Deprecated v1 alias for channel",
+            "type": "string"
+          }
+        },
+        "required": [
+          "payload_hex",
+          "key_id",
+          "signature_hex"
+        ],
+        "type": "object"
+      },
+      "method": "POST",
+      "name": "choir_submit",
+      "path": "/api/submit",
+      "purpose": "Submit one signed operation (hex payload, hex signature)",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/submit-batch",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "ops": {
+            "description": "Signed operations, admitted in array order",
+            "items": {
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "required": [
+                    "channel"
+                  ]
+                },
+                {
+                  "required": [
+                    "workspace"
+                  ]
+                }
+              ],
+              "properties": {
+                "channel": {
+                  "description": "Signature-covered attribution channel",
+                  "type": "string"
+                },
+                "key_id": {
+                  "type": "string"
+                },
+                "payload_hex": {
+                  "type": "string"
+                },
+                "signature_hex": {
+                  "type": "string"
+                },
+                "workspace": {
+                  "description": "Deprecated v1 alias for channel",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "payload_hex",
+                "key_id",
+                "signature_hex"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ops"
+        ],
+        "type": "object"
+      },
+      "method": "POST",
+      "name": "choir_submit_batch",
+      "path": "/api/submit-batch",
+      "purpose": "Same, in array order; the primary path for agent workloads (throughput figures live in PHASE0.md, not here, so they cannot go stale)",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/view",
+      "input_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "choir_view",
+      "path": "/api/view",
+      "purpose": "The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/appeal",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "description": "Newcomer attempt id returned with the rejection",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attempt_id"
+        ],
+        "type": "object"
+      },
+      "method": "POST",
+      "name": "choir_appeal",
+      "path": "/api/appeal",
+      "purpose": "Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/log?from=N",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "description": "Absolute sequence cursor",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from"
+        ],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "choir_log",
+      "path": "/api/log",
+      "purpose": "Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure",
+      "query_parameters": [
+        "from"
+      ]
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/workspace",
+      "input_schema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "base"
+                  ]
+                },
+                {
+                  "required": [
+                    "owner"
+                  ]
+                },
+                {
+                  "required": [
+                    "change"
+                  ]
+                },
+                {
+                  "required": [
+                    "idempotency_key"
+                  ]
+                },
+                {
+                  "required": [
+                    "channel"
+                  ]
+                },
+                {
+                  "required": [
+                    "payload_hex"
+                  ]
+                },
+                {
+                  "required": [
+                    "key_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "signature_hex"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "base",
+              "owner",
+              "change",
+              "idempotency_key",
+              "channel",
+              "payload_hex",
+              "key_id",
+              "signature_hex"
+            ]
+          }
+        ],
+        "properties": {
+          "base": {
+            "description": "Exact full Git commit oid; advanced requests provide this with owner, change and idempotency_key",
+            "type": "string"
+          },
+          "change": {
+            "description": "Stable logical change id",
+            "type": "string"
+          },
+          "channel": {
+            "description": "Owner and signature-covered attribution channel",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Owner-scoped create retry identity",
+            "type": "string"
+          },
+          "key_id": {
+            "description": "Owner key id",
+            "type": "string"
+          },
+          "name": {
+            "description": "Workspace name",
+            "type": "string"
+          },
+          "owner": {
+            "description": "Registered signing channel allowed to checkpoint and archive the stable change",
+            "type": "string"
+          },
+          "payload_hex": {
+            "description": "Hex-encoded CreateAuthorization for the exact binding",
+            "type": "string"
+          },
+          "repo": {
+            "description": "Repository name as owner/repo",
+            "type": "string"
+          },
+          "signature_hex": {
+            "description": "Owner signature over the create authorization",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "name"
+        ],
+        "type": "object"
+      },
+      "method": "POST",
+      "name": "choir_workspace",
+      "path": "/api/workspace",
+      "purpose": "Provision a CoW workspace; optional exact base/change binding makes retries idempotent",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/workspace/archive",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "description": "Stable logical change id returned by creation",
+            "type": "string"
+          },
+          "channel": {
+            "description": "Bound change owner and signature-covered attribution channel",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Bound create retry identity",
+            "type": "string"
+          },
+          "key_id": {
+            "description": "Owner key id",
+            "type": "string"
+          },
+          "name": {
+            "description": "Workspace name",
+            "type": "string"
+          },
+          "payload_hex": {
+            "description": "Hex-encoded ArchiveAuthorization naming this exact change, workspace and revision",
+            "type": "string"
+          },
+          "repo": {
+            "description": "Repository name as owner/repo",
+            "type": "string"
+          },
+          "signature_hex": {
+            "description": "Hex-encoded owner submission signature",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "name",
+          "change",
+          "idempotency_key",
+          "channel",
+          "payload_hex",
+          "key_id",
+          "signature_hex"
+        ],
+        "type": "object"
+      },
+      "method": "POST",
+      "name": "choir_workspace_archive",
+      "path": "/api/workspace/archive",
+      "purpose": "Recoverably archive a change-bound workspace and remove it from the active view",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/reviews?reviewer=X",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reviewer": {
+            "description": "Reviewer channel name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviewer"
+        ],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "choir_reviews",
+      "path": "/api/reviews",
+      "purpose": "One actor's pending review queue",
+      "query_parameters": [
+        "reviewer"
+      ]
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/schema",
+      "input_schema": null,
+      "method": "GET",
+      "name": null,
+      "path": "/api/schema",
+      "purpose": "This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17)",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/llms.txt",
+      "input_schema": null,
+      "method": "GET",
+      "name": null,
+      "path": "/llms.txt",
+      "purpose": "This surface, as text, for an agent that has never seen choir",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/sync.md",
+      "input_schema": null,
+      "method": "GET",
+      "name": null,
+      "path": "/sync.md",
+      "purpose": "The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/ref-agreement",
+      "input_schema": null,
+      "method": "GET",
+      "name": null,
+      "path": "/api/ref-agreement",
+      "purpose": "Where the op log and the bare repos disagree about a ref, read-only",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/accounts/invite",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/accounts/invite",
+      "purpose": "Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/accounts/redeem",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/accounts/redeem",
+      "purpose": "Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/accounts/revoke",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/accounts/revoke",
+      "purpose": "Delete an account: its token stops authenticating on the next request, and its grants and keys go with it",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/accounts",
+      "input_schema": null,
+      "method": "GET",
+      "name": null,
+      "path": "/api/accounts",
+      "purpose": "Who holds an account, what they were granted, and which invites are outstanding; never a secret or its hash",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/git-update",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/git-update",
+      "purpose": "Internal: the pre-receive hook callback",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/git-abort",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/git-abort",
+      "purpose": "Internal: retracts a refused push's already-accepted refs",
+      "query_parameters": []
+    }
+  ]
+}

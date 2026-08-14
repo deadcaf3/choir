@@ -47,6 +47,7 @@ mod review;
 mod review_outcomes;
 mod review_pruning;
 mod reviewer_conflict_config;
+mod schema;
 mod signers_reload;
 mod smart_http;
 mod snapshot_admission;

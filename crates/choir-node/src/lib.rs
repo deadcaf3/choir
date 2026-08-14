@@ -997,6 +997,29 @@ impl Node {
                 // file only a cloner can read would be worse than not
                 // naming it, so the document a remote agent is told to
                 // follow is served from the same place it is told about.
+                // The same surface, machine-readable, with what *this*
+                // node will actually accept merged in (D17). The static
+                // half is generated and committed; the capabilities are
+                // read off the live node, because a deployment's gates
+                // are not a fact a committed file can carry honestly.
+                if request.url().split('?').next().unwrap_or("") == "/api/schema" {
+                    let body = schema_with_capabilities(
+                        accounts.is_some(),
+                        acl.is_some(),
+                        platform.is_some(),
+                    );
+                    let bytes = body.len() as u64;
+                    let response = tiny_http::Response::from_string(body).with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .expect("static header"),
+                    );
+                    let outcome = served(request, response, 200, bytes);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
                 if let Some(text) = match request.url() {
                     "/llms.txt" => Some(LLMS_TXT),
                     "/sync.md" => Some(SYNC_MD),
@@ -1807,6 +1830,55 @@ pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
 /// node has no business linking the CLI, and a generated file with a
 /// staleness test is the cheaper coupling.
 const LLMS_TXT: &str = include_str!("llms.txt");
+
+/// The machine-readable API description (D17), generated from
+/// `choir-cli`'s surface table and checked for staleness by
+/// `choir-cli/tests/it/surface.rs`.
+///
+/// Included rather than depended on, for the reason `llms.txt` already
+/// is: the node has no business linking the CLI, and a generated file
+/// with a staleness test is the cheaper coupling.
+const SCHEMA_JSON: &str = include_str!("schema.json");
+
+/// [`SCHEMA_JSON`] with a `capabilities` object describing what this
+/// particular node will accept (D17).
+///
+/// The row calls for "versioned API + deprecation policy + capability
+/// negotiation", and the three parts land in different places on
+/// purpose. The version and the deprecations are properties of the API
+/// and are generated. The capabilities are properties of *this
+/// deployment* — whether it issues accounts, grades requests against an
+/// ACL, or runs a sequencer at all — and change with the flags it was
+/// started with. A client that reads only the committed file would build
+/// against a node that does not exist.
+///
+/// Deliberately coarse: what a client can *branch on*, not the operator's
+/// configuration. Whether review is required or a quota is set changes
+/// which requests succeed, not which requests are well-formed, and the
+/// node already answers those in its own words with a code and a repair
+/// (`ERRORS.md`). Listing them here would invite a client to
+/// pre-emptively refuse what the node would have explained.
+fn schema_with_capabilities(accounts: bool, acl: bool, platform: bool) -> String {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(SCHEMA_JSON).expect("the generated schema is JSON");
+    doc["capabilities"] = serde_json::json!({
+        // Credentials can be issued through the API rather than by hand.
+        "accounts": accounts,
+        // Requests are graded per repository, so a 404 may mean "not
+        // granted" rather than "not here" — the distinction `llms.txt`
+        // spells out and a client has to know before it retries.
+        "acl": acl,
+        // There is a sequencer behind this node, so signed operations
+        // are admitted at all. Without one it serves git and nothing
+        // else, and every `/api/submit` is refused for a reason no
+        // amount of client-side correctness fixes.
+        "platform": platform,
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&doc).expect("the schema is always serializable")
+    )
+}
 
 /// The sync contract, served at `/sync.md`. Hand-authored, unlike
 /// `llms.txt`, and included from the repository root so the served copy

@@ -36,6 +36,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 | `POST /api/workspace` | Provision a CoW workspace; optional exact base/change binding makes retries idempotent |
 | `POST /api/workspace/archive` | Recoverably archive a change-bound workspace and remove it from the active view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
+| `GET /api/schema` | This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17) |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |

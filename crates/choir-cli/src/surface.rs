@@ -32,6 +32,34 @@ pub const GEN_END: &str = "<!-- /generated -->";
 /// Explicit global options for authenticated node access.
 pub const AUTH_OPTIONS: &str = "[--auth-file <path>] [--auth-user <name>]";
 
+/// Version of the machine-readable API description (D17).
+///
+/// Bumped only for a change an existing client cannot ignore: an
+/// endpoint removed, a required field added, a field's meaning changed.
+/// Adding an endpoint or an optional field is additive and keeps the
+/// version, which is the same evolution rule every persisted struct in
+/// this workspace follows (invariant 1).
+///
+/// The row this implements is **one-way-leaning**: third parties build
+/// against this surface, so the fallback is a *versioned* API plus a
+/// deprecation policy rather than a way back. That is why the version is
+/// in the document from its first byte, before anyone depends on it.
+pub const API_VERSION: u32 = 1;
+
+/// Wire names this API still accepts and no longer documents, with what
+/// replaced them.
+///
+/// Stated in the schema rather than left to prose, because a client
+/// generated from the schema is exactly the reader who would otherwise
+/// build on an alias without knowing it is one.
+pub const DEPRECATIONS: &[(&str, &str, &str)] = &[(
+    "workspace",
+    "channel",
+    "v1 alias for the signature-covered attribution channel; accepted on \
+     submission for compatibility, and refused when it disagrees with \
+     `channel` rather than one silently winning",
+)];
+
 /// One `choir` subcommand.
 pub struct Command {
     /// Subcommand name.
@@ -406,6 +434,13 @@ pub const ENDPOINTS: &[Endpoint] = &[
     },
     Endpoint {
         method: "GET",
+        path: "/api/schema",
+        purpose: "This surface, machine-readable and versioned, plus what this particular \
+                  node will accept — the description an agent generates a client from (D17)",
+        mcp: None,
+    },
+    Endpoint {
+        method: "GET",
         path: "/llms.txt",
         purpose: "This surface, as text, for an agent that has never seen choir",
         mcp: None,
@@ -611,6 +646,92 @@ pub fn llms_txt() -> String {
     out
 }
 
+/// The machine-readable API description (D17), as pretty JSON.
+///
+/// The Code-Mode bet is that an agent writes code against a typed API
+/// rather than making many tool calls. Whatever language that code is
+/// eventually written in, it needs one description of the surface that
+/// cannot drift from the surface — so this is rendered from the same
+/// table that already renders `--help`, the README, `llms.txt`, the
+/// three `templates/` snippets and the MCP tool list, and lands in
+/// [`artifacts`] beside them so the one staleness test covers it.
+///
+/// **Static facts only.** What a *particular* node will accept —
+/// accounts, quotas, an ACL, the review gates — varies per deployment
+/// and cannot be generated, so the node merges a live `capabilities`
+/// object into this document when it serves it. Putting a runtime fact
+/// in a committed file would be a lie with a staleness test guarding it.
+#[must_use]
+pub fn schema_json() -> String {
+    let endpoints: Vec<serde_json::Value> = ENDPOINTS
+        .iter()
+        .map(|e| {
+            // The table's `path` carries the query parameter that is part
+            // of the contract (`/api/log?from=N`), which is right for a
+            // human reading `llms.txt` and useless to a generator: it
+            // would have to parse the template back out. So the two are
+            // split here, from information the table already holds —
+            // `McpArguments::Query` names the parameter.
+            let (path, query) = match e.mcp.as_ref().map(|m| m.arguments) {
+                Some(McpArguments::Query { parameter }) => (
+                    e.path.split('?').next().unwrap_or(e.path),
+                    vec![parameter],
+                ),
+                _ => (e.path, Vec::new()),
+            };
+            serde_json::json!({
+                "method": e.method,
+                "path": path,
+                // Present and empty rather than absent, so a generator
+                // never has to distinguish "no parameters" from "this
+                // build did not say".
+                "query_parameters": query,
+                // The documented spelling, kept because `llms.txt` and
+                // the README show it and a client comparing the two
+                // should not have to wonder whether they disagree.
+                "documented_as": e.path,
+                "purpose": e.purpose,
+                // The stable programmatic name, and the signal that this
+                // endpoint is one an agent is meant to call at all:
+                // internal hook endpoints carry neither.
+                "name": e.mcp.as_ref().map(|m| m.name),
+                "agent_facing": e.mcp.is_some(),
+                "input_schema": e.mcp.as_ref().map(|m| {
+                    serde_json::from_str::<serde_json::Value>(m.input_schema)
+                        .expect("every input schema in this table is JSON")
+                }),
+            })
+        })
+        .collect();
+    let commands: Vec<serde_json::Value> = COMMANDS
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "args": c.args,
+                "summary": c.summary,
+                "agent_facing": c.agent_facing,
+            })
+        })
+        .collect();
+    let deprecations: Vec<serde_json::Value> = DEPRECATIONS
+        .iter()
+        .map(|(name, replacement, note)| {
+            serde_json::json!({ "name": name, "replaced_by": replacement, "note": note })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "api_version": API_VERSION,
+        "endpoints": endpoints,
+        "commands": commands,
+        "deprecations": deprecations,
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&doc).expect("the schema is always serializable")
+    )
+}
+
 /// Replaces the region between [`GEN_START`] and [`GEN_END`] in `doc`.
 ///
 /// # Errors
@@ -650,6 +771,7 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
     let mut out = vec![
         (root.join("agents.md"), agents_md()),
         (root.join("crates/choir-node/src/llms.txt"), llms_txt()),
+        (root.join("crates/choir-node/src/schema.json"), schema_json()),
         // Owned by choir-node's reject module, generated here so one
         // staleness test covers every generated artifact rather than two
         // tests each covering half.
