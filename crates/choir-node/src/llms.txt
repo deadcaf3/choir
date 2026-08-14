@@ -35,6 +35,7 @@ choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
 choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key> - owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 choir runner <config-file> - drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout
 choir submit <api> <key-file> <channel> '<op-json>' - sign and submit one raw operation
+choir batch <api> <key-file> <channel> <ops-file> - sign and submit many operations as one batch — the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op in order
 choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]... - request review on a commit; name no reviewers and the node draws them
 choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note] - answer a review you were assigned
 choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>' - say something on a review; append-only and permanent, and the comment id is your retry identity

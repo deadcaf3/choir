@@ -273,6 +273,13 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: false,
     },
     Command {
+        name: "batch",
+        args: "<api> <key-file> <channel> <ops-file>",
+        summary: "sign and submit many operations as one batch — the primary path for agent \
+                  workloads; one op per line, `-` reads stdin, one result line per op in order",
+        agent_facing: true,
+    },
+    Command {
         name: "review",
         args: "<api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...",
         summary: "request review on a commit; name no reviewers and the node draws them",

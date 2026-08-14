@@ -249,6 +249,117 @@ fn submit(api: &str, key_file: &str, channel: &str, op: &ViewOp, auth: AuthOptio
     finish(status, &resp);
 }
 
+/// Signs every op in `source` on one channel and submits them as one
+/// batch (D17).
+///
+/// The node has told agents since D26 that `/api/submit-batch` is the
+/// primary path for their workloads — one durability barrier per batch
+/// against one per operation — and until now the CLI could not reach it.
+/// An agent taking that advice had to hand-roll ed25519 signing and
+/// `curl`, which is the thing this binary exists to prevent.
+///
+/// **The log scope is read once, not once per op.** `submit` reads it
+/// per call because it sends one op; doing that here would put an HTTP
+/// round trip in front of every operation and spend exactly what the
+/// batch endpoint saves. One read is also correct rather than merely
+/// cheaper: admission checks that the head an op names is still *in the
+/// window*, not that it is the current head, so ops signed against one
+/// head are admissible in sequence behind each other.
+///
+/// **Output is one line per op, in request order**, so a script can read
+/// line *n* for op *n* without counting brackets — and the accepted and
+/// rejected totals go to stderr, following the rule the runner already
+/// documents: machine-facing on stdout, human-facing on stderr.
+fn batch(api: &str, key_file: &str, channel: &str, source: &str, auth: AuthOptions<'_>) -> ! {
+    let text = if source == "-" {
+        let mut buffer = String::new();
+        if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer) {
+            eprintln!("choir batch: cannot read stdin: {error}");
+            std::process::exit(2);
+        }
+        buffer
+    } else {
+        match std::fs::read_to_string(source) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("choir batch: {source}: {error}");
+                std::process::exit(2);
+            }
+        }
+    };
+
+    // One op per line. Blank lines are skipped so a generated file may
+    // end with a newline, or be built by appending, without the last
+    // entry being a parse error nobody can see.
+    let mut ops: Vec<ViewOp> = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ViewOp>(line) {
+            Ok(op) => ops.push(op),
+            Err(error) => {
+                // Named by line, because the whole point of a batch is
+                // that there are many and "bad op json" would not say
+                // which.
+                eprintln!("choir batch: {source}:{}: {error}", number + 1);
+                std::process::exit(2);
+            }
+        }
+    }
+    if ops.is_empty() {
+        eprintln!("choir batch: {source} contains no operations");
+        std::process::exit(2);
+    }
+
+    let (node, head) = log_scope(api, auth);
+    let signed: Vec<serde_json::Value> = ops
+        .into_iter()
+        .map(|op| {
+            let op = op.in_scope(node.clone(), head.clone());
+            signed_payload_body(key_file, channel, &op.to_payload())
+        })
+        .collect();
+    let count = signed.len();
+    let (status, resp) = http(
+        api,
+        auth,
+        "choir_submit_batch",
+        serde_json::json!({ "ops": signed }),
+    );
+
+    let parsed: serde_json::Value = match serde_json::from_str(&resp) {
+        Ok(value) => value,
+        Err(_) => {
+            // A batch the node refused before reading the array answers
+            // in its own words rather than with per-op results. Pass it
+            // through whole rather than inventing results for ops that
+            // were never considered.
+            println!("{resp}");
+            std::process::exit(if (200..300).contains(&status) { 0 } else { 1 });
+        }
+    };
+    let Some(results) = parsed["results"].as_array() else {
+        println!("{resp}");
+        std::process::exit(if (200..300).contains(&status) { 0 } else { 1 });
+    };
+    for result in results {
+        println!("{result}");
+    }
+    let accepted = parsed["accepted"].as_u64().unwrap_or(0);
+    let rejected = parsed["rejected"].as_u64().unwrap_or(0);
+    eprintln!("choir batch: {accepted} accepted, {rejected} rejected, {count} submitted");
+    // Nonzero when any op was refused, so `set -e` stops. The per-op
+    // lines say which, which is the thing an exit code cannot carry.
+    std::process::exit(
+        if (200..300).contains(&status) && rejected == 0 && results.len() == count {
+            0
+        } else {
+            1
+        },
+    );
+}
+
 /// Emits a runner result and exits, data on stdout and nothing else.
 ///
 /// An orchestrator parses stdout, so a diagnostic written there would be
@@ -648,6 +759,9 @@ fn main() {
             finish(status, &resp);
         }
         ["runner", config_file] => runner(config_file, auth),
+        ["batch", api, key_file, channel, ops_file] => {
+            batch(api, key_file, channel, ops_file, auth);
+        }
         ["submit", api, key_file, channel, op_json] => {
             // Round-trip through ViewOp so the signed bytes are exactly
             // what the daemon will decode.
