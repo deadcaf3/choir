@@ -94,3 +94,101 @@ fn pre_l8_entries_still_decode_and_report_unsigned() {
     let json = serde_json::to_string(&e).unwrap();
     assert!(!json.contains("author_sig"));
 }
+
+/// ES256 verification, against a real assertion rather than a fixture.
+///
+/// The key and the signature come from `openssl` at test time, the way
+/// `choir-bridge`'s JWT test mints a throwaway RSA key, because a checked-in
+/// vector would prove only that the bytes were copied correctly once. The
+/// message has the exact shape a WebAuthn assertion signs:
+/// `authenticatorData ‖ SHA-256(clientDataJSON)`.
+#[test]
+fn an_es256_assertion_verifies_and_a_tampered_one_does_not() {
+    let work = std::env::temp_dir().join(format!("choir-es256-test-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let secret = work.join("signer.key");
+    let spki = work.join("signer.der");
+
+    let ok = std::process::Command::new("openssl")
+        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+        .arg(&secret)
+        .output()
+        .expect("openssl runs");
+    assert!(ok.status.success(), "generate P-256 key");
+    let ok = std::process::Command::new("openssl")
+        .args(["ec", "-in"])
+        .arg(&secret)
+        .args(["-pubout", "-outform", "DER", "-out"])
+        .arg(&spki)
+        .output()
+        .expect("openssl runs");
+    assert!(ok.status.success(), "extract SPKI");
+
+    // clientDataJSON, then the message the authenticator would sign.
+    let client_data = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdl","origin":"https://x"}"#;
+    let cd = work.join("clientData.json");
+    std::fs::write(&cd, client_data).unwrap();
+    let hashed = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .arg(&cd)
+        .output()
+        .expect("openssl runs");
+    assert!(hashed.status.success(), "hash clientDataJSON");
+    let mut message = vec![0x49u8; 37]; // stand-in authenticatorData
+    message.extend_from_slice(&hashed.stdout);
+
+    let msg_path = work.join("message.bin");
+    let sig_path = work.join("signature.der");
+    std::fs::write(&msg_path, &message).unwrap();
+    let ok = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(&secret)
+        .arg("-out")
+        .arg(&sig_path)
+        .arg(&msg_path)
+        .output()
+        .expect("openssl runs");
+    assert!(ok.status.success(), "sign the assertion");
+
+    let spki_der = std::fs::read(&spki).unwrap();
+    let signature = std::fs::read(&sig_path).unwrap();
+    assert_eq!(
+        choir_identity::verify_es256(&spki_der, &message, &signature),
+        Ok(()),
+        "a real assertion verifies"
+    );
+
+    // One flipped byte anywhere in the signed message must break it. This
+    // is the assertion that would still pass if `verify_es256` returned
+    // `Ok` unconditionally, so it is the one worth having.
+    let mut tampered = message.clone();
+    tampered[0] ^= 0x01;
+    assert_eq!(
+        choir_identity::verify_es256(&spki_der, &tampered, &signature),
+        Err(IdentityError::BadSignature),
+        "a tampered message is refused"
+    );
+
+    // The COSE path: an authenticator sends coordinates, not a key file.
+    // Rebuilding from the raw point must produce a key that verifies the
+    // same signature, or enrolment cannot use what the browser sends.
+    let point = &spki_der[choir_identity::P256_SPKI_PREFIX.len()..];
+    assert_eq!(point.len(), 65, "uncompressed point is 65 bytes");
+    let rebuilt = choir_identity::p256_point_to_spki(point).expect("a valid point");
+    assert_eq!(rebuilt, spki_der, "the prefix is exactly what openssl emits");
+    assert_eq!(
+        choir_identity::verify_es256(&rebuilt, &message, &signature),
+        Ok(()),
+        "a key rebuilt from raw coordinates verifies"
+    );
+
+    // A compressed point is refused rather than expanded: an authenticator
+    // sending one is doing something this path has never seen.
+    assert_eq!(
+        choir_identity::p256_point_to_spki(&[0x02; 33]),
+        Err(IdentityError::BadKey)
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
