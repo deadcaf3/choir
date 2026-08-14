@@ -85,6 +85,9 @@ pub enum Code {
     ForeignScope,
     /// The scoped head is no longer recent enough to admit.
     StaleScope,
+    /// A per-user quota (D37) was already full, or this request was
+    /// larger than one is allowed to be.
+    QuotaExceeded,
     /// The signature does not verify under the key it names, which this
     /// node does trust. Distinct from [`Code::UnknownKey`] because the
     /// repairs are opposites: that one widens the trusted set, this one
@@ -123,6 +126,7 @@ impl Code {
             Self::ScopeRequired => "scope_required",
             Self::ForeignScope => "foreign_scope",
             Self::StaleScope => "stale_scope",
+            Self::QuotaExceeded => "quota_exceeded",
             Self::BadSignature => "bad_signature",
             Self::Unclassified => "unclassified",
         }
@@ -154,6 +158,7 @@ impl Code {
             Self::ScopeRequired,
             Self::ForeignScope,
             Self::StaleScope,
+            Self::QuotaExceeded,
             Self::BadSignature,
             Self::Unclassified,
         ]
@@ -353,6 +358,7 @@ impl Code {
             Self::ScopeRequired => "This node admits only ops signed for its own log and a recent head, and this op carried no scope",
             Self::ForeignScope => "The op was signed for another node's log",
             Self::StaleScope => "The head the op was signed against is no longer in the node's recent window",
+            Self::QuotaExceeded => "A per-user quota was already full, or this request was larger than one is allowed to be",
             Self::BadSignature => "The signature does not verify over these bytes, under a key this node does trust",
             Self::Unclassified => "A rejection that did not originate as a structured one",
         }
@@ -384,6 +390,7 @@ impl Code {
             Self::ScopeRequired => "Read `log.node` and `log.head` from `GET /api/view`,                 put them in the op's `scope`, and sign that. `choir submit` does this                 automatically. An unscoped op cannot be admitted here because nothing in it                 says which log it was meant for or that it has not run before.",
             Self::ForeignScope => "Nothing to retry against this node: the op names another                 node's id in `expected`. Sign a scope naming this node, whose id is in                 `actual` and in `log.node` of `GET /api/view`.",
             Self::StaleScope => "Re-read `log.head` from `GET /api/view` and sign a fresh op                 against it. A signature is only admissible while the head it names is still                 in the node's window, which is what stops a captured op from being replayed                 later.",
+            Self::QuotaExceeded => "Not a retry: retrying the same request gets the same                 answer. `expected` names the ceiling and `actual` what you asked for.                 For a push, send fewer objects — several smaller pushes, or a shallower                 history. For a workspace, archive one you are finished with                 (`POST /api/workspace/archive`) to free the allowance. If neither is                 possible, the ceiling is the operator's to raise.",
             Self::BadSignature => "Re-sign the exact bytes you are submitting: a signature covers                 one `(channel, payload)` pair and does not carry to another. Registering a key                 does not help here, the key this names is already trusted. If you did not send                 this, a signature of yours was replayed onto bytes you never signed, and the                 operator wants to know.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",
         }

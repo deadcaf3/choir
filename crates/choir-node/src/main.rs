@@ -11,6 +11,7 @@
 //! [--hooks-file path]
 //! [--request-log path [--request-log-max-bytes n]]
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
+//! [--quota-push-bytes n] [--quota-workspaces n]
 //! [--bind addr] [--ssh-handoff path]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
 //! to `./repos` on port 8417; configured invocations must fill the port slot.
@@ -66,7 +67,14 @@
 //! a token bucket holding one minute's burst, answered `429` with
 //! `Retry-After`; the loopback hook callback and any holder of an `@node`
 //! grant are exempt, because a limiter that can lock out the operator is
-//! worse than no limiter. All three need `--auth-file`, since all three
+//! worse than no limiter. `--quota-push-bytes` and `--quota-workspaces`
+//! (D37) are the per-user ceilings a rate does not imply: the largest git
+//! request body one user may send, refused `413` before `git
+//! http-backend` is spawned so no `pre-receive` hook ever runs for it,
+//! and the most workspaces one user may hold at once, refused `403` and
+//! counted from a projection replayed out of the op log so the count
+//! survives a restart. They carry the limiter's exemptions unchanged.
+//! All five need `--auth-file`, since all five
 //! are per authenticated user. `--bind` with a non-loopback
 //! address is refused unless TLS is configured.
 //! `--ssh-handoff` (D31) writes this daemon's base URL and loopback
@@ -133,6 +141,8 @@ fn main() -> std::io::Result<()> {
         "--request-log-max-bytes",
         "--rate-limit-api",
         "--rate-limit-git",
+        "--quota-push-bytes",
+        "--quota-workspaces",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -542,6 +552,44 @@ fn main() -> std::io::Result<()> {
         eprintln!(
             "rate limit: the loopback hook callback and any holder of an @node grant are exempt"
         );
+    }
+    // D37. Same subject as the D33 flags, so the same requirement: a
+    // quota with nobody to charge it to is not a quota.
+    let push_bytes = flag_value("--quota-push-bytes")
+        .map(|value| {
+            value.parse::<std::num::NonZeroU64>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--quota-push-bytes needs a positive integer (bytes per git request)",
+                )
+            })
+        })
+        .transpose()?;
+    let max_workspaces = flag_value("--quota-workspaces")
+        .map(|value| {
+            value.parse::<std::num::NonZeroU32>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--quota-workspaces needs a positive integer (workspaces per user)",
+                )
+            })
+        })
+        .transpose()?;
+    if (push_bytes.is_some() || max_workspaces.is_some()) && !auth_enabled {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--quota-push-bytes/--quota-workspaces need --auth-file: the quota is per user",
+        ));
+    }
+    node.enable_quotas(push_bytes, max_workspaces);
+    if let Some(bytes) = push_bytes {
+        eprintln!("quota: at most {bytes} bytes in one git request per user");
+    }
+    if let Some(count) = max_workspaces {
+        eprintln!("quota: at most {count} workspaces held per user");
+    }
+    if push_bytes.is_some() || max_workspaces.is_some() {
+        eprintln!("quota: exempt exactly where the rate limit is — the loopback hook callback and any holder of an @node grant");
     }
     let mut create_next = false;
     for a in rest {
