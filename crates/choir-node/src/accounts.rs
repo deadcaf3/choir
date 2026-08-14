@@ -444,9 +444,17 @@ impl Accounts {
         if self.reserved.contains(&invite.user) {
             return conflict("that name became an operator credential; ask for a new invite");
         }
-        // Checked here as well as at minting, because the name can be
-        // revoked in between: an invite outstanding when its name retires
-        // must not be the way back in.
+        // Defence in depth, and measured to be exactly that: no sequence
+        // of API calls can reach this line with a retired name, because
+        // `revoke` drops every invite naming the user in the same locked
+        // write that retires it, and `invite` refuses a retired name.
+        // Deleting this check leaves the whole suite green — proved by
+        // mutation on 2026-08-14 rather than assumed — so it is not a
+        // guard any test can be said to hold. What it does cover is the
+        // store edited by hand while the node is stopped, which D36 keeps
+        // as the emergency revocation path, and a future `revoke` that
+        // stops dropping invites. It is kept for the second reason more
+        // than the first: this is the line that would notice.
         if state.retired.contains(&invite.user) {
             return conflict("that name has been revoked and is never reused; ask for another");
         }
