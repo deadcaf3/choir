@@ -902,3 +902,165 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The comment half of D39's row, served and signed: prepare, sign,
+/// submit, and the comment is in the log with the author the node
+/// authenticated rather than the one the body asked for.
+#[test]
+fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
+    use choir_node::platform::hex_encode;
+    use choir_view::{OpKind, ViewOp};
+
+    let work = std::env::temp_dir().join("choir-node-passkeys-comment");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(
+        work.join("acl"),
+        "alice @node write\nalice * write\nbob agents/demo write\n",
+    )
+    .expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).expect("key");
+
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.create_repo("agents/demo.git").expect("repo created");
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_accounts(work.join("accounts.json"), None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let (_, invite) = curl(&[
+        "-u", "alice:a", "-X", "POST", "--data-binary",
+        r#"{"user":"bob","grants":["agents/demo write"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    let pair = invite["invite"].as_str().expect("invite").to_string();
+    let (_, redeemed) = curl(&[
+        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    let bob = format!("bob:{}", redeemed["token"].as_str().expect("token"));
+
+    let (public_key, secret) = credential(&work, "commenter");
+    assert_eq!(
+        curl(&[
+            "-u", &bob, "-X", "POST", "--data-binary",
+            &format!(r#"{{"credential_id":"bobs-key","public_key":"{public_key}"}}"#),
+            &format!("{base}/api/accounts/passkey"),
+        ]).0,
+        200
+    );
+
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-talk".into(),
+        target: choir_oplog::ContentHash::blake3(b"a proposal"),
+        reviewers: vec!["alice".into()],
+        target_ref: Some("agents/demo.git:refs/heads/main".into()),
+    });
+    assert_eq!(
+        curl(&[
+            "-u", "alice:a", "-X", "POST", "-d",
+            &crate::support::submit_body(&author, "alice", &request),
+            &format!("{base}/api/submit"),
+        ]).0,
+        200
+    );
+
+    // Prepare. The body names alice; the node must build bob's comment,
+    // because the author is who authenticated and never who asked.
+    let (status, prepared) = curl(&[
+        "-u", &bob, "-X", "POST", "--data-binary",
+        r#"{"kind":"comment","id":"r-talk","body":"the diff reads fine","author":"alice"}"#,
+        &format!("{base}/api/prepare"),
+    ]);
+    assert_eq!(status, 200, "{prepared}");
+    assert_eq!(prepared["channel"], "bob", "the body chose the author: {prepared}");
+
+    let payload = choir_node::platform::hex_decode(
+        prepared["payload_hex"].as_str().expect("payload"),
+    )
+    .expect("hex");
+    match choir_view::ViewOp::from_payload(&payload).expect("a ViewOp").kind {
+        OpKind::PostComment { author, body, .. } => {
+            assert_eq!(author, "bob", "the prepared op names the wrong author");
+            assert_eq!(body, "the diff reads fine");
+        }
+        other => panic!("wrong op kind: {other:?}"),
+    }
+
+    // Sign the challenge the node handed back, exactly as the page does.
+    let challenge = prepared["challenge"].as_str().expect("challenge");
+    let client_data =
+        format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"{base}"}}"#)
+            .into_bytes();
+    let cd = work.join("cd.json");
+    std::fs::write(&cd, &client_data).expect("write");
+    let hashed = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .arg(&cd)
+        .output()
+        .expect("openssl runs");
+    let auth_data = vec![0x49u8; 37];
+    let mut message = auth_data.clone();
+    message.extend_from_slice(&hashed.stdout);
+    let msg = work.join("msg.bin");
+    let der = work.join("sig.der");
+    std::fs::write(&msg, &message).expect("write");
+    assert!(std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(&secret)
+        .arg("-out")
+        .arg(&der)
+        .arg(&msg)
+        .output()
+        .expect("openssl runs")
+        .status
+        .success());
+
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "-d",
+        &serde_json::json!({
+            "channel": prepared["channel"],
+            "payload_hex": prepared["payload_hex"],
+            "key_id": "bobs-key",
+            "scheme": 2,
+            "signature_hex": hex_encode(&std::fs::read(&der).expect("sig")),
+            "authenticator_data_hex": hex_encode(&auth_data),
+            "client_data_json_hex": hex_encode(&client_data),
+        })
+        .to_string(),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(status, 200, "{body}");
+
+    // And it is on the page, attributed to bob.
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-u", &bob, &format!("{base}/r/agents/demo/review/r-talk")])
+        .output()
+        .expect("curl runs");
+    let page = String::from_utf8_lossy(&out.stdout);
+    assert!(page.contains("the diff reads fine"), "the comment is missing: {page}");
+    assert!(page.contains("Say something"), "the box is missing");
+
+    // An over-long comment is refused at prepare, where the person can
+    // still edit it, rather than at admission where they cannot.
+    let long = "x".repeat(5000);
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "--data-binary",
+        &serde_json::json!({ "kind": "comment", "id": "r-talk", "body": long }).to_string(),
+        &format!("{base}/api/prepare"),
+    ]);
+    assert_eq!(status, 400, "{body}");
+
+    std::fs::remove_dir_all(&work).ok();
+}

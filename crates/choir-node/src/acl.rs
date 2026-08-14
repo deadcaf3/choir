@@ -568,6 +568,14 @@ pub fn api_denial(
         // point, and a repo scope would tie a fact about a person to a
         // repository they may not have.
         ("POST", "/api/accounts/passkey" | "/api/accounts/passkey/remove") => Vec::new(),
+        // Preparing an op for a browser to sign grants nothing (D39):
+        // the response is bytes the caller could have assembled
+        // themselves, and what makes an op admissible is the signature
+        // over them plus this same table applied at `/api/submit`. A
+        // grant requirement here would gate a serializer, and would have
+        // to be kept in agreement with the one that gates the write --
+        // two places to answer one question, which is how they drift.
+        ("POST", "/api/prepare") => Vec::new(),
         // Redemption is reached by a principal that holds no grant at
         // all — an unredeemed invite — so there is nothing here to check.
         // What keeps it from being an open door is that the invite is

@@ -846,6 +846,7 @@ fn review(
     h.push_str("</section>");
 
     verdict_buttons(&mut h, id, &state, user);
+    comment_box(&mut h, id, &state, user);
     Rendered { status: 200, etag: None, html: close(h) }
 }
 
@@ -899,15 +900,15 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
         ("Approve", "Approve", "ok"),
         ("RequestChanges", "Request changes", "danger"),
     ] {
-        let Some((payload_hex, challenge)) = prepared_verdict(id, user, verdict) else {
+        let Some(prepared) = crate::prepare::verdict(id, user, verdict) else {
             continue;
         };
         h.push_str("<button class=\"verdict ");
         h.push_str(class);
         h.push_str("\" data-payload=\"");
-        h.push_str(&esc(&payload_hex));
+        h.push_str(&esc(&prepared.payload_hex));
         h.push_str("\" data-challenge=\"");
-        h.push_str(&esc(&challenge));
+        h.push_str(&esc(&prepared.challenge));
         h.push_str("\">");
         h.push_str(label);
         h.push_str("</button> ");
@@ -917,54 +918,98 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
     h.push_str("</section>");
 }
 
-/// One verdict as the node would accept it: the payload bytes in hex, and
-/// the base64url challenge an authenticator must sign so that the
-/// signature attests to *this* operation (D39).
+/// The comment box (D39 × D38), offered to anyone who may write here
+/// rather than to reviewers only.
 ///
-/// Built here rather than in the browser so the op format has exactly one
-/// implementation. The challenge is
-/// `choir_identity::webauthn_challenge`, which is the hex form of
-/// `signing_hash(channel, payload)` — the same bytes the ed25519 path
-/// signs.
-fn prepared_verdict(id: &str, reviewer: &str, verdict: &str) -> Option<(String, String)> {
-    use choir_view::{OpKind, Verdict, ViewOp};
-    let verdict = match verdict {
-        "Approve" => Verdict::Approve,
-        "RequestChanges" => Verdict::RequestChanges,
-        _ => return None,
-    };
-    let payload = ViewOp::new(OpKind::PostVerdict {
-        id: id.to_string(),
-        reviewer: reviewer.to_string(),
-        verdict,
-        note: String::new(),
-    })
-    .to_payload();
-    let signing = choir_oplog::signing_hash(reviewer, &payload);
-    Some((
-        crate::platform::hex_encode(&payload),
-        base64url_nopad(&choir_identity::webauthn_challenge(&signing)),
-    ))
+/// Discussion is deliberately wider than judgement: a verdict is an
+/// authorization and belongs to the people asked for one, while a comment
+/// is a statement and belongs to anyone the ACL already lets write to
+/// this repository. The node makes that call at `/api/submit`; the page
+/// offering the box to a reader who is then refused would be worse than
+/// either, so it is shown only to a caller with a name — never to `anon`.
+///
+/// Unlike a verdict, the payload cannot be rendered ahead of time: it
+/// carries text nobody has typed yet. So this posts to `/api/prepare`
+/// first and signs what comes back, which keeps the op format in one
+/// implementation exactly as the verdict path does.
+fn comment_box(h: &mut String, id: &str, state: &serde_json::Value, user: &str) {
+    if user.is_empty() || user == "anon" || state["archived"].as_bool().unwrap_or(false) {
+        return;
+    }
+    h.push_str("<section><h2>Say something</h2>");
+    h.push_str("<noscript><p class=\"note\">Commenting signs an operation with your passkey, \
+                which needs scripting. With it off, use <code>choir comment</code>.</p></noscript>");
+    h.push_str("<div id=\"comment\" hidden data-review=\"");
+    h.push_str(&esc(id));
+    h.push_str("\" data-user=\"");
+    h.push_str(&esc(user));
+    h.push_str("\"><textarea id=\"comment-body\" rows=\"3\" maxlength=\"4096\" \
+                placeholder=\"What do you make of it?\"></textarea>");
+    h.push_str("<p><button id=\"comment-go\">Sign and post</button></p>");
+    h.push_str("<p id=\"comment-said\" class=\"note\" hidden></p></div>");
+    h.push_str(COMMENT_SCRIPT);
+    h.push_str("</section>");
 }
 
-/// Base64url without padding, WebAuthn's challenge encoding.
-fn base64url_nopad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
-        for i in 0..chunk.len() + 1 {
-            out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
-        }
-    }
-    out
-}
+/// The comment ceremony: prepare, sign, submit. Inline, no `src`, no
+/// library, no build step — the same scope as the verdict script, and
+/// held by the same test.
+const COMMENT_SCRIPT: &str = r#"<script>
+(function () {
+  var box = document.getElementById('comment');
+  var said = document.getElementById('comment-said');
+  if (!box || !window.PublicKeyCredential || !navigator.credentials) return;
+  box.hidden = false;
+  var hex = function (buf) {
+    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+      return ('0' + b.toString(16)).slice(-2);
+    }).join('');
+  };
+  var unb64url = function (s) {
+    var t = s.replace(/-/g, '+').replace(/_/g, '/');
+    var raw = atob(t + '==='.slice(0, (4 - t.length % 4) % 4));
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  };
+  var say = function (t) { said.hidden = false; said.textContent = t; };
+  document.getElementById('comment-go').addEventListener('click', function () {
+    var text = document.getElementById('comment-body').value;
+    if (!text.trim()) { say('Nothing to say yet.'); return; }
+    say('Preparing...');
+    fetch('/api/prepare', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: JSON.stringify({ kind: 'comment', id: box.dataset.review, body: text })
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    }).then(function (p) {
+      say('Waiting for your authenticator...');
+      return navigator.credentials.get({
+        publicKey: { challenge: unb64url(p.challenge), userVerification: 'preferred' }
+      }).then(function (c) {
+        return fetch('/api/submit', {
+          method: 'POST',
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            channel: p.channel,
+            payload_hex: p.payload_hex,
+            key_id: c.id,
+            scheme: 2,
+            signature_hex: hex(c.response.signature),
+            authenticator_data_hex: hex(c.response.authenticatorData),
+            client_data_json_hex: hex(c.response.clientDataJSON)
+          })
+        });
+      });
+    }).then(function (r) {
+      if (r.ok) { location.reload(); return; }
+      return r.text().then(function (t) { say('The node refused it: ' + t); });
+    }).catch(function (e) { say('Not posted: ' + e.message); });
+  });
+})();
+</script>"#;
 
 /// The whole of D39's client half. Inline, no `src`, no library, no build
 /// step — the scope the decision register approved, and the reason
@@ -1347,22 +1392,55 @@ mod tests {
     /// rather than one weakened probe covering both.
     #[test]
     fn the_review_page_runs_only_inline_script() {
-        // The constant is the whole client half, so probing it is
-        // probing what ships.
-        assert!(super::VERDICT_SCRIPT.starts_with("<script>"));
-        assert!(!super::VERDICT_SCRIPT.contains("src="), "the script is fetched");
-        for probe in ["http://", "https://", "//cdn", "@import", "import ", "require("] {
-            assert!(
-                !super::VERDICT_SCRIPT.contains(probe),
-                "the review script reaches out via {probe}"
-            );
+        // The constants are the whole client half, so probing them is
+        // probing what ships. Both, by name: a new one added without a
+        // line here is the way this rule rots.
+        for (what, script) in [
+            ("verdict", super::VERDICT_SCRIPT),
+            ("comment", super::COMMENT_SCRIPT),
+        ] {
+            assert!(script.starts_with("<script>"), "{what}");
+            assert!(!script.contains("src="), "{what}: the script is fetched");
+            for probe in ["http://", "https://", "//cdn", "@import", "import ", "require("] {
+                assert!(!script.contains(probe), "{what}: reaches out via {probe}");
+            }
+            // One script element each: two would mean somebody added a
+            // surface without reading this.
+            assert_eq!(script.matches("<script").count(), 1, "{what}");
+            // Nothing is interpolated, which is why "is this script safe"
+            // is answered once rather than per render.
+            assert!(!script.contains("{}"), "{what}");
         }
-        // Exactly one script element: two would mean somebody added a
-        // second surface without reading this.
-        assert_eq!(super::VERDICT_SCRIPT.matches("<script").count(), 1);
-        // Nothing is interpolated into it, which is why "is this script
-        // safe" is a question answered once rather than per render.
-        assert!(!super::VERDICT_SCRIPT.contains("{}"));
+    }
+
+    /// Discussion is wider than judgement, and narrower than the page.
+    /// A verdict belongs to the people asked for one; a comment belongs
+    /// to anyone with a name; neither is offered to an anonymous reader
+    /// or on a settled review.
+    #[test]
+    fn the_comment_box_is_offered_more_widely_than_a_verdict_and_never_to_anon() {
+        let live = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": false,
+        });
+        let rendered = |user: &str| {
+            let mut h = String::new();
+            super::comment_box(&mut h, "review-1", &live, user);
+            h
+        };
+        assert!(rendered("carol").contains("comment-go"), "a reviewer");
+        assert!(
+            rendered("mallory").contains("comment-go"),
+            "someone who is not a reviewer may still discuss"
+        );
+        assert!(rendered("anon").is_empty(), "an anonymous reader was offered a box");
+        assert!(rendered("").is_empty(), "an unnamed caller was offered a box");
+
+        let archived = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": true,
+        });
+        let mut h = String::new();
+        super::comment_box(&mut h, "review-1", &archived, "carol");
+        assert!(h.is_empty(), "an archived review still took comments");
     }
 
     /// The write affordance is offered only to someone who can actually
@@ -1409,33 +1487,4 @@ mod tests {
         assert!(h.contains("id=\"verdict\" hidden"), "the controls are not hidden by default");
     }
 
-    /// The payload the page hands the authenticator is the one the node
-    /// would accept, and the challenge is that payload's `signing_hash`.
-    /// Built in one place, so this is the assertion that the one place is
-    /// right.
-    #[test]
-    fn a_prepared_verdict_carries_the_challenge_its_payload_hashes_to() {
-        let (payload_hex, challenge) =
-            super::prepared_verdict("review-1", "carol", "Approve").expect("a known verdict");
-        let payload = crate::platform::hex_decode(&payload_hex).expect("hex");
-        let op = choir_view::ViewOp::from_payload(&payload).expect("a ViewOp");
-        match op.kind {
-            choir_view::OpKind::PostVerdict { id, reviewer, .. } => {
-                assert_eq!(id, "review-1");
-                // The reviewer in the payload and the channel the
-                // challenge is computed over must be the same name, or
-                // the node's own `ReviewerMismatch` check refuses it.
-                assert_eq!(reviewer, "carol");
-            }
-            other => panic!("wrong op kind: {other:?}"),
-        }
-        let signing = choir_oplog::signing_hash("carol", &payload);
-        assert_eq!(
-            challenge,
-            super::base64url_nopad(&choir_identity::webauthn_challenge(&signing)),
-            "the challenge must be this payload's signing hash, or the signature attests to \
-             an operation nobody asked about"
-        );
-        assert!(super::prepared_verdict("review-1", "carol", "Maybe").is_none());
-    }
 }
