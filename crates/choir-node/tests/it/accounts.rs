@@ -410,6 +410,68 @@ fn revocation_stops_the_token_and_removes_the_key() {
     assert_eq!(body["accounts"].as_array().expect("accounts").len(), 0);
 }
 
+/// A revoked name is never reissued, because the op log has it frozen
+/// inside the signature of every op its holder authored.
+///
+/// The failure this prevents is silent: a second person issued the same
+/// name inherits the first person's attribution — their workspace tally,
+/// their provenance, their reviews — and nothing afterwards can separate
+/// them, because rewriting the channel would invalidate the signature
+/// that makes each entry admissible.
+#[test]
+fn a_revoked_name_is_never_reissued() {
+    let s = served("reuse", &["agents/demo.git"], None);
+    let (_, invite) = s.invite(r#"{"user":"bob","grants":["agents/demo read"]}"#);
+    let pair = invite["invite"].as_str().expect("invite pair").to_string();
+    let (status, body) = s.redeem(&pair, "{}");
+    redeemed_json(status, &body);
+    let (status, body) = curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
+        r#"{"user":"bob"}"#,
+        &format!("{}/api/accounts/revoke", s.base),
+    ]);
+    assert_eq!(status, 200, "revocation refused: {body}");
+
+    // The name is spent. Not "already exists" — the record is gone; the
+    // refusal is about the history the log still attributes to it.
+    let (status, answer) = s.invite(r#"{"user":"bob","grants":["agents/demo read"]}"#);
+    assert_eq!(status, 409, "a revoked name was reissued: {answer}");
+    assert!(
+        answer["error"].as_str().unwrap_or_default().contains("never reused"),
+        "the refusal should say why: {answer}"
+    );
+    // And the operator can see the reason without guessing at it.
+    let (status, roster) = curl(&["-u", "alice:a", &format!("{}/api/accounts", s.base)]);
+    assert_eq!(status, 200, "roster refused: {roster}");
+    assert_eq!(roster["retired"][0], "bob");
+
+    // A name whose *invite* was cancelled before redemption never wrote
+    // an op, so it has no attribution to inherit and stays issuable.
+    // Over-refusing here would burn a name over a typo.
+    let (status, answer) = s.invite(r#"{"user":"carol","grants":["agents/demo read"]}"#);
+    assert_eq!(status, 200, "invite refused: {answer}");
+    let (status, answer) = curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
+        r#"{"user":"carol"}"#,
+        &format!("{}/api/accounts/revoke", s.base),
+    ]);
+    assert_eq!(status, 200, "cancelling an invite failed: {answer}");
+    assert_eq!(answer["account_revoked"], false);
+    let (status, answer) = s.invite(r#"{"user":"carol","grants":["agents/demo read"]}"#);
+    assert_eq!(
+        status, 200,
+        "a name that never held an account was burned by a cancelled invite: {answer}"
+    );
+}
+
 /// Self-service can never issue node-wide authority, which is what keeps
 /// D33's rate-limit exemption operator-conferred. Both halves are here
 /// because the refusal alone would prove only that a string was

@@ -139,6 +139,35 @@ struct Invite {
 struct State {
     accounts: BTreeMap<String, Account>,
     invites: BTreeMap<String, Invite>,
+    /// Names that have held an account and been revoked, and are
+    /// therefore never issued again.
+    ///
+    /// **Forget the secret, remember the name** — and the second half
+    /// costs nothing, because the name was never forgettable.
+    ///
+    /// Revocation deletes the token hash, the grants and the keys: a
+    /// credential must be forgettable, which is the whole case for
+    /// keeping credentials out of the append-only log. A name is not a
+    /// credential. `OpEntry::channel` carries `git/<name>` on every op
+    /// its holder ever authored, and `choir_oplog::signing_hash` covers
+    /// that channel, so the name sits *inside the author's signature* in
+    /// a hash chain — unrewritable without invalidating the signature
+    /// that makes the entry admissible. This list therefore adds no new
+    /// permanent record. It indexes one the log already keeps forever,
+    /// so that reissuing a name cannot hand a second person the first
+    /// person's signed attribution: their workspace tally (D37), their
+    /// provenance, their reviews.
+    ///
+    /// **Deliberately over-refuses.** The precise rule is "refuse a name
+    /// that has authored at least one op", since a name that was issued
+    /// and never used has no attribution to inherit. Answering that
+    /// needs a scan of log entries or a maintained index — `View::apply`
+    /// takes a `ViewOp` and never sees the channel, so no fold can
+    /// answer it — which is new derived persisted state to protect a
+    /// rare case whose workaround is picking another name. Refusing
+    /// every revoked name is the cheaper side to err on, and it is a
+    /// choice rather than an oversight.
+    retired: BTreeSet<String>,
 }
 
 /// Where a generated `authorized_keys` goes and what the forced command
@@ -330,6 +359,16 @@ impl Accounts {
         if state.accounts.contains_key(user) {
             return conflict(&format!("`{user}` already has an account; revoke it first"));
         }
+        // Names are never reused. See `State::retired`: the log has this
+        // string frozen into every channel the old holder wrote under,
+        // and issuing it again transfers their attribution to somebody
+        // else with nothing able to tell them apart afterwards.
+        if state.retired.contains(user) {
+            return conflict(&format!(
+                "`{user}` was revoked and is never reused: the op log still attributes that \
+                 name's history to whoever held it. Choose another name."
+            ));
+        }
         state.invites.retain(|_, invite| invite.expires_at > now_secs());
         if state.invites.values().any(|invite| invite.user == user) {
             return conflict(&format!(
@@ -405,6 +444,12 @@ impl Accounts {
         if self.reserved.contains(&invite.user) {
             return conflict("that name became an operator credential; ask for a new invite");
         }
+        // Checked here as well as at minting, because the name can be
+        // revoked in between: an invite outstanding when its name retires
+        // must not be the way back in.
+        if state.retired.contains(&invite.user) {
+            return conflict("that name has been revoked and is never reused; ask for another");
+        }
         let token = mint_secret();
         state.accounts.insert(
             invite.user.clone(),
@@ -456,6 +501,13 @@ impl Accounts {
         let invites_dropped = before - state.invites.len();
         if !had_account && invites_dropped == 0 {
             return (404, error_json("no such account"));
+        }
+        // Retired only when an account really existed. A name whose
+        // invite was cancelled before redemption never wrote anything to
+        // the log, so there is no history to protect and burning the name
+        // over a mistyped invite would be a worse answer than reusing it.
+        if had_account {
+            state.retired.insert(user.to_string());
         }
         if let Err(e) = self.commit(&state) {
             return server_error(&e);
@@ -511,6 +563,9 @@ impl Accounts {
             "format_version": FORMAT_VERSION,
             "accounts": accounts,
             "invites": invites,
+            // Served so an operator can see why a name is refused before
+            // they go looking for an override.
+            "retired": state.retired,
         })
     }
 
@@ -779,6 +834,7 @@ fn render_state(state: &State) -> String {
             "format_version": FORMAT_VERSION,
             "accounts": accounts,
             "invites": invites,
+            "retired": state.retired,
         })
     )
 }
@@ -812,7 +868,10 @@ fn parse_state(text: &str) -> Result<State, String> {
             })
             .unwrap_or_default()
     };
-    let mut state = State::default();
+    let mut state = State {
+        retired: strings(value.get("retired")).into_iter().collect(),
+        ..State::default()
+    };
     for entry in value
         .get("accounts")
         .and_then(serde_json::Value::as_array)
