@@ -260,6 +260,11 @@ fn main() -> std::io::Result<()> {
 
     let auth_enabled = auth.is_some();
     let mut node = Node::bind_full(&root, &bind, port, auth, tls)?;
+    // One writer per state dir, process-enforced: a second daemon on the
+    // same root would append to the same ops.jsonl and fork the chain.
+    // Held until after serve_forever; a stale lock from a dead process
+    // is reaped automatically.
+    let mut state_lock = None;
     if let Some(i) = rest.iter().position(|a| a == "--keys-file") {
         let path = rest.get(i + 1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "--keys-file needs a path")
@@ -274,6 +279,19 @@ fn main() -> std::io::Result<()> {
         }
         let state_dir = root.join(".choir");
         std::fs::create_dir_all(&state_dir)?;
+        state_lock = Some(choir_fs::WorkdirLock::acquire(&state_dir).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                match e {
+                    choir_fs::LockError::Locked => format!(
+                        "{} is in use by another running choir-node; two writers \
+                         on one op log would fork the chain",
+                        state_dir.display()
+                    ),
+                    choir_fs::LockError::Io(e) => format!("locking {}: {e}", state_dir.display()),
+                },
+            )
+        })?);
         // Same keys, OpenSSH form: what push-certificate verification
         // (git push --signed) checks signers against.
         choir_node::write_allowed_signers(&root, &signers)?;
@@ -288,12 +306,9 @@ fn main() -> std::io::Result<()> {
             choir_identity::ActorKey::from_secret_bytes(&bytes)
         } else {
             let key = choir_identity::ActorKey::generate();
-            std::fs::write(&key_path, key.secret_bytes())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-            }
+            // Atomic and 0600 from creation: no window where the secret
+            // is world-readable or half-written.
+            choir_fs::write_atomic_private(&key_path, key.secret_bytes())?;
             key
         };
         // The node's identity is pinned to the log it writes into. The
@@ -332,7 +347,8 @@ fn main() -> std::io::Result<()> {
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::write(&fingerprint_path, format!("{fingerprint}\n"))?;
+                // Atomic: a torn pin would refuse every later start.
+                choir_fs::write_atomic(&fingerprint_path, format!("{fingerprint}\n"))?;
             }
             Err(e) => return Err(e),
         }
@@ -706,5 +722,6 @@ fn main() -> std::io::Result<()> {
         node.port()
     );
     node.serve_forever();
+    drop(state_lock);
     Ok(())
 }

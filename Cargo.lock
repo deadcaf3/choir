@@ -230,6 +230,7 @@ dependencies = [
 name = "choir-bridge"
 version = "0.0.1"
 dependencies = [
+ "choir-fs",
  "choir-hash",
  "choir-identity",
  "choir-node",
@@ -242,6 +243,7 @@ dependencies = [
 name = "choir-cli"
 version = "0.0.1"
 dependencies = [
+ "choir-fs",
  "choir-hash",
  "choir-identity",
  "choir-node",
@@ -263,6 +265,10 @@ dependencies = [
  "choir-store",
  "choir-view",
 ]
+
+[[package]]
+name = "choir-fs"
+version = "0.0.1"
 
 [[package]]
 name = "choir-hash"
@@ -294,6 +300,7 @@ dependencies = [
 name = "choir-node"
 version = "0.0.1"
 dependencies = [
+ "choir-fs",
  "choir-hash",
  "choir-identity",
  "choir-oplog",

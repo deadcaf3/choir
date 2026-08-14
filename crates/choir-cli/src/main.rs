@@ -99,13 +99,10 @@ fn load_key(path: &str) -> ActorKey {
         ActorKey::from_secret_bytes(&bytes.as_slice().try_into().expect("32-byte key file"))
     } else {
         let key = ActorKey::generate();
-        std::fs::write(path, key.secret_bytes()).expect("write key file");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .expect("chmod key file");
-        }
+        // Atomic and 0600 from creation: no window where the secret is
+        // world-readable or half-written.
+        choir_fs::write_atomic_private(std::path::Path::new(path), key.secret_bytes())
+            .expect("write key file");
         key
     }
 }
@@ -1125,9 +1122,7 @@ fn main() {
             // untouched, so repeated installs produce no churn.
             let wrote = std::fs::read_to_string(&path).ok().as_deref() != Some(rendered.as_str());
             if wrote {
-                if let Err(error) =
-                    std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &rendered))
-                {
+                if let Err(error) = choir_fs::write_atomic(&path, &rendered) {
                     eprintln!("choir: cannot write {}: {error}", path.display());
                     std::process::exit(1);
                 }
