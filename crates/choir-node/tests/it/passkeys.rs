@@ -511,3 +511,153 @@ fn enrolment_acts_on_the_caller_and_refuses_the_principals_that_have_no_account(
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The whole D39 write path, end to end: a human's enrolled authenticator
+/// signs one operation and the node admits it into the log.
+///
+/// This is the test that makes `verify_webauthn_assertion` reachable.
+/// Until it existed the primitive was verified in isolation and the store
+/// held keys nothing consulted, which is two green halves and no path.
+#[test]
+fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
+    use choir_node::platform::hex_encode;
+    use choir_view::{OpKind, ViewOp};
+
+    let work = std::env::temp_dir().join("choir-node-passkeys-submit");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_accounts(work.join("accounts.json"), None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Bob gets an account, then enrols the authenticator he will sign
+    // with.
+    let (_, invite) = curl(&[
+        "-u", "alice:a", "-X", "POST", "--data-binary",
+        r#"{"user":"bob","grants":["agents/demo write"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    let pair = invite["invite"].as_str().expect("invite").to_string();
+    let (_, redeemed) = curl(&[
+        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    let token = redeemed["token"].as_str().expect("token").to_string();
+    let bob = format!("bob:{token}");
+
+    let (public_key, secret) = credential(&work, "submit");
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "--data-binary",
+        &format!(r#"{{"credential_id":"bobs-laptop","public_key":"{public_key}"}}"#),
+        &format!("{base}/api/accounts/passkey"),
+    ]);
+    assert_eq!(status, 200, "{body}");
+
+    // The operation, and the assertion over exactly its `signing_hash`.
+    // Repository-qualified, so the op authorizes against the grant bob
+    // was issued rather than falling to the node-wide default.
+    let op = ViewOp::new(OpKind::SetRef {
+        name: "agents/demo.git:refs/heads/main".into(),
+        commit: choir_oplog::ContentHash::blake3(b"a commit bob approved"),
+        prev: None,
+    });
+    let payload = op.to_payload();
+    let signing = choir_oplog::signing_hash("bob", &payload);
+    let challenge = base64url(&choir_identity::webauthn_challenge(&signing));
+    let client_data =
+        format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"{base}"}}"#)
+            .into_bytes();
+    let cd = work.join("submit-cd.json");
+    std::fs::write(&cd, &client_data).expect("write");
+    let hashed = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .arg(&cd)
+        .output()
+        .expect("openssl runs");
+    let auth_data = vec![0x49u8; 37];
+    let mut message = auth_data.clone();
+    message.extend_from_slice(&hashed.stdout);
+    let msg = work.join("submit-msg.bin");
+    let der = work.join("submit-sig.der");
+    std::fs::write(&msg, &message).expect("write");
+    assert!(std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(&secret)
+        .arg("-out")
+        .arg(&der)
+        .arg(&msg)
+        .output()
+        .expect("openssl runs")
+        .status
+        .success());
+    let signature = std::fs::read(&der).expect("signature");
+
+    let submit = |channel: &str, scheme: u64| {
+        serde_json::json!({
+            "channel": channel,
+            "payload_hex": hex_encode(&payload),
+            "key_id": "bobs-laptop",
+            "signature_hex": hex_encode(&signature),
+            "scheme": scheme,
+            "authenticator_data_hex": hex_encode(&auth_data),
+            "client_data_json_hex": hex_encode(&client_data),
+        })
+        .to_string()
+    };
+
+    // The same assertion offered on somebody else's channel finds no
+    // enrolled credential, because the lookup is keyed by account. Run
+    // first, so a later success cannot be what made this one fail.
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "-d", &submit("alice", 2),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "unknown_key", "{body}");
+
+    // A scheme the node does not implement is named rather than
+    // reinterpreted as ed25519 and reported as a bad signature.
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "-d", &submit("bob", 999),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["detail"].as_str())
+            .unwrap_or_default()
+            .contains("999"),
+        "the refusal must name the scheme it rejected: {body}"
+    );
+
+    // And the real thing: bob's authenticator signs, and the op lands.
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "-d", &submit("bob", 2),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["seq"], 0, "{body}");
+
+    // It is in the log as bob's, signed by the credential he enrolled.
+    let (status, view) = curl(&["-u", "alice:a", &format!("{base}/api/view")]);
+    assert_eq!(status, 200, "{view}");
+    assert!(
+        view["refs"]["agents/demo.git:refs/heads/main"] != serde_json::Value::Null,
+        "the ref the passkey set is missing: {view}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}

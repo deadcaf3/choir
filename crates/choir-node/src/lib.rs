@@ -286,6 +286,13 @@ impl Node {
     /// Enables the platform API (`/api/submit`, `/api/view`) backed by
     /// `platform`. Call before [`Node::serve_forever`].
     pub fn enable_platform(&mut self, platform: Platform) {
+        // The other half of the join in `enable_accounts`: whichever flag
+        // is applied second attaches the store, so passkey verification
+        // does not depend on the order the daemon happens to configure in
+        // (D39).
+        if let Some(store) = self.accounts.as_ref() {
+            platform.attach_accounts(store.clone());
+        }
         self.platform = Some(std::sync::Arc::new(platform));
     }
 
@@ -414,7 +421,14 @@ impl Node {
         let reserved = table.keys().cloned().collect();
         let store = accounts::Accounts::open(path, keys_out, reserved)?;
         eprintln!("accounts enabled ({} issued)", store.len());
-        self.accounts = Some(std::sync::Arc::new(store));
+        let store = std::sync::Arc::new(store);
+        // Either order: whichever of the two flags is applied second
+        // performs the join, so a passkey submission is verifiable
+        // regardless of how the daemon was configured (D39).
+        if let Some(platform) = self.platform.as_ref() {
+            platform.attach_accounts(store.clone());
+        }
+        self.accounts = Some(store);
         Ok(())
     }
 
