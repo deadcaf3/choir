@@ -802,7 +802,13 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
     // is not the same question as being a reviewer.
     let alices = page("alice:a");
     assert!(!alices.contains("Your verdict"), "a non-reviewer was offered a verdict");
-    assert!(!alices.contains("<script"), "a non-reviewer's page runs script");
+    assert!(!alices.contains("button class=\"verdict"), "a non-reviewer got a verdict button");
+    // She does get the comment box, and that is the distinction rather
+    // than an exception to it: judgement belongs to the people asked for
+    // it, discussion to anyone who may write here. This assertion used
+    // to read "no script at all" and was correct until the comment box
+    // landed; the workspace gate caught it, the crate-scoped run did not.
+    assert!(alices.contains("Say something"), "a writer was offered no way to discuss");
 
     // And the read surface is the same page for both: the enhancement
     // added a section, it did not change what was already there.

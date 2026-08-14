@@ -15,7 +15,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub mod account_page;
+mod account_page;
 pub mod accounts;
 pub mod acl;
 pub mod hooks;
