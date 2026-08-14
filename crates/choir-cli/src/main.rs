@@ -1136,7 +1136,7 @@ fn main() {
             finish(200, &doc.to_string());
         }
         ["triage", api] => {
-            let doc = derived_view(api, auth, |view| choir_cli::triage::triage(view));
+            let doc = derived_view(api, auth, choir_cli::triage::triage);
             finish(200, &doc);
         }
         ["state", api, channel] => {

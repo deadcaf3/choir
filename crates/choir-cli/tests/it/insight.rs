@@ -70,10 +70,7 @@ fn triage_and_state_read_real_emissions() {
     node.create_repo("agents/demo.git").unwrap();
     let port = node.port();
     let node = std::sync::Arc::new(node);
-    {
-        let node = node.clone();
-        std::thread::spawn(move || node.serve_forever());
-    }
+    std::thread::spawn(move || node.serve_forever());
     let api = format!("http://127.0.0.1:{port}");
 
     // Seed a commit so provisioning has a head; the push lands a SetRef,
