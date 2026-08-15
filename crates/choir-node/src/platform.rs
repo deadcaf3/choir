@@ -1580,7 +1580,7 @@ fn new_actor_review_outcomes_json(
         } else if review
             .verdicts
             .values()
-            .any(|(verdict, _)| *verdict == Verdict::RequestChanges)
+            .any(|answer| answer.verdict == Verdict::RequestChanges)
         {
             request_changes += 1;
             true
@@ -2342,7 +2342,7 @@ impl ChoirPolicy {
         let approvers = state
             .counted_approvers()
             .into_iter()
-            .map(|channel| view.bound_actor(channel))
+            .map(|(channel, at)| view.bound_actor_at(channel, at))
             .collect::<Result<Vec<_>, String>>()
             .map_err(|e| Self::unbound_approver(&e))?;
         Ok((state.approval_weight(), approvers))
@@ -2405,7 +2405,7 @@ impl ChoirPolicy {
                 ));
             }
         }
-        if let Some(owner) = self.owner_approved(acl, repo, name, commit, review) {
+        if let Some((owner, approved_at)) = self.owner_approved(acl, repo, name, commit, review) {
             // Only a `Submit` needs the id, and only a `Submit` may be
             // refused for the want of one. Resolving it on the push path
             // too would make an unbound reviewer key break a landing that
@@ -2416,7 +2416,7 @@ impl ChoirPolicy {
                     .view
                     .lock()
                     .expect("view lock")
-                    .bound_actor(&owner)
+                    .bound_actor_at(&owner, approved_at)
                     .map_err(|e| Self::unbound_approver(&e))?],
                 None => Vec::new(),
             };
@@ -2486,7 +2486,7 @@ impl ChoirPolicy {
         name: &str,
         commit: &ContentHash,
         review: Option<&str>,
-    ) -> Option<String> {
+    ) -> Option<(String, u64)> {
         let view = self.view.lock().expect("view lock");
         view.reviews
             .iter()
@@ -2496,14 +2496,15 @@ impl ChoirPolicy {
                     && state.target.as_ref() == Some(commit)
             })
             .find_map(|(_, state)| {
-                state
-                    .verdicts
-                    .keys()
-                    .find(|reviewer| {
-                        state.approval_stands(reviewer)
-                            && acl.allows_repo(reviewer, repo, crate::acl::Level::Own)
-                    })
-                    .cloned()
+                state.verdicts.keys().find_map(|reviewer| {
+                    // The position comes back with the name because the
+                    // approval has to be resolved to the key that was
+                    // live when it was cast, not the one holding the
+                    // channel now (D44).
+                    let at = state.standing_approval_at(reviewer)?;
+                    acl.allows_repo(reviewer, repo, crate::acl::Level::Own)
+                        .then(|| (reviewer.clone(), at))
+                })
             })
     }
 
@@ -6078,10 +6079,19 @@ fn review_json(r: &choir_view::ReviewState) -> serde_json::Value {
     let verdicts: std::collections::BTreeMap<_, _> = r
         .verdicts
         .iter()
-        .map(|(who, (v, note))| {
+        .map(|(who, answer)| {
             (
                 who.clone(),
-                serde_json::json!({ "verdict": format!("{v:?}"), "note": note }),
+                // `at` is served for the same reason `comments[].at` is,
+                // plus one specific to D44: it is what decides which key
+                // gets credited for this approval, so a client checking
+                // the `expected` authorization a rejection hands back
+                // cannot rederive it without this number.
+                serde_json::json!({
+                    "verdict": format!("{:?}", answer.verdict),
+                    "note": answer.note,
+                    "at": answer.at,
+                }),
             )
         })
         .collect();

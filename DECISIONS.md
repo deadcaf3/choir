@@ -55,6 +55,7 @@ that would reverse it are not published.
 | D41 | Push provenance as a schema field, not a channel-string convention | **One-way for readers** |
 | D42 | Repository ownership as a landing gate, granted as an ACL level | Two-way |
 | D43 | `Submit`: a landing carries the authorization basis that admitted it | **One-way for readers** |
+| D44 | An approval resolves to the key that was live when it was cast, not the one holding the channel now | Two-way |
 
 ## Reading the door column
 

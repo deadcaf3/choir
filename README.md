@@ -218,6 +218,26 @@ Two refusals to expect:
 
 Archiving a review discards its verdicts, so after that the entry bytes are the only surviving answer to who approved a landing. Replay still verifies every one of them, because each is checked at its own position in the log.
 
+### Rotating a key without breaking anything (D44)
+
+A reviewer's approval is recorded against the key that was **live when the verdict was cast**, not whichever key holds that channel now. So the ordinary lifecycle works and keeps telling the truth:
+
+```bash
+choir revoke <api> <node-key-file> <old-pubkey-hex> "laptop lost"
+choir bind   <api> <node-key-file> <operator> <new-pubkey-hex> [channel]
+```
+
+Both take the **public key hex** that `choir key` prints and the trusted-keys file already carries, not an actor id; the id is derived for you. Both are node-signed, so they need the node's key file.
+
+Approvals the old key already cast still land, and still name the old key. The new key is credited with nothing it did not do. A key bound *after* a verdict is not a candidate for crediting it either, so adding a key never retroactively makes open approvals ambiguous.
+
+Two consequences worth knowing:
+
+- **An approval cast by an already-revoked key cannot be credited at all**, and the landing is refused rather than attributed to nobody. That reviewer needs a fresh key and a fresh verdict.
+- **`choir log --verify` checks signatures as of their own position.** An entry signed before its key's revocation verifies forever; one signed at or after it is a failure, not merely unverified. The client fetches revocation positions from `/api/view`, so verification needs API access as well as a keys file.
+
+**Keep revoked keys in the trusted-keys file.** The log stores a key id, never the public key, so deleting the line makes every entry that key ever signed permanently unverifiable. Revocation does not cause that decay; deletion does, and nothing in the code can stop it.
+
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
 ### Issuing a credential without editing a file (D36)

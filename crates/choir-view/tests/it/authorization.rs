@@ -24,6 +24,14 @@ fn actor(seed: &[u8]) -> ContentHash {
 /// reviewers from distinct operators, and a binding for each — the
 /// smallest world in which an authorization can be checked at all.
 fn approved_log() -> MemLog {
+    approved_log_with(&[])
+}
+
+/// [`approved_log`], plus `extra` bindings placed **before** any verdict
+/// is cast. The position matters: an approver is resolved as of the
+/// verdict's own fold position (D44), so a binding appended afterwards
+/// cannot change who that verdict credits.
+fn approved_log_with(extra: &[(&str, &[u8])]) -> MemLog {
     let mut log = MemLog::new();
     for (who, seed) in [("ana", &b"ana"[..]), ("bo", &b"bo"[..])] {
         append_op(
@@ -36,6 +44,18 @@ fn approved_log() -> MemLog {
             }),
         )
         .expect("the binding lands");
+    }
+    for (who, seed) in extra {
+        append_op(
+            &mut log,
+            "node",
+            ViewOp::new(OpKind::BindKey {
+                operator: (*who).into(),
+                key: actor(seed),
+                channel: Some((*who).into()),
+            }),
+        )
+        .expect("a second key on one channel is a legal binding");
     }
     append_op(
         &mut log,
@@ -288,11 +308,138 @@ fn an_approval_the_log_binds_no_key_to_cannot_be_recorded() {
     assert!(reason.contains("binds no key to ana"), "{reason}");
 }
 
-/// Two keys on one channel is refused rather than resolved. Nothing in a
-/// review says which key cast the verdict, so a tiebreak would put a
-/// specific key in a durable record on the strength of a guess.
+/// Two *live* keys on one channel is refused rather than resolved.
+/// Nothing in a review says which key cast the verdict, so a tiebreak
+/// would put a specific key in a durable record on the strength of a
+/// guess. The "live" qualifier is D44's: a revoked rival is not a rival,
+/// or the documented revoke-and-rebind repair would break this path.
 #[test]
 fn a_channel_the_log_binds_twice_is_refused_rather_than_guessed() {
+    let log = approved_log_with(&[("ana", &b"ana's second key"[..])]);
+    let view = view_of(&log);
+    let reason = refused(&view, &submit(weight(2)));
+    assert!(reason.contains("more than one live key to ana"), "{reason}");
+}
+
+/// The lifecycle the code itself prescribes, end to end: a key is lost,
+/// revoked, and replaced by a fresh one on the same channel — which is
+/// forced, because a channel must read as its operator's name.
+///
+/// This is the regression test for the defect D44 was opened on. The
+/// landing must still work, and the record must still name the key that
+/// actually approved rather than the replacement, which never saw the
+/// review. Before as-of resolution, the two halves were unreachable
+/// together: counting the withdrawn row refused the landing outright,
+/// and ignoring it credited the fresh key.
+#[test]
+fn a_revoked_key_replaced_by_a_fresh_one_still_credits_the_key_that_approved() {
+    let mut log = approved_log();
+    append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::RevokeKey {
+            key: actor(b"ana"),
+            reason: "laptop lost".into(),
+        }),
+    )
+    .expect("the revocation lands");
+    append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::BindKey {
+            operator: "ana".into(),
+            key: actor(b"ana's fresh key"),
+            channel: Some("ana".into()),
+        }),
+    )
+    .expect("the remedy BindKey itself prescribes");
+    let mut view = view_of(&log);
+    // `weight(2)` names actor(b"ana") -- the revoked key. That is the
+    // assertion: the fresh key is bound, live, and on the same channel,
+    // and it is still not the one credited.
+    view.apply(&submit(weight(2)))
+        .expect("the landing survives the rotation");
+    assert_eq!(view.refs.get(REF), Some(&target()));
+}
+
+/// The other direction, so the rule is not just "revocation is ignored":
+/// an approval cast by a channel whose only key was already revoked has
+/// no key to credit, and the landing is refused rather than attributed to
+/// nobody.
+#[test]
+fn an_approval_cast_after_the_key_was_revoked_cannot_be_credited() {
+    let mut log = MemLog::new();
+    append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::BindKey {
+            operator: "ana".into(),
+            key: actor(b"ana"),
+            channel: Some("ana".into()),
+        }),
+    )
+    .expect("the binding lands");
+    append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::RevokeKey {
+            key: actor(b"ana"),
+            reason: "left the project".into(),
+        }),
+    )
+    .expect("the revocation lands");
+    append_op(
+        &mut log,
+        "author",
+        ViewOp::new(OpKind::SetRef {
+            name: REF.into(),
+            commit: ContentHash::blake3(b"base"),
+            prev: None,
+        }),
+    )
+    .expect("the ref exists");
+    append_op(
+        &mut log,
+        "author",
+        ViewOp::new(OpKind::RequestReview {
+            id: "r1".into(),
+            target: target(),
+            reviewers: vec!["ana".into()],
+            target_ref: Some(REF.into()),
+        }),
+    )
+    .expect("the review opens");
+    append_op(
+        &mut log,
+        "ana",
+        ViewOp::new(OpKind::PostVerdict {
+            id: "r1".into(),
+            reviewer: "ana".into(),
+            verdict: Verdict::Approve,
+            note: String::new(),
+        }),
+    )
+    .expect("the fold does not gate verdicts on bindings");
+    let view = view_of(&log);
+    let reason = refused(
+        &view,
+        &submit(Authorization::new(
+            Basis::OwnerApproved {
+                owner: "ana".into(),
+            },
+            vec![actor(b"ana")],
+        )),
+    );
+    assert!(reason.contains("was live at seq"), "{reason}");
+}
+
+/// The same two keys, in the other order relative to the verdict, and the
+/// landing succeeds. A key bound *after* an approval was cast could not
+/// have cast it, so it is not a rival for the credit — which is what
+/// stops an operator adding a key and retroactively making every open
+/// approval of theirs unresolvable.
+#[test]
+fn a_key_bound_after_the_verdict_does_not_make_it_ambiguous() {
     let mut log = approved_log();
     append_op(
         &mut log,
@@ -304,7 +451,7 @@ fn a_channel_the_log_binds_twice_is_refused_rather_than_guessed() {
         }),
     )
     .expect("a second key on one channel is a legal binding");
-    let view = view_of(&log);
-    let reason = refused(&view, &submit(weight(2)));
-    assert!(reason.contains("more than one key to ana"), "{reason}");
+    let mut view = view_of(&log);
+    view.apply(&submit(weight(2))).expect("the landing stands");
+    assert_eq!(view.refs.get(REF), Some(&target()));
 }

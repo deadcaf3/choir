@@ -441,6 +441,33 @@ fn load_registry(path: &str) -> Registry {
 /// `choir-node/tests/it/sync_contract.rs` is the independent one: it
 /// rebuilds the canonical bytes by hand and deliberately never calls
 /// `content_hash`.
+/// The revocation positions `/api/view` reports, keyed by actor id.
+///
+/// An empty map on any failure, including a node that cannot be reached
+/// or serves no bindings. That is the honest default: it verifies fewer
+/// claims rather than more, and the alternative — treating an
+/// unanswerable question as "revoked" — would report a sound log as
+/// broken.
+fn revocations(api: &str, auth: AuthOptions<'_>) -> choir_cli::verify::Revocations {
+    let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
+    if !(200..300).contains(&status) {
+        eprintln!("choir log: cannot read bindings ({status}); revocations not checked");
+        return choir_cli::verify::Revocations::new();
+    }
+    let view: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    view["bindings"]
+        .as_object()
+        .map(|bindings| {
+            bindings
+                .iter()
+                .filter_map(|(key_id, binding)| {
+                    Some((key_id.clone(), binding["revoked"]["at"].as_u64()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions<'_>) -> ! {
     let (status, body) = http(api, auth, "choir_log", serde_json::json!({ "from": from }));
     if !(200..300).contains(&status) {
@@ -467,7 +494,15 @@ fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions
     }
 
     let registry = keys.map(load_registry).unwrap_or_default();
-    let report = choir_cli::verify::page(&entries, &registry);
+    // A second request, and a deliberate one. Revocations decide whether
+    // a good signature was still authorized at the position it sits at
+    // (D44), and they are not on the log page -- the `RevokeKey` that
+    // matters may be outside the window. Asking the node costs a round
+    // trip and does not cost trust: a node that hides a revocation only
+    // makes its own log verify, while one that invents one is caught by
+    // the entry it points at.
+    let revoked = revocations(api, auth);
+    let report = choir_cli::verify::page(&entries, &registry, &revoked);
     for note in &report.notes {
         eprintln!("choir log: {note}");
     }

@@ -306,18 +306,22 @@ pub struct Authorization {
     /// the trust root (D9); a channel name is mutable, and an audit
     /// record that reads differently later than it read when written is
     /// not an audit record. Resolved through the log's own
-    /// [`OpKind::BindKey`] records by [`View::bound_actor`], so the join
-    /// is replayable — and an approval whose channel the log binds to no
-    /// key, or to more than one, cannot land through this op at all.
+    /// [`OpKind::BindKey`] records by [`View::bound_actor_at`], so the
+    /// join is replayable — and an approval whose channel the log binds
+    /// to no key, or to more than one, cannot land through this op at
+    /// all.
     ///
     /// **What an id here proves, exactly.** It is the key the log bound
-    /// to the approving channel *at this position*, not proof that this
-    /// key cast the verdict: the fold is handed only the op, never the
-    /// entry, so [`ReviewState::verdicts`] is keyed by channel and no
-    /// review can record a signer. That is also why freezing the id here
-    /// is worth doing — [`KeyBinding::channel`] is the one field a later
-    /// re-binding may change, so the answer is only stable once written
-    /// down.
+    /// to the approving channel *as of the verdict's own position*
+    /// ([`VerdictState::at`]), not proof that this key cast the verdict:
+    /// the fold is handed only the op, never the entry, so
+    /// [`ReviewState::verdicts`] is keyed by channel and no review can
+    /// record a signer. Resolving at the verdict's position rather than
+    /// the landing's is what keeps the claim true across a key rotation
+    /// (D44) — the replacement key never saw the review. That is also
+    /// why freezing the id here is worth doing: [`KeyBinding::channel`]
+    /// is the one field a later re-binding may change, so the answer is
+    /// only stable once written down.
     ///
     /// **Empty is a distinct value from absent.** A basis that requires
     /// no approvals records `[]`, and a reader can tell that from a log
@@ -1033,6 +1037,30 @@ pub struct CommentState {
     pub at: u64,
 }
 
+/// One reviewer's answer, as the fold recorded it.
+///
+/// The `at` field is D44's addition and the reason this is a struct
+/// rather than the `(Verdict, String)` pair it used to be. A verdict is
+/// keyed by **channel**, and a channel's key rotates: revoke a key and
+/// bind a fresh one and the channel now names a key that never cast this
+/// verdict. Without the position, "which key approved this" has no answer
+/// the log can reproduce, and an authorization record naming the current
+/// key would be asserting something false.
+///
+/// This is derived state, not wire format — nothing here is hashed or
+/// persisted, so recording it moves no entry hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictState {
+    /// The answer itself.
+    pub verdict: Verdict,
+    /// The note the reviewer attached; empty when they left none.
+    pub note: String,
+    /// Fold position the verdict was applied at, which is the log
+    /// sequence its op occupies — the same clock as
+    /// [`CommentState::at`] and [`KeyBinding::bound_at`].
+    pub at: u64,
+}
+
 /// Materialized state of one review: what is under review, who was
 /// asked, who has answered what, and what was said about it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1041,8 +1069,8 @@ pub struct ReviewState {
     pub target: Option<ContentHash>,
     /// Actors the review fanned out to.
     pub reviewers: Vec<String>,
-    /// reviewer → (verdict, note); absent = not answered yet.
-    pub verdicts: BTreeMap<String, (Verdict, String)>,
+    /// reviewer → their answer; absent = not answered yet.
+    pub verdicts: BTreeMap<String, VerdictState>,
     /// reviewer → node-recorded reason for retroactively invalidating
     /// that approval. Kept separately from verdict bulk so archived rows
     /// remain compact while the append-only decision stays visible.
@@ -1100,12 +1128,12 @@ impl ReviewState {
         self.counted_approver_channels(apply_slashes).len() * MAX_APPROVAL_WEIGHT_PER_OPERATOR
     }
 
-    fn counted_approver_channels(&self, apply_slashes: bool) -> Vec<&str> {
+    fn counted_approver_channels(&self, apply_slashes: bool) -> Vec<(&str, u64)> {
         self.verdicts
             .iter()
             .enumerate()
-            .filter(|(index, (reviewer, (verdict, _)))| {
-                if *verdict != Verdict::Approve
+            .filter(|(index, (reviewer, answer))| {
+                if answer.verdict != Verdict::Approve
                     || (apply_slashes && self.operator_is_slashed(reviewer))
                 {
                     return false;
@@ -1114,12 +1142,12 @@ impl ReviewState {
                 self.verdicts
                     .iter()
                     .take(*index)
-                    .all(|(prior, (prior_verdict, _))| {
-                        *prior_verdict != Verdict::Approve
+                    .all(|(prior, prior_answer)| {
+                        prior_answer.verdict != Verdict::Approve
                             || reviewer_operator(prior) != operator
                     })
             })
-            .map(|(_, (reviewer, _))| reviewer.as_str())
+            .map(|(_, (reviewer, answer))| (reviewer.as_str(), answer.at))
             .collect()
     }
 
@@ -1133,11 +1161,18 @@ impl ReviewState {
     /// [`MAX_APPROVAL_WEIGHT_PER_OPERATOR`], so the number in an
     /// authorization record and the names beside it cannot drift.
     ///
+    /// Each entry pairs the channel with the fold position of the verdict
+    /// being counted, because that position is what resolves the channel
+    /// to a key (see [`View::bound_actor_at`]). Returning the channel
+    /// alone would leave every caller to look the position up again, and
+    /// the one that forgot would silently credit whatever key holds the
+    /// channel today.
+    ///
     /// Meaningless on an archived review, whose verdicts are gone: the
     /// list is empty while [`ReviewState::approval_weight`] still answers
     /// from the stored total.
     #[must_use]
-    pub fn counted_approvers(&self) -> Vec<&str> {
+    pub fn counted_approvers(&self) -> Vec<(&str, u64)> {
         self.counted_approver_channels(true)
     }
 
@@ -1146,10 +1181,23 @@ impl ReviewState {
     /// used where one named approval has to be checked rather than a set.
     #[must_use]
     pub fn approval_stands(&self, reviewer: &str) -> bool {
+        self.standing_approval_at(reviewer).is_some()
+    }
+
+    /// The fold position of `reviewer`'s standing approval, or `None` if
+    /// they have none — [`ReviewState::approval_stands`] plus the one
+    /// fact a caller needs to resolve it to a key
+    /// ([`View::bound_actor_at`]).
+    ///
+    /// The predicate is defined as this returning `Some`, so the two can
+    /// never disagree about what "standing" means.
+    #[must_use]
+    pub fn standing_approval_at(&self, reviewer: &str) -> Option<u64> {
         self.verdicts
             .get(reviewer)
-            .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
-            && !self.operator_is_slashed(reviewer)
+            .filter(|answer| answer.verdict == Verdict::Approve)
+            .filter(|_| !self.operator_is_slashed(reviewer))
+            .map(|answer| answer.at)
     }
 
     fn slashed_operator_count(&self) -> usize {
@@ -1200,11 +1248,11 @@ impl ReviewState {
         };
         self.verdicts
             .get(first)
-            .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
+            .is_some_and(|answer| answer.verdict == Verdict::Approve)
             && eligible.all(|reviewer| {
                 self.verdicts
                     .get(reviewer)
-                    .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
+                    .is_some_and(|answer| answer.verdict == Verdict::Approve)
             })
     }
 
@@ -1486,12 +1534,12 @@ impl View {
                 Vec::new()
             }
             Basis::OwnerApproved { owner } => {
-                if !state.approval_stands(owner) {
-                    return Err(ViewError::Review(format!(
+                let at = state.standing_approval_at(owner).ok_or_else(|| {
+                    ViewError::Review(format!(
                         "{owner} has no standing approval on review {review}"
-                    )));
-                }
-                vec![self.bound_actor(owner).map_err(ViewError::Review)?]
+                    ))
+                })?;
+                vec![self.bound_actor_at(owner, at).map_err(ViewError::Review)?]
             }
             Basis::ApprovalWeight { required, met } => {
                 if *required == 0 {
@@ -1515,7 +1563,7 @@ impl View {
                 state
                     .counted_approvers()
                     .into_iter()
-                    .map(|channel| self.bound_actor(channel))
+                    .map(|(channel, at)| self.bound_actor_at(channel, at))
                     .collect::<Result<Vec<_>, String>>()
                     .map_err(ViewError::Review)?
             }
@@ -1662,7 +1710,7 @@ impl View {
                         if !review
                             .verdicts
                             .get(reviewer)
-                            .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
+                            .is_some_and(|answer| answer.verdict == Verdict::Approve)
                         {
                             return Err(ViewError::Review(format!(
                                 "{reviewer} has no approval to slash on {id}"
@@ -2094,11 +2142,23 @@ impl View {
                 verdict,
                 note,
             } => {
+                // Read before the mutable borrow, and the same clock
+                // `bound_at` and `Revocation::at` use: this position is
+                // what later resolves the channel to the key that was
+                // live when the verdict was cast (D44).
+                let at = self.next_seq;
                 self.reviews
                     .get_mut(id)
                     .expect("validate proved the review exists, is live, and lists this reviewer")
                     .verdicts
-                    .insert(reviewer.clone(), (*verdict, note.clone()));
+                    .insert(
+                        reviewer.clone(),
+                        VerdictState {
+                            verdict: *verdict,
+                            note: note.clone(),
+                            at,
+                        },
+                    );
             }
             OpKind::SlashApproval {
                 id,
@@ -2248,31 +2308,75 @@ impl View {
     /// authorization record name approvers as actor ids when a review can
     /// only name channels (see [`Authorization::approvers`]).
     ///
+    /// Resolved **as of fold position `at`** (D44), which for an approver
+    /// is the position of the verdict being credited
+    /// ([`VerdictState::at`]) rather than the position of the landing.
+    ///
+    /// Asking "now" is the bug this replaced. A channel's key rotates:
+    /// `BindKey` tells the holder of a revoked key to bind a fresh one,
+    /// and the fresh one necessarily claims the same channel, because the
+    /// channel is the operator's own name. So resolving at landing time
+    /// had two failures at once — with the withdrawn row still counted it
+    /// left the channel permanently ambiguous and refused every later
+    /// landing citing that reviewer, and with the withdrawn row ignored it
+    /// would name the fresh key as the approver of a verdict that key
+    /// never cast. Neither is a record worth keeping. The verdict's own
+    /// position has one answer and it is the true one.
+    ///
+    /// Contrast [`View::operator_of`], which answers for a revoked key
+    /// unconditionally: that is attribution, and attribution must not go
+    /// blind the moment a key is withdrawn.
+    ///
+    /// **The liveness half is exact; the channel half is the latest one.**
+    /// `bound_at` and [`Revocation::at`] are both recorded, so whether a
+    /// key was live at `at` replays exactly. Which channel it claimed is
+    /// read from the current binding, because a re-binding overwrites
+    /// [`KeyBinding::channel`] in place and the fold keeps no history of
+    /// it. A re-binding cannot change the operator (that is refused) and
+    /// the channel must read as the operator, so the drift this permits is
+    /// `ana` → `ana/laptop` within one operator, never across two. An
+    /// exact answer would need [`View::at`] re-folded to `at`, which this
+    /// method deliberately does not do: it is called from `validate`,
+    /// which has no log.
+    ///
     /// # Errors
     ///
     /// Returns a caller-facing reason when the log binds no key to
-    /// `channel`, or binds more than one. **Ambiguity is refused, not
-    /// resolved.** Two keys may legitimately share a channel, and nothing
-    /// in a review says which of them cast the verdict, so picking one
-    /// would put a specific key in a durable record on the strength of a
-    /// tiebreak. A record that says nothing is recoverable; one that says
-    /// the wrong thing confidently is not.
+    /// `channel`, none that was live at `at`, or more than one that was.
+    /// **Ambiguity is refused, not resolved.** Two keys may legitimately
+    /// be live on one channel at once, and nothing in a review says which
+    /// of them cast the verdict, so picking one would put a specific key
+    /// in a durable record on the strength of a tiebreak. A record that
+    /// says nothing is recoverable; one that says the wrong thing
+    /// confidently is not.
     ///
-    /// Answers for a **revoked** key, like [`View::operator_of`] and for
-    /// the same reason: this is attribution, and an audit that went blind
-    /// the moment a key was revoked would go blind exactly when it
-    /// matters. Whether a revoked key's approval still *authorizes* is a
-    /// separate question, and not one this fold decides.
-    pub fn bound_actor(&self, channel: &str) -> Result<ContentHash, String> {
-        let mut matched = self
+    /// "Nothing live at `at`" is its own message rather than folding into
+    /// "no binding": the repairs differ. One needs the operator to bind a
+    /// key; the other needs a fresh verdict from a fresh key, because the
+    /// approval on file was cast by a key nobody trusts now.
+    pub fn bound_actor_at(&self, channel: &str, at: u64) -> Result<ContentHash, String> {
+        let claims = |bound: &KeyBinding| bound.channel.as_deref() == Some(channel);
+        let live_then = |bound: &KeyBinding| {
+            bound.bound_at <= at && bound.revoked.as_ref().is_none_or(|gone| gone.at > at)
+        };
+        let mut live = self
             .bindings
             .iter()
-            .filter(|(_, bound)| bound.channel.as_deref() == Some(channel));
-        let (key_id, _) = matched
-            .next()
-            .ok_or_else(|| format!("the log binds no key to {channel}"))?;
-        if matched.next().is_some() {
-            return Err(format!("the log binds more than one key to {channel}"));
+            .filter(|(_, bound)| claims(bound) && live_then(bound));
+        let key_id = match live.next() {
+            Some((key_id, _)) => key_id,
+            None if self.bindings.values().any(claims) => {
+                return Err(format!(
+                    "no key the log binds to {channel} was live at seq {at}; that reviewer \
+                     needs a fresh key and a fresh verdict"
+                ))
+            }
+            None => return Err(format!("the log binds no key to {channel}")),
+        };
+        if live.next().is_some() {
+            return Err(format!(
+                "the log binds more than one live key to {channel} at seq {at}"
+            ));
         }
         ContentHash::from_hex(key_id)
             .ok_or_else(|| format!("binding for {channel} holds an unreadable key id {key_id}"))
