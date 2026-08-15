@@ -832,6 +832,48 @@ impl Accounts {
             .contains_key(user)
     }
 
+    /// What to call `user` in something a person reads (D46).
+    ///
+    /// `None` means "call it by its own name", which is the answer in
+    /// three different situations a caller must not try to tell apart:
+    /// an account issued before D46, one issued with an explicit `user`,
+    /// and one whose display name has been deleted. **The third is the
+    /// point of the field**, so a caller that renders "unknown" or
+    /// "deleted" for it undoes the deletion by announcing it. Render the
+    /// handle and say nothing.
+    #[must_use]
+    pub fn display_name(&self, user: &str) -> Option<String> {
+        self.state
+            .read()
+            .expect("accounts read lock")
+            .accounts
+            .get(user)
+            .and_then(|account| account.display_name.clone())
+    }
+
+    /// Every handle the store can name, as `(handle, display name)`.
+    ///
+    /// The rendering half of the D46 ACL decision: grants are written
+    /// against handles, and `choir acl render` regenerates the trailing
+    /// comments from this. Accounts with no display name are omitted
+    /// rather than listed as themselves — a comment repeating the handle
+    /// is noise, and the file already says it.
+    #[must_use]
+    pub fn roster(&self) -> BTreeMap<String, String> {
+        self.state
+            .read()
+            .expect("accounts read lock")
+            .accounts
+            .iter()
+            .filter_map(|(user, account)| {
+                account
+                    .display_name
+                    .clone()
+                    .map(|name| (user.clone(), name))
+            })
+            .collect()
+    }
+
     /// Everything the store holds except the secrets: who has an account,
     /// what they were granted, which public keys are registered, and
     /// which invites are outstanding.
@@ -845,6 +887,12 @@ impl Accounts {
             .map(|(user, account)| {
                 serde_json::json!({
                     "user": user,
+                    // Always present, `null` when the account has none
+                    // (D46). The store file omits the key to stay
+                    // readable; this is read by programs, and a key that
+                    // appears and disappears is one every client has to
+                    // handle twice.
+                    "display_name": account.display_name,
                     "grants": account.grants,
                     "ssh_keys": account.ssh_keys,
                     "passkeys": render_passkeys(&account.passkeys),
@@ -860,6 +908,7 @@ impl Accounts {
                 serde_json::json!({
                     "invite_id": id,
                     "user": invite.user,
+                    "display_name": invite.display_name,
                     "grants": invite.grants,
                     "issued_by": invite.issued_by,
                     "issued_at": invite.issued_at,

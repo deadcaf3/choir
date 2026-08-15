@@ -164,6 +164,103 @@ fn a_handle_and_its_display_name_survive_a_reopen() {
     std::fs::remove_dir_all(&work).ok();
 }
 
+/// The claim the whole decision rests on: revoking an account destroys
+/// the readable name while the handle -- the half the log already keeps
+/// forever -- survives as a retired entry that names nobody.
+///
+/// Asserted against the file on disk as well as the live store, because
+/// "not returned by a lookup" and "not written down" are different
+/// promises and only the second survives a restart.
+#[test]
+fn revoking_forgets_the_name_and_keeps_the_handle() {
+    let (store, path, work) = store("forget");
+    let (status, body) = store.invite(
+        "alice",
+        &json(&format!(
+            r#"{{"display_name":"{NAME}","grants":["agents/demo read"]}}"#
+        )),
+    );
+    assert_eq!(status, 200, "{body}");
+    let user = json(&body)["user"].as_str().expect("a principal").to_string();
+    let invite = json(&body)["invite"].as_str().expect("invite").to_string();
+    let (id, secret) = invite.split_once(':').expect("invite is id:secret");
+    let (status, body) = store.redeem(id, &json(&format!(r#"{{"secret":"{secret}"}}"#)));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(store.display_name(&user).as_deref(), Some(NAME));
+
+    let (status, body) = store.revoke(&json(&format!(r#"{{"user":"{user}"}}"#)));
+    assert_eq!(status, 200, "{body}");
+
+    assert_eq!(store.display_name(&user), None, "the name outlived the account");
+    let on_disk = std::fs::read_to_string(&path).expect("store readable");
+    assert!(
+        !on_disk.contains(NAME) && !on_disk.contains("Lovelace"),
+        "a revoked account left its holder's name on disk: {on_disk}"
+    );
+    // The handle stays, because the log already carries it and a name
+    // that could be reissued would hand a second person the first
+    // person's signed attribution.
+    assert!(
+        on_disk.contains(&user),
+        "the handle should be retired, not forgotten: {on_disk}"
+    );
+    assert!(!store.has_account(&user));
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// The roster is the input `choir acl render` regenerates comments from,
+/// so it must pair only the accounts that have something to say.
+#[test]
+fn the_roster_pairs_handles_with_names_and_omits_the_rest() {
+    let (store, _path, work) = store("roster");
+
+    // Both invites are redeemed, because the roster reads *accounts*.
+    // An earlier draft redeemed only one and asserted
+    // `roster.is_empty() || ...`, which is satisfied by the roster never
+    // being populated at all -- a test that passes by nothing happening.
+    let redeem = |body: &str| {
+        let issued = json(body);
+        let user = issued["user"].as_str().expect("a principal").to_string();
+        let pair = issued["invite"].as_str().expect("invite").to_string();
+        let (id, secret) = pair.split_once(':').expect("id:secret");
+        let (status, out) = store.redeem(id, &json(&format!(r#"{{"secret":"{secret}"}}"#)));
+        assert_eq!(status, 200, "{out}");
+        user
+    };
+
+    let (status, body) = store.invite(
+        "alice",
+        &json(&format!(
+            r#"{{"display_name":"{NAME}","grants":["agents/demo read"]}}"#
+        )),
+    );
+    assert_eq!(status, 200, "{body}");
+    let handle = redeem(&body);
+
+    let (status, body) = store.invite(
+        "alice",
+        &json(r#"{"user":"buildbot","grants":["agents/demo read"]}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let bot = redeem(&body);
+    assert_eq!(bot, "buildbot");
+
+    let roster = store.roster();
+    assert_eq!(
+        roster.get(&handle).map(String::as_str),
+        Some(NAME),
+        "the handle with a name is missing from the roster: {roster:?}"
+    );
+    assert!(
+        !roster.contains_key("buildbot"),
+        "an account with no display name should not appear: {roster:?}"
+    );
+    assert_eq!(roster.len(), 1, "exactly one account has a name: {roster:?}");
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
 /// A store written before D46 has no `display_name` anywhere, and must
 /// load as an ordinary store whose accounts simply have none. Written as
 /// a raw string rather than built with `json!`, because the input this
