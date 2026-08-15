@@ -148,6 +148,22 @@ while IFS= read -r repo; do
   bundle=$DEST/repos/$repo.bundle
   marker=$DEST/repos/$repo.refs
   mkdir -p "$(dirname "$bundle")"
+  # A repository with no refs cannot be bundled: `git bundle create`
+  # refuses rather than writing a zero-ref bundle, and `fail` took the
+  # whole pull down with it — so one repo created and never pushed to
+  # made every hourly run exit nonzero, with the log and fingerprint
+  # already safely copied. A backup script that always reports failure
+  # is one that stops being read, which is the actual damage.
+  #
+  # Nothing to back up is not a backup failure. Said out loud rather
+  # than skipped silently, because "no refs" and "we forgot to pull it"
+  # must not look the same in the output.
+  count=$(ssh_run "git --git-dir ~/.choir/repos/$repo for-each-ref | wc -l" | tr -d ' ') \
+    || fail "could not read the refs of $repo on the node host"
+  if [ "$count" = "0" ]; then
+    echo "pull-backup: $repo holds no refs yet; nothing to bundle"
+    continue
+  fi
   refs=$(ssh_run "git --git-dir ~/.choir/repos/$repo for-each-ref | sha256sum | cut -d' ' -f1") \
     || fail "could not read the refs of $repo on the node host"
   if [ -f "$bundle" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$refs" ]; then
