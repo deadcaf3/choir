@@ -1,0 +1,89 @@
+#!/bin/sh
+# The gate, in two lanes. There is no CI service; this is it.
+#
+#   sh scripts/gate fast   everything except the measurement binaries
+#   sh scripts/gate        all three steps over everything (before a commit)
+#
+# The fast lane is for the edit loop. **It is not a substitute for the
+# full lane**, and the rule it depends on is that the full lane runs
+# before every commit. This project's recurring failure is a check that
+# quietly stops checking, and "the slow tests are opt-in now" is how that
+# starts.
+#
+# Exit codes come from cargo directly, never through a pipe: `cargo test
+# | tail` reports tail's status and hides the verdict.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+LOG=${TMPDIR:-/tmp}/choir-gate
+mkdir -p "$LOG"
+
+# The measurement binaries, skipped by the fast lane: throughput ~36 s,
+# alloc_budget ~13 s, retention_cost ~7 s.
+#
+# `budget` is deliberately **not** here despite being the same kind of
+# test. It used to be 158 s -- half the entire gate -- and is now under a
+# second, because its iteration count learned the difference between a
+# debug and a release build. A test that cheap costs nothing to keep in,
+# and every test kept in is one the fast lane does not have to be trusted
+# about.
+SLOW="alloc_budget retention_cost throughput"
+
+fast_targets() {
+  # Every choir-node integration target except the four above.
+  for f in crates/choir-node/tests/*.rs; do
+    name=$(basename "$f" .rs)
+    case " $SLOW " in *" $name "*) continue ;; esac
+    printf ' --test %s' "$name"
+  done
+  printf ' --test it'   # the merged harness, crates/choir-node/tests/it/
+}
+
+if [ "${1:-full}" = "fast" ]; then
+  echo "== fast lane: skipping $SLOW =="
+  # shellcheck disable=SC2046
+  cargo test --workspace --no-fail-fast --exclude choir-node >"$LOG/test.log" 2>&1
+  A=$?
+  # shellcheck disable=SC2046
+  cargo test -p choir-node --no-fail-fast --lib $(fast_targets) >>"$LOG/test.log" 2>&1
+  B=$?
+  # Doctests are a third invocation because cargo refuses `--doc`
+  # alongside any other target selector -- and they are not optional
+  # here: every crate's module doc carries a `# Examples` block that is a
+  # real test, so a lane that drops them is not the same lane.
+  cargo test -p choir-node --doc >>"$LOG/test.log" 2>&1
+  C=$?
+  [ "$A" -eq 0 ] && [ "$B" -eq 0 ] && [ "$C" -eq 0 ]; TEST_EXIT=$?
+else
+  MARK="$LOG/start"; : > "$MARK"
+  cargo test --workspace --no-fail-fast >"$LOG/test.log" 2>&1
+  TEST_EXIT=$?
+fi
+
+cargo clippy --workspace --all-targets >"$LOG/clippy.log" 2>&1
+CLIPPY_EXIT=$?
+cargo doc --workspace --no-deps >"$LOG/doc.log" 2>&1
+DOC_EXIT=$?
+
+echo "TEST_EXIT=$TEST_EXIT  CLIPPY_EXIT=$CLIPPY_EXIT  DOC_EXIT=$DOC_EXIT"
+awk '/^test result:/ {
+  for (i = 1; i <= NF; i++) {
+    if ($i == "passed;")  p += $(i-1);
+    if ($i == "failed;")  f += $(i-1);
+    if ($i == "ignored;") g += $(i-1);
+  }
+} END { printf "passed %d  failed %d  ignored %d\n", p, f, g }' "$LOG/test.log"
+grep -E '^(test .* FAILED|error(\[|:))' "$LOG/test.log" | head -30
+
+# Exit 0 is not the same as clean: clippy warnings do not fail the build,
+# and `cargo doc` is the only step that runs rustdoc at all.
+echo "clippy warn/error lines: $(grep -cE '^(warning|error)' "$LOG/clippy.log")"
+grep -E '^(warning|error)' "$LOG/clippy.log" | head -20
+echo "rustdoc warn/error lines: $(grep -cE '^(warning|error)' "$LOG/doc.log")"
+grep -E '^(warning|error)' "$LOG/doc.log" | head -20
+
+# A receipt describes the tree at its start. Edit anything after the run
+# begins -- including a comment -- and the receipt above is void.
+if [ "${1:-full}" != "fast" ]; then
+  echo "--- freshness (must be empty) ---"
+  find crates scripts docs Cargo.toml README.md DECISIONS.md SYNC.md -newer "$MARK" 2>/dev/null
+fi
