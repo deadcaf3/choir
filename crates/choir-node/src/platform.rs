@@ -2382,6 +2382,27 @@ impl ChoirPolicy {
     /// the two answers are checked in: an owner who both approved and
     /// landed is recorded as having landed, because that is the assent
     /// the gate actually rested on.
+    ///
+    /// **The two answers match the ACL's user column against different
+    /// namespaces, and an operator writing that file has to know which.**
+    /// The landing answer asks about [`Self::acting_user`] — for a push
+    /// that is the transport channel minus its `git/` prefix, which is
+    /// the `--auth-file` username; for a signed op it is the *bound name*
+    /// of the signing key. The approval answer asks about a reviewer
+    /// channel, the key of [`choir_view::ReviewState::verdicts`], spelled
+    /// the way the reviewer pool spells it (`someone/reviewer`).
+    ///
+    /// So `alice choir/choir.git own` grants the landing answer and never
+    /// the approval one, and `alice/reviewer choir/choir.git own` grants
+    /// the reverse. Neither is wrong and nothing warns which was meant.
+    /// Granting the wrong spelling still flips [`crate::acl::Acl::has_owner`],
+    /// which switches the repository out of the approval-weight rule —
+    /// so a mismatched grant does not fall back, it narrows the gate to a
+    /// rule the intended actor cannot satisfy.
+    ///
+    /// For an owner landing their own work the landing answer is the only
+    /// reachable one regardless, because the reviewer draw excludes the
+    /// requester's own operator.
     #[allow(clippy::too_many_arguments)]
     fn owner_assented(
         &self,
