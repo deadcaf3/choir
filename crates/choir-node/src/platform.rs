@@ -4258,7 +4258,10 @@ impl Platform {
             Some(("G", signer)) if !signer.is_empty() => {
                 (format!("key/{signer}"), Provenance::PushCertified)
             }
-            _ => (format!("git/{user}"), Provenance::PushTransport),
+            _ => (
+                crate::quota::channel_for(user),
+                Provenance::PushTransport,
+            ),
         };
         let payload = ViewOp::new(kind)
             .in_scope(node, head)

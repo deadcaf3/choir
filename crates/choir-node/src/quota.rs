@@ -75,11 +75,22 @@ use choir_view::{OpKind, ViewOp};
 ///
 /// This must agree with the `attribution` that `crate::provision` stamps
 /// on a workspace operation, because that string is what
-/// [`WorkspaceTally`] counts. The agreement is pinned end to end rather
-/// than by a shared constant: `tests/it/quotas.rs` creates a workspace as
-/// a named user through the real API and asserts the tally attributes it
-/// to that user, so a change to either spelling fails a test rather than
-/// silently zeroing everyone's count.
+/// [`WorkspaceTally`] counts. The agreement is pinned end to end *as
+/// well*: `tests/it/quotas.rs` creates a workspace as a named user
+/// through the real API and asserts the tally attributes it to that
+/// user, so a change here fails a test rather than silently zeroing
+/// everyone's count.
+///
+/// **Every path that turns an authenticated user into a channel calls
+/// this.** It used to be one of four spellings of the same `format!`,
+/// agreeing by test rather than by construction, which was adequate
+/// while the mapping was the identity function. It stops being adequate
+/// the moment the mapping is not: a channel is what
+/// [`choir_oplog::signing_hash`] covers and therefore what the log
+/// records forever, so a rule applied here and missed at one of the
+/// other three would write the real name on the path nobody checked
+/// while every path that was checked looked correct. One function is
+/// the only version of that guarantee a test cannot be wrong about.
 #[must_use]
 pub fn channel_for(user: &str) -> String {
     format!("git/{user}")

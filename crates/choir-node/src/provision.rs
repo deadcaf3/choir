@@ -155,7 +155,7 @@ pub fn create_workspace(
             "send all four fields, or omit all four to use the legacy HEAD-based request",
         );
     }
-    let attribution = format!("git/{authenticated_user}");
+    let attribution = crate::quota::channel_for(authenticated_user);
 
     let bare = root.join(format!("{repo}.git"));
     if !bare.join("HEAD").exists() {
@@ -378,7 +378,7 @@ pub fn archive_workspace(
 
     let lock = repo_lock(repo);
     let _guard = lock.lock().expect("repo lock");
-    let attribution = format!("git/{authenticated_user}");
+    let attribution = crate::quota::channel_for(authenticated_user);
     let workspace = format!("{repo}/{name}");
     let Some(change) = platform.change_state(field("change")) else {
         return lifecycle_conflict("no durable change has the requested identity");
