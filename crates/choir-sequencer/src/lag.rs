@@ -90,7 +90,11 @@ impl Histogram {
         if self.count == 0 {
             return None;
         }
-        #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation
+        )]
         let target = ((self.count as f64) * percentile / 100.0).ceil().max(1.0) as u64;
         let mut seen = 0;
         for (index, hits) in self.buckets.iter().enumerate() {
@@ -270,13 +274,21 @@ mod tests {
             meter.record(seq, Duration::from_micros(50), Duration::from_micros(50), 1);
         }
         for seq in 95..100 {
-            meter.record(seq, Duration::from_millis(400), Duration::from_millis(400), 1);
+            meter.record(
+                seq,
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+                1,
+            );
         }
         let report = meter.report();
         assert_eq!(report.observed_ops, 100);
         let p99 = report.durable_p99_us.expect("observations recorded");
         assert!(p99 >= 400_000, "p99 must not understate the slow op: {p99}");
-        assert!(p99 <= 800_000, "bucketing may over-estimate at most 2x: {p99}");
+        assert!(
+            p99 <= 800_000,
+            "bucketing may over-estimate at most 2x: {p99}"
+        );
         let p50 = report.durable_p50_us.expect("observations recorded");
         assert!((50..=100).contains(&p50), "p50 sits on the fast ops: {p50}");
         assert_eq!(report.durable_max_us, 400_000);

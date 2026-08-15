@@ -139,7 +139,10 @@ fn concurrent_submissions_share_one_durability_barrier() {
         "group commit did not batch: {synced} syncs for {total} appends. \
          One sync per op means the writer is not draining the queue."
     );
-    println!("group commit: {total} ops, {synced} durability barriers ({:.1} ops/barrier)", total as f64 / synced as f64);
+    println!(
+        "group commit: {total} ops, {synced} durability barriers ({:.1} ops/barrier)",
+        total as f64 / synced as f64
+    );
 }
 
 /// A lone submitter against an idle sequencer must not be made to wait for
@@ -242,8 +245,7 @@ fn barrier_cost_and_batch_size_are_measured_not_derived() {
         .copied()
         .filter(|n| *n > 0)
         .collect();
-    let mut times: Vec<std::time::Duration> =
-        barrier_time.lock().expect("barrier times").clone();
+    let mut times: Vec<std::time::Duration> = barrier_time.lock().expect("barrier times").clone();
     sizes.sort_unstable();
     times.sort_unstable();
     let pct = |v: &[std::time::Duration], q: f64| v[((v.len() - 1) as f64 * q) as usize];
@@ -354,10 +356,7 @@ fn a_batch_of_only_rejections_does_not_sync() {
 
     let counting = CountingLog::new(Box::new(MemLog::new()));
     let syncs = counting.syncs.clone();
-    let sequencer = Sequencer::spawn_with_policy(
-        Box::new(counting),
-        Box::new(RefuseAll),
-    );
+    let sequencer = Sequencer::spawn_with_policy(Box::new(counting), Box::new(RefuseAll));
     let handle = sequencer.handle();
     for i in 0..5 {
         assert!(handle
@@ -392,8 +391,7 @@ fn rejections_do_not_join_the_batch() {
         }
     }
 
-    let sequencer =
-        Sequencer::spawn_with_policy(Box::new(MemLog::new()), Box::new(Picky));
+    let sequencer = Sequencer::spawn_with_policy(Box::new(MemLog::new()), Box::new(Picky));
     let handle = sequencer.handle();
     assert!(handle.try_submit("ws", b"yes-1".to_vec(), None).is_ok());
     assert!(handle.try_submit("ws", b"no-1".to_vec(), None).is_err());
