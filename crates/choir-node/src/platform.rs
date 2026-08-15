@@ -1984,6 +1984,16 @@ struct ChoirPolicy {
     /// Operator's protected-ref list: the same switch, but conditioned on
     /// where the review proposes to land. Shared with [`Platform`].
     protected_refs: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// The operator's ACL file, read here for [`crate::acl::Level::Own`]
+    /// grants alone (D42).
+    ///
+    /// Deliberately the *file*, not the merged table the HTTP layer
+    /// enforces. Self-service (D36) contributes grants to that merge, and
+    /// ownership authorizes a landing on a protected ref, so reading the
+    /// merge would make ownership reachable by whatever self-service can
+    /// issue. Reading the file makes "only the operator grants ownership"
+    /// true by construction rather than by auditing the issuer.
+    acl_file: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// When set, a protected ref only moves to a commit some approved
     /// review already named — the landing half of the gate.
     require_review: Arc<std::sync::atomic::AtomicBool>,
@@ -2142,6 +2152,233 @@ impl ChoirPolicy {
             .map(choir_view::ReviewState::approval_weight)
             .max()
             .unwrap_or(0)
+    }
+
+    /// The operator's ACL, parsed, or `None` when no file is configured.
+    ///
+    /// Read per call rather than cached, so granting ownership takes
+    /// effect with no restart — the same trade [`Self::ref_is_protected`]
+    /// makes, and paid on the same narrow path, since both are reached
+    /// only for a landing that is already gated.
+    ///
+    /// Fails **closed**. An unreadable or malformed file refuses the
+    /// landing rather than concluding there are no owners, because "no
+    /// owners" is precisely the branch that falls back to the weaker
+    /// rule: a gate that loses its policy file must not quietly demote
+    /// itself to the policy it was configured to replace.
+    fn acl_now(&self) -> Result<Option<crate::acl::Acl>, String> {
+        let guard = self.acl_file.lock().expect("acl file lock");
+        let Some(path) = guard.as_ref() else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            Rejection::new(
+                Code::PolicyUnavailable,
+                format!("acl file unreadable: {e}"),
+                "this is an operator problem, not a client one: the ownership gate fails \
+                 closed rather than guessing. Retry once the operator restores the file",
+            )
+            .encode()
+        })?;
+        crate::acl::Acl::parse(&text).map(Some).map_err(|e| {
+            Rejection::new(
+                Code::PolicyUnavailable,
+                format!("acl file unparseable: {e}"),
+                "ask the operator to repair the ACL file; the ownership gate refuses rather \
+                 than enforcing a table it only partly understands",
+            )
+            .encode()
+        })
+    }
+
+    /// The ACL user this submission acts as, when one can be established
+    /// from evidence rather than from a claim (D42).
+    ///
+    /// Three populations reach admission and only two of them resolve:
+    ///
+    /// - **A transport push.** `provenance` is a label only the node may
+    ///   apply — refused for any other signer earlier in `check` — so a
+    ///   [`Provenance::PushTransport`] op carries a channel the node
+    ///   synthesized from the authenticated HTTP user. `git/<user>` is
+    ///   therefore evidence about who pushed, not a claim by them.
+    /// - **An author-signed op.** The identity is the verified signing
+    ///   key, and the operator's trusted-keys name column is what binds a
+    ///   key to a name. An **unbound key resolves to nobody**: unbound
+    ///   keys are deliberately unconstrained in their choice of channel,
+    ///   so honouring the channel there would let any trusted key call
+    ///   itself an owner.
+    /// - **A certified push.** The channel is `key/<signer>`, naming the
+    ///   push certificate's key rather than an ACL user, and the
+    ///   authenticated user is not carried into the op. Resolves to
+    ///   nobody, so a `git push --signed` cannot assert ownership; see
+    ///   the rejection in [`Self::landing_is_authorized`], which says so
+    ///   rather than reporting a generic refusal.
+    fn acting_user(
+        &self,
+        sub: &Submission,
+        op: &ViewOp,
+        actor_id: &ContentHash,
+    ) -> Option<String> {
+        match op.provenance {
+            Some(Provenance::PushTransport) => {
+                sub.channel.strip_prefix("git/").map(ToString::to_string)
+            }
+            Some(Provenance::PushCertified) => None,
+            None => {
+                let names = self.key_names.lock().expect("key names lock");
+                names.bound_name(actor_id).map(ToString::to_string)
+            }
+        }
+    }
+
+    /// The landing half of the protected-ref gate: may this submission
+    /// move this protected ref to this commit?
+    ///
+    /// Two rules, and which one applies is a property of the *repository*
+    /// rather than of the actor (D42):
+    ///
+    /// - **Somebody owns the repository.** An owner's assent is necessary
+    ///   and sufficient. No quantity of non-owner approval substitutes,
+    ///   and no second opinion is required alongside it.
+    /// - **Nobody owns it.** The pre-D42 rule stands untouched: approval
+    ///   weight `REQUIRED_APPROVAL_WEIGHT`, from that many distinct
+    ///   operators.
+    ///
+    /// So a node with no `--acl-file`, or one whose ACL grants nobody
+    /// `own`, behaves exactly as every node did before D42. Ownership is
+    /// opt-in per repository, and opting one repository in leaves every
+    /// other one alone.
+    fn landing_is_authorized(
+        &self,
+        name: &str,
+        commit: &ContentHash,
+        sub: &Submission,
+        op: &ViewOp,
+        actor_id: &ContentHash,
+    ) -> Result<(), String> {
+        let acl = self.acl_now()?;
+        let repo = crate::acl::ref_repo(name);
+        if let (Some(acl), Some(repo)) = (acl.as_ref(), repo.as_ref()) {
+            if acl.has_owner(repo) {
+                return self.owner_assented(acl, repo, name, commit, sub, op, actor_id);
+            }
+        }
+        let approval_weight = self.approval_weight_for(name, commit);
+        if approval_weight < REQUIRED_APPROVAL_WEIGHT {
+            return Err(Rejection::new(
+                Code::ReviewRequired,
+                format!(
+                    "{name} is protected and this commit has approval weight \
+                     {approval_weight}, below the required {REQUIRED_APPROVAL_WEIGHT}"
+                ),
+                "open a review naming this ref and commit (`choir review ... --ref \
+                 <repo:ref>`), obtain approvals from two distinct operators, then push again",
+            )
+            .with_states(
+                Some(format!(
+                    "approval weight {REQUIRED_APPROVAL_WEIGHT} for {}",
+                    commit.to_hex()
+                )),
+                Some(format!("approval weight {approval_weight}")),
+            )
+            .encode());
+        }
+        Ok(())
+    }
+
+    /// Whether an owner of `repo` assented to this landing, in either of
+    /// the two ways that count (D42).
+    ///
+    /// One question with two answers, not a rule plus an exception:
+    /// performing the landing is assent, and so is having approved a
+    /// review that names this exact `(ref, commit)`. The first is what
+    /// lets an owner land their own work without reviewing themselves —
+    /// which they could not do anyway, since the reviewer draw excludes
+    /// the requester's own operator.
+    #[allow(clippy::too_many_arguments)]
+    fn owner_assented(
+        &self,
+        acl: &crate::acl::Acl,
+        repo: &str,
+        name: &str,
+        commit: &ContentHash,
+        sub: &Submission,
+        op: &ViewOp,
+        actor_id: &ContentHash,
+    ) -> Result<(), String> {
+        let acting = self.acting_user(sub, op, actor_id);
+        if let Some(user) = acting.as_deref() {
+            if acl.allows_repo(user, repo, crate::acl::Level::Own) {
+                return Ok(());
+            }
+        }
+        if self.owner_approved(acl, repo, name, commit) {
+            return Ok(());
+        }
+        // A certified push fails here for a reason the generic message
+        // would misdescribe: not "you are not an owner" but "the node
+        // cannot tell who you are", which has a different repair.
+        let next = if matches!(op.provenance, Some(Provenance::PushCertified)) {
+            "a signed push cannot assert repository ownership: its channel names the push \
+             certificate's key rather than an ACL user. Push without `--signed`, or have an \
+             owner approve a review naming this ref and commit"
+        } else {
+            "have an owner of this repository approve a review naming this ref and commit, \
+             or land it as an owner yourself. An owner submitting directly must have their \
+             key bound to their name in the trusted-keys file, or the node cannot tell the \
+             key is theirs"
+        };
+        Err(Rejection::new(
+            Code::ReviewRequired,
+            format!("{name} is protected and {repo} is owned; no owner has assented to this commit"),
+            next,
+        )
+        .with_states(
+            Some(format!("owner assent for {}", commit.to_hex())),
+            Some(match acting {
+                Some(user) => format!("a landing by {user}, who does not own {repo}"),
+                None => "a landing by an identity the node cannot resolve to an ACL user".into(),
+            }),
+        )
+        .encode())
+    }
+
+    /// Whether an owner of `repo` approved a review naming exactly this
+    /// `(ref, commit)` pair (D42).
+    ///
+    /// Deliberately **not** routed through [`choir_view::ReviewState::approved`],
+    /// which returns false until every drawn reviewer has answered. Under
+    /// D42 an owner's approval is sufficient on its own, so consulting
+    /// `approved()` would let one reviewer who never replies veto a
+    /// landing the owner had already assented to — a liveness bug wearing
+    /// the shape of a safety check.
+    ///
+    /// A slashed approval does not count. A retroactively invalidated
+    /// verdict is invalidated for an owner exactly as for anybody else,
+    /// which is the whole point of `SlashApproval` existing.
+    fn owner_approved(
+        &self,
+        acl: &crate::acl::Acl,
+        repo: &str,
+        name: &str,
+        commit: &ContentHash,
+    ) -> bool {
+        self.view
+            .lock()
+            .expect("view lock")
+            .reviews
+            .values()
+            .filter(|review| {
+                review.target_ref.as_deref() == Some(name)
+                    && review.target.as_ref() == Some(commit)
+            })
+            .any(|review| {
+                review.verdicts.iter().any(|(reviewer, (verdict, _))| {
+                    *verdict == choir_view::Verdict::Approve
+                        && !review.slashes.contains_key(reviewer)
+                        && acl.allows_repo(reviewer, repo, crate::acl::Level::Own)
+                })
+            })
     }
 
     /// Refuses a submission that has already been admitted, and one whose
@@ -2700,26 +2937,8 @@ impl SubmitPolicy for ChoirPolicy {
                     // Creating a protected ref is allowed: there is no
                     // history to hijack yet, and deletion is refused
                     // below, so "delete then re-create" is not a way in.
-                    let approval_weight = self.approval_weight_for(name, commit);
-                    if prev.is_some() && approval_weight < REQUIRED_APPROVAL_WEIGHT {
-                        return Err(Rejection::new(
-                            Code::ReviewRequired,
-                            format!(
-                                "{name} is protected and this commit has approval weight \
-                                 {approval_weight}, below the required {REQUIRED_APPROVAL_WEIGHT}"
-                            ),
-                            "open a review naming this ref and commit (`choir review ... --ref \
-                             <repo:ref>`), obtain approvals from two distinct operators, then \
-                             push again",
-                        )
-                        .with_states(
-                            Some(format!(
-                                "approval weight {REQUIRED_APPROVAL_WEIGHT} for {}",
-                                commit.to_hex()
-                            )),
-                            Some(format!("approval weight {approval_weight}")),
-                        )
-                        .encode());
+                    if prev.is_some() {
+                        self.landing_is_authorized(name, commit, sub, &op, &actor_id)?;
                     }
                 }
                 OpKind::DeleteRef { name, .. } if self.ref_is_protected(name)? => {
@@ -2878,6 +3097,9 @@ pub struct Platform {
     /// Shared with the policy: when set, a protected ref only moves to a
     /// commit an approved review already named.
     require_review: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with the policy: the operator's ACL file, consulted for
+    /// [`crate::acl::Level::Own`] grants when a landing is gated (D42).
+    acl_file: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// Shared with the policy: the credential store passkey submissions
     /// are verified against (D39). Filled by [`Platform::attach_accounts`].
     passkeys: Arc<Mutex<Option<Arc<crate::accounts::Accounts>>>>,
@@ -3080,6 +3302,7 @@ impl Platform {
         }));
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
+        let acl_file = Arc::new(Mutex::new(None));
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let require_scope = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hooks = Arc::new(Mutex::new(None));
@@ -3092,6 +3315,7 @@ impl Platform {
                 subject: (None, None),
                 require_assignment: require_assignment.clone(),
                 protected_refs: protected_refs.clone(),
+                acl_file: acl_file.clone(),
                 require_review: require_review.clone(),
                 require_scope: require_scope.clone(),
                 registry,
@@ -3124,6 +3348,7 @@ impl Platform {
             log_path: None,
             require_assignment,
             protected_refs,
+            acl_file,
             require_review,
             require_scope,
             passkeys,
@@ -3287,6 +3512,24 @@ impl Platform {
     #[must_use]
     pub fn with_protected_refs(self, path: std::path::PathBuf) -> Self {
         *self.protected_refs.lock().expect("protected refs lock") = Some(path);
+        self
+    }
+
+    /// Points the admission policy at the operator's ACL file, so a
+    /// landing on a protected ref can ask who owns the repository (D42).
+    ///
+    /// Without this the ownership rule is simply absent and every
+    /// protected ref keeps the approval-weight gate, which is the
+    /// behaviour of every node built before D42. Ownership is opt-in per
+    /// repository even once the file is attached: a repository nobody
+    /// holds `own` over is unaffected.
+    ///
+    /// The path, not a parsed table, because the file is hot-reloadable
+    /// and admission must see an ownership change without a restart —
+    /// the same reason [`Platform::with_protected_refs`] takes a path.
+    #[must_use]
+    pub fn with_acl_file(self, path: std::path::PathBuf) -> Self {
+        *self.acl_file.lock().expect("acl file lock") = Some(path);
         self
     }
 

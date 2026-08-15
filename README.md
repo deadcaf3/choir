@@ -127,7 +127,7 @@ Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (require
 | File | Format |
 |---|---|
 | `--auth-file` | `user:token` per line — authentication only; pair with `--acl-file` |
-| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `write`, and `auditor` on `@node` |
+| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `write` < `own`, and `auditor` on `@node` |
 | `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
@@ -150,7 +150,7 @@ carol      *                read
 dave       @node            auditor
 ```
 
-`read` clones and fetches; `write` adds push, workspace provisioning, and submitting ops that touch that repository. There is no `admin`: no endpoint performs a repository-scoped administrative action, since repo creation and ref protection are operator-side flags.
+`read` clones and fetches; `write` adds push, workspace provisioning, and submitting ops that touch that repository; `own` adds authorizing a landing on a protected ref (D42, below). There is no `admin`: the only repository-scoped administrative action that exists is the landing gate, and `own` is it.
 
 The operator's own credential usually wants two lines, since neither covers the other:
 
@@ -164,6 +164,29 @@ myself     @node  write
 Fail closed: with the flag set, anything not granted is refused. A repository you cannot read answers `404` rather than `403`, so a denial never confirms that it exists. The flag requires `--auth-file` — an ACL over anonymous requests would grade everyone the same. A malformed file refuses to start; a malformed *edit* keeps the previous table and complains, so a typo cannot silently revoke access.
 
 `/api/view`, `/api/reviews` and the browser page are narrowed to the repositories a credential may read, so a grant on one repository does not disclose that the others exist. Node-wide sections of the view (the ref-state attestation, key bindings, and the concentration, growth, newcomer and lag telemetry) need `@node auditor`; the log head and build stamp reach everyone, since a writer needs them to submit. A review you were assigned to still reaches you, on any repository — that is what an invitation is.
+
+### Repository ownership (D42)
+
+With `--protected-refs` and `--require-review`, a protected ref normally needs approval weight 2 from two distinct operators, and nobody is exempt. Granting somebody `own` over a repository changes which question the gate asks for that repository:
+
+```
+myself     owner/demo       own
+```
+
+**On a protected ref of an owned repository, one owner's assent is necessary and sufficient.** Assent takes either form, and the gate does not care which:
+
+- the owner performs the landing themselves, or
+- the owner approved a review naming that exact `(ref, commit)`.
+
+So an owner can land alone, with no review in existence. A non-owner reaches an owned ref only with an owner's approval, and no number of non-owner approvals substitutes for it — the two-operator rule is not a second route to the same place.
+
+Three things worth knowing before granting it:
+
+- **An owner's key is equivalent to the repositories they own.** Under the weight rule a stolen key buys one unit and still needs a second, conflict-graph-separated operator. Here it buys the repository. That is the trade the level exists to make; make it deliberately.
+- **An owner submitting directly must have their key bound** in `--keys-file` (`<channel> <64-hex>`). An unbound key is unconstrained in what channel it claims, so the gate refuses to read ownership off an unbound one — otherwise any trusted key could name itself an owner. Approving a review does not need this; landing under your own key does.
+- **`own` is granted in the file you write.** Self-service (D36) contributes to the merged table the HTTP layer enforces, but the landing gate reads the operator's file directly, so ownership cannot be self-issued.
+
+A repository nobody owns keeps the weight rule exactly as it was, and a node with no `--acl-file` behaves as it did before D42. The file is re-read per landing, so a grant takes effect with no restart; an unreadable or malformed file refuses the landing rather than concluding there are no owners.
 
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
@@ -563,7 +586,7 @@ choir "${A[@]}" verdict "$API" "$HOME/.choir/other.key" otherop/reviewer rev-1 a
 - Name **no** reviewers on `choir review`; empty list ⇒ node assignment. Self-picked lists may be refused under `--require-assignment` / protected refs.
 - Channel names: `operator/agent`. Same-operator agents cannot review each other.
 - Bind keys when registering: `choir key ~/.choir/agent.key myop/agent >> ~/.choir/keys`.
-- Protected landing with `--require-review` needs approval weight **2** (two distinct operators). See `scripts/flip/RUNBOOK.md` to enable gates on the dogfood node.
+- Protected landing with `--require-review` needs approval weight **2** (two distinct operators), unless somebody holds `own` over the repository, in which case one owner's assent lands it and nothing else does (D42). See `scripts/flip/RUNBOOK.md` to enable gates on the dogfood node.
 - Operators can invalidate a bad approval with `choir slash`; it lowers future approval weight and marks re-review required, but never rewrites an already-landed ref.
 - An optional reviewer conflict graph excludes operators within the configured hop distance from the requester. It is re-read per draw and fails closed by leaving the review unassigned.
 - `choir view` reports T3 concentration using exact counts and integer shares. Active branches mean last attributable mover, and protected updates mean admitted ref updates under the current policy; unknown and ambiguous attribution stay visible and make the overall status `indeterminate` rather than a pass.

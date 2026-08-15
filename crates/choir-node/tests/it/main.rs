@@ -39,6 +39,7 @@ mod newcomer_config;
 mod newcomer_harm;
 mod noscript;
 mod observability;
+mod ownership;
 mod passkeys;
 mod policy_hardening;
 mod provenance;

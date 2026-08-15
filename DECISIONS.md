@@ -53,6 +53,7 @@ that would reverse it are not published.
 | D39 | Browser writes via passkeys, narrowing D28's no-JavaScript rule | **One-way for the signature format** |
 | D40 | Replay purity and conflict quarantine, promoted to contract | **One-way if broken** |
 | D41 | Push provenance as a schema field, not a channel-string convention | **One-way for readers** |
+| D42 | Repository ownership as a landing gate, granted as an ACL level | Two-way |
 
 ## Reading the door column
 

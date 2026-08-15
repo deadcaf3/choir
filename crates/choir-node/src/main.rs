@@ -23,7 +23,7 @@
 //! `--acl-file` every credential reaches every repository, which the
 //! node says out loud at startup. `--acl-file` (D29) adds the
 //! per-repository decision — `<user> <repo|*|@node> <level>` per line,
-//! `read` < `write`, `auditor` on `@node`, fail closed, reloaded on
+//! `read` < `write` < `own`, `auditor` on `@node`, fail closed, reloaded on
 //! mtime — and requires `--auth-file`, since it grades authenticated
 //! users. `--keys-file` turns on the platform API; each
 //! line is `<64-char hex>` or `<name> <64-char hex>`, where the optional
@@ -471,6 +471,19 @@ fn main() -> std::io::Result<()> {
                         "protected refs require approval from two distinct operators to land \
                          (this daemon's own pushes included)"
                     );
+                    // D42: the same file the HTTP layer authorizes
+                    // against, read by admission for `own` grants alone.
+                    // Announced only when it changes a landing rule,
+                    // which is here: without `--require-review` nothing
+                    // gates a landing and ownership decides nothing.
+                    if let Some(acl) = flag_value("--acl-file") {
+                        platform = platform.with_acl_file(acl.into());
+                        eprintln!(
+                            "repository ownership enabled ({acl}): on a repo somebody holds \
+                             `own` over, one owner's assent lands a protected ref and the \
+                             two-operator rule does not also apply"
+                        );
+                    }
                 }
             } else if rest.iter().any(|a| a == "--require-review") {
                 // Nothing is protected, so the flag would silently do

@@ -13,17 +13,22 @@
 //!
 //! ```text
 //! # <user>   <repo|*|@node>   <level>
-//! alice      owner/project    write
+//! alice      owner/project    own
 //! alice      owner/notes      read
-//! bob        *                read
+//! bob        owner/project    write
 //! carol      @node            auditor
 //! ```
 //!
-//! Two levels, `read` < `write`. There is deliberately no `admin`: no
-//! endpoint performs a repository-scoped administrative action today
-//! (repository creation is the `--create` flag, ref protection is
-//! `--protected-refs`, both operator-side files), and a level with no
-//! operation behind it only invites a meaningless grant.
+//! Three levels, `read` < `write` < `own`. `own` arrived with D42, which
+//! is the first repository-scoped administrative action to exist: on a
+//! protected ref an owner's assent authorizes the landing, and `write`
+//! alone does not. Before that there was deliberately no `admin`, because
+//! a level with no operation behind it only invites a meaningless grant.
+//!
+//! **`own` is granted in this file only.** Self-service (D36) renders its
+//! issued grants in the same grammar, but the landing gate reads the
+//! operator's file directly rather than the merged table, so ownership
+//! cannot be self-issued.
 //!
 //! The file is not the only source of grants. Credential self-service
 //! (D36) renders what it issued in this same grammar, and the node
@@ -60,7 +65,13 @@ pub enum Scope {
     Node,
 }
 
-/// Grant strength. [`Level::Read`] is implied by [`Level::Write`].
+/// Grant strength. [`Level::Read`] is implied by [`Level::Write`], which
+/// is implied by [`Level::Own`].
+///
+/// The implication is the derived [`Ord`], which follows declaration
+/// order, and [`Acl::allows`] compares with `>=`. A new level must
+/// therefore be declared in strength order or every existing check
+/// silently changes meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     /// Clone and fetch a repository; read the node-scoped endpoints.
@@ -69,6 +80,14 @@ pub enum Level {
     /// Everything [`Level::Read`] allows, plus push, provision a
     /// workspace, and submit ops.
     Write,
+    /// Everything [`Level::Write`] allows, plus authorizing a landing on
+    /// a protected ref of this repository (D42). Spelled `own`.
+    ///
+    /// This is the repository-scoped administrative action the module
+    /// documentation used to say did not exist. It is not a *stronger
+    /// push*: on a protected ref an owner's assent is what the gate asks
+    /// for, and `write` alone no longer answers it.
+    Own,
 }
 
 /// A refused request: the status to answer with, and the reason.
@@ -167,6 +186,23 @@ impl Acl {
         self.allows(user, &Scope::Repo(normalize_repo(repo)), level)
     }
 
+    /// Whether anybody at all holds [`Level::Own`] over `repo` (D42).
+    ///
+    /// This is the switch between the two landing rules, not an
+    /// authorization check: a repository with no owner keeps the
+    /// approval-weight gate, and one with an owner asks for owner assent
+    /// instead. It is deliberately a question about the repository rather
+    /// than about a user, because the gate has to choose which rule
+    /// applies before it knows whether the actor satisfies it.
+    #[must_use]
+    pub fn has_owner(&self, repo: &str) -> bool {
+        let scope = Scope::Repo(normalize_repo(repo));
+        self.grants.values().any(|held| {
+            held.iter()
+                .any(|(granted, at)| *at >= Level::Own && covers(granted, &scope))
+        })
+    }
+
     /// A key identifying everything a filtered response depends on:
     /// the reader and the grants they hold, rendered canonically.
     ///
@@ -197,6 +233,7 @@ impl Acl {
                         let level = match level {
                             Level::Read => "r",
                             Level::Write => "w",
+                            Level::Own => "o",
                         };
                         format!("{target}={level}")
                     })
@@ -323,8 +360,17 @@ fn parse_level(scope: &Scope, level: &str) -> Result<Level, String> {
             Err("`auditor` is a node-wide role; on a repository write `read`".to_string())
         }
         (_, "read") => Ok(Level::Read),
+        // `own` names an owner *of a repository*. `@node` is the log and
+        // the attestation, which no repository owns, so the spelling is
+        // refused there rather than quietly granted over everything.
+        (Scope::Node, "own") => {
+            Err("`own` is a repository grant; `@node` takes `auditor` or `write`".to_string())
+        }
+        (_, "own") => Ok(Level::Own),
         (Scope::Node, other) => Err(format!("`{other}` is not a level; write `auditor` or `write`")),
-        (_, other) => Err(format!("`{other}` is not a level; write `read` or `write`")),
+        (_, other) => Err(format!(
+            "`{other}` is not a level; write `read`, `write` or `own`"
+        )),
     }
 }
 
@@ -388,7 +434,7 @@ fn subject_repo(subject: &str) -> Option<String> {
 }
 
 /// Repository named by a view ref key in its `<repo>:<refname>` form.
-fn ref_repo(name: &str) -> Option<String> {
+pub(crate) fn ref_repo(name: &str) -> Option<String> {
     name.split_once(':').map(|(repo, _)| normalize_repo(repo))
 }
 
@@ -845,6 +891,37 @@ mod tests {
         assert!(acl.allows_repo("alice", "o/r", Level::Read));
         assert!(acl.allows_repo("bob", "o/r", Level::Read));
         assert!(!acl.allows_repo("bob", "o/r", Level::Write));
+    }
+
+    /// The implication is the derived [`Ord`], which follows declaration
+    /// order, so this pins the order rather than the spelling. Declaring
+    /// `Own` before `Write` would compile, pass every existing test, and
+    /// quietly turn every `allows(.., Write)` check in the daemon into a
+    /// check for something weaker.
+    #[test]
+    fn own_implies_write_and_write_does_not_imply_own() {
+        let acl = Acl::parse("alice o/r own\nbob o/r write").expect("parses");
+        assert!(acl.allows_repo("alice", "o/r", Level::Read));
+        assert!(acl.allows_repo("alice", "o/r", Level::Write));
+        assert!(acl.allows_repo("alice", "o/r", Level::Own));
+        assert!(acl.allows_repo("bob", "o/r", Level::Write));
+        assert!(
+            !acl.allows_repo("bob", "o/r", Level::Own),
+            "write must not confer ownership: the landing gate asks for \
+             Own precisely because push permission is not assent"
+        );
+        assert!(Level::Read < Level::Write && Level::Write < Level::Own);
+    }
+
+    /// `own` names an owner of a repository. `@node` is the op log and the
+    /// attestation, which no repository owns; granting it there would be a
+    /// node-wide authority nobody asked for.
+    #[test]
+    fn own_is_a_repository_grant_and_the_node_refuses_it() {
+        assert!(Acl::parse("alice o/r own").is_ok());
+        assert!(Acl::parse("alice * own").is_ok(), "owning every repo is sayable");
+        let error = Acl::parse("alice @node own").expect_err("@node cannot be owned");
+        assert!(error.contains("repository grant"), "{error}");
     }
 
     /// `*` is a statement about repositories. If it also covered the node
