@@ -45,6 +45,7 @@ mod provenance;
 mod quotas;
 mod reconcile_refs;
 mod rejections;
+mod restore;
 mod resync;
 mod review;
 mod review_outcomes;

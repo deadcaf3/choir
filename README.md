@@ -120,7 +120,7 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--quota-push-bytes` / `--quota-workspaces`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--quota-push-bytes` / `--quota-workspaces`, `--journal <file>`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 
@@ -291,8 +291,70 @@ The cost is stated rather than hidden: an over-limit body is drained to a sink b
 
 Two boundaries, named rather than left to be discovered:
 
-- The ceiling is checked on `POST /api/workspace` and not on `POST /api/submit`. A credential that signs a `SetWorkspaceHead` itself still creates a view entry nothing refuses. Enforcing on the submission path means enforcing inside the sequencer's admission check, which cannot see an `@node` grant and would therefore throttle the one actor who can repair the node — the lockout this whole family of features exists not to cause.
+- The ceiling is checked on `POST /api/workspace` and not on `POST /api/submit`. A credential that signs a `SetWorkspaceHead` itself still creates a view entry nothing refuses. Enforcing on the submission path means enforcing inside the sequencer's admission check, which cannot see an `@node` grant and would therefore throttle the one actor who can repair the node — the lockout this whole family of features exists not to cause. The sequencer does bound one thing at that door, but it is a different kind of thing: how many ops one actor may have *awaiting a decision* at once, a window that empties as the writer works rather than a holding a credential can exhaust. See below.
 - The count is read outside the provisioning lock, so two simultaneous creations by a user at their ceiling can both pass. The overshoot is bounded by that user's own concurrency, not unbounded.
+
+### Fairness at the sequencer's door
+
+One actor submitting a thousand operations must not put another actor's single operation behind all thousand of them. So in front of the single writer, each actor holds a bounded number of ops awaiting a decision — 512, twice the writer's 256-op batch — and the writer serves what it drained round-robin across actors rather than in arrival order.
+
+The total order is untouched. Round-robin decides who is asked next; the writer still stamps `seq` one at a time, alone, and appends in exactly the order it decided.
+
+Over the bound, a submission is **answered rather than parked**: a rejection naming the count and the limit, so a flooding client is told to retry when one of its own ops completes instead of discovering the queue by waiting in it.
+
+Two limits, named rather than left to be discovered:
+
+- **The actor key is a claim, not a verified identity.** It is the key id the submission carries; the signature is verified later, on the writer thread. That is enough to bound an honest flooder and nothing more. Invented identities are the rate limiter's problem (D33), and claiming someone else's key id is a bounded denial of service against that one actor. **Nothing here may ever become load-bearing for authorization.**
+- **Nothing measures the wait.** `decision_latency` is stamped when the writer picks an op up, so time spent in front of the writer has never been visible to the node's own instruments. This adds a second place to wait that they still cannot see.
+
+There is no flag. The bound is a backstop well above a working agent's concurrency, not a policy dial.
+
+### Decision journal (`--journal`)
+
+The request log records what was *asked*. It cannot say what the sequencer *decided*, because an accepted op and a refused one are both a `200` on `POST /api/submit`. `--journal <file>` appends one JSON object per admission decision, plus the events that explain the decisions around it:
+
+```bash
+cargo run -p choir-node -- /tmp/choir-repos 8417 \
+  --keys-file ~/.choir/keys \
+  --journal ~/.choir/decisions.jsonl
+```
+
+```json
+{"format_version":1,"kind":"decision","actor_id":"8f3a…","workspace":"op/agent","op_type":"SetRef","decision":"accepted","reject_reason":null,"seq":41,"parent":"…","decision_latency_us":812}
+```
+
+Four kinds, every one a flat object carrying `kind`, so `jq 'select(.kind == "cas_failure")'` works with no schema to hand:
+
+| `kind` | What it records |
+|---|---|
+| `decision` | Every accept and every refusal — the author when the policy identified one, the op type when it decoded one, the refusal verbatim, and the time from dequeue to decision |
+| `queue_depth` | How many commands the writer drained in one wake-up: its own view of the backlog, sampled rather than continuous |
+| `window_resize` | The speculative merge window moving, **with its cause**, so a shrinking window is attributable and not merely visible |
+| `cas_failure` | A lost compare-and-swap, recorded separately from the rejection it also produces — "two writers raced this ref" is a fact about contention that a rejection count cannot separate from a client sending nonsense |
+
+**It is derived data and nothing else.** No hash covers it, nothing replays it, and losing the whole file changes no decision the node has made. That is what licenses the two properties it has: the writing happens on its own thread, and a record is dropped rather than allowed to stall the writer. A journal that could block the single writer would be a durability barrier wearing an observability costume.
+
+Without the flag nothing is recorded and nothing is *built*. Each event owns its strings, so constructing one only to discard it costs several allocations per op on the writer thread — wiring the journal in without that guard moved the submit path from 174 allocations per op to 212, and `submit_path_allocation_budget` failed, which is that test doing its job.
+
+### Repairing a log (`choir repair`)
+
+A node killed mid-write leaves a partial final record. `FileLog::open` truncates that torn tail automatically, so a daemon comes back after a power cut without a human — but it copies the bytes to a `<log>.torn-<offset>` sidecar first, synced before the truncation is issued. Nothing in this workspace deletes log bytes.
+
+Everything else is a tool, and the tool makes the operator choose the mode:
+
+```bash
+cargo run -p choir-cli -- repair ~/.choir/repos/.choir/ops.jsonl --verify
+```
+
+| Mode | What it does | Exit |
+|---|---|---|
+| `--verify` | Walks the chain, reports the first bad record and how much was intact before it. Changes nothing, quarantines nothing. | `0` usable, `1` damaged |
+| `--truncate-tail` | Only when the damage is a torn final record: quarantines those bytes, truncates to the last complete entry, syncs. | `0` repaired, `1` refused |
+| neither, or both | Usage error. `repair` alone is never read as permission to modify a log. | `2` |
+
+`--verify` reads the file with its own reader rather than opening it as a log, because opening a log repairs it. A verify built on `FileLog::open` would truncate the tail as a side effect and then report the file intact, having caused the change it failed to mention.
+
+Damage anywhere but the tail is **refused, not patched**. Cutting the file back past a mid-log break would drop records already acknowledged to clients, so the tool prints restore-from-backup steps and exits `1`. Refusing also means quarantining nothing: there is no suffix there it would be safe to remove.
 
 ## Use the node
 
@@ -539,6 +601,10 @@ source templates/choir.env.sh   # sets CHOIR_API; optional user/token/key
 | `review_required` | Protected ref, insufficient weight | Node-drawn review + two operators approve, then push |
 | Workspace slow / fails | No CoW FS | Use APFS or btrfs |
 | Lost submit response | Network blip after accept | Resubmit **identical** signed bytes → `already_applied: true` (`ERRORS.md`) |
+| Node will not start, log reported corrupt | A fully-written record breaks the chain mid-log | `choir repair <log> --verify` names the first bad record. Mid-log damage is a restore, not a repair |
+| A `<log>.torn-<offset>` file appeared | The node was killed mid-write; the partial tail was quarantined, then truncated | Expected, and not an error. Nothing reads it; keep it as long as you want the evidence |
+| A submitter is told its quota is exhausted | That actor already has 512 ops awaiting a decision | Not the D37 quota. Retry when one of your own ops completes; it is a bounded in-flight window, not a holding |
+| A restored node printed `choir: retracted` and refs are gone | It was started before the git objects were in place, so reconciliation made the log agree with the emptiness | Start again from the backup into a clean root. Objects go in **before** the first boot: `docs/runbook-restore.md` |
 
 Rejection code table: [`ERRORS.md`](ERRORS.md).
 
@@ -552,6 +618,7 @@ Rejection code table: [`ERRORS.md`](ERRORS.md).
 | [`templates/`](templates/README.md) | Drop-in agent harness snippets |
 | [`scripts/choirctl`](scripts/choirctl) | Dogfood node operator entrypoint |
 | [`scripts/flip/RUNBOOK.md`](scripts/flip/RUNBOOK.md) | Supervised install + protected-ref gates |
+| [`docs/runbook-restore.md`](docs/runbook-restore.md) | Rebuilding a node from a backup, and the secrets a backup never holds |
 | [`DECISIONS.md`](DECISIONS.md) | Decision register: what was decided, and which choices are one-way |
 
 ## License

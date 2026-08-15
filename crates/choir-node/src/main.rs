@@ -705,7 +705,15 @@ fn main() -> std::io::Result<()> {
         if create_next {
             match node.create_repo(a) {
                 Ok(()) => eprintln!("created {a}"),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // Already there is not nothing to do. The repo may have
+                // arrived from a backup bundle, which carries objects and
+                // refs and no hook at all — served normally, and every push
+                // into it bypassing the sequencer. It may also predate a
+                // move, leaving `gpg.ssh.allowedSignersFile` pointed at a
+                // root that no longer exists. Adoption is idempotent, so
+                // the ordinary restart pays a few `git config` calls and
+                // says nothing.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => node.adopt_repo(a)?,
                 Err(e) => return Err(e),
             }
             create_next = false;

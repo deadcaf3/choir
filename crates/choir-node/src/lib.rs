@@ -545,39 +545,101 @@ impl Node {
                 name.to_string(),
             ));
         }
-        let ok = std::process::Command::new("git")
+        if !std::process::Command::new("git")
             .args(["init", "--bare", "-q"])
             .arg(&path)
             .status()?
             .success()
-            && std::process::Command::new("git")
-                .args(["config", "http.receivepack", "true"])
-                .current_dir(&path)
+        {
+            return Err(std::io::Error::other("git init failed"));
+        }
+        self.configure_repo(&path)
+    }
+
+    /// Brings an *existing* bare repo under this root back under the
+    /// sequencer: the same hook and the same git config
+    /// [`Node::create_repo`] installs.
+    ///
+    /// This is what a restore needs, and without it a restore is silently
+    /// unsound. Objects arrive as a bundle, which `git clone --bare` and
+    /// `git fetch` both unpack into a repo with **no `pre-receive` hook** —
+    /// and a repo with no hook is served normally while every push into it
+    /// bypasses the sequencer entirely, landing refs that no op in the log
+    /// ever records. The alternative order is worse: letting the node
+    /// create the repos empty and unpacking afterwards means startup
+    /// reconciliation sees a log naming commits git does not have, decides
+    /// the log is unbackable, and *appends retractions for every restored
+    /// ref* (see [`Platform::reconcile_git_refs`]).
+    ///
+    /// It also re-points `gpg.ssh.allowedSignersFile`, which
+    /// [`Node::create_repo`] wrote as an absolute path into the root that
+    /// existed then. A restore onto a different path leaves that config
+    /// naming a directory that may not exist, or worse, one that does and
+    /// holds someone else's keys.
+    ///
+    /// Idempotent, and safe to run on every start. The one value it does
+    /// not overwrite is `receive.certNonceSeed`: rotating it would refuse
+    /// the signed pushes already in flight against the old seed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the path does not exist, is not a git repository, or a
+    /// `git config` call fails.
+    pub fn adopt_repo(&self, name: &str) -> std::io::Result<()> {
+        let path = self.repo_path(name)?;
+        if !path.join("objects").is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{name}: not a bare git repository"),
+            ));
+        }
+        self.configure_repo(&path)
+    }
+
+    /// The configuration and hook shared by [`Node::create_repo`] and
+    /// [`Node::adopt_repo`], applied to an initialized bare repo.
+    fn configure_repo(&self, path: &Path) -> std::io::Result<()> {
+        // Seeded once and then left alone: `create_repo` reaches here with
+        // it unset, `adopt_repo` with it already set from whenever the repo
+        // was made, and re-seeding would invalidate every signed push
+        // holding a nonce from the old seed.
+        if !std::process::Command::new("git")
+            .args(["config", "--get", "receive.certNonceSeed"])
+            .current_dir(path)
+            .stdout(std::process::Stdio::null())
+            .status()?
+            .success()
+            && !std::process::Command::new("git")
+                .args([
+                    "config",
+                    "receive.certNonceSeed",
+                    &choir_identity::ActorKey::generate().actor_id().to_hex(),
+                ])
+                .current_dir(path)
                 .status()?
                 .success()
+        {
+            return Err(std::io::Error::other("git config failed"));
+        }
+        let ok = std::process::Command::new("git")
+            .args(["config", "http.receivepack", "true"])
+            .current_dir(path)
+            .status()?
+            .success()
             // Pin hooks to this repo: a host-global core.hooksPath (set
             // by e.g. husky) would otherwise silently bypass the
             // sequencer hook below.
             && std::process::Command::new("git")
                 .args(["config", "core.hooksPath", "hooks"])
-                .current_dir(&path)
+                .current_dir(path)
                 .status()?
                 .success()
             // Advertise push certificates (`git push --signed`) and
             // verify their ssh signatures against the allowed-signers
             // file (per-actor keys, L8).
             && std::process::Command::new("git")
-                .args([
-                    "config",
-                    "receive.certNonceSeed",
-                    &choir_identity::ActorKey::generate().actor_id().to_hex(),
-                ])
-                .current_dir(&path)
-                .status()?
-                .success()
-            && std::process::Command::new("git")
                 .args(["config", "gpg.format", "ssh"])
-                .current_dir(&path)
+                .current_dir(path)
                 .status()?
                 .success()
             && std::process::Command::new("git")
@@ -589,11 +651,11 @@ impl Node {
                         .join(".choir")
                         .join("allowed_signers"),
                 )
-                .current_dir(&path)
+                .current_dir(path)
                 .status()?
                 .success();
         if !ok {
-            return Err(std::io::Error::other("git init/config failed"));
+            return Err(std::io::Error::other("git config failed"));
         }
         // The pre-receive hook routes every ref update of a push through
         // the platform sequencer (pre-receive, not update: only

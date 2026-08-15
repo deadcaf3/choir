@@ -354,6 +354,15 @@ verify-backup)
   sh "$HERE/verify_backup.sh" "${2:-}"
   ;;
 
+restore-from-backup)
+  # Backup -> a running node, with the proof attached. Everything this
+  # needs is in the backup directory and the target root, so unlike the
+  # legs above it makes no ssh connection and does not care which side of
+  # the D20 host move this machine is on.
+  [ $# -ge 3 ] || { echo "usage: choirctl restore-from-backup <backup-dir> <target-root>" >&2; exit 2; }
+  sh "$HERE/restore_from_backup.sh" "$2" "$3"
+  ;;
+
 pull-backup)
   # Node host -> this machine: the offsite copy of the live log, after
   # the host move. Self-verifying (checksum, prefix, seq contiguity).
@@ -402,8 +411,11 @@ sh scripts/choirctl <command>
   verify-backup    pull the offsite copy back and check all five ways
   pull-backup      fetch the log copy from the node host (remote mode)
   schedule-backup [secs]   pull-backup on a launchd interval (default 3600)
+  restore-from-backup <backup-dir> <target-root>
+                   rebuild a node from a backup and prove it accepts a write
 
-Port is $PORT (override with CHOIR_PORT). Runbook: scripts/flip/RUNBOOK.md
+Port is $PORT (override with CHOIR_PORT).
+Runbooks: scripts/flip/RUNBOOK.md (install), docs/runbook-restore.md (restore)
 USAGE
   ;;
 esac
