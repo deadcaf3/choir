@@ -19,6 +19,7 @@
 //! assert_eq!(log.len(), 1);
 //! ```
 
+pub mod fairness;
 pub mod journal;
 pub mod lag;
 
@@ -127,16 +128,111 @@ fn as_micros(d: Duration) -> u64 {
 /// be measured through the barrier, not just up to the append).
 type PendingAck = (mpsc::Sender<Result<Accepted, String>>, Accepted, Instant);
 
+/// Fills `turns` with the order to serve one drained batch in: one op
+/// from each actor in rotation, until every op has a turn.
+///
+/// The quota is what *bounds* how long one actor can make another wait.
+/// This is the finer half of the same idea, and it only matters within a
+/// single wake-up: when the writer surfaces to find one actor's burst
+/// interleaved with somebody's single op, arrival order would serve the
+/// burst first, and rotation serves the single op second instead of
+/// last. Per-actor order is preserved exactly — each bucket is FIFO —
+/// so an actor's own ops never overtake each other.
+///
+/// The single-actor case, which is most of them and every benchmark,
+/// takes the identity path and allocates nothing. That is deliberate:
+/// `alloc_budget` gates the per-op allocation count, and a scheduler
+/// that charged every op for a fairness decision nobody needed would be
+/// paying to solve a problem it does not have.
+fn round_robin(
+    queued: &[Option<Queued>],
+    buckets: &mut Vec<(Arc<str>, std::collections::VecDeque<usize>)>,
+    turns: &mut Vec<usize>,
+) {
+    turns.clear();
+    // One actor (or none): arrival order already is round-robin.
+    let mut lone = true;
+    let mut first: Option<&Arc<str>> = None;
+    for item in queued.iter().flatten() {
+        match first {
+            None => first = Some(&item.1),
+            Some(seen) if Arc::ptr_eq(seen, &item.1) => {}
+            Some(_) => {
+                lone = false;
+                break;
+            }
+        }
+    }
+    if lone {
+        // Filled slots only. Arrival order is already the answer here,
+        // but handing back an index to a slot that holds nothing would
+        // make the caller's `take()` the only thing standing between
+        // this and a panic.
+        turns.extend(
+            queued
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| item.as_ref().map(|_| index)),
+        );
+        return;
+    }
+
+    buckets.clear();
+    for (index, item) in queued.iter().enumerate() {
+        let Some((_, actor, _)) = item else { continue };
+        // Pointer equality, not string equality: the same actor hands
+        // back the same interned `Arc` (see [`fairness::Quotas::admit`]),
+        // so this compares a word rather than a string. A key re-interned
+        // mid-batch would split into two buckets, which costs that actor
+        // a slightly larger share of one batch and nothing else.
+        match buckets.iter_mut().find(|(key, _)| Arc::ptr_eq(key, actor)) {
+            Some((_, indexes)) => indexes.push_back(index),
+            None => {
+                let mut indexes = std::collections::VecDeque::new();
+                indexes.push_back(index);
+                buckets.push((actor.clone(), indexes));
+            }
+        }
+    }
+    while turns.len() < queued.len() {
+        let before = turns.len();
+        for (_, indexes) in buckets.iter_mut() {
+            if let Some(index) = indexes.pop_front() {
+                turns.push(index);
+            }
+        }
+        // Every bucket is empty; the remainder are `None` slots. Without
+        // this the loop would spin forever on a batch containing them.
+        if turns.len() == before {
+            break;
+        }
+    }
+}
+
 enum Command {
-    Submit(Submission, mpsc::Sender<Result<Accepted, String>>),
+    /// The op, the interned actor bucket holding its quota slot (see
+    /// [`fairness`]), and where to answer.
+    Submit(
+        Submission,
+        Arc<str>,
+        mpsc::Sender<Result<Accepted, String>>,
+    ),
     Shutdown,
 }
+
+/// One drained command awaiting its turn in the writer's round-robin.
+type Queued = (
+    Submission,
+    Arc<str>,
+    mpsc::Sender<Result<Accepted, String>>,
+);
 
 /// Cloneable client handle; one per workspace/agent.
 #[derive(Clone)]
 pub struct SequencerHandle {
     tx: mpsc::Sender<Command>,
     poisoned: Arc<AtomicBool>,
+    quotas: fairness::Quotas,
 }
 
 impl SequencerHandle {
@@ -176,7 +272,11 @@ impl SequencerHandle {
     ///
     /// # Errors
     ///
-    /// The policy's rejection reason.
+    /// The policy's rejection reason, or a [`fairness`] rejection naming
+    /// the quota when this actor already has too many ops awaiting a
+    /// decision. The quota is checked here, on the calling thread, before
+    /// anything is sent: an over-quota submitter is *answered*, never
+    /// parked, so a client always has something to react to.
     ///
     /// # Panics
     ///
@@ -187,18 +287,23 @@ impl SequencerHandle {
         payload: Vec<u8>,
         author_sig: Option<Witness>,
     ) -> Result<Accepted, String> {
+        let sub = Submission {
+            channel: channel.to_string(),
+            payload,
+            author_sig,
+        };
+        let actor = self.quotas.admit(fairness::Quotas::actor_of(&sub))?;
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
-            .send(Command::Submit(
-                Submission {
-                    channel: channel.to_string(),
-                    payload,
-                    author_sig,
-                },
-                reply_tx,
-            ))
+            .send(Command::Submit(sub, actor, reply_tx))
             .expect("sequencer thread alive");
         reply_rx.recv().expect("sequencer replies before dropping")
+    }
+
+    /// The per-actor admission quotas this handle submits through.
+    #[must_use]
+    pub fn quotas(&self) -> fairness::Quotas {
+        self.quotas.clone()
     }
 
     /// Offers every submission before waiting for any reply, so the whole
@@ -230,19 +335,27 @@ impl SequencerHandle {
         // the next -- exactly the per-op blocking that made the batch
         // endpoint pay one fsync per op.
         #[allow(clippy::needless_collect)]
-        let waiting: Vec<_> = subs
+        let waiting: Vec<Result<mpsc::Receiver<Result<Accepted, String>>, String>> = subs
             .into_iter()
             .map(|sub| {
+                // An over-quota member is refused in place rather than
+                // failing the group: the endpoint's documented semantics
+                // are per-op, and one member's ceiling is not the
+                // group's problem.
+                let actor = self.quotas.admit(fairness::Quotas::actor_of(&sub))?;
                 let (reply_tx, reply_rx) = mpsc::channel();
                 self.tx
-                    .send(Command::Submit(sub, reply_tx))
+                    .send(Command::Submit(sub, actor, reply_tx))
                     .expect("sequencer thread alive");
-                reply_rx
+                Ok(reply_rx)
             })
             .collect();
         waiting
             .into_iter()
-            .map(|rx| rx.recv().expect("sequencer replies before dropping"))
+            .map(|slot| match slot {
+                Ok(rx) => rx.recv().expect("sequencer replies before dropping"),
+                Err(refused) => Err(refused),
+            })
             .collect()
     }
 }
@@ -257,6 +370,9 @@ pub struct Sequencer {
     /// Written by the writer for every accepted op; read and drained by
     /// the daemon through [`Sequencer::lag`].
     lag: Arc<LagMeter>,
+    /// Per-actor admission ceilings, shared with every handle and with
+    /// the writer thread that releases their slots.
+    quotas: fairness::Quotas,
     thread: Option<JoinHandle<Box<dyn OpLog>>>,
 }
 
@@ -291,7 +407,10 @@ impl Sequencer {
         let writer_flag = poisoned.clone();
         let lag = Arc::new(LagMeter::new());
         let writer_lag = lag.clone();
+        let quotas = fairness::Quotas::default();
+        let writer_quotas = quotas.clone();
         let thread = std::thread::spawn(move || {
+            let quotas = writer_quotas;
             // Ordered, then made durable, then acknowledged. Everything
             // admitted in one pass through the loop shares a single
             // `sync`, so the fsync cost is paid once per batch rather
@@ -319,13 +438,14 @@ impl Sequencer {
             // should impose on every embedder including the test suite.
             // It is written up for whoever owns that call.
             let mut durability_failed = false;
+            // Reused across wake-ups. A fresh buffer per batch would put
+            // an allocation on the writer's hot path for no reason.
+            let mut queued: Vec<Option<Queued>> = Vec::new();
+            let mut turns: Vec<usize> = Vec::new();
+            let mut buckets: Vec<(Arc<str>, std::collections::VecDeque<usize>)> = Vec::new();
             while let Ok(first) = rx.recv() {
                 let mut cmd = Some(first);
-                // Depth is counted per wake-up rather than sampled on a
-                // timer: this is the writer's own view of how much was
-                // already waiting behind it, which is the number a
-                // backlog question is actually asking about.
-                let mut drained = 0usize;
+                queued.clear();
                 // Admit the woken command, then drain whatever else is
                 // already queued behind it. Nothing is waited for: an idle
                 // sequencer still batches exactly one op, so a lone
@@ -336,96 +456,111 @@ impl Sequencer {
                             stopping = true;
                             break;
                         }
-                        Command::Submit(sub, reply) => {
-                            let started = Instant::now();
-                            // Fail closed. Once a barrier has failed this
-                            // writer can no longer promise anything, so it
-                            // refuses *before* appending rather than
-                            // ordering ops it cannot persist.
-                            if durability_failed {
-                                let _ =
-                                    reply
-                                        .send(Err("log is not durable: writer stopped accepting"
-                                            .to_string()));
-                                cmd = rx.try_recv().ok();
-                                continue;
-                            }
-                            // Cloned only when something will read it:
-                            // `String::new()` does not allocate, the
-                            // clone does, and this is the writer's
-                            // per-op path.
-                            let journalling = journal.enabled();
-                            let workspace = if journalling {
-                                sub.channel.clone()
-                            } else {
-                                String::new()
-                            };
-                            match policy.check(&sub) {
-                                // A rejection touches neither the log nor
-                                // durability, so it is answered at once
-                                // rather than made to wait for the batch.
-                                Err(reason) => {
-                                    if journalling {
-                                        let (actor_id, op_type) = policy.subject();
-                                        journal.record(journal::Event::Decision {
-                                            actor_id,
-                                            workspace,
-                                            op_type,
-                                            accepted: false,
-                                            reject_reason: Some(reason.clone()),
-                                            seq: None,
-                                            parent: None,
-                                            decision_latency_us: as_micros(started.elapsed()),
-                                        });
-                                    }
-                                    let _ = reply.send(Err(reason));
-                                }
-                                Ok(()) => {
-                                    let seq = log.len();
-                                    let entry = OpEntry {
-                                        format_version: FORMAT_VERSION,
-                                        parent: log.head(),
-                                        seq,
-                                        channel: sub.channel,
-                                        payload: sub.payload,
-                                        witnesses: Vec::new(),
-                                        author_sig: sub.author_sig,
-                                    };
-                                    let hash = entry.content_hash();
-                                    if journalling {
-                                        let (actor_id, op_type) = policy.subject();
-                                        journal.record(journal::Event::Decision {
-                                            actor_id,
-                                            workspace,
-                                            op_type,
-                                            accepted: true,
-                                            reject_reason: None,
-                                            seq: Some(seq),
-                                            parent: entry.parent.as_ref().map(ContentHash::to_hex),
-                                            decision_latency_us: as_micros(started.elapsed()),
-                                        });
-                                    }
-                                    policy.accepted(&entry, &hash);
-                                    log.append(entry)
-                                        .expect("single writer never sees a stale head");
-                                    acks.push((
-                                        reply,
-                                        Accepted {
-                                            seq,
-                                            hash,
-                                            decision_latency: started.elapsed(),
-                                        },
-                                        started,
-                                    ));
-                                }
-                            }
+                        Command::Submit(sub, actor, reply) => {
+                            queued.push(Some((sub, actor, reply)));
                         }
                     }
-                    drained += 1;
-                    if acks.len() >= MAX_BATCH {
+                    if queued.len() >= MAX_BATCH {
                         break;
                     }
                     cmd = rx.try_recv().ok();
+                }
+                // Depth is counted per wake-up rather than sampled on a
+                // timer: this is the writer's own view of how much was
+                // already waiting behind it, which is the number a
+                // backlog question is actually asking about.
+                let drained = queued.len();
+                round_robin(&queued, &mut buckets, &mut turns);
+                for &index in &turns {
+                    let Some((sub, actor, reply)) = queued[index].take() else {
+                        continue;
+                    };
+                    let started = Instant::now();
+                    // Fail closed. Once a barrier has failed this writer
+                    // can no longer promise anything, so it refuses
+                    // *before* appending rather than ordering ops it
+                    // cannot persist.
+                    if durability_failed {
+                        let _ = reply.send(Err(
+                            "log is not durable: writer stopped accepting".to_string()
+                        ));
+                        quotas.release(&actor);
+                        continue;
+                    }
+                    // Cloned only when something will read it:
+                    // `String::new()` does not allocate, the clone does,
+                    // and this is the writer's per-op path.
+                    let journalling = journal.enabled();
+                    let workspace = if journalling {
+                        sub.channel.clone()
+                    } else {
+                        String::new()
+                    };
+                    match policy.check(&sub) {
+                        // A rejection touches neither the log nor
+                        // durability, so it is answered at once rather
+                        // than made to wait for the batch.
+                        Err(reason) => {
+                            if journalling {
+                                let (actor_id, op_type) = policy.subject();
+                                journal.record(journal::Event::Decision {
+                                    actor_id,
+                                    workspace,
+                                    op_type,
+                                    accepted: false,
+                                    reject_reason: Some(reason.clone()),
+                                    seq: None,
+                                    parent: None,
+                                    decision_latency_us: as_micros(started.elapsed()),
+                                });
+                            }
+                            let _ = reply.send(Err(reason));
+                        }
+                        Ok(()) => {
+                            let seq = log.len();
+                            let entry = OpEntry {
+                                format_version: FORMAT_VERSION,
+                                parent: log.head(),
+                                seq,
+                                channel: sub.channel,
+                                payload: sub.payload,
+                                witnesses: Vec::new(),
+                                author_sig: sub.author_sig,
+                            };
+                            let hash = entry.content_hash();
+                            if journalling {
+                                let (actor_id, op_type) = policy.subject();
+                                journal.record(journal::Event::Decision {
+                                    actor_id,
+                                    workspace,
+                                    op_type,
+                                    accepted: true,
+                                    reject_reason: None,
+                                    seq: Some(seq),
+                                    parent: entry.parent.as_ref().map(ContentHash::to_hex),
+                                    decision_latency_us: as_micros(started.elapsed()),
+                                });
+                            }
+                            policy.accepted(&entry, &hash);
+                            log.append(entry)
+                                .expect("single writer never sees a stale head");
+                            acks.push((
+                                reply,
+                                Accepted {
+                                    seq,
+                                    hash,
+                                    decision_latency: started.elapsed(),
+                                },
+                                started,
+                            ));
+                        }
+                    }
+                    // Decided, so the slot is no longer holding anyone
+                    // up. An accepted op still waits on the shared
+                    // durability barrier, but by then it is behind
+                    // nobody: the quota bounds work queued *ahead* of
+                    // another actor, and this op no longer is any.
+                    quotas.release(&actor);
                 }
                 // Only when something was actually queued behind the
                 // woken command. A lone submitter wakes the writer for
@@ -500,6 +635,7 @@ impl Sequencer {
             tx,
             poisoned,
             lag,
+            quotas,
             thread: Some(thread),
         }
     }
@@ -517,6 +653,7 @@ impl Sequencer {
         SequencerHandle {
             tx: self.tx.clone(),
             poisoned: self.poisoned.clone(),
+            quotas: self.quotas.clone(),
         }
     }
 
@@ -532,5 +669,128 @@ impl Sequencer {
             .expect("shutdown called once")
             .join()
             .expect("sequencer thread exits cleanly")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{round_robin, Queued, Submission};
+    use std::collections::VecDeque;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    /// A batch as the writer sees it: actor keys in arrival order. The
+    /// reply channels are never used, only carried.
+    fn batch(actors: &[&str]) -> (Vec<Option<Queued>>, Vec<Arc<str>>) {
+        // One interned key per distinct name, exactly as `Quotas::admit`
+        // hands out -- the scheduler compares them by pointer, so a test
+        // that allocated a fresh `Arc` per op would be testing nothing.
+        let mut interned: Vec<Arc<str>> = Vec::new();
+        let queued = actors
+            .iter()
+            .map(|name| {
+                let key = match interned.iter().find(|k| k.as_ref() == *name) {
+                    Some(k) => k.clone(),
+                    None => {
+                        let k: Arc<str> = Arc::from(*name);
+                        interned.push(k.clone());
+                        k
+                    }
+                };
+                let (reply, _rx) = mpsc::channel();
+                Some((
+                    Submission {
+                        channel: (*name).to_string(),
+                        payload: Vec::new(),
+                        author_sig: None,
+                    },
+                    key,
+                    reply,
+                ))
+            })
+            .collect();
+        (queued, interned)
+    }
+
+    /// The order `round_robin` chose, as actor names.
+    fn served(actors: &[&str]) -> Vec<String> {
+        let (queued, _interned) = batch(actors);
+        let mut buckets: Vec<(Arc<str>, VecDeque<usize>)> = Vec::new();
+        let mut turns = Vec::new();
+        round_robin(&queued, &mut buckets, &mut turns);
+        turns
+            .iter()
+            .map(|&i| queued[i].as_ref().expect("slot filled").1.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn one_actor_is_served_in_arrival_order() {
+        let order = served(&["a", "a", "a"]);
+        assert_eq!(order, ["a", "a", "a"]);
+    }
+
+    #[test]
+    fn a_burst_does_not_bury_a_single_op_behind_it() {
+        // The case the scheduler exists for: five ops from one actor
+        // already queued when one op from someone else arrives last.
+        let order = served(&["flood", "flood", "flood", "flood", "flood", "quiet"]);
+        assert_eq!(
+            order[1], "quiet",
+            "arrival order would serve the single op last; rotation \
+             serves it second: {order:?}"
+        );
+        assert_eq!(order.len(), 6, "and nothing is dropped: {order:?}");
+    }
+
+    #[test]
+    fn an_actors_own_ops_never_overtake_each_other() {
+        // Per-actor FIFO is the one thing rotation must not disturb: ops
+        // from one actor build on each other, and a CAS written against
+        // the previous one fails if they are reordered.
+        let (queued, _interned) = batch(&["a", "b", "a", "b", "a"]);
+        let mut buckets: Vec<(Arc<str>, VecDeque<usize>)> = Vec::new();
+        let mut turns = Vec::new();
+        round_robin(&queued, &mut buckets, &mut turns);
+        let positions: Vec<usize> = turns
+            .iter()
+            .copied()
+            .filter(|&i| queued[i].as_ref().expect("slot filled").1.as_ref() == "a")
+            .collect();
+        assert_eq!(
+            positions,
+            [0, 2, 4],
+            "a's ops must be served in the order a sent them: {turns:?}"
+        );
+    }
+
+    #[test]
+    fn every_op_is_served_exactly_once() {
+        let (queued, _interned) = batch(&["a", "b", "c", "a", "a", "c"]);
+        let mut buckets: Vec<(Arc<str>, VecDeque<usize>)> = Vec::new();
+        let mut turns = Vec::new();
+        round_robin(&queued, &mut buckets, &mut turns);
+        let mut seen = turns.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), queued.len(), "no duplicates and no drops");
+        assert_eq!(turns.len(), queued.len());
+    }
+
+    #[test]
+    fn an_empty_batch_terminates() {
+        // The rotation loop runs until every op has a turn. A batch that
+        // can never fill `turns` -- empty, or holding taken slots -- is
+        // the shape that would spin forever without its guard.
+        let mut buckets: Vec<(Arc<str>, VecDeque<usize>)> = Vec::new();
+        let mut turns = Vec::new();
+        round_robin(&[], &mut buckets, &mut turns);
+        assert!(turns.is_empty());
+
+        let (mut queued, _interned) = batch(&["a", "b"]);
+        queued[0] = None;
+        queued[1] = None;
+        round_robin(&queued, &mut buckets, &mut turns);
+        assert!(turns.is_empty(), "no op left to serve: {turns:?}");
     }
 }
