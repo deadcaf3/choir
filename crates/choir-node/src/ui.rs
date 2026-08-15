@@ -821,6 +821,38 @@ pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &s
 /// system setting, both without a line of JavaScript.
 pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
 
+/// The URL D39's client half is served from, in one place because the
+/// route, the tag and the tests all have to name the same string.
+pub(crate) const WEBAUTHN_JS_PATH: &str = "/static/webauthn.js";
+
+/// D39's client half: three passkey ceremonies, no library, no build
+/// step, no third party, and nothing off this origin.
+///
+/// **A file rather than a string constant, and fetched rather than
+/// inlined.** The stylesheet above argues for inlining and this argues
+/// the other way, because they answer to different headers: a page that
+/// runs no script can carry `default-src 'none'` whatever its CSS does,
+/// while a page that runs script must either license the exact bytes by
+/// digest or license a source. Digests meant recomputing a SHA-256 per
+/// script at bind through `openssl`, and a node without `openssl`
+/// silently fell back to `'unsafe-inline'` — a weaker policy than
+/// intended, arrived at by accident, visible only in a served header.
+/// One same-origin source removes the digest, the subprocess and the
+/// fallback together.
+///
+/// What D39's row scoped is intact: no framework, no build step, no
+/// third-party host, works offline. The clause that changes is "no
+/// fetched script", which becomes "nothing fetched off this origin".
+pub(crate) const WEBAUTHN_JS: &str = include_str!("webauthn.js");
+
+/// The element that pulls [`WEBAUTHN_JS`] in, on the two pages that
+/// carry a ceremony and on no other.
+///
+/// `defer` rather than placement: the ceremonies query elements by id,
+/// and deferring to after parse is what makes that true wherever the tag
+/// sits.
+pub(crate) const CEREMONY_SCRIPT: &str = "<script src=\"/static/webauthn.js\" defer></script>";
+
 
 #[cfg(test)]
 mod tests {
@@ -975,15 +1007,15 @@ mod tests {
     /// **`<script` left this list in D39 and the test got stronger, not
     /// weaker.** The old probe conflated two things: "this page fetches
     /// something" and "this page runs script". D39 reversed the second
-    /// in one narrow place, and the row scoped the reversal to inline
-    /// script with no `src`, no library and no build step. So the
+    /// in one narrow place, and the row scoped the reversal to a script
+    /// with no library, no build step and no third party. So the
     /// property that mattered is now stated directly — every other probe
-    /// stands, and a script element that carries a `src` is a fetch and
-    /// is refused by name.
+    /// stands, and any `src` on *this* page is refused by name.
     ///
-    /// This page has no script at all; the review page is the one that
-    /// does, and `browse::the_review_page_runs_only_inline_script` holds
-    /// the same line there.
+    /// This page has no script at all and fetches nothing. The two
+    /// ceremony pages fetch exactly one thing, [`WEBAUTHN_JS`], from
+    /// this origin; `the_client_half_is_one_same_origin_file` below is
+    /// the rule for that, and this stays the rule for the read surface.
     #[test]
     fn the_page_references_no_external_resource() {
         let page = render(r#"{"refs":{}}"#, 1);
@@ -998,6 +1030,59 @@ mod tests {
             !page.contains("src="),
             "a fetched resource is a fetched resource whether or not it is script"
         );
+    }
+
+    /// D39's scope, restated for the file the ceremonies moved into: one
+    /// same-origin resource, no library, no build step, no third party.
+    ///
+    /// This probes the constant that ships rather than a copy, because
+    /// the constant *is* what the node serves — `include_str!` means
+    /// there is no second version to drift from.
+    #[test]
+    fn the_client_half_is_one_same_origin_file() {
+        for probe in ["http://", "https://", "//cdn", "@import", "import ", "require("] {
+            assert!(!WEBAUTHN_JS.contains(probe), "the ceremony reaches out via {probe}");
+        }
+        // Every fetch it makes is a path, never an origin, and it says
+        // so twice: same-origin credentials and a leading slash.
+        for path in ["'/api/submit'", "'/api/prepare'", "'/api/accounts/passkey'"] {
+            assert!(WEBAUTHN_JS.contains(path), "{path} is not where this posts");
+        }
+        assert!(!WEBAUTHN_JS.contains("<script"), "a script file carrying markup");
+        // Nothing is interpolated into it, which is what lets one
+        // response serve every reader and every render.
+        assert!(!WEBAUTHN_JS.contains("{}"));
+        // The tag and the route must name the same URL; they are two
+        // constants precisely so the route can be matched without
+        // parsing markup, and two constants can disagree.
+        assert!(
+            CEREMONY_SCRIPT.contains(WEBAUTHN_JS_PATH),
+            "the tag points somewhere the node does not serve: {CEREMONY_SCRIPT}"
+        );
+        assert!(CEREMONY_SCRIPT.contains(" defer"), "the ceremonies run before the DOM exists");
+    }
+
+    /// ES256 only, because that is the one scheme the node can verify.
+    /// Offering `alg: -257` would enrol RSA keys that
+    /// `verify_webauthn_assertion` refuses at first use, which is the
+    /// failure mode enrolment-time validation exists to prevent.
+    ///
+    /// It moved here with the script it constrains. The rule did not
+    /// change; the place it is written did, and one file with three
+    /// ceremonies in it is why.
+    #[test]
+    fn the_ceremony_asks_for_the_only_algorithm_the_node_verifies() {
+        assert!(WEBAUTHN_JS.contains("alg: -7"));
+        assert!(!WEBAUTHN_JS.contains("-257"), "RSA was offered");
+        // `getPublicKey()` rather than parsing the attestation object:
+        // D39 scoped a CBOR reader out, and a hand-rolled one is the
+        // tripwire on that row.
+        assert!(WEBAUTHN_JS.contains("getPublicKey"));
+        assert!(!WEBAUTHN_JS.contains("attestationObject"));
+        // Scheme 2 is WebAuthn/ES256 on the wire. A submission built
+        // with any other number is refused by the node, so a page that
+        // sent one would offer a button that never works.
+        assert!(WEBAUTHN_JS.contains("scheme: 2"));
     }
 
     /// Shortening is a display detail, and a display detail must not be

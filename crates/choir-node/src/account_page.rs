@@ -13,9 +13,10 @@
 //! since the only account it ever shows is your own.
 //!
 //! The same scope rules as the review page apply and are asserted the
-//! same way: inline script, no `src`, no library, no build step, and the
-//! page reads correctly with scripting off — where it says so and names
-//! the endpoint, rather than presenting a button that cannot work.
+//! same way: one same-origin script, no library, no build step, nothing
+//! off this origin, and the page reads correctly with scripting off —
+//! where it says so and names the endpoint, rather than presenting a
+//! button that cannot work.
 
 use crate::accounts::Accounts;
 
@@ -117,7 +118,7 @@ pub(crate) fn render(store: Option<&Accounts>, user: &str) -> Page {
     h.push_str("\"><button id=\"enrol-go\">Add a passkey</button> ");
     h.push_str("<input id=\"enrol-label\" maxlength=\"64\" placeholder=\"this laptop\">");
     h.push_str("<p id=\"enrol-said\" class=\"note\" hidden></p></div>");
-    h.push_str(ENROL_SCRIPT);
+    h.push_str(crate::ui::CEREMONY_SCRIPT);
     h.push_str("</section>");
     Page { status: 200, html: close(h) }
 }
@@ -128,96 +129,24 @@ fn close(mut h: String) -> String {
     h
 }
 
-/// The registration ceremony. Inline, no `src`, no library, no build
-/// step — the same scope D39 approved for the verdict script, and
-/// asserted by the same kind of test.
-///
-/// **The challenge here is not verified by the node, and that is stated
-/// rather than hidden.** WebAuthn requires one, so one is sent; but
-/// nothing parses the attestation object, so nothing checks it came back.
-/// D39 scoped a CBOR reader out deliberately, and the consequence — that
-/// enrolment trusts the authenticated channel rather than proving
-/// possession — is recorded on `Accounts::enroll_passkey` and in
-/// the build log. A challenge that looked verified would be the worse
-/// version of the same limitation.
-pub(crate) const ENROL_SCRIPT: &str = r#"<script>
-(function () {
-  var box = document.getElementById('enrol');
-  var said = document.getElementById('enrol-said');
-  if (!box || !window.PublicKeyCredential || !navigator.credentials) return;
-  box.hidden = false;
-  var user = box.dataset.user;
-  var b64url = function (buf) {
-    var s = '';
-    var b = new Uint8Array(buf);
-    for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
-    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  };
-  var say = function (t) { said.hidden = false; said.textContent = t; };
-  var utf8 = function (s) { return new TextEncoder().encode(s); };
-  document.getElementById('enrol-go').addEventListener('click', function () {
-    say('Follow your browser’s prompt...');
-    navigator.credentials.create({
-      publicKey: {
-        rp: { name: 'choir' },
-        user: { id: utf8(user), name: user, displayName: user },
-        challenge: crypto.getRandomValues(new Uint8Array(32)),
-        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-        authenticatorSelection: { userVerification: 'preferred' },
-        timeout: 120000
-      }
-    }).then(function (c) {
-      var spki = c.response.getPublicKey && c.response.getPublicKey();
-      if (!spki) throw new Error('this browser did not return a public key');
-      var label = document.getElementById('enrol-label').value || 'passkey';
-      return fetch('/api/accounts/passkey', {
-        method: 'POST',
-        credentials: 'same-origin',
-        body: JSON.stringify({
-          credential_id: c.id, public_key: b64url(spki), label: label
-        })
-      });
-    }).then(function (r) {
-      if (r.ok) { location.reload(); return; }
-      return r.text().then(function (t) { say('The node refused it: ' + t); });
-    }).catch(function (e) { say('Not enrolled: ' + e.message); });
-  });
-})();
-</script>"#;
-
 #[cfg(test)]
 mod tests {
-    /// The same line the review page holds, held here: D39's reversal is
-    /// inline script and nothing else.
+    /// The ids are the whole contract between this page and
+    /// [`crate::ui::WEBAUTHN_JS`], now that the script is a shared file
+    /// rather than a constant sitting next to the markup it drives.
+    ///
+    /// Rename one on either side and enrolment stops working silently:
+    /// the button renders, nothing binds to it, and the page looks
+    /// exactly as it should. Both halves name the same four strings
+    /// here, so the rename fails a test instead of a person.
     #[test]
-    fn the_account_page_runs_only_inline_script() {
-        assert!(super::ENROL_SCRIPT.starts_with("<script>"));
-        assert!(!super::ENROL_SCRIPT.contains("src="), "the script is fetched");
-        for probe in ["http://", "https://", "//cdn", "@import", "require("] {
+    fn the_shared_script_looks_for_the_ids_this_page_emits() {
+        for id in ["enrol", "enrol-go", "enrol-label", "enrol-said"] {
             assert!(
-                !super::ENROL_SCRIPT.contains(probe),
-                "the enrolment script reaches out via {probe}"
+                crate::ui::WEBAUTHN_JS.contains(&format!("'{id}'")),
+                "the shared script never looks for {id}"
             );
         }
-        assert_eq!(super::ENROL_SCRIPT.matches("<script").count(), 1);
-        // Nothing interpolated, so the script is safe to read once rather
-        // than per render. The username travels on the element.
-        assert!(!super::ENROL_SCRIPT.contains("{}"));
-    }
-
-    /// ES256 only, because that is the one scheme the node can verify.
-    /// Offering `alg: -257` would enrol RSA keys that
-    /// `verify_webauthn_assertion` refuses at first use, which is the
-    /// failure mode enrolment-time validation exists to prevent.
-    #[test]
-    fn the_ceremony_asks_for_the_only_algorithm_the_node_verifies() {
-        assert!(super::ENROL_SCRIPT.contains("alg: -7"));
-        assert!(!super::ENROL_SCRIPT.contains("-257"), "RSA was offered");
-        // `getPublicKey()` rather than parsing the attestation object:
-        // D39 scoped a CBOR reader out, and a hand-rolled one is the
-        // tripwire on that row.
-        assert!(super::ENROL_SCRIPT.contains("getPublicKey"));
-        assert!(!super::ENROL_SCRIPT.contains("attestationObject"));
     }
 
     /// A node with no store, and a credential with no account, are

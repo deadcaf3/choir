@@ -845,13 +845,13 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
         String::from_utf8_lossy(&out.stdout).to_string()
     };
 
-    // Bob was asked, so bob is offered the control — and the script that
-    // makes it work is inline, on the page, with no `src`.
+    // Bob was asked, so bob is offered the control — and the one file
+    // that makes it work is pulled in, from this node and nowhere else.
     let bobs = page("bob:b");
     assert!(bobs.contains("Your verdict"), "the reviewer was offered nothing: {bobs}");
     assert!(bobs.contains("button class=\"verdict"), "no verdict button");
-    assert!(bobs.contains("navigator.credentials.get"), "the script is missing");
-    assert!(!bobs.contains("src="), "the review page fetches something");
+    assert!(bobs.contains("src=\"/static/webauthn.js\""), "the ceremony is missing");
+    assert_eq!(bobs.matches("src=").count(), 1, "the review page fetches something else");
     assert!(bobs.contains("<noscript>"), "no scripting-off fallback");
     assert!(bobs.contains("data-user=\"bob\""), "the channel is not the caller");
 
@@ -960,10 +960,10 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     // the scripting-off fallback beside it.
     let empty = page(&bob);
     assert!(empty.contains("None yet"), "no empty state: {empty}");
-    assert!(empty.contains("navigator.credentials.create"), "no ceremony");
+    assert!(empty.contains("src=\"/static/webauthn.js\""), "no ceremony");
     assert!(empty.contains("Add a passkey"), "no control");
     assert!(empty.contains("<noscript>"), "no scripting-off fallback");
-    assert!(!empty.contains("src="), "the account page fetches something");
+    assert_eq!(empty.matches("src=").count(), 1, "the account page fetches something else");
 
     // After enrolling, the page lists it under the name he gave it — and
     // lists it for him only.
@@ -1200,43 +1200,33 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
         200
     );
 
-    // The `Content-Security-Policy` a URL actually answers with.
-    let csp = |path: &str| {
-        let out = std::process::Command::new("curl")
-            .args(["-s", "-D", "-", "-o", "/dev/null", "-u", "alice:a", &format!("{base}{path}")])
-            .output()
-            .expect("curl runs");
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .find(|line| line.to_ascii_lowercase().starts_with("content-security-policy:"))
-            .map(|line| line[line.find(':').expect("a header colon") + 1..].trim().to_string())
-    };
+    let header_at = |path: &str, name: &str| header_of(&base, path, name);
+    let csp = |path: &str| header_at(path, "content-security-policy");
 
-    // The two script-bearing pages, and the hashes they must carry.
-    // Computed here from the served scripts would be the same mechanism
-    // the node uses; these constants come from an independent SHA-256
-    // (Python's hashlib) so the two derivations have to agree.
-    let verdict = "'sha256-7EGlzCX77Fq0Dv7W6kFGtGfAh/m7JGJL8Ko9o8yEuo0='";
-    let comment = "'sha256-p6kALqNE2wazCGuVLbD3pSO+Ul4HNDFhIidwQ3PaGak='";
-    let enrol = "'sha256-+eHBwQ+sINOtDs9/x5LGhej3ZINumisaDBHssA+AA6I='";
-
-    let review = csp("/r/agents/demo/review/r-csp").expect("the review page sends a CSP");
-    assert!(review.contains(verdict), "no verdict hash: {review}");
-    assert!(review.contains(comment), "no comment hash: {review}");
-    assert!(review.contains("connect-src 'self'"), "fetch is blocked: {review}");
-    assert!(
-        !review.contains("'unsafe-inline'; script-src") && !review.contains("script-src 'unsafe"),
-        "the review page permits any inline script: {review}"
-    );
-
-    let account = csp("/account").expect("the account page sends a CSP");
-    assert!(account.contains(enrol), "no enrolment hash: {account}");
-    assert!(account.contains("connect-src 'self'"), "fetch is blocked: {account}");
-    // Each page carries only its own script. A node-wide header would
-    // license the review scripts here and the enrolment script there,
-    // on pages that must never run them.
-    assert!(!account.contains(verdict), "the account page licenses a review script");
-    assert!(!review.contains(enrol), "the review page licenses the enrolment script");
+    // The two pages that carry a ceremony. `'self'` and not a digest:
+    // the script is one same-origin file now, so the header names a
+    // source. What must never appear is `unsafe-inline` — that is the
+    // fallback the digest path could reach on a host without `openssl`,
+    // and it licenses every inline script on the page including one an
+    // escaping miss put there.
+    for path in ["/r/agents/demo/review/r-csp", "/account"] {
+        let header = csp(path).unwrap_or_else(|| panic!("{path} sends no CSP"));
+        // The whole directive, compared whole. Probing it for a
+        // forbidden substring is how this test used to be written, and
+        // it passed against `script-src 'self' 'unsafe-inline'`: every
+        // spelling somebody thought of was absent and the one that
+        // matters was there. `style-src 'unsafe-inline'` is legitimate
+        // and next door, so "no unsafe-inline anywhere" is not the rule
+        // either — the rule is that this directive says exactly one
+        // thing.
+        assert_eq!(
+            directive(&header, "script-src").as_deref(),
+            Some("'self'"),
+            "{path} runs script it should not: {header}"
+        );
+        assert_eq!(directive(&header, "connect-src").as_deref(), Some("'self'"), "{header}");
+        assert_eq!(directive(&header, "default-src").as_deref(), Some("'none'"), "{header}");
+    }
 
     // And every other browser surface still runs nothing at all. This is
     // the property the read path has always had and the one a single
@@ -1249,6 +1239,255 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
         );
         assert!(header.contains("default-src 'none'"), "{path}: {header}");
     }
+
+    // The two policies are two hand-written constants, and the scripted
+    // one is meant to be the read surface's plus two directives. Read
+    // off the wire because that is where a divergence would show: drop
+    // `frame-ancestors` from one of them and every page still looks
+    // right, on a node that can now be framed.
+    let read = csp("/").expect("the node page sends a CSP");
+    let scripted = csp("/account").expect("the account page sends a CSP");
+    assert!(
+        scripted.starts_with(&read),
+        "the scripted policy no longer extends the read one:\n  {read}\n  {scripted}"
+    );
+
+    // `script-src 'self'` licenses a *source*, not bytes: any
+    // same-origin URL a `<script src>` can name is now a candidate. What
+    // stops one being loaded as code is `nosniff`, which makes a browser
+    // refuse anything that is not typed as JavaScript — so it has to be
+    // on everything, including git's own CGI output, which is a pusher's
+    // bytes with a content type git chose.
+    for path in [
+        "/",
+        "/r/agents/demo",
+        "/r/agents/demo/review/r-csp",
+        "/account",
+        "/api/view",
+        "/agents/demo.git/info/refs?service=git-upload-pack",
+        "/no/such/page",
+    ] {
+        assert_eq!(
+            header_at(path, "x-content-type-options").as_deref(),
+            Some("nosniff"),
+            "{path} may be sniffed into a script"
+        );
+    }
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// One CSP directive's value, whole, or `None` if the policy does not
+/// carry that directive at all.
+fn directive(header: &str, name: &str) -> Option<String> {
+    header
+        .split(';')
+        .map(str::trim)
+        .find_map(|d| d.strip_prefix(name).map(|rest| rest.trim().to_string()))
+}
+
+/// One header off the wire, by name, lowercased for comparison.
+fn header_of(base: &str, path: &str, name: &str) -> Option<String> {
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-D", "-", "-o", "/dev/null", "-u", "alice:a", &format!("{base}{path}")])
+        .output()
+        .expect("curl runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with(&format!("{name}:")))
+        .map(|line| line[line.find(':').expect("a header colon") + 1..].trim().to_string())
+}
+
+/// The text inside each `<script>` element, which is what a
+/// `script-src 'self'` header refuses to run.
+///
+/// A page that grew one would not be a style problem: the control would
+/// simply stop working in a browser, and every test here drives the node
+/// with `curl`, which enforces nothing.
+fn inline_script_bodies(html: &str) -> Vec<String> {
+    let mut bodies = Vec::new();
+    let mut rest = html;
+    while let Some(at) = rest.find("<script") {
+        rest = &rest[at..];
+        let open = match rest.find('>') {
+            Some(i) => i + 1,
+            None => break,
+        };
+        let end = rest.find("</script>").unwrap_or(rest.len());
+        if end > open {
+            bodies.push(rest[open..end].to_string());
+        }
+        rest = &rest[end.min(rest.len())..];
+        rest = rest.strip_prefix("</script>").unwrap_or(rest);
+    }
+    bodies
+}
+
+/// Every attribute in `html` whose name starts with `on` — the other way
+/// code reaches a page, and one `script-src` says nothing about.
+fn handler_attributes(html: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for chunk in html.split('<').skip(1) {
+        for word in chunk.split('>').next().unwrap_or("").split_whitespace() {
+            let name = word.split('=').next().unwrap_or("");
+            if word.contains('=')
+                && name.len() > 2
+                && name.starts_with("on")
+                && name[2..].chars().all(|c| c.is_ascii_alphabetic())
+            {
+                found.push(word.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// Phase 5's whole claim, read off the wire: the pages carry no code,
+/// the code is one file, and that file is the only JavaScript the node
+/// will ever hand a browser.
+#[test]
+fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
+    use choir_view::{OpKind, ViewOp};
+
+    let work = std::env::temp_dir().join("choir-node-passkeys-static");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).expect("key");
+
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.create_repo("agents/demo.git").expect("repo created");
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_accounts(work.join("accounts.json"), None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // A review alice is asked to judge, so the page renders both
+    // ceremonies rather than the reader's version of itself.
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-static".into(),
+        target: choir_oplog::ContentHash::blake3(b"a proposal"),
+        reviewers: vec!["alice".into()],
+        target_ref: Some("agents/demo.git:refs/heads/main".into()),
+    });
+    assert_eq!(
+        curl(&[
+            "-u", "alice:a", "-X", "POST", "-d",
+            &crate::support::submit_body(&author, "alice", &request),
+            &format!("{base}/api/submit"),
+        ]).0,
+        200
+    );
+
+    let body = |who: &str, path: &str| {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-u", who, &format!("{base}{path}")])
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // The account page only offers enrolment to an issued account, so
+    // one is issued: alice's credential comes from the operator's auth
+    // file and cannot hold a passkey.
+    let (_, invite) = curl(&[
+        "-u", "alice:a", "-X", "POST", "--data-binary",
+        r#"{"user":"bob","grants":["agents/demo read"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    let pair = invite["invite"].as_str().expect("invite").to_string();
+    let (_, redeemed) = curl(&[
+        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    let bob = format!("bob:{}", redeemed["token"].as_str().expect("token"));
+
+    let review = body("alice:a", "/r/agents/demo/review/r-static");
+    let account = body(&bob, "/account");
+    for (what, page) in [("review", &review), ("account", &account)] {
+        // The ceremony is on the page at all — otherwise the two
+        // assertions below hold for a page with no write path on it,
+        // which is the shape of a test that checks nothing.
+        assert!(page.contains("<script"), "{what}: no ceremony rendered: {page}");
+        assert_eq!(
+            inline_script_bodies(page),
+            Vec::<String>::new(),
+            "{what} carries inline script"
+        );
+        assert_eq!(
+            handler_attributes(page),
+            Vec::<String>::new(),
+            "{what} carries an event handler"
+        );
+        assert_eq!(
+            page.matches("<script").count(),
+            1,
+            "{what} pulls in more than the one file"
+        );
+        assert!(
+            page.contains("src=\"/static/webauthn.js\""),
+            "{what} fetches something else: {page}"
+        );
+    }
+
+    // A reader with nothing to sign gets no ceremony and no request for
+    // one: the read surface's guarantee, kept by construction.
+    let listing = body("alice:a", "/r/agents/demo/reviews");
+    assert!(!listing.contains("<script"), "a read page fetched script: {listing}");
+
+    // The file itself: typed as JavaScript, since under `script-src
+    // 'self'` a browser with `nosniff` runs nothing that is not.
+    assert_eq!(
+        header_of(&base, "/static/webauthn.js", "content-type").as_deref(),
+        Some("text/javascript; charset=utf-8")
+    );
+    assert_eq!(
+        header_of(&base, "/static/webauthn.js", "x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+    let script = body("alice:a", "/static/webauthn.js");
+    for ceremony in ["'verdict'", "'comment'", "'enrol'"] {
+        assert!(script.contains(ceremony), "the served file has lost {ceremony}");
+    }
+    assert!(!script.contains("<script"), "a script file carrying markup");
+
+    // Served without a credential, deliberately: a browser that is sent
+    // a 401 for a subresource and does not retry leaves the ceremony
+    // hidden and the `<noscript>` sentence suppressed, which is an
+    // absent control rather than a visible failure. There is nothing in
+    // this file to protect — it is the same constant on every node.
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-w", "\n%{http_code}", &format!("{base}/static/webauthn.js")])
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (anon, code) = text.rsplit_once('\n').expect("a status code");
+    assert_eq!(code.trim(), "200", "the ceremony needs a credential to load");
+    assert_eq!(anon, script, "an anonymous reader is served different bytes");
+
+    // And it revalidates, so a page load costs a round trip and no
+    // bytes rather than the file again.
+    let tag = header_of(&base, "/static/webauthn.js", "etag").expect("an ETag");
+    let out = std::process::Command::new("curl")
+        .args([
+            "-s", "-o", "/dev/null", "-w", "%{http_code}",
+            "-H", &format!("If-None-Match: {tag}"),
+            &format!("{base}/static/webauthn.js"),
+        ])
+        .output()
+        .expect("curl runs");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "304", "no revalidation");
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -1267,8 +1506,9 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
 ///
 /// Lives here rather than in `noscript.rs` because the helper that mints
 /// a credential does, and because the rule reads better beside the page
-/// it constrains — the same reason `ui.rs` and `browse.rs` each hold
-/// their own script rule instead of one list covering both.
+/// it constrains — the same reason each page keeps its own rule about
+/// what it renders, while `ui.rs` holds the one rule about the script
+/// they share.
 #[test]
 fn the_account_page_still_lists_your_passkeys_with_scripting_disabled() {
     let work = std::env::temp_dir().join("choir-node-passkeys-noscript");

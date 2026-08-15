@@ -1256,9 +1256,25 @@ fn review(
     }
     h.push_str("</section>");
 
-    verdict_buttons(&mut h, id, &state, user);
-    comment_box(&mut h, id, &state, user);
+    write_sections(&mut h, id, &state, user);
     Rendered { status: 200, etag: None, html: close(h) }
+}
+
+/// Both write affordances, and the one `<script>` element that serves
+/// them — emitted only if one of them rendered.
+///
+/// A reader with no verdict to cast and no right to comment gets the
+/// page they always got, script in neither sense: no element and no
+/// request. That is the read surface's guarantee, and it is a function
+/// rather than four lines inside `review` so a test can hold it without
+/// standing up a platform.
+fn write_sections(h: &mut String, id: &str, state: &serde_json::Value, user: &str) {
+    let before = h.len();
+    verdict_buttons(h, id, state, user);
+    comment_box(h, id, state, user);
+    if h.len() > before {
+        h.push_str(crate::ui::CEREMONY_SCRIPT);
+    }
 }
 
 /// The passkey write affordance (D39), and the one place this repository
@@ -1269,9 +1285,10 @@ fn review(
 /// because a browser write the node cannot forge requires the browser to
 /// *produce a signature*, and an HTML form submits values rather than
 /// computing them. The reversal buys exactly one thing and must keep
-/// buying only that: the read surface is unchanged, the script is inline,
-/// nothing is fetched, and with scripting off the section below is a
-/// sentence naming the CLI rather than a broken control.
+/// buying only that: the read surface is unchanged, the script is
+/// [`crate::ui::WEBAUTHN_JS`] and nothing else, nothing is fetched off
+/// this origin, and with scripting off the section below is a sentence
+/// naming the CLI rather than a broken control.
 ///
 /// The page does not know the op format. The node renders the two
 /// payloads and their challenges; the script's whole job is to hand a
@@ -1300,9 +1317,10 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
                 <code>choir verdict</code> — the CLI is the write path this page is an \
                 alternative to, never a replacement for.</p></noscript>");
     // The channel travels on the element rather than in the script, so
-    // the script is a constant with nothing interpolated into it — the
-    // one property that makes "is this page's script safe" a question you
-    // answer once instead of per render.
+    // the script is one file with nothing interpolated into it — the one
+    // property that makes "is this page's script safe" a question you
+    // answer once instead of per render, and the reason it can be a
+    // shared resource at all.
     h.push_str("<div id=\"verdict\" hidden data-user=\"");
     h.push_str(&esc(user));
     h.push_str("\"><p class=\"note\">Signed by your passkey on this device. Nothing is sent \
@@ -1325,7 +1343,6 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
         h.push_str("</button> ");
     }
     h.push_str("<p id=\"verdict-said\" class=\"note\" hidden></p></div>");
-    h.push_str(VERDICT_SCRIPT);
     h.push_str("</section>");
 }
 
@@ -1358,125 +1375,8 @@ fn comment_box(h: &mut String, id: &str, state: &serde_json::Value, user: &str) 
                 placeholder=\"What do you make of it?\"></textarea>");
     h.push_str("<p><button id=\"comment-go\">Sign and post</button></p>");
     h.push_str("<p id=\"comment-said\" class=\"note\" hidden></p></div>");
-    h.push_str(COMMENT_SCRIPT);
     h.push_str("</section>");
 }
-
-/// The comment ceremony: prepare, sign, submit. Inline, no `src`, no
-/// library, no build step — the same scope as the verdict script, and
-/// held by the same test.
-pub(crate) const COMMENT_SCRIPT: &str = r#"<script>
-(function () {
-  var box = document.getElementById('comment');
-  var said = document.getElementById('comment-said');
-  if (!box || !window.PublicKeyCredential || !navigator.credentials) return;
-  box.hidden = false;
-  var hex = function (buf) {
-    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
-      return ('0' + b.toString(16)).slice(-2);
-    }).join('');
-  };
-  var unb64url = function (s) {
-    var t = s.replace(/-/g, '+').replace(/_/g, '/');
-    var raw = atob(t + '==='.slice(0, (4 - t.length % 4) % 4));
-    var out = new Uint8Array(raw.length);
-    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
-    return out;
-  };
-  var say = function (t) { said.hidden = false; said.textContent = t; };
-  document.getElementById('comment-go').addEventListener('click', function () {
-    var text = document.getElementById('comment-body').value;
-    if (!text.trim()) { say('Nothing to say yet.'); return; }
-    say('Preparing...');
-    fetch('/api/prepare', {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: JSON.stringify({ kind: 'comment', id: box.dataset.review, body: text })
-    }).then(function (r) {
-      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
-      return r.json();
-    }).then(function (p) {
-      say('Waiting for your authenticator...');
-      return navigator.credentials.get({
-        publicKey: { challenge: unb64url(p.challenge), userVerification: 'preferred' }
-      }).then(function (c) {
-        return fetch('/api/submit', {
-          method: 'POST',
-          credentials: 'same-origin',
-          body: JSON.stringify({
-            channel: p.channel,
-            payload_hex: p.payload_hex,
-            key_id: c.id,
-            scheme: 2,
-            signature_hex: hex(c.response.signature),
-            authenticator_data_hex: hex(c.response.authenticatorData),
-            client_data_json_hex: hex(c.response.clientDataJSON)
-          })
-        });
-      });
-    }).then(function (r) {
-      if (r.ok) { location.reload(); return; }
-      return r.text().then(function (t) { say('The node refused it: ' + t); });
-    }).catch(function (e) { say('Not posted: ' + e.message); });
-  });
-})();
-</script>"#;
-
-/// The whole of D39's client half. Inline, no `src`, no library, no build
-/// step — the scope the decision register approved, and the reason
-/// `the_page_references_no_external_resource` narrows rather than
-/// disappears.
-pub(crate) const VERDICT_SCRIPT: &str = r#"<script>
-(function () {
-  var box = document.getElementById('verdict');
-  var said = document.getElementById('verdict-said');
-  if (!box || !window.PublicKeyCredential || !navigator.credentials) return;
-  box.hidden = false;
-  var bytes = function (hex) {
-    var out = new Uint8Array(hex.length / 2);
-    for (var i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
-    return out;
-  };
-  var hex = function (buf) {
-    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
-      return ('0' + b.toString(16)).slice(-2);
-    }).join('');
-  };
-  var unb64url = function (s) {
-    var t = s.replace(/-/g, '+').replace(/_/g, '/');
-    var raw = atob(t + '==='.slice(0, (4 - t.length % 4) % 4));
-    var out = new Uint8Array(raw.length);
-    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
-    return out;
-  };
-  var say = function (text) { said.hidden = false; said.textContent = text; };
-  Array.prototype.forEach.call(document.querySelectorAll('button.verdict'), function (b) {
-    b.addEventListener('click', function () {
-      say('Waiting for your authenticator...');
-      navigator.credentials.get({
-        publicKey: { challenge: unb64url(b.dataset.challenge), userVerification: 'preferred' }
-      }).then(function (c) {
-        return fetch('/api/submit', {
-          method: 'POST',
-          credentials: 'same-origin',
-          body: JSON.stringify({
-            channel: box.dataset.user,
-            payload_hex: b.dataset.payload,
-            key_id: c.id,
-            scheme: 2,
-            signature_hex: hex(c.response.signature),
-            authenticator_data_hex: hex(c.response.authenticatorData),
-            client_data_json_hex: hex(c.response.clientDataJSON)
-          })
-        });
-      }).then(function (r) {
-        if (r.ok) { location.reload(); return; }
-        return r.text().then(function (t) { say('The node refused it: ' + t); });
-      }).catch(function (e) { say('Not signed: ' + e.message); });
-    });
-  });
-})();
-</script>"#;
 
 /// The git object id inside a view hash, or `None` when the hash is not
 /// a git object at all.
@@ -2078,34 +1978,73 @@ mod tests {
         assert_eq!(human("-"), "-");
     }
 
-    /// D39's reversal, held to the scope the row approved: the review
-    /// page runs script, and that script is inline, carries no `src`,
-    /// pulls in no library, and needs no build step.
+    /// D39's reversal, held to the scope the row approved: the two write
+    /// sections carry markup and data, never code.
     ///
-    /// The sibling in `ui.rs` asserts the read surface still has no
-    /// script at all. Between them the rule is stated where each applies,
-    /// rather than one weakened probe covering both.
+    /// The page emits one `<script src>` for both of them, once, in
+    /// `review`. A section that grew its own element would be an inline
+    /// script under a `script-src 'self'` header — blocked by the
+    /// browser, so the control would simply stop working, and this says
+    /// so at the section that did it rather than in a served page
+    /// somebody has to fetch.
+    ///
+    /// `ui.rs` holds the rule for the script itself, the served pages are
+    /// swept for inline script and handlers by
+    /// `passkeys::the_ceremony_pages_carry_no_code_and_fetch_one_file`,
+    /// and the read surface keeps its own rule: no script at all.
     #[test]
-    fn the_review_page_runs_only_inline_script() {
-        // The constants are the whole client half, so probing them is
-        // probing what ships. Both, by name: a new one added without a
-        // line here is the way this rule rots.
-        for (what, script) in [
-            ("verdict", super::VERDICT_SCRIPT),
-            ("comment", super::COMMENT_SCRIPT),
-        ] {
-            assert!(script.starts_with("<script>"), "{what}");
-            assert!(!script.contains("src="), "{what}: the script is fetched");
-            for probe in ["http://", "https://", "//cdn", "@import", "import ", "require("] {
-                assert!(!script.contains(probe), "{what}: reaches out via {probe}");
-            }
-            // One script element each: two would mean somebody added a
-            // surface without reading this.
-            assert_eq!(script.matches("<script").count(), 1, "{what}");
-            // Nothing is interpolated, which is why "is this script safe"
-            // is answered once rather than per render.
-            assert!(!script.contains("{}"), "{what}");
+    fn the_write_sections_carry_no_code_of_their_own() {
+        let state = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": false,
+        });
+        let mut verdict = String::new();
+        super::verdict_buttons(&mut verdict, "review-1", &state, "carol");
+        let mut comment = String::new();
+        super::comment_box(&mut comment, "review-1", &state, "carol");
+        for (what, html) in [("verdict", &verdict), ("comment", &comment)] {
+            assert!(!html.is_empty(), "{what}: nothing rendered, so nothing was checked");
+            assert!(!html.contains("<script"), "{what} grew a script element: {html}");
         }
+        // And the ids each section hands the shared script, named on
+        // both sides so a rename fails a test rather than a person: the
+        // control renders, nothing binds to it, and the page looks
+        // exactly as it should.
+        for id in ["verdict", "verdict-said", "comment", "comment-go", "comment-body"] {
+            assert!(
+                crate::ui::WEBAUTHN_JS.contains(&format!("'{id}'")),
+                "the shared script never looks for {id}"
+            );
+        }
+    }
+
+    /// The page asks for the script only when it has something for the
+    /// script to do.
+    ///
+    /// The case that matters is a review nobody can act on any more,
+    /// because that is the one where both sections render nothing and
+    /// the page is a read page again. Every authenticated reader gets a
+    /// comment box on a live review, so a served page cannot show this:
+    /// archiving is admission policy the daemon spends its own key on,
+    /// and no curl-driven test can reach it. Hence here, on the four
+    /// lines that decide.
+    #[test]
+    fn a_review_nobody_can_act_on_asks_for_no_script() {
+        let settled = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": true,
+        });
+        let mut h = String::new();
+        super::write_sections(&mut h, "review-1", &settled, "carol");
+        assert!(h.is_empty(), "an archived review fetched the ceremony: {h}");
+
+        // And the live case still does, exactly once, however many
+        // sections rendered.
+        let live = serde_json::json!({
+            "reviewers": ["carol"], "verdicts": {}, "archived": false,
+        });
+        let mut h = String::new();
+        super::write_sections(&mut h, "review-1", &live, "carol");
+        assert_eq!(h.matches("<script").count(), 1, "{h}");
+        assert!(h.contains("Your verdict") && h.contains("comment-go"), "{h}");
     }
 
     /// Discussion is wider than judgement, and narrower than the page.

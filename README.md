@@ -374,7 +374,9 @@ Open the node's base URL (`/`) in a browser and it serves one read-only page: re
 
 It is deliberately not an app. The page is server-rendered from the same `/api/view` payload the API serves (so it cannot drift from the API), cached by view sequence, and revalidated with an `ETag` — a repeat visit on unchanged state returns `304` with no body, so refreshing or polling it costs the node nothing. No JavaScript, no build step, no external fetch, so it works offline and inside networks with no route to the internet.
 
-Writes are not available from the browser and are not planned without their own decision: every write still goes through the signed-operation API.
+Writes from a browser exist in exactly one place, under its own decision (D39): a reviewer can cast a verdict or leave a comment on a review page, and a person can enrol a passkey on `/account`. The browser signs the operation with a key that never leaves the device, so the node cannot forge it — the same property the CLI's actor key has, which is why this is a second signature scheme rather than a second write path. Everything else still goes through the signed-operation API.
+
+That client half is one same-origin file, `/static/webauthn.js`: no library, no build step, nothing from another host, and no page-embedded code. The two pages that use it are the only ones served with a `script-src 'self'` policy; every other page, including all of `/r/`, is served `default-src 'none'` and runs nothing at all. With scripting off, those two sections are a sentence naming the CLI rather than a control that cannot work.
 
 ### Repository browsing
 
