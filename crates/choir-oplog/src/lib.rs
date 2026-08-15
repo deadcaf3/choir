@@ -31,6 +31,8 @@ use serde::{Deserialize, Serialize};
 
 pub use choir_hash::ContentHash;
 
+pub mod repair;
+
 /// Current wire-format version. Bump on any incompatible change; additive
 /// changes keep the version (DECISIONS.md).
 pub const FORMAT_VERSION: u16 = 1;
@@ -335,6 +337,8 @@ pub struct FileLog {
     /// Bytes of unterminated tail discarded by [`FileLog::open`]; see
     /// [`FileLog::torn_tail_bytes`]. Zero for a cleanly closed log.
     torn_tail_bytes: u64,
+    /// Where [`FileLog::open`] put a torn tail's bytes, if there was one.
+    torn_tail_quarantine: Option<std::path::PathBuf>,
 }
 
 impl FileLog {
@@ -406,7 +410,24 @@ impl FileLog {
             write_pos += n as u64;
         }
         drop(reader);
+        let mut torn_tail_quarantine = None;
         if torn_tail_bytes > 0 {
+            // Copied out before the file is cut, and synced before the
+            // truncation is issued. These bytes were never acknowledged,
+            // so discarding them loses nothing anyone was promised -- but
+            // "loses nothing" is a claim about the sequencer's protocol,
+            // and the bytes are the only evidence available to anyone
+            // checking it after the fact. Keeping them costs one file.
+            //
+            // Order matters: a crash between the two leaves a spare copy
+            // of bytes still present in the log, which is harmless. The
+            // reverse order would leave a truncation with no copy, which
+            // is the deletion this exists to avoid.
+            torn_tail_quarantine = Some(repair::quarantine_tail(
+                path,
+                &line,
+                write_pos,
+            )?);
             // Cut it off before the writer can append behind it. `sync_all`
             // rather than `sync_data` because it is the file's *length*
             // that has to survive here.
@@ -427,6 +448,7 @@ impl FileLog {
             pending: std::collections::VecDeque::new(),
             head,
             torn_tail_bytes,
+            torn_tail_quarantine,
         })
     }
 
@@ -439,6 +461,16 @@ impl FileLog {
     /// never reports it turns a crash into a silent one.
     pub fn torn_tail_bytes(&self) -> u64 {
         self.torn_tail_bytes
+    }
+
+    /// Where the truncated bytes were saved, if any were.
+    ///
+    /// The truncation is automatic because a node has to come back up
+    /// unattended after a power cut, but the bytes are not thrown away:
+    /// an operator asking "what was lost" gets a file to look at rather
+    /// than a number. `None` means the log ended on a record boundary.
+    pub fn torn_tail_quarantine(&self) -> Option<&std::path::Path> {
+        self.torn_tail_quarantine.as_deref()
     }
 }
 

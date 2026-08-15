@@ -444,6 +444,7 @@ commands:
   choir state <api> <channel>
   choir skill install [--into <dir>]
   choir view <api> [--limit <n>] [--offset <n>]
+  choir repair <log-file> --verify | --truncate-tail
 
 Exit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), 2 usage error.
 ```

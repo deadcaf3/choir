@@ -24,6 +24,7 @@
 //! choir triage <api>
 //! choir state <api> <channel>
 //! choir skill install [--into <dir>]
+//! choir repair <log-file> --verify | --truncate-tail
 //! ```
 //!
 //! Exit codes: 0 = the node accepted, 1 = the node rejected (the JSON
@@ -90,6 +91,108 @@ fn actor_id_from_hex(key_hex: &str) -> choir_hash::ContentHash {
         std::process::exit(2);
     };
     choir_hash::ContentHash::blake3(&bytes)
+}
+
+/// `choir repair <log-file> --verify | --truncate-tail`.
+///
+/// Run against a log **no daemon is holding**. Nothing here takes a lock,
+/// because the only safe way to repair a log is for nothing to be
+/// appending to it, and a lock would suggest otherwise.
+///
+/// Exit codes follow the binary's convention: 0 the log is usable (or was
+/// made usable), 1 it is damaged and this cannot fix it, 2 usage.
+fn repair(log_file: &str, flags: &[&str]) {
+    let path = std::path::Path::new(log_file);
+    let verify = flags.contains(&"--verify");
+    let truncate = flags.contains(&"--truncate-tail");
+    if verify == truncate {
+        // Neither, or both. Both is the interesting one: it reads like
+        // "check and then fix", which is exactly the compound action the
+        // operator is supposed to be choosing between.
+        eprintln!(
+            "choir repair <log-file> --verify | --truncate-tail\n\
+             \n\
+               --verify         walk the chain and report; changes nothing\n\
+               --truncate-tail  quarantine a partly written final record and\n\
+                               cut the log back to the last complete one\n\
+             \n\
+             Exactly one mode, and no default: which of these happens to your\n\
+             log is not a decision this tool should make for you."
+        );
+        std::process::exit(2);
+    }
+
+    let report = match choir_oplog::repair::verify(path) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("choir: cannot read {log_file}: {error:?}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("{log_file}");
+    println!("  intact records: {}", report.intact_records);
+    match &report.head {
+        Some(head) => println!("  head:           {}", head.to_hex()),
+        None => println!("  head:           (empty log)"),
+    }
+    if report.torn_tail_bytes > 0 {
+        println!(
+            "  torn tail:      {} bytes, never acknowledged to any client",
+            report.torn_tail_bytes
+        );
+    }
+
+    if let Some(fault) = &report.fault {
+        // Mid-log damage. Say what and where, then say the only thing
+        // that actually helps -- and do not offer to truncate, because
+        // truncating past this point would drop ops that were
+        // acknowledged to somebody.
+        println!("  FAULT:          {fault}");
+        eprintln!(
+            "\nThis is damage to a record that was written whole, not an interrupted\n\
+             write, so cutting the end of the file cannot repair it: every record\n\
+             after position {} was acknowledged to a client.\n\
+             \n\
+             Restore from backup:\n\
+               1. stop the node (it will refuse to start on this log anyway)\n\
+               2. keep this file -- do not delete it; it is the only copy of\n\
+                  whatever is still readable\n\
+               3. restore the log from the most recent backup\n\
+               4. verify the restored copy with `choir repair <log> --verify`\n\
+                  before starting the node on it",
+            fault.position()
+        );
+        std::process::exit(1);
+    }
+
+    if verify {
+        if report.torn_tail_bytes > 0 {
+            println!(
+                "\nUsable. The torn tail is repairable: re-run with --truncate-tail,\n\
+                 or simply start the node, which repairs it on open."
+            );
+        } else {
+            println!("\nIntact.");
+        }
+        return;
+    }
+
+    match choir_oplog::repair::truncate_tail(path) {
+        Ok(None) => println!("\nNothing to repair; the log already ends on a record boundary."),
+        Ok(Some(repaired)) => println!(
+            "\nRepaired.\n  quarantined:    {} ({} bytes)\n  log length:     {}\n\n\
+             The removed bytes are in that file, not deleted. Verify before\n\
+             starting the node: choir repair {log_file} --verify",
+            repaired.quarantine.display(),
+            repaired.bytes,
+            repaired.length
+        ),
+        Err(error) => {
+            eprintln!("choir: repair refused: {error:?}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Loads the 32-byte secret key file, creating it (0600) if absent.
@@ -855,6 +958,12 @@ fn main() {
                 None => println!("{hex}"),
             }
         }
+        // The mode is required, never defaulted. A repair tool that
+        // picks its own action is the one thing this must not be: the
+        // difference between "tell me what is wrong" and "change my log"
+        // is the operator's to make, and a default would make it by
+        // habit.
+        ["repair", log_file, rest @ ..] => repair(log_file, rest),
         ["workspace", api, repo, name, rest @ ..] => {
             let body = workspace_body(repo, name, rest);
             let (status, resp) = http(api, auth, "choir_workspace", body);

@@ -424,6 +424,16 @@ pub const COMMANDS: &[Command] = &[
         summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest",
         agent_facing: true,
     },
+    Command {
+        name: "repair",
+        args: "<log-file> --verify | --truncate-tail",
+        summary: "inspect a stopped node's op log, or repair a tail that was still being \
+                  written; `--verify` walks the hash chain and changes nothing, \
+                  `--truncate-tail` quarantines the partial record to a sidecar before \
+                  cutting, and damage anywhere but the tail is refused rather than \
+                  patched over",
+        agent_facing: false,
+    },
 ];
 
 /// Every endpoint the node serves, in the order the README lists them.
