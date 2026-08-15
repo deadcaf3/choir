@@ -29,6 +29,7 @@ mod git_partial_push;
 mod git_sequenced;
 mod git_signed;
 mod graft_attack;
+mod handles;
 mod hooks;
 mod journal;
 mod identity_pinning;

@@ -130,6 +130,22 @@ struct Account {
     /// rather than in a table beside it, so revocation — which deletes
     /// the account — cannot forget to forget them.
     passkeys: Vec<Passkey>,
+    /// What to call this account's holder in anything a person reads
+    /// (D46). `None` on an account whose *name* is already the human
+    /// name — every account issued before D46, and any issued since with
+    /// an explicit `user`.
+    ///
+    /// This is the deletable half of an identity and the only half. The
+    /// account's key in [`State::accounts`] is what
+    /// [`crate::quota::channel_for`] turns into a channel, which
+    /// `choir_oplog::signing_hash` covers, which the log keeps forever —
+    /// so a name used as the key can never be withdrawn, while a name
+    /// held here is one row to drop.
+    ///
+    /// Nothing authorizes against it and nothing may start: the moment a
+    /// display name decides anything, deleting it changes what the node
+    /// permits, and it stops being safe to delete.
+    display_name: Option<String>,
     /// Unix seconds at redemption.
     created_at: u64,
 }
@@ -161,8 +177,15 @@ struct Passkey {
 struct Invite {
     /// BLAKE3 of the secret half.
     secret_hash: String,
-    /// Account this invite creates when redeemed.
+    /// Account this invite creates when redeemed. Already the minted
+    /// handle when the issuer sent a `display_name` (D46) — the handle
+    /// is decided at issue rather than at redemption, so the invite and
+    /// the account it becomes name the same principal.
     user: String,
+    /// Readable name the redeemed account carries (D46), when the issuer
+    /// gave one. Travels on the invite because the person redeeming it
+    /// does not choose it — the issuer did.
+    display_name: Option<String>,
     /// Grants that account will be issued.
     grants: Vec<String>,
     /// Unix seconds after which it stops working.
@@ -350,9 +373,43 @@ impl Accounts {
     /// that is lost is reissued rather than recovered.
     #[must_use]
     pub fn invite(&self, issuer: &str, body: &serde_json::Value) -> (u16, String) {
-        let Some(user) = body.get("user").and_then(serde_json::Value::as_str) else {
-            return bad_request("`user` is required");
+        // D46: which field names the account decides whether the log
+        // will carry a person's name forever. `user` is the pre-D46
+        // spelling and still means "this exact string is the principal",
+        // so it is what an operator credential or a bot wants.
+        // `display_name` mints an opaque handle and keeps the readable
+        // name in the store, where revoking can delete it.
+        let (user, display_name) = match (
+            body.get("user").and_then(serde_json::Value::as_str),
+            body.get("display_name").and_then(serde_json::Value::as_str),
+        ) {
+            (Some(_), Some(_)) => {
+                return bad_request(
+                    "send `user` or `display_name`, not both: they are two different \
+                     decisions about what the log records forever",
+                )
+            }
+            (Some(user), None) => (user.to_string(), None),
+            (None, Some(name)) => {
+                if let Err(e) = validate_display_name(name) {
+                    return bad_request(&e);
+                }
+                let state = self.state.read().expect("accounts read lock");
+                let taken = |candidate: &str| {
+                    state.accounts.contains_key(candidate)
+                        || state.retired.contains(candidate)
+                        || self.reserved.contains(candidate)
+                };
+                let Some(handle) = mint_handle(&taken) else {
+                    drop(state);
+                    return server_error("could not mint a free account handle");
+                };
+                drop(state);
+                (handle, Some(name.to_string()))
+            }
+            (None, None) => return bad_request("`user` or `display_name` is required"),
         };
+        let user = user.as_str();
         if let Err(e) = validate_username(user) {
             return bad_request(&e);
         }
@@ -423,6 +480,7 @@ impl Accounts {
             Invite {
                 secret_hash: hash(&secret),
                 user: user.to_string(),
+                display_name: display_name.clone(),
                 grants: grants.clone(),
                 expires_at,
                 issued_by: issuer.to_string(),
@@ -437,7 +495,14 @@ impl Accounts {
             200,
             serde_json::json!({
                 "format_version": FORMAT_VERSION,
+                // The principal, which is the minted handle when the
+                // issuer sent a `display_name` (D46). Returned because
+                // this is the only moment the issuer learns it, and they
+                // need it to write an ACL line — the store is the only
+                // other place the pairing exists, and deleting the
+                // account is meant to destroy it.
                 "user": user,
+                "display_name": display_name,
                 "invite_id": id,
                 // The two halves as one basic-auth pair, because that is
                 // how it is used: `curl -u <invite>` and nothing else.
@@ -503,6 +568,7 @@ impl Accounts {
             invite.user.clone(),
             Account {
                 token_hash: hash(&token),
+                display_name: invite.display_name.clone(),
                 grants: invite.grants.clone(),
                 ssh_keys: ssh_key.into_iter().collect(),
                 // Enrolment is a later, separately authenticated act:
@@ -916,6 +982,31 @@ pub fn validate_grant(user: &str, grant: &str) -> Result<String, String> {
     Ok(format!("{target} {level}"))
 }
 
+/// Checks a readable display name (D46).
+///
+/// Looser than [`validate_username`] on purpose: this string is never a
+/// principal, never a path segment, never an ACL subject and never a
+/// channel, so the reasons a username is restricted do not apply to it.
+/// What it must not do is break the files and pages that render it, so
+/// control characters and newlines are refused and the length is capped.
+///
+/// # Errors
+///
+/// Returns a message when it is empty, too long, or carries a control
+/// character.
+pub fn validate_display_name(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_LABEL_CHARS {
+        return Err(format!(
+            "a display name must be 1 to {MAX_LABEL_CHARS} characters"
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("a display name must not contain control characters".to_string());
+    }
+    Ok(())
+}
+
 /// Checks a name the node will interpolate into an `authorized_keys`
 /// forced command and key on for every authorization decision.
 ///
@@ -996,6 +1087,47 @@ fn mint_secret() -> String {
     ActorKey::generate().actor_id().to_hex()
 }
 
+/// How many hex characters an account handle carries (D46).
+///
+/// Twelve is 48 bits: long enough that [`mint_handle`]'s retry loop is
+/// theatre rather than a real code path, short enough to read in an ACL
+/// line and a review page. The value is not load-bearing — the
+/// collision check is — so it can be raised later without a migration.
+const HANDLE_CHARS: usize = 12;
+
+/// A fresh account handle: opaque, and from the same OS-random source
+/// every other secret here comes from (D46).
+///
+/// **Deliberately derived from nothing.** A handle computed from the
+/// person — a hash of their name or email — would be stable, which
+/// sounds like a feature and is the whole vulnerability: anyone holding
+/// a guess at the input can confirm it against the log forever, and the
+/// log is the thing we cannot take back. Random costs a collision check
+/// and buys the property.
+///
+/// `taken` must answer for live accounts, retired handles **and**
+/// operator credentials from the auth file. Returns `None` if it cannot
+/// find a free handle, which the caller must treat as a refusal rather
+/// than fall back to a name.
+fn mint_handle(taken: &dyn Fn(&str) -> bool) -> Option<String> {
+    for _ in 0..8 {
+        let minted = mint_secret();
+        // `mint_secret` returns a self-describing hash, `<codec>-<hex>`
+        // (invariant 2). The codec byte is the same on every one of
+        // them, so it carries no entropy and only costs width here.
+        let handle: String = minted
+            .rsplit('-')
+            .next()?
+            .chars()
+            .take(HANDLE_CHARS)
+            .collect();
+        if handle.len() == HANDLE_CHARS && !taken(&handle) {
+            return Some(handle);
+        }
+    }
+    None
+}
+
 /// BLAKE3 of a secret, hex, with its codec byte — the same envelope
 /// every other hash on this node carries (invariant 2).
 fn hash(secret: &str) -> String {
@@ -1046,7 +1178,7 @@ fn render_state(state: &State) -> String {
         .accounts
         .iter()
         .map(|(user, account)| {
-            serde_json::json!({
+            let mut record = serde_json::json!({
                 "user": user,
                 "token_hash": account.token_hash,
                 "grants": account.grants,
@@ -1058,14 +1190,27 @@ fn render_state(state: &State) -> String {
                     "created_at": k.created_at,
                 })).collect::<Vec<_>>(),
                 "created_at": account.created_at,
-            })
+            });
+            // Emitted only when set, so an account issued before D46
+            // renders exactly the record it always did. The store is a
+            // node-owned file rather than hashed bytes, so this is
+            // tidiness rather than an invariant -- but a `null` on every
+            // legacy row is noise an operator has to learn to ignore,
+            // and things operators learn to ignore stop being read.
+            if let Some(name) = account.display_name.as_deref() {
+                record
+                    .as_object_mut()
+                    .expect("account record is an object")
+                    .insert("display_name".into(), serde_json::json!(name));
+            }
+            record
         })
         .collect();
     let invites: Vec<serde_json::Value> = state
         .invites
         .iter()
         .map(|(id, invite)| {
-            serde_json::json!({
+            let mut record = serde_json::json!({
                 "invite_id": id,
                 "secret_hash": invite.secret_hash,
                 "user": invite.user,
@@ -1073,7 +1218,14 @@ fn render_state(state: &State) -> String {
                 "expires_at": invite.expires_at,
                 "issued_by": invite.issued_by,
                 "issued_at": invite.issued_at,
-            })
+            });
+            if let Some(name) = invite.display_name.as_deref() {
+                record
+                    .as_object_mut()
+                    .expect("invite record is an object")
+                    .insert("display_name".into(), serde_json::json!(name));
+            }
+            record
         })
         .collect();
     format!(
@@ -1136,6 +1288,14 @@ fn parse_state(text: &str) -> Result<State, String> {
             user.to_string(),
             Account {
                 token_hash: token_hash.to_string(),
+                // Absent on every account issued before D46, and that
+                // decodes as `None` rather than as the username: the
+                // point of the field is that it can be deleted, and a
+                // value invented at load could not be.
+                display_name: entry
+                    .get("display_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
                 grants: strings(entry.get("grants")),
                 ssh_keys: strings(entry.get("ssh_keys")),
                 passkeys: parse_passkeys(entry.get("passkeys")),
@@ -1164,6 +1324,10 @@ fn parse_state(text: &str) -> Result<State, String> {
             Invite {
                 secret_hash: secret_hash.to_string(),
                 user: user.to_string(),
+                display_name: entry
+                    .get("display_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
                 grants: strings(entry.get("grants")),
                 expires_at: entry
                     .get("expires_at")
