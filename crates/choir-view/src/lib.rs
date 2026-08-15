@@ -280,6 +280,117 @@ impl ArchiveAuthorization {
     }
 }
 
+/// Why a [`OpKind::Submit`] was allowed to land (D43).
+///
+/// The gate that admits a landing runs at apply time inside the node's
+/// submission policy, so without this the log records *that* a ref moved
+/// and never *why*. A later additive field cannot repair that: entries
+/// written before it stay blank, and that window is permanently
+/// unauditable. So it ships with the first `Submit` ever accepted.
+///
+/// The record is **checked, not trusted**. Everything here except the
+/// ACL's own grants is derivable from the fold, and [`View::validate`]
+/// rederives it and refuses a mismatch — the [`OpKind::RecordRefSnapshot`]
+/// discipline, for the same reason: a claim every replayer verifies is
+/// worth more than one only the admitting node could have checked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Authorization {
+    /// Wire-format version; see [`FORMAT_VERSION`].
+    pub format_version: u16,
+    /// The rule that admitted the landing.
+    pub basis: Basis,
+    /// Actor ids whose standing approvals the basis rested on, in the
+    /// review's verdict order.
+    ///
+    /// **Actor ids, never channel names.** An id is `hash(pubkey)` and is
+    /// the trust root (D9); a channel name is mutable, and an audit
+    /// record that reads differently later than it read when written is
+    /// not an audit record. Resolved through the log's own
+    /// [`OpKind::BindKey`] records by [`View::bound_actor`], so the join
+    /// is replayable — and an approval whose channel the log binds to no
+    /// key, or to more than one, cannot land through this op at all.
+    ///
+    /// **What an id here proves, exactly.** It is the key the log bound
+    /// to the approving channel *at this position*, not proof that this
+    /// key cast the verdict: the fold is handed only the op, never the
+    /// entry, so [`ReviewState::verdicts`] is keyed by channel and no
+    /// review can record a signer. That is also why freezing the id here
+    /// is worth doing — [`KeyBinding::channel`] is the one field a later
+    /// re-binding may change, so the answer is only stable once written
+    /// down.
+    ///
+    /// **Empty is a distinct value from absent.** A basis that requires
+    /// no approvals records `[]`, and a reader can tell that from a log
+    /// predating the field, because such a log holds no `Submit`.
+    pub approvers: Vec<ContentHash>,
+}
+
+impl Authorization {
+    /// Creates an authorization at the current wire-format version.
+    #[must_use]
+    pub fn new(basis: Basis, approvers: Vec<ContentHash>) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            basis,
+            approvers,
+        }
+    }
+}
+
+/// The rule that admitted a landing, as the evaluation that admitted it
+/// computed it (D43).
+///
+/// Three variants because there are three ways a protected-ref landing
+/// is currently allowed, and an approver list alone distinguishes none of
+/// them: under D42 a landing can be authorized with **zero** approvals,
+/// so an empty list would equally mean "an owner landed it" and "the
+/// policy required nobody".
+///
+/// There is deliberately **no variant for an ungated ref.** A `Submit`
+/// whose ref is unprotected, or whose node is not running the review
+/// gate, is refused rather than recorded — see [`OpKind::Submit`]. The
+/// record therefore means exactly one thing, and cannot be used to dress
+/// an unexamined ref move as an authorized one.
+///
+/// Where a variant names a principal it names it in the namespace the
+/// rule actually read. The ownership rule reads the ACL's subject
+/// column, which holds usernames and has no actor id to offer, so
+/// `owner` is a username. Recording the rule's real input beats
+/// recording a prettier identity the rule never saw.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Basis {
+    /// `owner` holds `own` on the repository and performed the landing
+    /// themselves (D42). Performing the landing is assent, which is why
+    /// no approval is recorded.
+    OwnerLanded {
+        /// The ACL subject the node resolved the acting identity to.
+        owner: String,
+    },
+    /// `owner` holds `own` on the repository and approved a review
+    /// naming this exact `(ref, commit)` pair (D42).
+    OwnerApproved {
+        /// The approving owner's reviewer channel, which is also its ACL
+        /// subject. The fold checks it against the review's standing
+        /// approvals; it cannot check the grant, which lives in a file.
+        owner: String,
+    },
+    /// No owner is granted on the repository, so the weight rule applied
+    /// and was met.
+    ApprovalWeight {
+        /// The threshold in force when the landing was admitted.
+        ///
+        /// This is the part of the "the rule itself is not pinned"
+        /// residual that could be closed cheaply: for this basis an
+        /// auditor no longer has to reconstruct the threshold from
+        /// operator-side config history. The ACL grants behind the two
+        /// owner variants stay unpinned, and still need a tripwire
+        /// rather than taste.
+        required: u32,
+        /// The review's approval weight at admission.
+        met: u32,
+    },
+}
+
 /// The view mutations. Head-moving ops carry `prev` (compare-and-set
 /// against the current view) so a stale writer is rejected instead of
 /// silently clobbering a concurrent advance — the same discipline the op
@@ -701,6 +812,65 @@ pub enum OpKind {
         /// enforced at admission).
         viewer: String,
     },
+    /// Land a reviewed commit on a ref **and record why it was allowed**
+    /// (D43; additive variant, wire-format unchanged).
+    ///
+    /// [`OpKind::SetRef`] can already move a ref, and the landing gate
+    /// already runs before it. What the log does not keep is the reason:
+    /// the gate is evaluated at apply time inside the node's submission
+    /// policy against files that are not in the log, so a `SetRef` on a
+    /// protected ref records that a merge happened and nothing about what
+    /// permitted it. This op is the same move with the answer attached.
+    ///
+    /// Three properties live in the fold:
+    ///
+    /// 1. **The named review must actually say what the landing claims.**
+    ///    It must exist, be live, and name exactly this `(name, commit)`
+    ///    pair. An authorization citing a review about something else is
+    ///    the failure mode worth refusing.
+    /// 2. **The authorization is rederived, never trusted.** Approvers,
+    ///    approval weight, and the approving owner's standing verdict are
+    ///    all computed from the view and compared; a mismatch is a
+    ///    rejection. The ACL grant behind an owner basis is the one part
+    ///    no replayer can check, because it lives in an operator file.
+    /// 3. **It is the sole reason the record outlives the review.**
+    ///    [`OpKind::ArchiveReview`] discards verdicts, so after archiving
+    ///    the entry bytes are the only surviving answer to "who approved
+    ///    this". Replay still verifies, because validation runs at this
+    ///    op's own position — before the archive that comes later.
+    ///
+    /// **This op narrows the gate on purpose.** The node's weight check
+    /// takes the maximum over *every* review naming `(ref, commit)`; a
+    /// `Submit` names one review and is judged on that one, so two
+    /// half-approved reviews of the same commit cannot pool weight
+    /// through this path.
+    ///
+    /// **It is refused on a ref no rule gates.** A node not running the
+    /// review gate, or a ref outside its protected set, takes an
+    /// ordinary [`OpKind::SetRef`]. Admitting a `Submit` there would
+    /// mint an authorization record for a decision nothing examined,
+    /// which is worse than no record — so [`Basis`] has no variant for
+    /// it and admission says so.
+    ///
+    /// *Who* may submit one is admission policy (L2). Unlike
+    /// [`OpKind::AssignReviewers`] this one is **author-signed**: the
+    /// basis is a node determination, but pressing merge is a human act,
+    /// and the signature is the only place the log can keep who wanted
+    /// it. Admission rederives the authorization and refuses any
+    /// mismatch, so a client that writes its own basis buys a rejection
+    /// rather than a claim.
+    Submit {
+        /// The review being landed.
+        review: String,
+        /// Ref name, in the view's namespaced form (`<repo>:<refname>`).
+        name: String,
+        /// The commit to land, which must be the review's target.
+        commit: ContentHash,
+        /// Expected current target (CAS), `None` to create.
+        prev: Option<ContentHash>,
+        /// Why this was allowed.
+        authorization: Authorization,
+    },
 }
 
 /// A signed attestation that the complete ref-state at log position
@@ -927,6 +1097,10 @@ impl ReviewState {
     }
 
     fn live_approval_weight(&self, apply_slashes: bool) -> usize {
+        self.counted_approver_channels(apply_slashes).len() * MAX_APPROVAL_WEIGHT_PER_OPERATOR
+    }
+
+    fn counted_approver_channels(&self, apply_slashes: bool) -> Vec<&str> {
         self.verdicts
             .iter()
             .enumerate()
@@ -945,8 +1119,37 @@ impl ReviewState {
                             || reviewer_operator(prior) != operator
                     })
             })
-            .count()
-            * MAX_APPROVAL_WEIGHT_PER_OPERATOR
+            .map(|(_, (reviewer, _))| reviewer.as_str())
+            .collect()
+    }
+
+    /// The reviewer channels [`ReviewState::approval_weight`] actually
+    /// counts: the first standing `Approve` from each distinct operator,
+    /// in verdict order, slashes applied.
+    ///
+    /// This exists so a [`OpKind::Submit`] can name the approvals its
+    /// weight rested on rather than "everyone who clicked approve". The
+    /// weight is *defined* as this list's length times
+    /// [`MAX_APPROVAL_WEIGHT_PER_OPERATOR`], so the number in an
+    /// authorization record and the names beside it cannot drift.
+    ///
+    /// Meaningless on an archived review, whose verdicts are gone: the
+    /// list is empty while [`ReviewState::approval_weight`] still answers
+    /// from the stored total.
+    #[must_use]
+    pub fn counted_approvers(&self) -> Vec<&str> {
+        self.counted_approver_channels(true)
+    }
+
+    /// Whether `reviewer` has an `Approve` verdict that no slash has
+    /// invalidated — the individual half of [`ReviewState::counted_approvers`],
+    /// used where one named approval has to be checked rather than a set.
+    #[must_use]
+    pub fn approval_stands(&self, reviewer: &str) -> bool {
+        self.verdicts
+            .get(reviewer)
+            .is_some_and(|(verdict, _)| *verdict == Verdict::Approve)
+            && !self.operator_is_slashed(reviewer)
     }
 
     fn slashed_operator_count(&self) -> usize {
@@ -1221,6 +1424,113 @@ pub struct View {
 }
 
 impl View {
+    /// Rederives a [`OpKind::Submit`]'s authorization and refuses a
+    /// mismatch (D43).
+    ///
+    /// The node's gate decides *whether* a landing is allowed, reading an
+    /// ACL and a protected-ref list that are not in the log. This checks
+    /// everything about that decision which **is** in the log: that the
+    /// cited review exists, is live, and proposes exactly this landing;
+    /// that a named approving owner really has a standing approval on it;
+    /// that a claimed approval weight is the weight this review actually
+    /// carries; and that the approver ids are the ones the log's own
+    /// bindings produce.
+    ///
+    /// So the ACL grant is the single unverifiable element, and it is
+    /// named rather than implied. Everything else is refused on
+    /// disagreement by every replayer, not just by the node that admitted
+    /// it — the [`OpKind::RecordRefSnapshot`] discipline.
+    fn validate_submit(
+        &self,
+        review: &str,
+        name: &str,
+        commit: &ContentHash,
+        authorization: &Authorization,
+    ) -> Result<(), ViewError> {
+        let state = self
+            .reviews
+            .get(review)
+            .ok_or_else(|| ViewError::Review(format!("no such review {review}")))?;
+        if matches!(state.status, ReviewStatus::Archived { .. }) {
+            // Archiving drops the verdicts, so nothing here could be
+            // rederived. Refusing keeps "the record was checked" true
+            // without exception, rather than true except when it is not.
+            return Err(ViewError::Review(format!(
+                "review {review} is archived and its verdicts are gone, so the \
+                 authorization this landing claims cannot be checked"
+            )));
+        }
+        if state.target_ref.as_deref() != Some(name) {
+            return Err(ViewError::Review(format!(
+                "review {review} proposes to land on {}, not {name}",
+                state.target_ref.as_deref().unwrap_or("no ref")
+            )));
+        }
+        if state.target.as_ref() != Some(commit) {
+            return Err(ViewError::Review(format!(
+                "review {review} names commit {}, not {}",
+                state
+                    .target
+                    .as_ref()
+                    .map_or_else(|| "none".to_string(), ContentHash::to_hex),
+                commit.to_hex()
+            )));
+        }
+        let expected: Vec<ContentHash> = match &authorization.basis {
+            Basis::OwnerLanded { owner } => {
+                if owner.is_empty() {
+                    return Err(ViewError::Review(
+                        "an owner-landed authorization must name the owner".to_string(),
+                    ));
+                }
+                Vec::new()
+            }
+            Basis::OwnerApproved { owner } => {
+                if !state.approval_stands(owner) {
+                    return Err(ViewError::Review(format!(
+                        "{owner} has no standing approval on review {review}"
+                    )));
+                }
+                vec![self.bound_actor(owner).map_err(ViewError::Review)?]
+            }
+            Basis::ApprovalWeight { required, met } => {
+                if *required == 0 {
+                    return Err(ViewError::Review(
+                        "an approval-weight authorization must state a nonzero threshold"
+                            .to_string(),
+                    ));
+                }
+                let actual = u32::try_from(state.approval_weight()).unwrap_or(u32::MAX);
+                if *met != actual {
+                    return Err(ViewError::Review(format!(
+                        "review {review} carries approval weight {actual}, not the claimed {met}"
+                    )));
+                }
+                if met < required {
+                    return Err(ViewError::Review(format!(
+                        "approval weight {met} is below the {required} this authorization claims \
+                         to satisfy"
+                    )));
+                }
+                state
+                    .counted_approvers()
+                    .into_iter()
+                    .map(|channel| self.bound_actor(channel))
+                    .collect::<Result<Vec<_>, String>>()
+                    .map_err(ViewError::Review)?
+            }
+        };
+        if authorization.approvers != expected {
+            return Err(ViewError::Review(format!(
+                "authorization on review {review} lists {} approvers where the log's own \
+                 bindings produce {}",
+                authorization.approvers.len(),
+                expected.len()
+            )));
+        }
+        Ok(())
+    }
+
     /// Whether `op` would apply cleanly, without changing anything.
     ///
     /// Every precondition in this model is a read — a CAS comparison, a
@@ -1261,6 +1571,16 @@ impl View {
             } => cas(self.workspaces.get(workspace), prev, workspace),
             OpKind::SetRef { name, prev, .. } | OpKind::DeleteRef { name, prev } => {
                 cas(self.refs.get(name), prev, name)
+            }
+            OpKind::Submit {
+                review,
+                name,
+                commit,
+                prev,
+                authorization,
+            } => {
+                cas(self.refs.get(name), prev, name)?;
+                self.validate_submit(review, name, commit, authorization)
             }
             // Removing an absent workspace is not an error: the op is a
             // statement about the end state, not about the transition.
@@ -1690,6 +2010,16 @@ impl View {
             OpKind::SetRef { name, commit, .. } => {
                 self.refs.insert(name.clone(), commit.clone());
             }
+            // The ref move is all of it. The authorization is not
+            // projected anywhere: it is a statement about one admission
+            // decision, and the entry bytes are where a statement about
+            // a past decision belongs. Copying it into the view would
+            // create a second, mutable-looking home for an immutable
+            // fact, and the review page can already tell a landed review
+            // by comparing the ref to the target.
+            OpKind::Submit { name, commit, .. } => {
+                self.refs.insert(name.clone(), commit.clone());
+            }
             OpKind::DeleteWorkspace { workspace } => {
                 self.workspaces.remove(workspace);
                 for change in self.changes.values_mut() {
@@ -1910,6 +2240,42 @@ impl View {
             at_seq: self.next_seq,
             prev_snapshot: self.latest_snapshot.as_ref().map(RefSnapshot::id),
         }
+    }
+
+    /// The actor key the log binds to reviewer channel `channel`.
+    ///
+    /// The inverse of [`KeyBinding::channel`], and the join that lets an
+    /// authorization record name approvers as actor ids when a review can
+    /// only name channels (see [`Authorization::approvers`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns a caller-facing reason when the log binds no key to
+    /// `channel`, or binds more than one. **Ambiguity is refused, not
+    /// resolved.** Two keys may legitimately share a channel, and nothing
+    /// in a review says which of them cast the verdict, so picking one
+    /// would put a specific key in a durable record on the strength of a
+    /// tiebreak. A record that says nothing is recoverable; one that says
+    /// the wrong thing confidently is not.
+    ///
+    /// Answers for a **revoked** key, like [`View::operator_of`] and for
+    /// the same reason: this is attribution, and an audit that went blind
+    /// the moment a key was revoked would go blind exactly when it
+    /// matters. Whether a revoked key's approval still *authorizes* is a
+    /// separate question, and not one this fold decides.
+    pub fn bound_actor(&self, channel: &str) -> Result<ContentHash, String> {
+        let mut matched = self
+            .bindings
+            .iter()
+            .filter(|(_, bound)| bound.channel.as_deref() == Some(channel));
+        let (key_id, _) = matched
+            .next()
+            .ok_or_else(|| format!("the log binds no key to {channel}"))?;
+        if matched.next().is_some() {
+            return Err(format!("the log binds more than one key to {channel}"));
+        }
+        ContentHash::from_hex(key_id)
+            .ok_or_else(|| format!("binding for {channel} holds an unreadable key id {key_id}"))
     }
 
     /// The operator `key` is bound to, if the log ever bound it.

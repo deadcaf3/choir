@@ -54,6 +54,7 @@ that would reverse it are not published.
 | D40 | Replay purity and conflict quarantine, promoted to contract | **One-way if broken** |
 | D41 | Push provenance as a schema field, not a channel-string convention | **One-way for readers** |
 | D42 | Repository ownership as a landing gate, granted as an ACL level | Two-way |
+| D43 | `Submit`: a landing carries the authorization basis that admitted it | **One-way for readers** |
 
 ## Reading the door column
 

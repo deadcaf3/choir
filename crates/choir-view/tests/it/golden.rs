@@ -47,7 +47,8 @@ use choir_hash::ContentHash;
 use choir_oplog::{signing_hash, OpEntry, Witness, FORMAT_VERSION as OPLOG_FORMAT_VERSION};
 use choir_store::{ChunkerParams, Manifest, FORMAT_VERSION as STORE_FORMAT_VERSION};
 use choir_view::{
-    ArchiveAuthorization, Commit, CreateAuthorization, OpKind, RefSnapshot, TreeEntry, Verdict,
+    ArchiveAuthorization, Authorization, Basis, Commit, CreateAuthorization, OpKind, RefSnapshot,
+    TreeEntry, Verdict,
     ViewOp,
     FORMAT_VERSION as VIEW_FORMAT_VERSION,
 };
@@ -352,6 +353,23 @@ fn view_op_variants_are_frozen() {
         "1e-6dbe521521bb82be5fd8b04ac8c84c86c59c4deb3d73244945f711a4bf408f1a",
     );
     assert_golden(
+        "Submit",
+        &ViewOp::new(OpKind::Submit {
+            review: "r1".into(),
+            name: "repo.git:refs/heads/main".into(),
+            commit: h(b"commit two"),
+            prev: Some(h(b"commit one")),
+            authorization: Authorization::new(
+                Basis::OwnerApproved {
+                    owner: "alice".into(),
+                },
+                vec![h(b"actor key")],
+            ),
+        }),
+        r#"{"format_version":1,"kind":{"Submit":{"review":"r1","name":"repo.git:refs/heads/main","commit":{"codec":30,"digest":[85,132,118,97,239,147,219,56,81,251,10,83,89,23,246,20,25,60,73,118,206,203,90,41,65,69,251,150,168,140,62,8]},"prev":{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]},"authorization":{"format_version":1,"basis":{"OwnerApproved":{"owner":"alice"}},"approvers":[{"codec":30,"digest":[74,226,209,106,169,109,122,128,69,150,239,183,206,147,93,53,14,89,126,246,185,152,171,32,6,11,49,108,128,53,125,237]}]}}}}"#,
+        "1e-bce9933a25f8c711e41c5738b29bcfcf2166ba703ca552c19c6aacabd3344f06",
+    );
+    assert_golden(
         "RevokeKey",
         &ViewOp::new(OpKind::RevokeKey {
             key: h(b"actor key"),
@@ -359,6 +377,52 @@ fn view_op_variants_are_frozen() {
         }),
         r#"{"format_version":1,"kind":{"RevokeKey":{"key":{"codec":30,"digest":[74,226,209,106,169,109,122,128,69,150,239,183,206,147,93,53,14,89,126,246,185,152,171,32,6,11,49,108,128,53,125,237]},"reason":"key material leaked"}}}"#,
         "1e-a5e01e6bb86011c79abd03ceb3ba823cb1e1bbe3ccd860eb613ae0b352a0b5b8",
+    );
+}
+
+/// The landing record (D43). Frozen as its own shape *and* inside the op
+/// that carries it: the authorization is the part a later auditor reads,
+/// so a field reordering that moved its bytes would move the entry hash
+/// of every merge ever admitted.
+#[test]
+fn authorization_is_frozen() {
+    assert_golden(
+        "Authorization",
+        &Authorization::new(
+            Basis::OwnerApproved {
+                owner: "alice".into(),
+            },
+            vec![h(b"actor key")],
+        ),
+        r#"{"format_version":1,"basis":{"OwnerApproved":{"owner":"alice"}},"approvers":[{"codec":30,"digest":[74,226,209,106,169,109,122,128,69,150,239,183,206,147,93,53,14,89,126,246,185,152,171,32,6,11,49,108,128,53,125,237]}]}"#,
+        "1e-126781208239d4d63635125841851ac0936fdcc0d28c15eef2a74fe188df70b5",
+    );
+    assert_golden(
+        "Authorization at approval weight",
+        &Authorization::new(
+            Basis::ApprovalWeight {
+                required: 2,
+                met: 2,
+            },
+            vec![h(b"actor key"), h(b"commit one")],
+        ),
+        r#"{"format_version":1,"basis":{"ApprovalWeight":{"required":2,"met":2}},"approvers":[{"codec":30,"digest":[74,226,209,106,169,109,122,128,69,150,239,183,206,147,93,53,14,89,126,246,185,152,171,32,6,11,49,108,128,53,125,237]},{"codec":30,"digest":[113,243,157,180,180,13,146,48,202,21,47,8,14,78,28,196,37,204,129,12,165,24,94,86,43,113,252,6,133,86,128,3]}]}"#,
+        "1e-d1efc590064f98aed8021230caa1540e178c5d29dd656e90392c43aab8ff6ccb",
+    );
+    assert_golden(
+        "Authorization with no approvals required",
+        &Authorization::new(
+            Basis::OwnerLanded {
+                owner: "alice".into(),
+            },
+            Vec::new(),
+        ),
+        // An empty approver list is *serialized*, not skipped. "Nobody
+        // was required" and "this predates the field" must never be the
+        // same bytes, which is why `approvers` carries no
+        // `skip_serializing_if`.
+        r#"{"format_version":1,"basis":{"OwnerLanded":{"owner":"alice"}},"approvers":[]}"#,
+        "1e-1277142af81e176a804755037be646c69e3e6f1ab71afd68421a626f4f171cff",
     );
 }
 

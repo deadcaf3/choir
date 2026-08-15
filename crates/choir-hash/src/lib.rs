@@ -70,6 +70,29 @@ impl ContentHash {
         Some(s)
     }
 
+    /// Parses what [`ContentHash::to_hex`] produced. `None` for anything
+    /// else, including a bare digest with no codec prefix.
+    ///
+    /// Its only caller is a lookup that reads a key id back out of a
+    /// hex-keyed map and has to put it in a persisted record. That is
+    /// also the reason it refuses an unprefixed digest rather than
+    /// guessing a codec: inventing the byte that says which hash function
+    /// this is would defeat the envelope (D6).
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let (codec, digest) = text.split_once('-')?;
+        if codec.len() != 2 || digest.is_empty() || digest.len() % 2 != 0 {
+            return None;
+        }
+        let digest: Option<Vec<u8>> = (0..digest.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(digest.get(i..i + 2)?, 16).ok())
+            .collect();
+        Some(Self {
+            codec: u8::from_str_radix(codec, 16).ok()?,
+            digest: digest?,
+        })
+    }
+
     /// Lowercase hex of the digest, prefixed with the codec byte
     /// (e.g. `1e-ab12…`); used for filesystem sharding and display.
     pub fn to_hex(&self) -> String {

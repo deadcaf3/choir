@@ -35,6 +35,7 @@ mod identity_pinning;
 mod key_binding;
 mod key_names;
 mod landing;
+mod landing_record;
 mod newcomer_config;
 mod newcomer_harm;
 mod noscript;

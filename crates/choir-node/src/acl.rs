@@ -449,9 +449,13 @@ pub(crate) fn ref_repo(name: &str) -> Option<String> {
 #[must_use]
 pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) -> Vec<Scope> {
     let repos: Vec<String> = match kind {
-        OpKind::SetRef { name, .. } | OpKind::DeleteRef { name, .. } => {
-            ref_repo(name).into_iter().collect()
-        }
+        // A landing authorizes against the repository whose ref it
+        // moves, exactly as the bare ref move does. It needs no scope of
+        // its own: the extra authority a `Submit` carries is the landing
+        // gate's, and that gate is not this grant.
+        OpKind::SetRef { name, .. }
+        | OpKind::DeleteRef { name, .. }
+        | OpKind::Submit { name, .. } => ref_repo(name).into_iter().collect(),
         OpKind::SetWorkspaceHead { workspace, .. } | OpKind::DeleteWorkspace { workspace } => {
             subject_repo(workspace).into_iter().collect()
         }

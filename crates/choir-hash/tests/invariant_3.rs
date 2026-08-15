@@ -281,8 +281,16 @@ fn the_set_of_persisted_shapes_is_frozen() {
     // bytes the node rebuilds from the decoded fields, so their golden
     // vectors are joined by a round-trip property that also pins the
     // field boundaries an encoder could otherwise let collide.
-    const REGISTERED: [&str; 7] = [
+    // Authorization registered 2026-08-15 (D43): the landing record a
+    // `Submit` carries. Its golden vectors cover all three bases and pin
+    // that an empty approver list is serialized rather than skipped —
+    // "nobody was required" and "this predates the field" must never be
+    // the same bytes. The canonicalization property covers arbitrary
+    // owner names, which are ACL subjects and so not bound by any
+    // grammar this crate controls.
+    const REGISTERED: [&str; 8] = [
         "ArchiveAuthorization",
+        "Authorization",
         "Commit",
         "CreateAuthorization",
         "Manifest",

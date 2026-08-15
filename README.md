@@ -188,6 +188,36 @@ Three things worth knowing before granting it:
 
 A repository nobody owns keeps the weight rule exactly as it was, and a node with no `--acl-file` behaves as it did before D42. The file is re-read per landing, so a grant takes effect with no restart; an unreadable or malformed file refuses the landing rather than concluding there are no owners.
 
+### Landing a review with the reason it was allowed (D43)
+
+A `SetRef` on a protected ref records that a merge happened. It cannot record *why* it was permitted: the gate runs at admission against the ACL and the protected-ref list, neither of which is in the log. `Submit` is the same ref move with the gate's own answer attached.
+
+```json
+{"Submit": {"review": "r1", "name": "demo.git:refs/heads/main",
+            "commit": {...}, "prev": {...},
+            "authorization": {"format_version": 1,
+                              "basis": {"OwnerApproved": {"owner": "myself"}},
+                              "approvers": [{...}]}}}
+```
+
+The basis is one of three, matching the three ways a landing is currently allowed: `OwnerLanded`, `OwnerApproved`, or `ApprovalWeight {required, met}`. Under D42 a landing can be authorized with **zero** approvals, so an approver list alone would not distinguish them.
+
+**The authorization is never a client's to assert.** Build a `Submit` and post it; if it does not match, the rejection's `expected` field is the gate's own record as JSON. Sign that verbatim and post again:
+
+```bash
+curl -u "$USER" -X POST https://<HOST>/api/submit -d "$FIRST_ATTEMPT" \
+  | jq -r .expected          # the authorization the gate produced
+```
+
+Two round trips, deliberately. The alternative is a second copy of the landing rule on the read path so a client could ask in advance, and a record that can disagree with the decision it describes is worth nothing.
+
+Two refusals to expect:
+
+- **`this landing cannot name its approvers`.** Approvers are recorded as actor ids, read from the log's own `BindKey` records, so an approving channel with no binding (or two) refuses the landing rather than recording it with a gap. Bind the reviewer's key and merge again.
+- **`is not gated on this node`.** A `Submit` on an unprotected ref, or on a node not running `--require-review`, is refused: a landing record for a decision nothing made reads exactly like one that was checked. Move the ref with `SetRef`.
+
+Archiving a review discards its verdicts, so after that the entry bytes are the only surviving answer to who approved a landing. Replay still verifies every one of them, because each is checked at its own position in the log.
+
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
 ### Issuing a credential without editing a file (D36)

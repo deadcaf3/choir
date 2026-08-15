@@ -33,8 +33,8 @@ use choir_sequencer::journal::Journal as _;
 use choir_sequencer::lag::LagMeter;
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
 use choir_view::{
-    reviewer_operator, ArchiveAuthorization, ChangeState, CreateAuthorization, OpKind, Provenance,
-    ReviewStatus, Verdict, View, ViewOp,
+    reviewer_operator, ArchiveAuthorization, Authorization, Basis, ChangeState,
+    CreateAuthorization, OpKind, Provenance, ReviewStatus, Verdict, View, ViewOp,
 };
 
 use crate::reject::{Code, Rejection};
@@ -2248,22 +2248,38 @@ impl ChoirPolicy {
     /// `own`, behaves exactly as every node did before D42. Ownership is
     /// opt-in per repository, and opting one repository in leaves every
     /// other one alone.
-    fn landing_is_authorized(
+    ///
+    /// **Returns the authorization rather than a bare yes** (D43). The
+    /// gate is evaluated at apply time against files that are not in the
+    /// log, so this function is the only place that knows why a landing
+    /// was allowed. A [`OpKind::Submit`] records that answer, and the
+    /// brief's constraint is that the record must come out of the
+    /// evaluation that admitted the op and not a second pass that
+    /// recomputes it — two computations can disagree, and a field that
+    /// can disagree with the decision it describes is decoration. So
+    /// there is one function, the `SetRef` path discards its value, and
+    /// the `Submit` path writes it down.
+    ///
+    /// `review` narrows the weight rule to a single named review; `None`
+    /// keeps the pre-D43 behaviour of taking the best of every review
+    /// naming this `(ref, commit)`.
+    fn authorization_for(
         &self,
         name: &str,
         commit: &ContentHash,
+        review: Option<&str>,
         sub: &Submission,
         op: &ViewOp,
         actor_id: &ContentHash,
-    ) -> Result<(), String> {
+    ) -> Result<Authorization, String> {
         let acl = self.acl_now()?;
         let repo = crate::acl::ref_repo(name);
         if let (Some(acl), Some(repo)) = (acl.as_ref(), repo.as_ref()) {
             if acl.has_owner(repo) {
-                return self.owner_assented(acl, repo, name, commit, sub, op, actor_id);
+                return self.owner_assented(acl, repo, name, commit, review, sub, op, actor_id);
             }
         }
-        let approval_weight = self.approval_weight_for(name, commit);
+        let (approval_weight, approvers) = self.weight_and_approvers(name, commit, review)?;
         if approval_weight < REQUIRED_APPROVAL_WEIGHT {
             return Err(Rejection::new(
                 Code::ReviewRequired,
@@ -2283,7 +2299,72 @@ impl ChoirPolicy {
             )
             .encode());
         }
-        Ok(())
+        Ok(Authorization::new(
+            Basis::ApprovalWeight {
+                required: u32::try_from(REQUIRED_APPROVAL_WEIGHT).unwrap_or(u32::MAX),
+                met: u32::try_from(approval_weight).unwrap_or(u32::MAX),
+            },
+            approvers,
+        ))
+    }
+
+    /// The approval weight backing a landing, and the actor ids of the
+    /// approvals it counted (D43).
+    ///
+    /// The two come from one call because they must describe the same
+    /// review: `approval_weight_for` takes the maximum over every review
+    /// naming `(ref, commit)`, so a weight and a separately-derived
+    /// approver list could easily belong to different rows.
+    ///
+    /// Approver ids are resolved only when a `Submit` asked for them
+    /// (`review` is `Some`). A plain push does not need them and must not
+    /// be refused for an unbound reviewer key, which would change the
+    /// pre-D43 push gate.
+    fn weight_and_approvers(
+        &self,
+        name: &str,
+        commit: &ContentHash,
+        review: Option<&str>,
+    ) -> Result<(usize, Vec<ContentHash>), String> {
+        let Some(review) = review else {
+            return Ok((self.approval_weight_for(name, commit), Vec::new()));
+        };
+        let view = self.view.lock().expect("view lock");
+        let Some(state) = view.reviews.get(review) else {
+            return Ok((0, Vec::new()));
+        };
+        if state.target_ref.as_deref() != Some(name) || state.target.as_ref() != Some(commit) {
+            return Ok((0, Vec::new()));
+        }
+        if !state.approved() {
+            return Ok((0, Vec::new()));
+        }
+        let approvers = state
+            .counted_approvers()
+            .into_iter()
+            .map(|channel| view.bound_actor(channel))
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(|e| Self::unbound_approver(&e))?;
+        Ok((state.approval_weight(), approvers))
+    }
+
+    /// The rejection for an approval this node cannot name an actor id
+    /// for (D43).
+    ///
+    /// A landing whose approvers cannot be identified is refused rather
+    /// than recorded with a gap. That is a liveness cost on a node with
+    /// no `BindKey` records, and it buys the property the whole record
+    /// exists for: `channel_is_owned` constrains *bound* keys only, so
+    /// an approval from an unbound channel is one nobody can be held to.
+    fn unbound_approver(reason: &str) -> String {
+        Rejection::new(
+            Code::ReviewRequired,
+            format!("this landing cannot name its approvers: {reason}"),
+            "a merge records who approved it as actor ids, which it reads from the log's own \
+             key bindings. Ask the operator to bind that reviewer's key (`choir bind-key`), \
+             then merge again",
+        )
+        .encode()
     }
 
     /// Whether an owner of `repo` assented to this landing, in either of
@@ -2295,6 +2376,12 @@ impl ChoirPolicy {
     /// lets an owner land their own work without reviewing themselves —
     /// which they could not do anyway, since the reviewer draw excludes
     /// the requester's own operator.
+    ///
+    /// Returns which of the two answers applied, so a [`OpKind::Submit`]
+    /// can record it (D43). The order is load-bearing and is the order
+    /// the two answers are checked in: an owner who both approved and
+    /// landed is recorded as having landed, because that is the assent
+    /// the gate actually rested on.
     #[allow(clippy::too_many_arguments)]
     fn owner_assented(
         &self,
@@ -2302,18 +2389,41 @@ impl ChoirPolicy {
         repo: &str,
         name: &str,
         commit: &ContentHash,
+        review: Option<&str>,
         sub: &Submission,
         op: &ViewOp,
         actor_id: &ContentHash,
-    ) -> Result<(), String> {
+    ) -> Result<Authorization, String> {
         let acting = self.acting_user(sub, op, actor_id);
         if let Some(user) = acting.as_deref() {
             if acl.allows_repo(user, repo, crate::acl::Level::Own) {
-                return Ok(());
+                return Ok(Authorization::new(
+                    Basis::OwnerLanded {
+                        owner: user.to_string(),
+                    },
+                    Vec::new(),
+                ));
             }
         }
-        if self.owner_approved(acl, repo, name, commit) {
-            return Ok(());
+        if let Some(owner) = self.owner_approved(acl, repo, name, commit, review) {
+            // Only a `Submit` needs the id, and only a `Submit` may be
+            // refused for the want of one. Resolving it on the push path
+            // too would make an unbound reviewer key break a landing that
+            // D42 admits today, which is a gate change wearing the shape
+            // of a record change.
+            let approvers = match review {
+                Some(_) => vec![self
+                    .view
+                    .lock()
+                    .expect("view lock")
+                    .bound_actor(&owner)
+                    .map_err(|e| Self::unbound_approver(&e))?],
+                None => Vec::new(),
+            };
+            return Ok(Authorization::new(
+                Basis::OwnerApproved { owner },
+                approvers,
+            ));
         }
         // A certified push fails here for a reason the generic message
         // would misdescribe: not "you are not an owner" but "the node
@@ -2356,29 +2466,126 @@ impl ChoirPolicy {
     /// A slashed approval does not count. A retroactively invalidated
     /// verdict is invalidated for an owner exactly as for anybody else,
     /// which is the whole point of `SlashApproval` existing.
+    ///
+    /// **The slash test is per operator, not per channel** — the same
+    /// predicate the weight rule applies, via
+    /// [`choir_view::ReviewState::approval_stands`]. D42 shipped this
+    /// check spelled `slashes.contains_key(reviewer)`, which let a
+    /// slashed operator's *other* channel keep authorizing while its
+    /// weight contribution was already gone. Two answers to "is this
+    /// approval still good" is one more than a gate may have.
+    ///
+    /// Returns the approving owner's channel, which a
+    /// [`OpKind::Submit`] records (D43). `review` narrows the search to
+    /// one named review; `None` searches every review naming this
+    /// `(ref, commit)`, which is the pre-D43 push behaviour.
     fn owner_approved(
         &self,
         acl: &crate::acl::Acl,
         repo: &str,
         name: &str,
         commit: &ContentHash,
-    ) -> bool {
-        self.view
-            .lock()
-            .expect("view lock")
-            .reviews
-            .values()
-            .filter(|review| {
-                review.target_ref.as_deref() == Some(name)
-                    && review.target.as_ref() == Some(commit)
+        review: Option<&str>,
+    ) -> Option<String> {
+        let view = self.view.lock().expect("view lock");
+        view.reviews
+            .iter()
+            .filter(|(id, state)| {
+                review.is_none_or(|wanted| wanted == id.as_str())
+                    && state.target_ref.as_deref() == Some(name)
+                    && state.target.as_ref() == Some(commit)
             })
-            .any(|review| {
-                review.verdicts.iter().any(|(reviewer, (verdict, _))| {
-                    *verdict == choir_view::Verdict::Approve
-                        && !review.slashes.contains_key(reviewer)
-                        && acl.allows_repo(reviewer, repo, crate::acl::Level::Own)
-                })
+            .find_map(|(_, state)| {
+                state
+                    .verdicts
+                    .keys()
+                    .find(|reviewer| {
+                        state.approval_stands(reviewer)
+                            && acl.allows_repo(reviewer, repo, crate::acl::Level::Own)
+                    })
+                    .cloned()
             })
+    }
+
+    /// Admits a [`OpKind::Submit`] only if the authorization it carries
+    /// is the one this node's own gate produces (D43).
+    ///
+    /// The op is author-signed, so `authorization` arrives as a claim.
+    /// It is never trusted and never patched: the gate runs, and the
+    /// claim must equal its result exactly. A client that writes its own
+    /// basis gets a rejection naming both sides, not a landing.
+    ///
+    /// Refused outright when no rule would examine the landing — the
+    /// operator is not running the review gate, or the ref is not
+    /// protected. `Submit`'s entire value is the record, and a record of
+    /// a decision nothing made is worse than no record: it reads, to
+    /// every later auditor, exactly like one that was checked.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_is_authorized(
+        &self,
+        gating: bool,
+        review: &str,
+        name: &str,
+        commit: &ContentHash,
+        claimed: &Authorization,
+        sub: &Submission,
+        op: &ViewOp,
+        actor_id: &ContentHash,
+    ) -> Result<(), String> {
+        if !gating || !self.ref_is_protected(name)? {
+            return Err(Rejection::new(
+                Code::ReviewRequired,
+                format!(
+                    "{name} is not gated on this node, so a landing record for it would \
+                     assert a review that nothing performed"
+                ),
+                "move the ref with an ordinary `SetRef`, or ask the operator to protect this \
+                 ref and enable `--require-review`",
+            )
+            .encode());
+        }
+        let computed = self.authorization_for(name, commit, Some(review), sub, op, actor_id)?;
+        if computed == *claimed {
+            return Ok(());
+        }
+        // `expected` carries the gate's answer as its own canonical JSON,
+        // not a summary of it. That is what makes the mismatch a usable
+        // two-step protocol rather than a dead end: a client submits,
+        // reads the authorization it should have signed, and submits
+        // again. The alternative is a second implementation of this rule
+        // on the read path so a client could ask in advance -- and a
+        // record that can disagree with the decision it describes is the
+        // one thing this field must never be.
+        Err(Rejection::new(
+            Code::ReviewRequired,
+            format!(
+                "the authorization on this submit is not the one {name}'s gate produced: \
+                 it admits this landing as {}, and the submit claims {}",
+                Self::basis_summary(&computed),
+                Self::basis_summary(claimed)
+            ),
+            "sign and resubmit with the authorization in `expected`, verbatim. It is the \
+             gate's own answer and a client cannot assert it",
+        )
+        .with_states(
+            serde_json::to_string(&computed).ok(),
+            serde_json::to_string(claimed).ok(),
+        )
+        .encode())
+    }
+
+    /// One-line rendering of an authorization, for the prose half of a
+    /// mismatch rejection. Approvers are counted rather than listed: the
+    /// hex ids would bury the part that differs.
+    fn basis_summary(authorization: &Authorization) -> String {
+        let basis = match &authorization.basis {
+            Basis::OwnerLanded { owner } => format!("landed by owner {owner}"),
+            Basis::OwnerApproved { owner } => format!("approved by owner {owner}"),
+            Basis::ApprovalWeight { required, met } => {
+                format!("approval weight {met} against a required {required}")
+            }
+        };
+        format!("{basis} with {} approver(s)", authorization.approvers.len())
     }
 
     /// Refuses a submission that has already been admitted, and one whose
@@ -2928,17 +3135,17 @@ impl SubmitPolicy for ChoirPolicy {
         // No exemption for the node's own key. Every git push arrives
         // here as a node-signed `SetRef`, so exempting the node would
         // exempt every push, which is the whole population being gated.
-        if self
+        let gating = self
             .require_review
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if gating {
             match &op.kind {
                 OpKind::SetRef { name, commit, prev } if self.ref_is_protected(name)? => {
                     // Creating a protected ref is allowed: there is no
                     // history to hijack yet, and deletion is refused
                     // below, so "delete then re-create" is not a way in.
                     if prev.is_some() {
-                        self.landing_is_authorized(name, commit, sub, &op, &actor_id)?;
+                        self.authorization_for(name, commit, None, sub, &op, &actor_id)?;
                     }
                 }
                 OpKind::DeleteRef { name, .. } if self.ref_is_protected(name)? => {
@@ -2952,6 +3159,33 @@ impl SubmitPolicy for ChoirPolicy {
                 }
                 _ => {}
             }
+        }
+        // Deliberately outside the `gating` block above, and deliberately
+        // not guarded on `prev`. A `Submit` exists to carry an
+        // authorization record; letting one through unexamined -- because
+        // the operator turned the gate off, or because the ref is not
+        // protected, or because it creates the ref rather than moving it
+        // -- would mint a signed claim that a rule admitted a landing
+        // when no rule looked at it. The claim is the asset here, so it
+        // is the thing that must never be issued unbacked.
+        if let OpKind::Submit {
+            review,
+            name,
+            commit,
+            authorization,
+            ..
+        } = &op.kind
+        {
+            self.submit_is_authorized(
+                gating,
+                review,
+                name,
+                commit,
+                authorization,
+                sub,
+                &op,
+                &actor_id,
+            )?;
         }
         // Admission is a read. Every precondition `View::apply` enforces
         // is a CAS comparison or a key lookup, so this asks the shared

@@ -20,8 +20,8 @@
 
 use choir_hash::ContentHash;
 use choir_view::{
-    ArchiveAuthorization, Commit, CreateAuthorization, OpKind, RefSnapshot, TreeEntry, Verdict,
-    ViewOp, FORMAT_VERSION,
+    ArchiveAuthorization, Authorization, Basis, Commit, CreateAuthorization, OpKind, RefSnapshot,
+    TreeEntry, Verdict, ViewOp, FORMAT_VERSION,
 };
 
 /// Fixed seeds: deterministic, but more than one draw.
@@ -596,6 +596,68 @@ fn lifecycle_authorizations_round_trip_and_stay_distinct() {
                 shifted.to_payload(),
                 bytes,
                 "{at}: a field boundary did not survive encoding"
+            );
+        }
+    }
+}
+
+/// The landing record (D43), which is hashed inside every `Submit` entry
+/// and read by every later auditor.
+///
+/// `owner` is an ACL subject, so no grammar this crate controls bounds
+/// it; the generated names carry quotes, backslashes and newlines for
+/// that reason. The three properties are the ones the record's value
+/// rests on: it round-trips byte-identically, an empty approver list is
+/// written rather than skipped, and the basis is not interchangeable with
+/// another basis naming the same principal.
+#[test]
+fn authorizations_round_trip_and_keep_their_basis_distinct() {
+    for seed in SEEDS {
+        let mut rng = Rng::new(seed);
+        for case in 0..8 {
+            let at = format!("seed {seed:#x} case {case}");
+            let owner = rng.path();
+
+            let approved = Authorization::new(
+                Basis::OwnerApproved {
+                    owner: owner.clone(),
+                },
+                vec![rng.hash()],
+            );
+            let bytes = serde_json::to_vec(&approved).expect("an authorization serializes");
+            let decoded: Authorization =
+                serde_json::from_slice(&bytes).expect("an authorization decodes");
+            assert_eq!(decoded, approved, "{at}: the record did not round-trip");
+            assert_eq!(
+                serde_json::to_vec(&decoded).expect("re-serializes"),
+                bytes,
+                "{at}: rebuilt bytes drifted from the hashed ones"
+            );
+
+            // The same owner under the other rule is a different record.
+            // These two answer different questions -- "who approved it"
+            // versus "who landed it" -- and an encoder that let them
+            // collide would make the field unable to tell them apart,
+            // which is the one thing it exists to do.
+            let landed = Authorization::new(
+                Basis::OwnerLanded {
+                    owner: owner.clone(),
+                },
+                Vec::new(),
+            );
+            assert_ne!(
+                serde_json::to_vec(&landed).expect("serializes"),
+                bytes,
+                "{at}: two bases naming one owner must not encode alike"
+            );
+
+            // Empty is written, never skipped: "nobody was required" and
+            // "this predates the field" must not be the same bytes.
+            let text = String::from_utf8(serde_json::to_vec(&landed).expect("serializes"))
+                .expect("canonical form is UTF-8");
+            assert!(
+                text.contains(r#""approvers":[]"#),
+                "{at}: an empty approver list must survive encoding: {text}"
             );
         }
     }
