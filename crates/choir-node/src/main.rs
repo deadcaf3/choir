@@ -8,7 +8,7 @@
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--newcomer-audit path --newcomer-adjudications path]
 //! [--review-adjudications path]
-//! [--hooks-file path]
+//! [--hooks-file path] [--journal path]
 //! [--request-log path [--request-log-max-bytes n]]
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--quota-push-bytes n] [--quota-workspaces n]
@@ -48,6 +48,16 @@
 //! captured signature unreplayable — on this node after the state it
 //! expected returns, and on any other node at all. Off by default because
 //! it refuses clients that predate scopes, not because unscoped is safe.
+//! `--journal` appends one JSON object per admission decision: the
+//! author, workspace, op type, whether it was accepted, the refusal
+//! when there was one, and how long the decision took. It also records
+//! queue depth, speculation-window moves with their cause, and every
+//! lost compare-and-swap. It is derived data — nothing replays it, no
+//! hash covers it, and losing it changes no decision — so the writing
+//! happens on its own thread and a record is dropped rather than
+//! allowed to stall the writer. Without the flag nothing is recorded
+//! and nothing is built, which the allocation budget enforces.
+//!
 //! `--hooks-file` (D32) subscribes operator-named URLs to refs that
 //! land: one `<repo:refname pattern> <url> <secret> [allow-private]` per
 //! line, the same trailing-`*` patterns `--protected-refs` uses,
@@ -150,6 +160,7 @@ fn main() -> std::io::Result<()> {
         "--review-adjudications",
         "--acl-file",
         "--hooks-file",
+        "--journal",
         "--ssh-handoff",
         "--request-log",
         "--request-log-max-bytes",
@@ -410,6 +421,13 @@ fn main() -> std::io::Result<()> {
         // D32. Delivery records go beside the lag log, for the same
         // reason: an attempt to notify somebody is an observation about
         // this node, not part of the ordered history anyone replays.
+        // Derived data, so it is installed like a log sink rather than
+        // like policy: nothing downstream reads it, and a node that
+        // fails to open it should say so at startup rather than
+        // silently record nothing.
+        if let Some(path) = flag_value("--journal") {
+            platform = platform.with_journal(std::path::Path::new(&path))?;
+        }
         if let Some(path) = flag_value("--hooks-file") {
             platform = platform
                 .with_hooks(path.into(), state_dir.join("hooks.jsonl"))

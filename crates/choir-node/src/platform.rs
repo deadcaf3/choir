@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 use choir_identity::{ActorKey, Registry};
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness};
+use choir_sequencer::journal;
+use choir_sequencer::journal::Journal as _;
 use choir_sequencer::lag::LagMeter;
 use choir_sequencer::{Sequencer, SequencerHandle, Submission, SubmitPolicy};
 use choir_view::{
@@ -1905,7 +1907,66 @@ fn materialize_platform_state(
 
 /// Verify author signature, then CAS against the shared view. Runs on
 /// the sequencer's writer thread; API readers share the view mutex.
+/// The op variant's name, from its own externally-tagged serialization
+/// rather than a hand-written match: a variant added later journals
+/// correctly without anyone remembering to extend a table here.
+fn op_type_name(op: &ViewOp) -> Option<String> {
+    serde_json::to_value(&op.kind)
+        .ok()
+        .and_then(|v| v.as_object().and_then(|o| o.keys().next().cloned()))
+}
+
+/// A journal slot the builder fills after the writer thread is running.
+///
+/// [`Sequencer::spawn_with_journal`] takes its journal by value at
+/// construction, but every `with_*` builder runs afterwards, so the
+/// value handed to the writer has to be a slot rather than a journal.
+/// Same shape as the hot-reloadable config beside it.
+///
+/// `on` is separate from the lock on purpose: [`journal::Journal::enabled`]
+/// is consulted once per op on the writer thread, and a node with no
+/// journal should pay one relaxed atomic load, not a mutex acquisition.
+#[derive(Clone, Default)]
+struct SharedJournal {
+    inner: Arc<Mutex<Option<Box<dyn journal::Journal>>>>,
+    on: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SharedJournal {
+    /// Installs `journal`, and switches recording on.
+    fn install(&self, journal: Box<dyn journal::Journal>) {
+        if let Ok(mut slot) = self.inner.lock() {
+            *slot = Some(journal);
+            self.on.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl journal::Journal for SharedJournal {
+    fn record(&self, event: journal::Event) {
+        if !self.enabled() {
+            return;
+        }
+        if let Ok(slot) = self.inner.lock() {
+            if let Some(journal) = slot.as_ref() {
+                journal.record(event);
+            }
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.on.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 struct ChoirPolicy {
+    /// Where this policy reports CAS failures. The sequencer cannot:
+    /// a refusal reaches it as an opaque string, so contention and
+    /// nonsense look identical from there.
+    journal: SharedJournal,
+    /// What the last `check` identified, handed to the journal through
+    /// [`SubmitPolicy::subject`] rather than derived a second time.
+    subject: (Option<String>, Option<String>),
     registry: Registry,
     view: Arc<Mutex<View>>,
     entries: Arc<Mutex<LogWindow>>,
@@ -2258,6 +2319,7 @@ impl SubmitPolicy for ChoirPolicy {
         {
             verified_actor = self.registry.verify_signing_hash(&signing, sig);
         }
+        self.subject = (None, None);
         let actor_id = verified_actor.map_err(|e| {
             // Two failures with opposite repairs, and one of them is an
             // attack signal, so they cannot share a code. A key id the
@@ -2287,6 +2349,13 @@ impl SubmitPolicy for ChoirPolicy {
             }
             .encode()
         })?;
+        // Derived here, while the signature is already verified, and
+        // only when something will read it: naming the op means
+        // serializing its kind, which is not free per op.
+        let journalling = self.journal.enabled();
+        if journalling {
+            self.subject.0 = Some(actor_id.to_hex());
+        }
         let op = ViewOp::from_payload(&sub.payload).map_err(|e| {
             Rejection::new(
                 Code::MalformedOp,
@@ -2295,6 +2364,9 @@ impl SubmitPolicy for ChoirPolicy {
             )
             .encode()
         })?;
+        if journalling {
+            self.subject.1 = op_type_name(&op);
+        }
         // Before any policy that asks what the op *does*: has this
         // signature already been spent, and was it ever meant for this
         // log at all.
@@ -2675,7 +2747,28 @@ impl SubmitPolicy for ChoirPolicy {
             .lock()
             .expect("view lock")
             .validate(&op)
-            .map_err(|e| crate::reject::from_view_error(&e).encode())
+            .map_err(|e| {
+                // A lost CAS is recorded as contention in its own right,
+                // carrying both sides. A rejection count alone cannot
+                // separate "two writers raced this ref" from "a client
+                // sent nonsense", and only the first is a fact about
+                // load.
+                if let choir_view::ViewError::StaleHead {
+                    expected, actual, ..
+                } = &e
+                {
+                    self.journal.record(journal::Event::CasFailure {
+                        workspace: sub.channel.clone(),
+                        expected: expected.as_ref().map(ContentHash::to_hex),
+                        actual: actual.as_ref().map(ContentHash::to_hex),
+                    });
+                }
+                crate::reject::from_view_error(&e).encode()
+            })
+    }
+
+    fn subject(&self) -> (Option<String>, Option<String>) {
+        self.subject.clone()
     }
 
     fn accepted(&mut self, entry: &OpEntry, hash: &ContentHash) {
@@ -2753,6 +2846,9 @@ impl ChoirPolicy {
 
 /// A running platform: the sequencer plus the shared view it maintains.
 pub struct Platform {
+    /// The slot `with_journal` fills; shared with the writer thread and
+    /// the admission policy, which both hold clones.
+    journal: SharedJournal,
     handle: SequencerHandle,
     view: Arc<Mutex<View>>,
     /// The daemon's own key: signs ops it derives from authenticated git
@@ -2988,9 +3084,12 @@ impl Platform {
         let require_scope = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hooks = Arc::new(Mutex::new(None));
         let passkeys = Arc::new(Mutex::new(None));
-        let sequencer = Sequencer::spawn_with_policy(
+        let shared_journal = SharedJournal::default();
+        let sequencer = Sequencer::spawn_with_journal(
             log,
             Box::new(ChoirPolicy {
+                journal: shared_journal.clone(),
+                subject: (None, None),
                 require_assignment: require_assignment.clone(),
                 protected_refs: protected_refs.clone(),
                 require_review: require_review.clone(),
@@ -3009,8 +3108,10 @@ impl Platform {
                 workspace_tally: workspace_tally.clone(),
                 passkeys: passkeys.clone(),
             }),
+            Box::new(shared_journal.clone()),
         );
         let platform = Self {
+            journal: shared_journal,
             handle: sequencer.handle(),
             lag: sequencer.lag(),
             lag_log: None,
@@ -4196,6 +4297,22 @@ impl Platform {
     #[must_use]
     pub fn durability_failed(&self) -> bool {
         self.handle.durability_failed()
+    }
+
+    /// Records every admission decision to `path` as JSONL.
+    ///
+    /// Derived data (see [`journal`]): the file is appended to from its
+    /// own thread, never read back, and its loss or truncation changes
+    /// no decision this node makes. Safe to rotate by moving it aside;
+    /// the daemon keeps writing to the open handle until restarted.
+    ///
+    /// # Errors
+    ///
+    /// If `path` cannot be opened for append.
+    pub fn with_journal(self, path: &std::path::Path) -> std::io::Result<Self> {
+        self.journal
+            .install(Box::new(journal::FileJournal::create(path)?));
+        Ok(self)
     }
 
     /// Appends gate breaches to `path`, one JSON object per line.

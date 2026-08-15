@@ -339,6 +339,7 @@ dependencies = [
  "choir-identity",
  "choir-oplog",
  "choir-view",
+ "serde_json",
 ]
 
 [[package]]

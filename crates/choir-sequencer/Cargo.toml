@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 choir-oplog = { path = "../choir-oplog" }
+# Journal records only. Already a workspace dependency in eight crates,
+# so this adds no transitive weight; hand-rolling JSON escaping for
+# free-text reject reasons is the bug this avoids.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

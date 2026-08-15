@@ -130,9 +130,36 @@ pub struct MergeQueue {
     queue: std::collections::VecDeque<Change>,
     memory: memory::ResolutionMemory,
     landed: std::collections::BTreeSet<String>,
+    /// Where window changes are reported. Derived data: the queue never
+    /// reads it back, and a journal that dropped every record would
+    /// change no landing decision.
+    journal: Box<dyn choir_sequencer::journal::Journal>,
 }
 
 impl MergeQueue {
+    /// Moves the speculation window and records why.
+    ///
+    /// A window that shrank is the queue's loudest signal, and a size
+    /// alone cannot say whether it shrank because a build failed or
+    /// grew because a train landed. The cause travels with the number
+    /// so the answer does not have to be inferred from timing.
+    fn resize(&mut self, to: usize, cause: &str) {
+        let from = self.window;
+        self.window = to;
+        if from != to {
+            self.journal.record(choir_sequencer::journal::Event::WindowResize {
+                from,
+                to,
+                cause: cause.to_string(),
+            });
+        }
+    }
+
+    /// Sends window changes to `journal` instead of discarding them.
+    pub fn set_journal(&mut self, journal: Box<dyn choir_sequencer::journal::Journal>) {
+        self.journal = journal;
+    }
+
     /// Creates a queue over `base` content with the default window.
     pub fn new(base: &str) -> Self {
         Self::with_pipeline(base, Pipeline::default_v1())
@@ -150,6 +177,7 @@ impl MergeQueue {
             queue: std::collections::VecDeque::new(),
             memory: memory::ResolutionMemory::new(),
             landed: std::collections::BTreeSet::new(),
+            journal: Box::new(choir_sequencer::journal::NullJournal),
         }
     }
 
@@ -285,7 +313,7 @@ impl MergeQueue {
                         self.landed.insert(identity::change_identity(&change));
                         handle.submit(&change.workspace, state.into_bytes());
                         merged.push(change.id);
-                        self.window += 1;
+                        self.resize(self.window + 1, "train landed clean");
                     }
                 }
                 Some(i) => {
@@ -296,7 +324,7 @@ impl MergeQueue {
                         self.landed.insert(identity::change_identity(&change));
                         handle.submit(&change.workspace, state.into_bytes());
                         merged.push(change.id);
-                        self.window += 1;
+                        self.resize(self.window + 1, "green prefix landed");
                     }
                     let (failed, _) = train.remove(0);
                     let failed_id = failed.id;
@@ -357,7 +385,7 @@ impl MergeQueue {
                             }
                         }
                     } else {
-                        self.window = (self.window / 2).max(1);
+                        self.resize((self.window / 2).max(1), "combined build failed");
                         for (change, _) in train.into_iter().rev() {
                             self.queue.push_front(change);
                         }

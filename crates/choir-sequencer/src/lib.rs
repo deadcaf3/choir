@@ -19,6 +19,7 @@
 //! assert_eq!(log.len(), 1);
 //! ```
 
+pub mod journal;
 pub mod lag;
 
 use choir_oplog::{ContentHash, OpEntry, OpLog, Witness, FORMAT_VERSION};
@@ -62,6 +63,23 @@ pub trait SubmitPolicy: Send {
     /// would otherwise re-serialize every entry on the write path, which
     /// the allocation budget already caught once.
     fn accepted(&mut self, _entry: &OpEntry, _hash: &ContentHash) {}
+
+    /// What the last [`SubmitPolicy::check`] identified about its
+    /// submission: `(actor_id, op_type)`, for the journal.
+    ///
+    /// Called by the sequencer immediately after `check`, on the same
+    /// thread, so a policy that already derived these while checking
+    /// hands them over rather than deriving them twice. That matters:
+    /// `actor_id` comes from verifying a signature, and re-verifying
+    /// every op to describe it would double the cost of the one step
+    /// that is genuinely expensive.
+    ///
+    /// The default answers nothing, which is honest for a policy that
+    /// never looked. A journal then records the decision without an
+    /// author, and an entry with a null `actor_id` says exactly that.
+    fn subject(&self) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
 }
 
 /// The default policy: everything is admitted (localhost/dev shape).
@@ -93,6 +111,16 @@ pub struct Accepted {
 /// far under the 100 ms decision-latency gate at the measured per-op cost,
 /// not a tuned value.
 const MAX_BATCH: usize = 256;
+
+/// Microseconds, saturating.
+///
+/// The journal carries an integer rather than a float so a `jq` filter
+/// can compare and sum it without surprises. `u64` microseconds covers
+/// half a million years; a decision that outlived that has other
+/// problems.
+fn as_micros(d: Duration) -> u64 {
+    u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
+}
 
 /// One admitted op waiting on the batch's durability barrier: where to
 /// answer, what to answer with, and when it was dequeued (so the ack can
@@ -190,10 +218,7 @@ impl SequencerHandle {
     /// # Panics
     ///
     /// Panics if the sequencer thread has already shut down.
-    pub fn try_submit_many(
-        &self,
-        subs: Vec<Submission>,
-    ) -> Vec<Result<Accepted, String>> {
+    pub fn try_submit_many(&self, subs: Vec<Submission>) -> Vec<Result<Accepted, String>> {
         // A reply channel per op rather than one shared channel: replies
         // are not ordered with respect to each other, because a rejection
         // is answered immediately while an admitted op waits for the
@@ -243,7 +268,24 @@ impl Sequencer {
 
     /// Starts the writer thread over `log`; every submission passes
     /// through `policy` before it is ordered.
-    pub fn spawn_with_policy(mut log: Box<dyn OpLog>, mut policy: Box<dyn SubmitPolicy>) -> Self {
+    ///
+    /// Records nothing. Use [`Sequencer::spawn_with_journal`] to observe
+    /// decisions.
+    pub fn spawn_with_policy(log: Box<dyn OpLog>, policy: Box<dyn SubmitPolicy>) -> Self {
+        Self::spawn_with_journal(log, policy, Box::new(journal::NullJournal))
+    }
+
+    /// [`Sequencer::spawn_with_policy`], recording every decision to
+    /// `journal`.
+    ///
+    /// The journal is derived data: it is written after the decision is
+    /// made, never consulted, and its failure cannot refuse an op. See
+    /// [`journal`] for why the I/O belongs on another thread.
+    pub fn spawn_with_journal(
+        mut log: Box<dyn OpLog>,
+        mut policy: Box<dyn SubmitPolicy>,
+        journal: Box<dyn journal::Journal>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<Command>();
         let poisoned = Arc::new(AtomicBool::new(false));
         let writer_flag = poisoned.clone();
@@ -279,6 +321,11 @@ impl Sequencer {
             let mut durability_failed = false;
             while let Ok(first) = rx.recv() {
                 let mut cmd = Some(first);
+                // Depth is counted per wake-up rather than sampled on a
+                // timer: this is the writer's own view of how much was
+                // already waiting behind it, which is the number a
+                // backlog question is actually asking about.
+                let mut drained = 0usize;
                 // Admit the woken command, then drain whatever else is
                 // already queued behind it. Nothing is waited for: an idle
                 // sequencer still batches exactly one op, so a lone
@@ -296,17 +343,41 @@ impl Sequencer {
                             // refuses *before* appending rather than
                             // ordering ops it cannot persist.
                             if durability_failed {
-                                let _ = reply.send(Err(
-                                    "log is not durable: writer stopped accepting".to_string(),
-                                ));
+                                let _ =
+                                    reply
+                                        .send(Err("log is not durable: writer stopped accepting"
+                                            .to_string()));
                                 cmd = rx.try_recv().ok();
                                 continue;
                             }
+                            // Cloned only when something will read it:
+                            // `String::new()` does not allocate, the
+                            // clone does, and this is the writer's
+                            // per-op path.
+                            let journalling = journal.enabled();
+                            let workspace = if journalling {
+                                sub.channel.clone()
+                            } else {
+                                String::new()
+                            };
                             match policy.check(&sub) {
                                 // A rejection touches neither the log nor
                                 // durability, so it is answered at once
                                 // rather than made to wait for the batch.
                                 Err(reason) => {
+                                    if journalling {
+                                        let (actor_id, op_type) = policy.subject();
+                                        journal.record(journal::Event::Decision {
+                                            actor_id,
+                                            workspace,
+                                            op_type,
+                                            accepted: false,
+                                            reject_reason: Some(reason.clone()),
+                                            seq: None,
+                                            parent: None,
+                                            decision_latency_us: as_micros(started.elapsed()),
+                                        });
+                                    }
                                     let _ = reply.send(Err(reason));
                                 }
                                 Ok(()) => {
@@ -321,6 +392,19 @@ impl Sequencer {
                                         author_sig: sub.author_sig,
                                     };
                                     let hash = entry.content_hash();
+                                    if journalling {
+                                        let (actor_id, op_type) = policy.subject();
+                                        journal.record(journal::Event::Decision {
+                                            actor_id,
+                                            workspace,
+                                            op_type,
+                                            accepted: true,
+                                            reject_reason: None,
+                                            seq: Some(seq),
+                                            parent: entry.parent.as_ref().map(ContentHash::to_hex),
+                                            decision_latency_us: as_micros(started.elapsed()),
+                                        });
+                                    }
                                     policy.accepted(&entry, &hash);
                                     log.append(entry)
                                         .expect("single writer never sees a stale head");
@@ -337,10 +421,18 @@ impl Sequencer {
                             }
                         }
                     }
+                    drained += 1;
                     if acks.len() >= MAX_BATCH {
                         break;
                     }
                     cmd = rx.try_recv().ok();
+                }
+                // Only when something was actually queued behind the
+                // woken command. A lone submitter wakes the writer for
+                // itself constantly, and recording depth 1 for each
+                // would bury every interesting line under them.
+                if drained > 1 && journal.enabled() {
+                    journal.record(journal::Event::QueueDepth { depth: drained });
                 }
 
                 // The durability barrier. Submitters are told `Accepted`

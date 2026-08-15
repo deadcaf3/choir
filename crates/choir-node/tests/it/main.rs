@@ -30,6 +30,7 @@ mod git_sequenced;
 mod git_signed;
 mod graft_attack;
 mod hooks;
+mod journal;
 mod identity_pinning;
 mod key_binding;
 mod key_names;

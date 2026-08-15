@@ -107,3 +107,55 @@ fn fifty_in_flight_with_flaky_ci_keeps_main_green() {
     // Window halved on each of the 6 failures but recovered via greens.
     assert!(report.window_trace.iter().all(|w| *w >= 1));
 }
+
+/// The window trace says the window moved; the journal says why. A size
+/// alone cannot separate "a build failed" from "a train landed", and
+/// that distinction is the whole reason the number is worth watching.
+#[test]
+fn every_window_move_is_journalled_with_its_cause() {
+    use choir_queue::MergeQueue;
+    use choir_sequencer::journal::{Journal, MemJournal};
+    use choir_sequencer::Sequencer;
+    use choir_oplog::MemLog;
+
+    struct Handle(std::sync::Arc<MemJournal>);
+    impl Journal for Handle {
+        fn record(&self, event: choir_sequencer::journal::Event) {
+            self.0.record(event);
+        }
+    }
+
+    let recorded = std::sync::Arc::new(MemJournal::new());
+    let mut queue = MergeQueue::new(&base());
+    queue.set_journal(Box::new(Handle(recorded.clone())));
+    for c in (0..10).map(disjoint_change) {
+        queue.submit(c);
+    }
+    let mut ci = |c: &Change, _: &str| c.id != 4;
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let report = queue.drain(&mut ci, &sequencer);
+    assert_eq!(report.rejected, vec![(4, Rejection::CiFailure)]);
+
+    let resizes: Vec<serde_json::Value> = recorded
+        .lines()
+        .iter()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid JSON"))
+        .filter(|v| v["kind"] == "window_resize")
+        .collect();
+    assert!(!resizes.is_empty(), "the window moved but nothing recorded it");
+
+    // The shrink must be attributable, not merely visible.
+    let shrink = resizes
+        .iter()
+        .find(|v| v["to"].as_u64() < v["from"].as_u64())
+        .expect("the failure halved the window");
+    assert_eq!(shrink["cause"], "combined build failed");
+
+    // And growth must not be reported with the failure's cause.
+    for grew in resizes.iter().filter(|v| v["to"].as_u64() > v["from"].as_u64()) {
+        assert_ne!(
+            grew["cause"], "combined build failed",
+            "a growing window was attributed to a failure"
+        );
+    }
+}
