@@ -3780,6 +3780,43 @@ impl Platform {
         *self.passkeys.lock().expect("passkey store lock") = Some(store);
     }
 
+    /// Writes the credential's public key into a passkey submission, so
+    /// the entry it becomes can be checked by someone holding nothing
+    /// but the log (D45).
+    ///
+    /// The node supplies this rather than the client because the client
+    /// *cannot*: `getPublicKey()` exists on a WebAuthn registration
+    /// response only, so a browser holding an assertion has the
+    /// credential id and no key. The value written is the one the
+    /// admission check is about to verify against, read from the same
+    /// store by the same `(channel, credential id)` pair.
+    ///
+    /// **The request cannot influence this field.** `decode_submission`
+    /// never reads a `credential_key` from the body, so there is no
+    /// mismatch to refuse and no path by which a caller asserts key
+    /// material for a credential it does not hold. "Refuse a bad value"
+    /// and "make a bad value unrepresentable" answer the same question;
+    /// the second needs no test to stay true.
+    ///
+    /// **Absent signature, absent store and unknown credential are all
+    /// left alone.** Each is a reason [`ChoirPolicy::verify_passkey`]
+    /// refuses this submission a moment later, with a code and a repair.
+    /// Refusing here as well would be a second refusal for one cause,
+    /// raised from the shape of the request instead of by the check that
+    /// owns the question.
+    fn stamp_credential_key(&self, sub: &mut DecodedSubmission) {
+        let Some(sig) = sub.author_sig.as_mut() else {
+            return;
+        };
+        if sig.scheme_id() != choir_oplog::scheme::WEBAUTHN_ES256 {
+            return;
+        }
+        let store = self.passkeys.lock().expect("passkey store lock").clone();
+        if let Some(spki) = store.and_then(|s| s.passkey_spki(&sub.channel, &sig.key_id)) {
+            sig.credential_key = Some(spki);
+        }
+    }
+
     /// A protected ref only moves to a commit that an **approved** review
     /// with weight from two distinct operators already named as its
     /// destination, and can never be deleted.
@@ -5243,7 +5280,11 @@ impl Platform {
                 // 500 durability barriers instead of ceil(500/MAX_BATCH).
                 let mut decoded = Vec::with_capacity(ops.len());
                 for op in ops {
-                    decoded.push(decode_submission(op));
+                    let mut one = decode_submission(op);
+                    if let Ok(sub) = one.as_mut() {
+                        self.stamp_credential_key(sub);
+                    }
+                    decoded.push(one);
                 }
                 let started_at_unix_ms: Vec<u64> =
                     decoded.iter().map(|_| unix_ms()).collect();
@@ -5451,10 +5492,11 @@ impl Platform {
                         )
                         .body()),
         };
-        let sub = match decode_submission(&req) {
+        let mut sub = match decode_submission(&req) {
             Ok(sub) => sub,
             Err(reason) => return (400, Rejection::decode(&reason).body()),
         };
+        self.stamp_credential_key(&mut sub);
         let started_at_unix_ms = unix_ms();
         match self.handle.try_submit(
             &sub.channel,
@@ -5964,13 +6006,16 @@ fn entry_json(e: &OpEntry) -> serde_json::Value {
         // a client can only take the node's word for authorship.
         "author_sig_hex": e.author_sig.as_ref().map(|w| hex_encode(&w.signature)),
     });
-    // D39 put three more fields inside `Witness`, and therefore inside
-    // the hashed form. Omitting them here made a passkey-signed entry
-    // unreproducible: a client rebuilding from the served fields
-    // computes a different hash and cannot tell a legitimate entry from
-    // a lying node. That is the exact failure the witnesses comment
-    // above warns about, arriving through a different field — the fields
-    // were added to the format and not to this shape.
+    // D39 put three more fields inside `Witness` and D45 a fourth, and
+    // therefore inside the hashed form. Omitting them here made a
+    // passkey-signed entry unreproducible: a client rebuilding from the
+    // served fields computes a different hash and cannot tell a
+    // legitimate entry from a lying node. That is the exact failure the
+    // witnesses comment above warns about, arriving through a different
+    // field — the fields were added to the format and not to this shape.
+    //
+    // So this block grows with `Witness`, every time, and forgetting it
+    // is silent. `sync_contract.rs` is where that is caught.
     //
     // Emitted only when present, so an ed25519 entry's served JSON is
     // byte-identical to what it always was and no existing client sees a
@@ -5985,6 +6030,9 @@ fn entry_json(e: &OpEntry) -> serde_json::Value {
         }
         if let Some(data) = sig.client_data_json.as_ref() {
             object.insert("client_data_json_hex".into(), serde_json::json!(hex_encode(data)));
+        }
+        if let Some(key) = sig.credential_key.as_ref() {
+            object.insert("credential_key_hex".into(), serde_json::json!(hex_encode(key)));
         }
     }
     value

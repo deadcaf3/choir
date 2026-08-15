@@ -56,6 +56,7 @@ that would reverse it are not published.
 | D42 | Repository ownership as a landing gate, granted as an ACL level | Two-way |
 | D43 | `Submit`: a landing carries the authorization basis that admitted it | **One-way for readers** |
 | D44 | An approval resolves to the key that was live when it was cast, not the one holding the channel now | Two-way |
+| D45 | A passkey signature carries the credential key it is checked against, instead of a delegation op | Two-way |
 
 ## Reading the door column
 

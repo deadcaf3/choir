@@ -31,13 +31,7 @@ fn from_actor(key_id: &str, payload: &[u8]) -> Submission {
     Submission {
         channel: "ws".to_string(),
         payload: payload.to_vec(),
-        author_sig: Some(Witness {
-            key_id: key_id.to_string(),
-            signature: Vec::new(),
-            scheme: None,
-            authenticator_data: None,
-            client_data_json: None,
-        }),
+        author_sig: Some(Witness::ed25519(key_id, Vec::new())),
     }
 }
 

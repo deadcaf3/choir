@@ -136,7 +136,7 @@ lie about ordering:
 `author_key` is `"1e-" + hex(blake3(public_key_32_bytes))`, so it also
 tells you which key to look up, and binds the id to the key material.
 
-**A passkey signature (D39) carries three more fields, and they are
+**A passkey signature (D39, D45) carries four more fields, and they are
 inside the hashed form.** When `author_scheme` is present the signature
 is not raw ed25519 over the signing hash: `2` means WebAuthn ES256, an
 ECDSA P-256 signature over `authenticator_data ‖ SHA-256(client_data_json)`,
@@ -144,10 +144,28 @@ where the `challenge` member inside `client_data_json` is the base64url
 of the signing hash from step 2. Both byte strings are served, hex, as
 `authenticator_data_hex` and `client_data_json_hex`.
 
-They are omitted entirely when absent, exactly as they are in the hashed
-form, so an ed25519 entry's JSON is unchanged and an older client sees
-no new keys. **But a client that ignores them cannot recompute the hash
-of a passkey-signed entry** — they are in the canonical bytes, so
+The fourth is `credential_key_hex` (D45): the credential's public key as
+SubjectPublicKeyInfo DER, written by the node from the credential it
+verified the submission against. **Verify a passkey signature against
+this and nothing else.** For an ed25519 entry `author_key` is
+`blake3(pubkey)` and you supply the key; for a passkey entry
+`author_key` is the credential id, which resolves only inside the
+node's account store — so without this field there is no key to check
+against and never will be. Entries written before D45 do not carry it
+and cannot be checked by anyone.
+
+What that establishes is narrower than the ed25519 case, and the
+difference matters: the key arrives *with* the signature, so verifying
+proves the bytes are intact and were signed by the credential named, and
+proves nothing about whether that credential belonged to `workspace`.
+That binding lives in server state which is not part of the log. Report
+the two outcomes separately; a verifier that counts them together
+reports the weaker claim in the stronger word.
+
+All four are omitted entirely when absent, exactly as they are in the
+hashed form, so an ed25519 entry's JSON is unchanged and an older client
+sees no new keys. **But a client that ignores them cannot recompute the
+hash of a passkey-signed entry** — they are in the canonical bytes, so
 leaving them out yields a different digest and a legitimate entry looks
 tampered with. Absent `author_scheme` means ed25519, which is the only
 scheme that existed before D39; an unrecognised value is a scheme this

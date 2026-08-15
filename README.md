@@ -238,6 +238,8 @@ Two consequences worth knowing:
 
 **Keep revoked keys in the trusted-keys file.** The log stores a key id, never the public key, so deleting the line makes every entry that key ever signed permanently unverifiable. Revocation does not cause that decay; deletion does, and nothing in the code can stop it.
 
+That warning is about ed25519 keys only. A passkey-signed entry carries its own credential key (D45), so it needs no keys file and survives a restore that keeps the log and loses everything else — which is what `scripts/pull_backup.sh` does, deliberately. `choir log --verify` counts those entries on their own line, as *intact but unanchored*: the bytes are proven, and what is not proven is that the credential belonged to that account, because that binding lives in the accounts store rather than in the log. Read it as a real check that stops one step short, not as a weaker version of the ed25519 one.
+
 Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
 
 ### Issuing a credential without editing a file (D36)

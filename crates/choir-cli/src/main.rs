@@ -434,6 +434,11 @@ fn load_registry(path: &str) -> Registry {
 /// for a signature nobody could check is the one failure that would make
 /// this worse than no command at all.
 ///
+/// A passkey entry carries its own credential key (D45), so it needs
+/// nothing from `--keys` — and is counted separately for the same
+/// reason: the key came with the signature, so the bytes are proven
+/// intact and nothing proves the credential was that channel's.
+///
 /// **This is a first-party client and says so.** It decodes into the
 /// same `OpEntry` the node encodes from, so a hash agreeing here proves
 /// the node agrees with *this build's* definition of the format rather
@@ -509,8 +514,22 @@ fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions
     for failure in &report.failures {
         eprintln!("choir log: {failure}");
     }
+    // The passkey count is named separately rather than folded into
+    // "verified" (D45). It is a real result — the bytes are intact and
+    // were signed by the credential named — and it is not the same
+    // result: no key set vouches for a credential the entry carries
+    // itself. One number covering both would report the weaker claim in
+    // the stronger word, on every line, forever.
+    let passkeys = if report.integrity_only == 0 {
+        String::new()
+    } else {
+        format!(
+            ", {} passkey signatures intact but unanchored",
+            report.integrity_only
+        )
+    };
     eprintln!(
-        "choir log: {} entries, chain {}, {} signatures verified, {} unverified",
+        "choir log: {} entries, chain {}, {} signatures verified, {} unverified{passkeys}",
         entries.len(),
         if report.failures.is_empty() { "holds" } else { "BROKEN" },
         report.checked,

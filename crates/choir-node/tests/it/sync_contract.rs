@@ -104,7 +104,7 @@ fn canonical(e: &serde_json::Value) -> Vec<u8> {
             key_id,
             byte_array(&hex_decode(sig).expect("signature hex"))
         ));
-        // D39's fields, in declaration order, each omitted when absent
+        // D39's fields and D45's, in declaration order, each omitted when absent
         // for the same reason `author_sig` itself is. A client that
         // stops here recomputes the wrong hash for a passkey-signed
         // entry — they are inside the canonical bytes.
@@ -114,6 +114,7 @@ fn canonical(e: &serde_json::Value) -> Vec<u8> {
         for (served, field) in [
             ("authenticator_data_hex", "authenticator_data"),
             ("client_data_json_hex", "client_data_json"),
+            ("credential_key_hex", "credential_key"),
         ] {
             if let Some(hex) = e[served].as_str() {
                 s.push_str(&format!(

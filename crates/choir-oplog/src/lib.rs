@@ -92,6 +92,25 @@ pub struct Witness {
     /// other scheme.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_data_json: Option<Vec<u8>>,
+    /// The credential's public key as SubjectPublicKeyInfo DER, so a
+    /// [`scheme::WEBAUTHN_ES256`] signature can be checked by someone
+    /// holding nothing but the log (D45). Absent for every other scheme,
+    /// and absent from entries written before D45.
+    ///
+    /// The other two WebAuthn fields are *inside* what the authenticator
+    /// signed, so altering them breaks the signature. This one is the key
+    /// the signature is checked **against**, so altering it forges
+    /// nothing — it stops a good entry from verifying. It is covered by
+    /// [`OpEntry::content_hash`] and therefore by the chain, which is
+    /// what makes that substitution detectable; it is not covered by
+    /// [`OpEntry::signing_hash`], and calling it signed would be wrong.
+    ///
+    /// Written by the node from the credential it just verified against,
+    /// never by the client: `getPublicKey()` exists on a WebAuthn
+    /// *registration* response only, so a browser holding an assertion
+    /// does not have this value to send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_key: Option<Vec<u8>>,
 }
 
 impl Witness {
@@ -104,6 +123,7 @@ impl Witness {
             scheme: None,
             authenticator_data: None,
             client_data_json: None,
+            credential_key: None,
         }
     }
 
@@ -123,7 +143,20 @@ impl Witness {
             scheme: Some(scheme::WEBAUTHN_ES256),
             authenticator_data: Some(authenticator_data),
             client_data_json: Some(client_data_json),
+            credential_key: None,
         }
+    }
+
+    /// Attaches the credential public key a verifier needs (D45).
+    ///
+    /// A builder rather than a fifth argument to
+    /// [`Witness::webauthn_es256`], because the two values arrive at
+    /// different moments: the browser sends the assertion, and the node
+    /// adds the key after looking it up to verify against.
+    #[must_use]
+    pub fn with_credential_key(mut self, spki_der: Vec<u8>) -> Self {
+        self.credential_key = Some(spki_der);
+        self
     }
 
     /// The scheme this signature claims, resolving the pre-D39 absence

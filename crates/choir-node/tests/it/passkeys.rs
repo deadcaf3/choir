@@ -70,6 +70,54 @@ fn credential(work: &std::path::Path, name: &str) -> (String, std::path::PathBuf
     (base64url(&std::fs::read(&der).expect("spki")), secret)
 }
 
+/// Signs one submission the way an authenticator does: ECDSA P-256 over
+/// `authenticator_data ‖ SHA-256(client_data_json)`, with the op's
+/// `signing_hash` as the challenge inside the client data.
+///
+/// Returns `(authenticator_data, client_data_json, signature)` — the
+/// three values a submission carries. `tag` names this assertion's
+/// scratch files: two assertions in one test would otherwise overwrite
+/// each other's, and the loser signs the winner's bytes.
+fn assertion(
+    work: &std::path::Path,
+    secret: &std::path::Path,
+    tag: &str,
+    origin: &str,
+    channel: &str,
+    payload: &[u8],
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let signing = choir_oplog::signing_hash(channel, payload);
+    let challenge = base64url(&choir_identity::webauthn_challenge(&signing));
+    let client_data =
+        format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"{origin}"}}"#)
+            .into_bytes();
+    let cd = work.join(format!("{tag}-cd.json"));
+    std::fs::write(&cd, &client_data).expect("write");
+    let hashed = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .arg(&cd)
+        .output()
+        .expect("openssl runs");
+    assert!(hashed.status.success(), "hash clientDataJSON");
+    let auth_data = vec![0x49u8; 37];
+    let mut message = auth_data.clone();
+    message.extend_from_slice(&hashed.stdout);
+    let msg = work.join(format!("{tag}-msg.bin"));
+    let der = work.join(format!("{tag}-sig.der"));
+    std::fs::write(&msg, &message).expect("write");
+    assert!(std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(secret)
+        .arg("-out")
+        .arg(&der)
+        .arg(&msg)
+        .output()
+        .expect("openssl runs")
+        .status
+        .success());
+    (auth_data, client_data, std::fs::read(&der).expect("signature"))
+}
+
 /// Base64url without padding, via `openssl` rather than through the
 /// node's own encoder, so a test of the node's decoding does not depend
 /// on the node's encoding being right.
@@ -574,35 +622,8 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
         prev: None,
     });
     let payload = op.to_payload();
-    let signing = choir_oplog::signing_hash("bob", &payload);
-    let challenge = base64url(&choir_identity::webauthn_challenge(&signing));
-    let client_data =
-        format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"{base}"}}"#)
-            .into_bytes();
-    let cd = work.join("submit-cd.json");
-    std::fs::write(&cd, &client_data).expect("write");
-    let hashed = std::process::Command::new("openssl")
-        .args(["dgst", "-sha256", "-binary"])
-        .arg(&cd)
-        .output()
-        .expect("openssl runs");
-    let auth_data = vec![0x49u8; 37];
-    let mut message = auth_data.clone();
-    message.extend_from_slice(&hashed.stdout);
-    let msg = work.join("submit-msg.bin");
-    let der = work.join("submit-sig.der");
-    std::fs::write(&msg, &message).expect("write");
-    assert!(std::process::Command::new("openssl")
-        .args(["dgst", "-sha256", "-sign"])
-        .arg(&secret)
-        .arg("-out")
-        .arg(&der)
-        .arg(&msg)
-        .output()
-        .expect("openssl runs")
-        .status
-        .success());
-    let signature = std::fs::read(&der).expect("signature");
+    let (auth_data, client_data, signature) =
+        assertion(&work, &secret, "submit", &base, "bob", &payload);
 
     let submit = |channel: &str, scheme: u64| {
         serde_json::json!({
@@ -728,12 +749,32 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
         .as_array()
         .and_then(|entries| entries.iter().find(|e| e["author_scheme"].as_u64() == Some(2)))
         .unwrap_or_else(|| panic!("no passkey-signed entry in the page: {page}"));
-    for field in ["authenticator_data_hex", "client_data_json_hex"] {
+    for field in [
+        "authenticator_data_hex",
+        "client_data_json_hex",
+        // D45's field, and the reason this loop is the tripwire: the
+        // node stamps the credential key into the witness, so an
+        // `/api/log` that does not serve it puts the entry back in the
+        // state described above — a legitimate entry that recomputes to
+        // the wrong hash.
+        "credential_key_hex",
+    ] {
         assert!(
             entry[field].as_str().is_some_and(|hex| !hex.is_empty()),
             "the served entry omits `{field}`, so its hash cannot be recomputed: {entry}"
         );
     }
+    // Which key, not merely that there is one. "Some bytes are present"
+    // is satisfied by a node stamping anything at all, and the whole
+    // claim of D45 is that the bytes are *the enrolled credential's*.
+    let served_key =
+        choir_node::platform::hex_decode(entry["credential_key_hex"].as_str().expect("key"))
+            .expect("hex");
+    assert_eq!(
+        base64url(&served_key),
+        public_key,
+        "the node stamped a key that is not the one bob enrolled"
+    );
     // The whole point, checked the way a third party would: rebuild the
     // signature from what was served and confirm the hash the node
     // claims is the hash of what it sent.
@@ -743,6 +784,10 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
         choir_node::platform::hex_decode(entry["authenticator_data_hex"].as_str().expect("auth"))
             .expect("hex"),
         choir_node::platform::hex_decode(entry["client_data_json_hex"].as_str().expect("client"))
+            .expect("hex"),
+    )
+    .with_credential_key(
+        choir_node::platform::hex_decode(entry["credential_key_hex"].as_str().expect("key"))
             .expect("hex"),
     );
     let recomputed = choir_oplog::OpEntry {
@@ -766,6 +811,64 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
         recomputed.to_hex(),
         entry["hash"].as_str().expect("hash"),
         "a passkey-signed entry does not hash to what the node claims: {entry}"
+    );
+
+    // And D45's property, asked the way the future asks it: check the
+    // signature using only what the entry carries. No store, no
+    // registry, no node — the state a Phase-4 restore leaves a reader
+    // in, because `pull_backup.sh` takes the log and not `accounts.json`.
+    let carried = choir_oplog::Witness::webauthn_es256(
+        entry["author_key"].as_str().expect("author key"),
+        choir_node::platform::hex_decode(entry["author_sig_hex"].as_str().expect("sig")).expect("hex"),
+        choir_node::platform::hex_decode(entry["authenticator_data_hex"].as_str().expect("auth"))
+            .expect("hex"),
+        choir_node::platform::hex_decode(entry["client_data_json_hex"].as_str().expect("client"))
+            .expect("hex"),
+    )
+    .with_credential_key(served_key);
+    choir_identity::verify_carried_webauthn(&choir_oplog::signing_hash("bob", &payload), &carried)
+        .expect("a passkey entry must verify from the page alone");
+
+    // The batch endpoint is a second door to the same admission, and
+    // stamping had to be wired into both. Skipping it here would leave
+    // the failure silent in the worst way available: the op lands, the
+    // response says 200, and the entry is uncheckable forever with
+    // nothing at submission time to notice.
+    let second = ViewOp::new(OpKind::SetRef {
+        name: "agents/demo.git:refs/heads/next".into(),
+        commit: choir_oplog::ContentHash::blake3(b"a second commit"),
+        prev: None,
+    });
+    let batched = second.to_payload();
+    let (auth2, client2, sig2) = assertion(&work, &secret, "batch", &base, "bob", &batched);
+    let (status, body) = curl(&[
+        "-u", &bob, "-X", "POST", "--data-binary",
+        &serde_json::json!({"ops": [{
+            "channel": "bob",
+            "payload_hex": hex_encode(&batched),
+            "key_id": "bobs-laptop",
+            "signature_hex": hex_encode(&sig2),
+            "scheme": 2,
+            "authenticator_data_hex": hex_encode(&auth2),
+            "client_data_json_hex": hex_encode(&client2),
+        }]})
+        .to_string(),
+        &format!("{base}/api/submit-batch"),
+    ]);
+    assert_eq!(status, 200, "{body}");
+
+    let (status, page) = curl(&["-u", "alice:a", &format!("{base}/api/log?from=0")]);
+    assert_eq!(status, 200, "{page}");
+    let batched_entry = page["entries"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|e| e["seq"].as_u64() == Some(1)))
+        .unwrap_or_else(|| panic!("the batched op did not land: {page}"));
+    assert_eq!(
+        batched_entry["credential_key_hex"]
+            .as_str()
+            .map(|hex| base64url(&choir_node::platform::hex_decode(hex).expect("hex"))),
+        Some(public_key),
+        "the batch path admitted a passkey op without stamping its key: {batched_entry}"
     );
 
     // It is in the log as bob's, signed by the credential he enrolled.

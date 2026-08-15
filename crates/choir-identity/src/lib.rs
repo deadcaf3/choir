@@ -482,3 +482,41 @@ pub fn verify_webauthn_assertion(
     message.extend_from_slice(&sha256(client_data_json)?);
     verify_es256(spki_der, &message, &sig.signature)
 }
+
+/// Verifies a WebAuthn assertion against the credential key the
+/// signature *carries* (D45), for a reader holding no credential store.
+///
+/// The same check as [`verify_webauthn_assertion`], differing only in
+/// where the key comes from — and that difference is the whole point:
+/// [`choir_oplog::Witness::credential_key`] travels with the entry, so a
+/// log restored from backup stays checkable after the store that
+/// admitted it is gone.
+///
+/// **This establishes integrity, not trust.** The key arrives with the
+/// signature, so success means "these bytes were signed by the
+/// credential this entry names" and says nothing about whether that
+/// credential belonged to the channel. An ed25519 signature is checked
+/// against a key the caller's [`Registry`] vouches for; nothing vouches
+/// here, and a caller that reports the two as one result is overstating
+/// this one.
+///
+/// Returns the actor id, `blake3` of the credential key — the same rule
+/// [`ActorKey::actor_id`] uses, so a passkey author and an ed25519
+/// author are named the same way.
+///
+/// # Errors
+///
+/// [`IdentityError::UnknownKey`] when the signature carries no
+/// credential key, which is every passkey entry written before D45.
+/// Otherwise the failure modes of [`verify_webauthn_assertion`].
+pub fn verify_carried_webauthn(
+    signing: &ContentHash,
+    sig: &Witness,
+) -> Result<ContentHash, IdentityError> {
+    let spki = sig
+        .credential_key
+        .as_ref()
+        .ok_or_else(|| IdentityError::UnknownKey(sig.key_id.clone()))?;
+    verify_webauthn_assertion(spki, signing, sig)?;
+    Ok(ContentHash::blake3(spki))
+}

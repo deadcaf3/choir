@@ -219,13 +219,7 @@ mod tests {
         Submission {
             channel: "ws".into(),
             payload: Vec::new(),
-            author_sig: Some(choir_oplog::Witness {
-                key_id: key_id.into(),
-                signature: Vec::new(),
-                scheme: None,
-                authenticator_data: None,
-                client_data_json: None,
-            }),
+            author_sig: Some(choir_oplog::Witness::ed25519(key_id, Vec::new())),
         }
     }
 

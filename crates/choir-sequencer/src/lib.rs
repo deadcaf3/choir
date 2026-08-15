@@ -209,6 +209,20 @@ fn round_robin(
     }
 }
 
+// `Submit` is ~208 bytes and `Shutdown` carries none, which is what the
+// lint objects to. Its premise does not hold here: these are transient
+// channel messages, at most `MAX_BATCH` in flight, and `Shutdown` is sent
+// exactly once per sequencer lifetime — so the "wasted" space is one
+// message, once, not a cost paid per stored value.
+//
+// Boxing the payload to even them out would put a heap allocation on the
+// write path, which is the one path this workspace measures allocations
+// on (`choir-node/tests/alloc_budget.rs`). Paying that on every op to
+// save 208 bytes on a message sent at shutdown is the wrong trade.
+//
+// It first fired when D45 added `Witness::credential_key`, taking
+// `Submission` past the 200-byte default threshold.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// The op, the interned actor bucket holding its quota slot (see
     /// [`fairness`]), and where to answer.

@@ -16,23 +16,43 @@
 //! 2. **Recomputation** — the `hash` the node claims is the hash of the
 //!    entry it was attached to. Needs nothing but the page.
 //! 3. **Authorship** — the actor named actually signed it, *and* was
-//!    still trusted at that position (D44). This is the only check that
-//!    needs things the page does not carry: the public key, and the
-//!    revocation positions. An entry whose key the caller does not hold
-//!    is reported **unverified**, never verified; an entry signed at or
-//!    after its key's revocation is a **failure**, because that is a
-//!    claim the log itself contradicts rather than one this client
-//!    cannot check.
+//!    still trusted at that position (D44). For an ed25519 entry this is
+//!    the only check that needs things the page does not carry: the
+//!    public key, and the revocation positions. An entry whose key the
+//!    caller does not hold is reported **unverified**, never verified;
+//!    an entry signed at or after its key's revocation is a **failure**,
+//!    because that is a claim the log itself contradicts rather than one
+//!    this client cannot check.
+//!
+//!    A passkey entry carries its own credential key (D45) and so needs
+//!    nothing external — but for the same reason it establishes only
+//!    half of what the ed25519 path does. See
+//!    [`crate::verify::Report::integrity_only`].
 //!
 //! # What still cannot be verified forever
 //!
-//! The log records a key **id** — `hash(pubkey)` — never the public key
-//! itself. So a page's signatures are checkable only while somebody still
-//! holds the key material, and an operator who deletes a revoked key's
-//! line from the trusted-keys file makes that key's history permanently
-//! `unverified`. Revocation no longer causes that decay; deletion still
-//! does. Retaining revoked keys' public material is an operator
-//! responsibility nothing in the code can enforce.
+//! For an ed25519 entry the log records a key **id** — `hash(pubkey)` —
+//! never the public key itself. So those signatures are checkable only
+//! while somebody still holds the key material, and an operator who
+//! deletes a revoked key's line from the trusted-keys file makes that
+//! key's history permanently `unverified`. Revocation no longer causes
+//! that decay; deletion still does. Retaining revoked keys' public
+//! material is an operator responsibility nothing in the code can
+//! enforce.
+//!
+//! D45 fixed that for passkeys by a route not open to ed25519 keys: a
+//! WebAuthn signature is useless without the authenticator data anyway,
+//! so the entry already carried scheme-specific material and the
+//! credential key joined it. An ed25519 signature carries nothing, and
+//! adding the public key to every one of them would grow every entry to
+//! re-state what a one-line file already says.
+//!
+//! What no passkey entry can establish, before or after D45, is that the
+//! credential belonged to the channel. That binding lives in the
+//! accounts store, which is server state, is not in the backup set, and
+//! is deliberately erasable. An entry admitted on a credential now
+//! withdrawn looks exactly like one admitted on a credential still
+//! enrolled, and neither this client nor any other can tell them apart.
 
 use choir_hash::ContentHash;
 use choir_identity::{IdentityError, Registry};
@@ -49,6 +69,17 @@ pub struct Report {
     pub notes: Vec<String>,
     /// Signatures actually verified against a held key.
     pub checked: usize,
+    /// Passkey signatures that verified against the credential key the
+    /// entry itself carries (D45): the bytes are intact and were signed
+    /// by the credential named, and nothing here anchors that credential
+    /// to a channel.
+    ///
+    /// Its own counter rather than a share of [`Report::checked`],
+    /// because the two answer different questions and one number that
+    /// means two things is the shape every wrong reading in this file
+    /// has taken. Half a check is worth reporting; it is not worth
+    /// reporting as a whole one.
+    pub integrity_only: usize,
     /// Entries whose authorship could not be established either way.
     pub unverified: usize,
 }
@@ -115,6 +146,37 @@ pub fn page(
             }
             (Some(key_id), Some(e)) => match e.author_sig.as_ref() {
                 None => report.unverified += 1,
+                // A passkey carries its own key (D45), so this branch
+                // answers a different question from the one below and
+                // has to report a different answer. It also consults no
+                // revocation table: `revoked` is keyed by ed25519 actor
+                // id and a passkey's `key_id` is a credential id, a
+                // different namespace — and withdrawing a credential is
+                // a store edit that leaves no positional record, so
+                // there is nothing here to look up rather than a lookup
+                // that happens to miss.
+                Some(sig) if sig.scheme_id() == choir_oplog::scheme::WEBAUTHN_ES256 => {
+                    match choir_identity::verify_carried_webauthn(&e.signing_hash(), sig) {
+                        Ok(_) => {
+                            report.integrity_only += 1;
+                            report.notes.push(format!(
+                                "seq {seq}: signed by credential {key_id}, whose key this \
+                                 entry carries; the bytes are intact, and nothing in the log \
+                                 ties that credential to a channel"
+                            ));
+                        }
+                        Err(IdentityError::UnknownKey(_)) => {
+                            report.unverified += 1;
+                            report.notes.push(format!(
+                                "seq {seq}: passkey entry carries no credential key, so it \
+                                 was written before D45 and nothing can check it now"
+                            ));
+                        }
+                        Err(error) => report.failures.push(format!(
+                            "seq {seq}: passkey signature does not verify ({error:?})"
+                        )),
+                    }
+                }
                 Some(sig) => {
                     // The three outcomes are already distinct in the
                     // error type, and keeping them distinct is the whole
@@ -184,6 +246,7 @@ pub fn rebuild(entry: &serde_json::Value) -> Option<OpEntry> {
                         .as_str()
                         .and_then(hex_decode),
                     client_data_json: entry["client_data_json_hex"].as_str().and_then(hex_decode),
+                    credential_key: entry["credential_key_hex"].as_str().and_then(hex_decode),
                 },
             })
         }
@@ -372,5 +435,230 @@ mod tests {
         assert_eq!(report.checked, 0, "authorship was claimed without a key");
         assert_eq!(report.unverified, 2);
         assert!(report.notes.iter().any(|n| n.contains("no key held")));
+    }
+
+    /// Base64url, no padding — what a `clientDataJSON` challenge is
+    /// spelled in. Ten lines rather than a dependency, and self-checking:
+    /// get it wrong and every assertion below fails on a challenge
+    /// mismatch rather than passing quietly.
+    fn base64url(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut buf = [0u8; 3];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            let n = u32::from_be_bytes([0, buf[0], buf[1], buf[2]]);
+            for i in 0..chunk.len() + 1 {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 0x3f) as usize] as char);
+            }
+        }
+        out
+    }
+
+    /// A scratch directory this test alone owns. These run on parallel
+    /// threads in one process, so a shared name is two tests overwriting
+    /// each other's key files.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("choir-verify-d45-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// A P-256 credential: the private key file, and its public key as
+    /// SubjectPublicKeyInfo DER — the exact bytes `getPublicKey()`
+    /// returns and `Witness::credential_key` carries.
+    fn credential(dir: &std::path::Path, name: &str) -> (std::path::PathBuf, Vec<u8>) {
+        let secret = dir.join(format!("{name}.key"));
+        let spki = dir.join(format!("{name}.der"));
+        assert!(std::process::Command::new("openssl")
+            .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+            .arg(&secret)
+            .output()
+            .expect("openssl runs")
+            .status
+            .success());
+        assert!(std::process::Command::new("openssl")
+            .args(["ec", "-in"])
+            .arg(&secret)
+            .args(["-pubout", "-outform", "DER", "-out"])
+            .arg(&spki)
+            .output()
+            .expect("openssl runs")
+            .status
+            .success());
+        (secret, std::fs::read(&spki).expect("spki"))
+    }
+
+    /// One entry signed the way an authenticator signs one, served in
+    /// `/api/log`'s shape.
+    ///
+    /// Built with real ECDSA rather than a fixture, because the claim
+    /// under test is that these bytes verify against nothing but
+    /// themselves — and a hand-written signature verifies against
+    /// nothing at all. `carried` is the key written into the witness,
+    /// which is a separate argument from the one that signs precisely so
+    /// a test can make them disagree.
+    fn passkey_entry(
+        dir: &std::path::Path,
+        secret: &std::path::Path,
+        carried: Option<Vec<u8>>,
+    ) -> serde_json::Value {
+        let channel = "bob";
+        let payload = b"an op bob approved".to_vec();
+        let signing = choir_oplog::signing_hash(channel, &payload);
+        let challenge = base64url(&choir_identity::webauthn_challenge(&signing));
+        let client_data =
+            format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"x"}}"#)
+                .into_bytes();
+
+        let cd = dir.join("cd.json");
+        std::fs::write(&cd, &client_data).expect("write");
+        let hashed = std::process::Command::new("openssl")
+            .args(["dgst", "-sha256", "-binary"])
+            .arg(&cd)
+            .output()
+            .expect("openssl runs");
+        assert!(hashed.status.success(), "hash clientDataJSON");
+        let authenticator_data = vec![0x49u8; 37];
+        let mut message = authenticator_data.clone();
+        message.extend_from_slice(&hashed.stdout);
+
+        let msg = dir.join("assertion.bin");
+        let der = dir.join("assertion.der");
+        std::fs::write(&msg, &message).expect("write");
+        assert!(std::process::Command::new("openssl")
+            .args(["dgst", "-sha256", "-sign"])
+            .arg(secret)
+            .args(["-out"])
+            .arg(&der)
+            .arg(&msg)
+            .output()
+            .expect("openssl runs")
+            .status
+            .success());
+
+        let mut sig = choir_oplog::Witness::webauthn_es256(
+            "bobs-laptop",
+            std::fs::read(&der).expect("signature"),
+            authenticator_data,
+            client_data,
+        );
+        sig.credential_key = carried;
+        let entry = OpEntry {
+            format_version: FORMAT_VERSION,
+            parent: None,
+            seq: 0,
+            channel: channel.into(),
+            payload,
+            witnesses: Vec::new(),
+            author_sig: Some(sig),
+        };
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let sig = entry.author_sig.as_ref().expect("signed");
+        let mut served = serde_json::json!({
+            "seq": entry.seq,
+            "workspace": entry.channel,
+            "payload_hex": hex(&entry.payload),
+            "author_key": sig.key_id,
+            "author_sig_hex": hex(&sig.signature),
+            "author_scheme": sig.scheme,
+            "authenticator_data_hex": sig.authenticator_data.as_deref().map(hex),
+            "client_data_json_hex": sig.client_data_json.as_deref().map(hex),
+            "hash": entry.content_hash().to_hex(),
+            "parent": serde_json::Value::Null,
+            "format_version": entry.format_version,
+            "witnesses": entry.witnesses,
+        });
+        if let Some(key) = sig.credential_key.as_deref() {
+            served["credential_key_hex"] = serde_json::json!(hex(key));
+        }
+        served
+    }
+
+    /// D45's whole point: a passkey-signed entry checks out with no
+    /// credential store, no registry and no node — which is the state a
+    /// Phase-4 restore leaves a reader in, because `pull_backup.sh` takes
+    /// the log and not the accounts file.
+    #[test]
+    fn a_passkey_entry_verifies_from_the_page_alone() {
+        let dir = scratch("carried");
+        let (secret, spki) = credential(&dir, "bob");
+        let entries = vec![passkey_entry(&dir, &secret, Some(spki))];
+
+        let report = super::page(&entries, &Registry::new(), &Revocations::new());
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.integrity_only, 1);
+        assert_eq!(report.unverified, 0);
+        // And never as a whole check: the credential arrived with the
+        // entry, so nothing vouched for it, and reporting this as
+        // `checked` would claim an anchor that does not exist.
+        assert_eq!(report.checked, 0, "an unanchored key was counted as checked");
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("nothing in the log ties that credential to a channel")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The substitution the field invites: swap in a different, perfectly
+    /// valid credential key. It cannot forge anything — it makes a good
+    /// entry stop verifying — and it must be reported as a failure and
+    /// not as something unverifiable.
+    ///
+    /// The served `hash` is rebuilt around the substitution, so the
+    /// recomputation check passes and this test can only be satisfied by
+    /// the signature check. Tampering without that step fails on the hash
+    /// and proves nothing about D45.
+    #[test]
+    fn a_substituted_credential_key_is_a_failure() {
+        let dir = scratch("swapped");
+        let (secret, _) = credential(&dir, "bob");
+        let (_, other) = credential(&dir, "someone-else");
+        let mut entry = passkey_entry(&dir, &secret, Some(other));
+        entry["hash"] = serde_json::json!(super::rebuild(&entry)
+            .expect("rebuildable")
+            .content_hash()
+            .to_hex());
+
+        let report = super::page(&[entry], &Registry::new(), &Revocations::new());
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|f| f.contains("passkey signature does not verify")),
+            "a swapped credential key passed: {report:?}"
+        );
+        assert_eq!(report.integrity_only, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Entries written before D45 carry no credential key, and there is
+    /// no way to obtain one now. Say so, and count it as unverified —
+    /// the failure bucket would accuse an honest node of lying about
+    /// history it wrote correctly under the older format.
+    #[test]
+    fn a_passkey_entry_written_before_d45_stays_unverified() {
+        let dir = scratch("pre-d45");
+        let (secret, _) = credential(&dir, "bob");
+        let entries = vec![passkey_entry(&dir, &secret, None)];
+
+        let report = super::page(&entries, &Registry::new(), &Revocations::new());
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.unverified, 1);
+        assert_eq!(report.integrity_only, 0);
+        assert!(report.notes.iter().any(|n| n.contains("written before D45")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The counters do not leak into each other. An ed25519 page was
+    /// `checked` before D45 and is `checked` after it, and adding a
+    /// second bucket must not quietly reclassify anything.
+    #[test]
+    fn an_ed25519_page_is_untouched_by_the_passkey_bucket() {
+        let key = ActorKey::generate();
+        let report = super::page(&page(&key, 3), &registry_for(&key), &Revocations::new());
+        assert_eq!(report.checked, 3);
+        assert_eq!(report.integrity_only, 0);
     }
 }
