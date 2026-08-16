@@ -5012,6 +5012,27 @@ impl Platform {
         self.view.lock().expect("view lock").next_seq
     }
 
+    /// The store's generation and the handle-to-name map to render
+    /// channels through (D46).
+    ///
+    /// Both together because a caller that resolves names has to cache
+    /// on the generation the map was read at: revoking an account
+    /// deletes a name and appends no op, so the view sequence does not
+    /// move and a page keyed on it alone would keep showing the deleted
+    /// name.
+    ///
+    /// `(0, empty)` on a node with no accounts store attached, which
+    /// resolves nothing and renders every channel as itself — the same
+    /// answer a store gives for an account issued before D46 or issued
+    /// with an explicit `user`.
+    #[must_use]
+    pub fn roster(&self) -> (u64, std::collections::BTreeMap<String, String>) {
+        match &*self.passkeys.lock().expect("accounts lock") {
+            Some(accounts) => (accounts.generation(), accounts.roster()),
+            None => (0, std::collections::BTreeMap::new()),
+        }
+    }
+
     /// Repository the review `id` proposes to land on, in the canonical
     /// D29 spelling, or `None` when the review is unknown or unbound.
     ///

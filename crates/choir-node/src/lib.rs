@@ -2014,7 +2014,11 @@ fn handle_ui(
     // surely as a new op does.
     let reader = acl.map(|table| table.cache_key(user)).unwrap_or_default();
     let seq = platform.view_seq();
-    let tag = ui::etag(seq, &reader);
+    // Read once and used for both the tag and the render, so the page a
+    // reader is handed resolved names against exactly the store state
+    // its `ETag` claims (D46).
+    let (generation, roster) = platform.roster();
+    let tag = ui::etag(seq, generation, &reader);
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
         let response = tiny_http::Response::empty(304).with_header(
             tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
@@ -2022,7 +2026,7 @@ fn handle_ui(
         return served(request, response, 304, 0);
     }
 
-    let page = cache.page(seq, &reader, || {
+    let page = cache.page(seq, generation, &reader, &roster, || {
         let body = platform.handle_api("GET", "/api/view", &[]).1;
         match acl {
             Some(table) => acl::filter_response(table, user, "/api/view", &body),

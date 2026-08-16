@@ -52,8 +52,45 @@
 //! visible placeholder, and an unexpected payload yields a page that
 //! says less rather than a panic that serves nothing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+
+/// Handle to readable name, for the accounts a store can still name.
+///
+/// The D46 rendering half. Channels in the log are opaque handles, so
+/// every surface a person reads resolves through one of these or shows
+/// the handle.
+pub(crate) type Roster = BTreeMap<String, String>;
+
+/// A channel with every segment the roster can name replaced by the
+/// name (D46).
+///
+/// Channels are `/`-joined and the principal is one segment of them —
+/// `git/<handle>` for a push, `<handle>/reviewer` for a review seat — so
+/// resolving per segment covers both shapes and any later one without
+/// this function knowing which is which. The segments around it carry
+/// meaning (`git/` is a provenance label only the node may apply) and
+/// are kept.
+///
+/// **A segment the roster cannot name is returned unchanged, and that is
+/// the point.** It is the expected state for three situations a reader
+/// must not be able to tell apart: an account issued before D46, one
+/// issued with an explicit `user`, and one whose name has been deleted.
+/// Rendering "unknown" or "deleted" for the third would undo the
+/// deletion by announcing it.
+pub(crate) fn person(channel: &str, roster: &Roster) -> String {
+    if roster.is_empty() {
+        return channel.to_string();
+    }
+    channel
+        .split('/')
+        .map(|segment| match roster.get(segment) {
+            Some(name) => name.as_str(),
+            None => segment,
+        })
+        .collect::<Vec<&str>>()
+        .join("/")
+}
 
 /// The rendered pages for one view sequence, one per distinct reader.
 ///
@@ -66,37 +103,63 @@ use std::sync::{Arc, Mutex};
 /// page it held describes a state the node has left, so the bound on
 /// what this can hold is the number of distinct readers between two ops.
 pub(crate) struct UiCache {
-    inner: Mutex<(u64, HashMap<String, Arc<String>>)>,
+    inner: Mutex<(PageState, Pages)>,
 }
+
+/// What the pages on hand were built from: the view sequence, and the
+/// accounts-store generation the names on them were resolved at. Either
+/// moving invalidates every page, which is why they travel as one value
+/// rather than as two fields that could be compared separately.
+type PageState = (u64, u64);
+
+/// The finished pages for one [`PageState`], keyed by reader.
+type Pages = HashMap<String, Arc<String>>;
 
 impl UiCache {
     /// A cache holding nothing, which is the state after every restart.
     pub(crate) fn new() -> Self {
         UiCache {
-            inner: Mutex::new((0, HashMap::new())),
+            inner: Mutex::new(((0, 0), HashMap::new())),
         }
     }
 
     /// The page for view sequence `seq` as `reader` may see it,
     /// rendering it only if the copy on hand describes some other
-    /// sequence or was built for a reader who sees something else.
+    /// sequence, was built for a reader who sees something else, or
+    /// resolved names against an accounts store that has since changed.
     ///
     /// `build_json` is called only on a miss. It is a closure rather
     /// than a value so a hit never pays for the JSON it would not use.
-    pub(crate) fn page<F>(&self, seq: u64, reader: &str, build_json: F) -> Arc<String>
+    ///
+    /// **`generation` is not an optimization.** Names on this page are
+    /// resolved through the accounts store (D46), which changes without
+    /// the view sequence moving — revoking an account deletes a name and
+    /// appends no op. Keyed on `seq` alone, a cached page would keep
+    /// showing a name after the row carrying it was deleted, which is
+    /// the one thing the deletion was for. Pass
+    /// [`crate::accounts::Accounts::generation`], or `0` on a node with
+    /// no store, where the roster is empty and nothing resolves anyway.
+    pub(crate) fn page<F>(
+        &self,
+        seq: u64,
+        generation: u64,
+        reader: &str,
+        roster: &Roster,
+        build_json: F,
+    ) -> Arc<String>
     where
         F: FnOnce() -> String,
     {
         let mut slot = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let (cached_seq, pages) = &mut *slot;
-        if *cached_seq != seq {
+        let (cached_at, pages) = &mut *slot;
+        if *cached_at != (seq, generation) {
             pages.clear();
-            *cached_seq = seq;
+            *cached_at = (seq, generation);
         }
         if let Some(page) = pages.get(reader) {
             return Arc::clone(page);
         }
-        let page = Arc::new(render(&build_json(), seq));
+        let page = Arc::new(render(&build_json(), seq, roster));
         pages.insert(reader.to_string(), Arc::clone(&page));
         page
     }
@@ -112,11 +175,22 @@ impl UiCache {
 /// omitted entirely when no ACL is configured — that node serves one
 /// page to everybody, and its tags stay the bare sequence numbers they
 /// have always been.
-pub(crate) fn etag(seq: u64, reader: &str) -> String {
+///
+/// `generation` joins it for the reason [`UiCache::page`] gives: a name
+/// deleted from the accounts store changes the page without changing the
+/// sequence, and a browser holding the previous copy has to be told. It
+/// is omitted when zero, which is every node with no accounts store, so
+/// those tags stay the bare sequence numbers they have always been too.
+pub(crate) fn etag(seq: u64, generation: u64, reader: &str) -> String {
+    let state = if generation == 0 {
+        seq.to_string()
+    } else {
+        format!("{seq}.{generation}")
+    };
     if reader.is_empty() {
-        return format!("W/\"{seq}\"");
+        return format!("W/\"{state}\"");
     }
-    format!("W/\"{seq}-{}\"", short_digest(reader))
+    format!("W/\"{state}-{}\"", short_digest(reader))
 }
 
 /// A short, stable, non-reversing tag for a reader key.
@@ -194,7 +268,7 @@ fn split_ref(full: &str) -> (&str, &str) {
 /// `seq` is displayed rather than derived from `json` so the number on
 /// the page is the same number in the `ETag`; a reader comparing two
 /// nodes is comparing the thing the cache keyed on.
-fn render(json: &str, seq: u64) -> String {
+fn render(json: &str, seq: u64, roster: &Roster) -> String {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
     let mut h = String::with_capacity(16 * 1024);
 
@@ -207,9 +281,9 @@ fn render(json: &str, seq: u64) -> String {
 
     header(&mut h, &v, seq);
     refs_section(&mut h, &v);
-    reviews_section(&mut h, &v);
+    reviews_section(&mut h, &v, roster);
     attestation_section(&mut h, &v);
-    workspaces_section(&mut h, &v);
+    workspaces_section(&mut h, &v, roster);
     health_section(&mut h, &v);
 
     h.push_str("</main><footer>Served pre-rendered at view seq ");
@@ -329,7 +403,7 @@ fn refs_section(h: &mut String, v: &serde_json::Value) {
 
 /// Reviews, incomplete ones first: the queue is the part a human is
 /// here to act on, and a completed review is history.
-fn reviews_section(h: &mut String, v: &serde_json::Value) {
+fn reviews_section(h: &mut String, v: &serde_json::Value, roster: &Roster) {
     let reviews = match v.get("reviews").and_then(serde_json::Value::as_object) {
         Some(m) => m,
         None => return,
@@ -371,7 +445,7 @@ fn reviews_section(h: &mut String, v: &serde_json::Value) {
             "<p class=\"empty\">Nothing awaiting a verdict. Every review here has been answered.</p>",
         );
     } else {
-        review_table(h, &open);
+        review_table(h, &open, roster);
     }
 
     // Everything settled, folded away. `<details>` because the browser
@@ -381,7 +455,7 @@ fn reviews_section(h: &mut String, v: &serde_json::Value) {
         h.push_str("<details><summary>");
         h.push_str(&done.len().to_string());
         h.push_str(" completed</summary>");
-        review_table(h, &done);
+        review_table(h, &done, roster);
         h.push_str("</details>");
     }
     h.push_str("</section>");
@@ -390,7 +464,7 @@ fn reviews_section(h: &mut String, v: &serde_json::Value) {
 /// One table of reviews, newest-looking first is not attempted: the
 /// view keys reviews by id, and inventing an order the log does not
 /// carry would be a display that lies about sequence.
-fn review_table(h: &mut String, rows: &[(&String, &serde_json::Value)]) {
+fn review_table(h: &mut String, rows: &[(&String, &serde_json::Value)], roster: &Roster) {
     h.push_str("<table><thead><tr><th>Review</th><th>Target</th><th>Weight</th><th>Verdicts</th></tr></thead><tbody>");
     for (id, r) in rows {
         let archived = r
@@ -463,7 +537,7 @@ fn review_table(h: &mut String, rows: &[(&String, &serde_json::Value)]) {
         h.push_str("</span></td><td class=\"num\">");
         h.push_str(&weight.to_string());
         h.push_str("</td><td>");
-        verdicts(h, r);
+        verdicts(h, r, roster);
         h.push_str("</td></tr>");
     }
     h.push_str("</tbody></table>");
@@ -474,7 +548,7 @@ fn review_table(h: &mut String, rows: &[(&String, &serde_json::Value)]) {
 /// `pub(crate)` because the D34 review list folds the same rendering
 /// into each row's `<details>`: one function is how "what a verdict
 /// looks like" stays one answer across both surfaces.
-pub(crate) fn verdicts(h: &mut String, r: &serde_json::Value) {
+pub(crate) fn verdicts(h: &mut String, r: &serde_json::Value, roster: &Roster) {
     let assigned = r
         .get("reviewers")
         .and_then(serde_json::Value::as_array)
@@ -489,7 +563,7 @@ pub(crate) fn verdicts(h: &mut String, r: &serde_json::Value) {
         let name = who.as_str().unwrap_or("—");
         let answer = verdicts.and_then(|m| m.get(name));
         h.push_str("<div class=\"v\">");
-        h.push_str(&esc(name));
+        h.push_str(&esc(&person(name, roster)));
         match answer {
             Some(a) => {
                 let verdict = s(a, "verdict");
@@ -549,7 +623,7 @@ fn attestation_section(h: &mut String, v: &serde_json::Value) {
 }
 
 /// Workspaces and their heads.
-fn workspaces_section(h: &mut String, v: &serde_json::Value) {
+fn workspaces_section(h: &mut String, v: &serde_json::Value, roster: &Roster) {
     let ws = match v.get("workspaces").and_then(serde_json::Value::as_object) {
         Some(m) => m,
         None => return,
@@ -573,7 +647,7 @@ fn workspaces_section(h: &mut String, v: &serde_json::Value) {
     h.push_str("<table><tbody>");
     for (name, head) in ws {
         h.push_str("<tr><td>");
-        h.push_str(&esc(name));
+        h.push_str(&esc(&person(name, roster)));
         h.push_str("</td><td class=\"mono\">");
         h.push_str(&esc(&short(head.as_str().unwrap_or("—"))));
         h.push_str("</td></tr>");
@@ -878,7 +952,7 @@ mod tests {
             "refs": {"o/r.git:refs/heads/<img src=x onerror=alert(1)>": "11-deadbeefdeadbeef"}
         })
         .to_string();
-        let page = render(&json, 7);
+        let page = render(&json, 7, &Roster::new());
         assert!(!page.contains("<img src=x"), "raw markup reached the page");
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));
     }
@@ -901,7 +975,7 @@ mod tests {
             }
         })
         .to_string();
-        let page = render(&json, 7);
+        let page = render(&json, 7, &Roster::new());
         for name in ["agents/one", "r/project"] {
             assert!(
                 page.contains(&format!("<a href=\"/r/{name}\">{name}</a>")),
@@ -941,7 +1015,7 @@ mod tests {
             }
         })
         .to_string();
-        let page = render(&json, 1);
+        let page = render(&json, 1, &Roster::new());
         assert!(
             page.contains("refs/heads/main <b class=\"tag pending\">1 pending</b>"),
             "the open review is not on its ref's row: {page}"
@@ -965,6 +1039,7 @@ mod tests {
             &serde_json::json!({"concentration": {"tripwire_status": "indeterminate"}})
                 .to_string(),
             1,
+            &Roster::new(),
         );
         assert!(waiting.contains("indeterminate"), "the status vanished: {waiting}");
         assert!(
@@ -982,6 +1057,7 @@ mod tests {
             &serde_json::json!({"concentration": {"tripwire_status": "not_observed"}})
                 .to_string(),
             1,
+            &Roster::new(),
         );
         assert!(
             !settled.contains("neither a pass nor a breach"),
@@ -995,7 +1071,7 @@ mod tests {
     #[test]
     fn unparseable_or_empty_state_still_renders() {
         for json in ["not json at all", "null", "{}", r#"{"refs":42}"#] {
-            let page = render(json, 0);
+            let page = render(json, 0, &Roster::new());
             assert!(page.starts_with("<!doctype html>"), "no page for {json}");
             assert!(page.contains("</html>"), "truncated page for {json}");
         }
@@ -1018,7 +1094,7 @@ mod tests {
     /// the rule for that, and this stays the rule for the read surface.
     #[test]
     fn the_page_references_no_external_resource() {
-        let page = render(r#"{"refs":{}}"#, 1);
+        let page = render(r#"{"refs":{}}"#, 1, &Roster::new());
         for probe in ["http://", "https://", "//cdn", "@import"] {
             assert!(!page.contains(probe), "page reaches out via {probe}");
         }
@@ -1105,7 +1181,7 @@ mod tests {
             "build": {"commit": "日日日日日日日日日日日日日日"},
         })
         .to_string();
-        assert!(render(&json, 1).ends_with("</html>"));
+        assert!(render(&json, 1, &Roster::new()).ends_with("</html>"));
     }
 
     /// A refusal has to carry four things, because that is what the JSON
@@ -1456,7 +1532,7 @@ mod tests {
             "snapshot": {"at_seq": 344, "id": "1e-151d4b26d084280e", "prev_snapshot": null},
         })
         .to_string();
-        let page = render(&json, 344);
+        let page = render(&json, 344, &Roster::new());
 
         assert!(page.contains("8.4 ms"), "durable p99 never resolved");
         assert!(page.contains("0.5 ms"), "decision p99 never resolved");
@@ -1472,15 +1548,120 @@ mod tests {
         assert!(page.contains("genesis"), "a null prev_snapshot must say so");
     }
 
+    /// A handle the roster names is rendered as the person, in both
+    /// channel shapes, and the segments around it survive.
+    ///
+    /// `git/` is a provenance label only the node may apply (D41), so
+    /// dropping it would turn "the node saw this push authenticated"
+    /// into "somebody claimed to be this person".
+    #[test]
+    fn a_named_handle_renders_as_the_person_and_keeps_its_label() {
+        let mut roster = Roster::new();
+        roster.insert("7f3ac2ab19cd".to_string(), "Alice Ng".to_string());
+
+        assert_eq!(person("7f3ac2ab19cd", &roster), "Alice Ng");
+        assert_eq!(person("git/7f3ac2ab19cd", &roster), "git/Alice Ng");
+        assert_eq!(person("7f3ac2ab19cd/reviewer", &roster), "Alice Ng/reviewer");
+    }
+
+    /// A handle the roster cannot name is rendered as itself, silently.
+    ///
+    /// The three situations that produce one — issued before D46,
+    /// issued with an explicit `user`, and **deleted** — must be
+    /// indistinguishable on the page. A word like "unknown" or
+    /// "deleted" beside the third undoes the deletion by announcing
+    /// that there was something there to delete.
+    #[test]
+    fn an_unnamed_handle_renders_as_itself_and_says_nothing_else() {
+        let mut roster = Roster::new();
+        roster.insert("7f3ac2ab19cd".to_string(), "Alice Ng".to_string());
+
+        for channel in ["91bd04ff2a17", "git/91bd04ff2a17", "91bd04ff2a17/reviewer"] {
+            let rendered = person(channel, &roster);
+            assert_eq!(rendered, channel, "a handle nobody can name was rewritten");
+            for tell in ["unknown", "deleted", "revoked", "former", "?"] {
+                assert!(
+                    !rendered.contains(tell),
+                    "rendering {channel} announced the absence with {tell:?}: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// The whole point, asserted on the page rather than on the helper:
+    /// a name the store has forgotten is gone from the rendered HTML,
+    /// and the handle it was attached to is what a reader sees.
+    #[test]
+    fn deleting_a_name_removes_it_from_the_page() {
+        let json = serde_json::json!({
+            "reviews": {
+                "r1": {
+                    "reviewers": ["7f3ac2ab19cd/reviewer"],
+                    "verdicts": {"7f3ac2ab19cd/reviewer": {"verdict": "Approve", "note": ""}},
+                }
+            }
+        })
+        .to_string();
+
+        let mut roster = Roster::new();
+        roster.insert("7f3ac2ab19cd".to_string(), "Alice Ng".to_string());
+        let named = render(&json, 1, &roster);
+        assert!(named.contains("Alice Ng"), "a named handle rendered as a handle: {named}");
+
+        // Revocation deletes the row the name lived in; the handle
+        // survives, because the log kept it and cannot be edited.
+        let forgotten = render(&json, 1, &Roster::new());
+        assert!(
+            !forgotten.contains("Alice Ng"),
+            "the deleted name is still on the page: {forgotten}"
+        );
+        assert!(
+            forgotten.contains("7f3ac2ab19cd"),
+            "the handle vanished with the name, so the verdict names nobody at all: {forgotten}"
+        );
+    }
+
     /// A hit must not call the builder: that is the entire performance
     /// claim, and a closure that panics is the only way to prove the
     /// call did not happen.
     #[test]
     fn a_cache_hit_does_not_rebuild_the_page() {
         let cache = UiCache::new();
-        let first = cache.page(3, "", || r#"{"refs":{}}"#.to_string());
-        let second = cache.page(3, "", || panic!("rebuilt an unchanged page"));
+        let first = cache.page(3, 0, "", &Roster::new(), || r#"{"refs":{}}"#.to_string());
+        let second = cache.page(3, 0, "", &Roster::new(), || panic!("rebuilt an unchanged page"));
         assert!(Arc::ptr_eq(&first, &second), "same seq served a new page");
+    }
+
+    /// Revoking an account deletes a name and appends no op, so the
+    /// sequence does not move. Keyed on the sequence alone the cache
+    /// would go on serving the deleted name until the next push — which
+    /// on a quiet repository is never. The `ETag` has to move with it,
+    /// or a browser holding the previous copy is told nothing changed.
+    #[test]
+    fn forgetting_a_name_invalidates_the_page_without_a_new_op() {
+        let json = serde_json::json!({
+            "reviews": {"r1": {"reviewers": ["7f3ac2ab19cd/reviewer"], "verdicts": {}}}
+        })
+        .to_string();
+        let mut roster = Roster::new();
+        roster.insert("7f3ac2ab19cd".to_string(), "Alice Ng".to_string());
+
+        let cache = UiCache::new();
+        let named = cache.page(3, 9, "", &roster, || json.clone());
+        assert!(named.contains("Alice Ng"), "{named}");
+
+        // Same sequence, later store: the name is gone from the store
+        // and must be gone from the page.
+        let forgotten = cache.page(3, 10, "", &Roster::new(), || json.clone());
+        assert!(
+            !forgotten.contains("Alice Ng"),
+            "a deleted name survived in the cache at an unchanged sequence: {forgotten}"
+        );
+        assert_ne!(
+            etag(3, 9, ""),
+            etag(3, 10, ""),
+            "the ETag did not move, so a browser keeps the page with the name on it"
+        );
     }
 
     /// ...and a changed sequence must rebuild, or the page would show
@@ -1489,12 +1670,12 @@ mod tests {
     fn a_new_sequence_rebuilds_and_shows_the_new_state() {
         let cache = UiCache::new();
         let before =
-            cache.page(1, "", || r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string());
+            cache.page(1, 0, "", &Roster::new(), || r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string());
         let after =
-            cache.page(2, "", || r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string());
+            cache.page(2, 0, "", &Roster::new(), || r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string());
         assert!(before.contains("11-aaa"));
         assert!(after.contains("11-bbb"));
-        assert_ne!(etag(1, ""), etag(2, ""));
+        assert_ne!(etag(1, 0, ""), etag(2, 0, ""));
     }
 
     /// Two readers at one sequence are two pages, and each is reused.
@@ -1503,16 +1684,16 @@ mod tests {
     #[test]
     fn readers_seeing_different_things_get_different_pages() {
         let cache = UiCache::new();
-        let alice = cache.page(4, "alice", || r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string());
-        let bob = cache.page(4, "bob", || r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string());
+        let alice = cache.page(4, 0, "alice", &Roster::new(), || r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string());
+        let bob = cache.page(4, 0, "bob", &Roster::new(), || r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string());
         // On the repository name rather than the `.git` key it is stored
         // under: this test is about one reader never seeing the other's
         // page, and the negative half is stricter for the shorter string.
         assert!(alice.contains("o/a") && !alice.contains("o/b"));
         assert!(bob.contains("o/b") && !bob.contains("o/a"));
-        let again = cache.page(4, "alice", || panic!("rebuilt a cached reader's page"));
+        let again = cache.page(4, 0, "alice", &Roster::new(), || panic!("rebuilt a cached reader's page"));
         assert!(Arc::ptr_eq(&alice, &again), "the reader's own page was dropped");
-        assert_ne!(etag(4, "alice"), etag(4, "bob"), "one ETag for two pages");
+        assert_ne!(etag(4, 0, "alice"), etag(4, 0, "bob"), "one ETag for two pages");
     }
 
     /// A new sequence must drop every reader's page, not only the one
@@ -1521,9 +1702,9 @@ mod tests {
     #[test]
     fn advancing_the_sequence_clears_every_readers_page() {
         let cache = UiCache::new();
-        let stale = cache.page(5, "alice", || r#"{"refs":{}}"#.to_string());
-        let _ = cache.page(6, "bob", || r#"{"refs":{}}"#.to_string());
-        let fresh = cache.page(6, "alice", || r#"{"refs":{}}"#.to_string());
+        let stale = cache.page(5, 0, "alice", &Roster::new(), || r#"{"refs":{}}"#.to_string());
+        let _ = cache.page(6, 0, "bob", &Roster::new(), || r#"{"refs":{}}"#.to_string());
+        let fresh = cache.page(6, 0, "alice", &Roster::new(), || r#"{"refs":{}}"#.to_string());
         assert!(!Arc::ptr_eq(&stale, &fresh), "a page from an older sequence survived");
     }
 
@@ -1531,9 +1712,9 @@ mod tests {
     /// carry a username to whatever logs it.
     #[test]
     fn the_etag_hides_the_reader_and_is_unchanged_without_an_acl() {
-        assert_eq!(etag(7, ""), "W/\"7\"");
-        let tagged = etag(7, "alice\u{1f}*=r");
+        assert_eq!(etag(7, 0, ""), "W/\"7\"");
+        let tagged = etag(7, 0, "alice\u{1f}*=r");
         assert!(!tagged.contains("alice"), "the ETag carried the username: {tagged}");
-        assert_ne!(tagged, etag(7, "bob\u{1f}*=r"));
+        assert_ne!(tagged, etag(7, 0, "bob\u{1f}*=r"));
     }
 }

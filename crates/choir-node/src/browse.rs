@@ -1016,6 +1016,11 @@ fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered
         return unavailable(repo);
     };
     let rows = platform.reviews_for_repo(repo);
+    // Reviewer seats are channels, and a channel is an opaque handle
+    // after D46, so the list resolves them the same way the D28 page
+    // does. This page carries no `ETag`, so unlike that one it has no
+    // cache identity to fold the store generation into.
+    let (_, roster) = platform.roster();
 
     let mut h = shell(&format!("{repo}: reviews"));
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
@@ -1073,7 +1078,7 @@ fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered
                 h.push_str(" of ");
                 h.push_str(&assigned.len().to_string());
                 h.push_str("</summary>");
-                crate::ui::verdicts(&mut h, review);
+                crate::ui::verdicts(&mut h, review, &roster);
                 h.push_str("</details>");
             }
             h.push_str("</td></tr>");
