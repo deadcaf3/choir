@@ -143,6 +143,7 @@ fi
 #    re-ship megabytes of unchanged history; the bundle is verified
 #    here, against this checkout, before it replaces the previous one.
 bundles=0
+unverified=0
 while IFS= read -r repo; do
   case $repo in ''|\#*) continue ;; esac
   bundle=$DEST/repos/$repo.bundle
@@ -203,8 +204,16 @@ sys.stdout.write("".join(r + "\n" for r in sorted(rows)))
 PY
     git -C "$(dirname "$0")/.." bundle list-heads "$bundle" \
       | grep -E ' refs/(heads|tags)/' | LC_ALL=C sort > "$DEST/.bundle_refs"
-    cmp -s "$DEST/.snap_refs" "$DEST/.bundle_refs" \
-      || fail "the bundle for $repo does not match the node's attested ref-state (re-run once; a persistent mismatch is divergence)"
+    # The three outcomes are D47's, and they live in their own script so
+    # they can be exercised with fixtures rather than only against a
+    # node. A repo with no attested rows is reported and counted, never
+    # failed: it cannot have any, so failing it fails every run forever.
+    if sh "$(dirname "$0")/attest_check.sh" "$repo" "$DEST/.snap_refs" "$DEST/.bundle_refs"; then
+      [ -s "$DEST/.snap_refs" ] || unverified=$((unverified + 1))
+    else
+      rm -f "$DEST/.snap_refs" "$DEST/.bundle_refs"
+      fail "the bundle for $repo does not match the node's attested ref-state (re-run once; a persistent mismatch is divergence)"
+    fi
     rm -f "$DEST/.snap_refs" "$DEST/.bundle_refs"
   fi
   bundles=$((bundles + 1))
@@ -218,3 +227,10 @@ leaked=$(ls "$DEST" "$DEST/policy" | grep -E '^(auth)$|\.key$|\.pem$' || true)
 [ -z "$leaked" ] || fail "SECRETS IN THE BACKUP: $leaked (a backup holding a token or key is a credential channel)"
 
 echo "pull-backup: $lines ops, fingerprint, 6 policy files, $bundles repo bundles -> $DEST"
+# Never let the run's last line read as full verification when it was
+# not. The per-repo line above already said which; this says how many,
+# because that is the number an operator would otherwise have to count
+# out of a scrolled log.
+if [ "$unverified" -gt 0 ]; then
+  echo "pull-backup: $unverified of $bundles bundles are UNVERIFIED — copied, with no attested ref-state behind them (D47)"
+fi

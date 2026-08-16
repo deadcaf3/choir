@@ -1130,3 +1130,82 @@ fn the_pulled_backup_carries_the_log_and_the_pin_but_never_the_key() {
         String::from_utf8_lossy(&syntax.stderr)
     );
 }
+
+/// D47's three outcomes, run rather than grepped.
+///
+/// The rule this encodes came from a live failure: an imported
+/// repository has no attested ref-state, so comparing its bundle
+/// against one compares four real refs with an empty set, and every
+/// hourly backup exits nonzero forever. The repair is not to silence
+/// the check — for that repository the op log genuinely is not the
+/// authority on ref state — it is to report it as unverified and keep
+/// failing only on the case the check exists for.
+///
+/// Asserted by executing the script with fixture files, because a test
+/// that greps `pull_backup.sh` for a message is a test of how the
+/// message is spelled today.
+#[test]
+fn an_unattested_repo_is_reported_unverified_and_divergence_still_fails() {
+    let work = std::env::temp_dir().join(format!("choir-attest-check-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    let script = repo_root().join("scripts/attest_check.sh");
+
+    let refs = "aaaa refs/heads/main\nbbbb refs/tags/v1\n";
+    let attested = work.join("attested");
+    let bundled = work.join("bundled");
+    let empty = work.join("empty");
+    std::fs::write(&empty, "").expect("empty fixture");
+
+    let run = |a: &std::path::Path, b: &std::path::Path| -> (bool, String) {
+        let out = std::process::Command::new("sh")
+            .arg(&script)
+            .arg("some/repo.git")
+            .arg(a)
+            .arg(b)
+            .output()
+            .expect("attest_check runs");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text)
+    };
+
+    // Attested and matching: the ordinary case, and it must stay quiet
+    // about being anything else.
+    std::fs::write(&attested, refs).expect("attested fixture");
+    std::fs::write(&bundled, refs).expect("bundle fixture");
+    let (ok, said) = run(&attested, &bundled);
+    assert!(ok, "a matching bundle failed: {said}");
+    assert!(said.contains("verified"), "{said}");
+    assert!(!said.contains("UNVERIFIED"), "a matching bundle read as unverified: {said}");
+
+    // Attested and different: divergence, and it must still stop the
+    // run. This is the whole reason the check exists, and the failure
+    // mode of getting D47 wrong is turning this into a warning.
+    std::fs::write(&bundled, "cccc refs/heads/main\n").expect("bundle fixture");
+    let (ok, said) = run(&attested, &bundled);
+    assert!(!ok, "divergence was tolerated: {said}");
+    assert!(said.contains("divergence"), "{said}");
+
+    // No attested rows: reported by name, and the run continues.
+    std::fs::write(&bundled, refs).expect("bundle fixture");
+    let (ok, said) = run(&empty, &bundled);
+    assert!(ok, "an unattested repo failed the run: {said}");
+    assert!(said.contains("UNVERIFIED"), "the unverified state was not announced: {said}");
+    assert!(said.contains("some/repo.git"), "the repo was not named: {said}");
+    assert!(
+        said.contains("never sequenced"),
+        "the reason is missing, so a reader cannot tell this from divergence: {said}"
+    );
+
+    // ...and the caller counts them, so the last line of a run can never
+    // read as full verification when it was not.
+    let pull = std::fs::read_to_string(repo_root().join("scripts/pull_backup.sh"))
+        .expect("scripts/pull_backup.sh");
+    assert!(
+        pull.contains("attest_check.sh") && pull.contains("unverified"),
+        "pull_backup.sh does not use the checker or does not count its unverified repos"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
