@@ -42,9 +42,11 @@ TARGET_DIR="$(cargo metadata --format-version 1 --no-deps \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 TARGET_DIR="${TARGET_DIR:-$REPO_DIR/target}"
 BIN="$TARGET_DIR/release/choir-node"
+CHOIR="$TARGET_DIR/release/choir"
 POLICY_MARKER="$STATE/review-gates.enabled"
 SCOPE_MARKER="$STATE/scope-required.enabled"
 TLS_MARKER="$STATE/tls.enabled"
+PUBLIC_URL_FILE=$HOME/.choir-public-url
 PROTECTED_REFS="$STATE/protected-refs"
 NEWCOMER_AUDIT="$STATE/newcomer-audit.jsonl"
 NEWCOMER_ADJUDICATIONS="$STATE/newcomer-adjudications.jsonl"
@@ -142,6 +144,7 @@ fi
 # Linux installer, same fail-closed refusal on a half-filled marker.
 TLS_CERT=""
 TLS_KEY=""
+PUBLIC_URL=""
 if [[ -f "$TLS_MARKER" ]]; then
   TLS_CERT=$(sed -n 1p "$TLS_MARKER")
   TLS_KEY=$(sed -n 2p "$TLS_MARKER")
@@ -149,6 +152,15 @@ if [[ -f "$TLS_MARKER" ]]; then
     || { echo "$TLS_MARKER must hold two lines: cert path, key path" >&2; exit 1; }
   [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] \
     || { echo "TLS enabled but the cert/key files named by $TLS_MARKER are not readable" >&2; exit 1; }
+  [[ -r "$PUBLIC_URL_FILE" ]] \
+    || { echo "TLS enabled but no verified API route is configured; run configure_public_url.sh <domain> $PORT" >&2; exit 1; }
+  PUBLIC_URL=$(sed -n 1p "$PUBLIC_URL_FILE")
+  [[ "$(wc -l < "$PUBLIC_URL_FILE" | tr -d ' ')" = 1 ]] \
+    || { echo "$PUBLIC_URL_FILE must hold exactly one URL" >&2; exit 1; }
+  case "$PUBLIC_URL" in
+    https://*:"$PORT") ;;
+    *) echo "$PUBLIC_URL_FILE must hold https://<domain>:$PORT" >&2; exit 1;;
+  esac
 fi
 if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$PROTECTED_REFS"
@@ -180,5 +192,10 @@ fi
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "loaded $LABEL on 127.0.0.1:$PORT (logs: $STATE/node.log)"
-echo "check: curl -s -u choir:\$(cut -d: -f2 $STATE/auth) http://127.0.0.1:$PORT/api/view"
+if [[ -n "$PUBLIC_URL" ]]; then
+  echo "loaded $LABEL on public TLS port $PORT (logs: $STATE/node.log)"
+  echo "check: $CHOIR --auth-file $STATE/auth --auth-user <user> view \"\$(cat ~/.choir-public-url)\""
+else
+  echo "loaded $LABEL on 127.0.0.1:$PORT (logs: $STATE/node.log)"
+  echo "check: $CHOIR --auth-file $STATE/auth --auth-user <user> view http://127.0.0.1:$PORT"
+fi

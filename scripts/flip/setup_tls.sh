@@ -34,6 +34,7 @@ MARKER=$STATE/tls.enabled
 HOOK=/etc/letsencrypt/renewal-hooks/deploy/choir-tls
 NODE_USER=$(id -un)
 NODE_UID=$(id -u)
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 command -v certbot >/dev/null 2>&1 \
   || { echo "certbot is not installed; run: sudo apt-get install -y certbot" >&2; exit 1; }
@@ -70,6 +71,12 @@ sudo "$HOOK"
 #    marker discipline as the review and scope gates.
 printf '%s\n%s\n' "$TLS_DIR/fullchain.pem" "$TLS_DIR/privkey.pem" > "$MARKER"
 chmod 600 "$MARKER"
+
+# 5. The certificate-valid route operator tools use. Without this marker
+#    they fall back to the pre-TLS loopback tunnel; on the node itself that
+#    either depends on a tunnel that does not exist or reaches TLS by IP and
+#    fails hostname verification. Keep the name explicit and untracked.
+sh "$HERE/configure_public_url.sh" "$DOMAIN" "$PORT"
 
 echo "issued for $DOMAIN; pair projected to $TLS_DIR; marker written to $MARKER"
 echo "next: re-run the installer to render the TLS unit, e.g."

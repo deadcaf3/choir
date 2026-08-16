@@ -305,13 +305,16 @@ steps, all on the node host, all reversible by deleting one marker file:
 1. Firewall: allow inbound 80 (certbot standalone issuance, and every
    ~60-day renewal rebinds it) and the serving port. Nothing else ever
    serves on 80.
-2. `sh ~/choir-build/scripts/flip/setup_tls.sh <domain> [port]` — issues
+2. `sh ~/choir-build/scripts/flip/setup_tls.sh <domain> [port]` issues
    the Let's Encrypt cert (account registered without an email, per the
    standing privacy rule), installs a deploy hook that re-projects the
    pair to `~/.choir/tls/` at 0600 and restarts the unit on every
    renewal, runs that hook once now so it is proven today rather than at
-   the first renewal, and writes `~/.choir/tls.enabled` (two lines: cert
-   path, key path).
+   the first renewal, writes `~/.choir/tls.enabled` (two lines: cert
+   path, key path), and writes `~/.choir-public-url` with the
+   certificate-valid API base. An existing TLS node can add only the
+   route marker with `sh scripts/flip/configure_public_url.sh <domain>
+   [port]`; that does not renew or restart anything.
 3. Re-run the installer. The marker flips the rendered unit to
    `--bind 0.0.0.0 --tls-cert ... --tls-key ...`; the same one-way
    marker discipline as the review and scope gates, so every later
@@ -319,6 +322,20 @@ steps, all on the node host, all reversible by deleting one marker file:
    refuses to render (fail closed) — and the node itself refuses a
    non-loopback bind without TLS (invariant 9), so there is no
    configuration in which plaintext basic auth crosses a real network.
+
+After TLS is enabled, node-local and remote CLI calls use the same verified
+route:
+
+```sh
+BASE=$(cat ~/.choir-public-url)
+~/bin/choir --auth-file ~/.choir/auth --auth-user <user> view "$BASE"
+```
+
+Do not use `https://127.0.0.1` with `-k`. It is useful only as a narrow
+reachability diagnostic because `-k` disables the server identity check.
+The public-name route was chosen over a permanent loopback exception so
+normal commands keep certificate verification and do not depend on an SSH
+tunnel.
 
 Access for a new user is one appended `user:token` line in
 `~/.choir/auth` (0600; mint the token with `openssl rand -hex 32`,

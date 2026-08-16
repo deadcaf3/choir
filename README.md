@@ -91,7 +91,7 @@ sh scripts/flip/setup_tls.sh <your.domain> [port]   # certbot + renewal hook + m
 sh scripts/flip/install_node_linux.sh <port> '' ~/bin   # re-render the unit
 ```
 
-`setup_tls.sh` writes `~/.choir/tls.enabled` (cert path, then key path). That marker is what flips the rendered unit to `--bind 0.0.0.0 --tls-cert … --tls-key …`; delete it and reinstall to go back to loopback. Keep inbound **80** open permanently — renewals rebind it — and your serving port open too.
+`setup_tls.sh` writes `~/.choir/tls.enabled` (cert path, then key path) and `~/.choir-public-url` (the certificate-valid API base). The first marker flips the rendered unit to `--bind 0.0.0.0 --tls-cert … --tls-key …`; the second keeps every CLI request on verified HTTPS instead of reaching the certificate by loopback IP or depending on an SSH tunnel. Delete the TLS marker and reinstall to go back to loopback. Keep inbound **80** open permanently because renewals rebind it, and keep your serving port open too.
 
 Auth stays mandatory when public: anonymous requests get **401** on both the API and git, and a browser opening the URL gets a login prompt. That is the expected state, not a misconfiguration. Give each additional person their own line in `~/.choir/auth`:
 
@@ -101,7 +101,7 @@ printf 'alice:%s\n' "$(openssl rand -hex 32)" >> ~/.choir/auth   # hand the toke
 
 On its own that token grants read and write on **every** repository the node serves (see the warning under file formats). Pair it with an `--acl-file` line before handing it over, or you are giving full node access.
 
-Operator scripts follow the public name automatically if you put it in an untracked `~/.choir-public-url`; without that file they use the loopback tunnel. Details and the operator checklist: `scripts/flip/RUNBOOK.md`.
+Operator scripts follow the public name automatically through the untracked `~/.choir-public-url`. `setup_tls.sh` creates it. For an existing TLS node, run `sh scripts/flip/configure_public_url.sh <your.domain> [port]` once. Do not replace this with `https://127.0.0.1` plus `-k`: that reaches the process but stops authenticating the server. Without the marker, a non-TLS installation uses the loopback tunnel. Details and the operator checklist: `scripts/flip/RUNBOOK.md`.
 
 ### Option B — any Unix (foreground)
 

@@ -5,6 +5,94 @@ fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+#[test]
+fn public_url_configuration_is_private_validated_and_wired_into_tls_setup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = std::env::temp_dir().join(format!("choir-public-url-{}", std::process::id()));
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::create_dir_all(&home).expect("scratch home");
+    let script = repo_root().join("scripts/flip/configure_public_url.sh");
+
+    let configured = std::process::Command::new("sh")
+        .arg(&script)
+        .args(["node.example.test", "9443"])
+        .env("HOME", &home)
+        .output()
+        .expect("configuration helper runs");
+    assert!(
+        configured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let marker = home.join(".choir-public-url");
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("marker readable"),
+        "https://node.example.test:9443\n"
+    );
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "the route sits beside credential-bearing operator state"
+    );
+
+    for (domain, port) in [
+        ("not-a-public-name", "8417"),
+        ("bad/name.example", "8417"),
+        ("node.example.test", "0"),
+        ("node.example.test", "65536"),
+    ] {
+        let refused = std::process::Command::new("sh")
+            .arg(&script)
+            .args([domain, port])
+            .env("HOME", &home)
+            .output()
+            .expect("configuration helper runs");
+        assert!(!refused.status.success(), "accepted {domain}:{port}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("valid marker survives refused input"),
+        "https://node.example.test:9443\n"
+    );
+
+    let setup = std::fs::read_to_string(repo_root().join("scripts/flip/setup_tls.sh"))
+        .expect("TLS setup source");
+    let here = setup.find("HERE=").expect("TLS setup locates its helpers");
+    let configure = setup
+        .find("configure_public_url.sh")
+        .expect("TLS setup configures the verified route");
+    assert!(
+        here < configure,
+        "helper directory must be known before use"
+    );
+
+    for name in [
+        "scripts/flip/install_node.sh",
+        "scripts/flip/install_node_linux.sh",
+    ] {
+        let installer = std::fs::read_to_string(repo_root().join(name)).expect(name);
+        assert!(
+            installer.contains(".choir-public-url"),
+            "{name} does not require the certificate-valid route when TLS is active"
+        );
+        assert!(
+            installer.contains("--auth-file")
+                && installer.contains("\\$(cat ~/.choir-public-url)"),
+            "{name} does not recommend the CLI over verified HTTPS"
+        );
+        assert!(
+            !installer.contains("view $PUBLIC_URL"),
+            "{name} exposes the private route in installer output"
+        );
+        assert!(
+            !installer.contains("curl -s -u choir:"),
+            "{name} still prints a secret-bearing loopback curl command"
+        );
+    }
+
+    std::fs::remove_dir_all(home).ok();
+}
+
 /// Writes the repos file both renderers read in place of the old single
 /// positional repo. Unique per call: these tests run on parallel threads
 /// inside one process, so a pid-keyed name would collide.
