@@ -1111,6 +1111,10 @@ fn review(
         return no_such_review(repo, id);
     };
     let commit_oid = git_oid_of(state["target"].as_str().unwrap_or("")).unwrap_or_default();
+    // Reviewer seats and comment authors are channels, and a channel is
+    // an opaque handle after D46. This page is where a person reads who
+    // said what, so it resolves them the same way the D28 page does.
+    let (_, roster) = platform.roster();
 
     let mut h = shell(&format!("{repo}: review {id}"));
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
@@ -1171,7 +1175,7 @@ fn review(
             let verdict = &state["verdicts"][who];
             let slashed = state["slashes"].get(who).and_then(serde_json::Value::as_str);
             h.push_str("<tr><td class=\"mono\">");
-            h.push_str(&esc(who));
+            h.push_str(&esc(&crate::ui::person(who, &roster)));
             h.push_str("</td><td>");
             match verdict["verdict"].as_str() {
                 Some("Approve") => h.push_str("<b class=\"tag ok\">approve</b>"),
@@ -1217,7 +1221,10 @@ fn review(
             h.push_str("<tr><td class=\"num mono muted\">");
             h.push_str(&esc(&comment["at"].to_string()));
             h.push_str("</td><td class=\"mono\">");
-            h.push_str(&esc(comment["author"].as_str().unwrap_or("")));
+            h.push_str(&esc(&crate::ui::person(
+                comment["author"].as_str().unwrap_or(""),
+                &roster,
+            )));
             h.push_str("</td><td>");
             h.push_str(&esc(comment["body"].as_str().unwrap_or("")));
             h.push_str("</td></tr>");

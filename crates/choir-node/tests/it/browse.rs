@@ -885,3 +885,147 @@ fn a_granted_repository_that_is_missing_says_nothing_about_the_disk() {
         );
     }
 }
+
+/// The review page names the people, not their handles (D46).
+///
+/// This page is where a person reads who was asked and who said what,
+/// and after D46 a channel is twelve hex characters. `ui::person` is
+/// unit-tested on strings; what only a served page can show is that the
+/// two places this page renders a channel — the reviewer seat and a
+/// comment's author — were both wired to it. A miss on either renders a
+/// perfectly good page naming nobody.
+#[test]
+fn a_review_page_names_the_person_behind_a_handle() {
+    let work = std::env::temp_dir().join("choir-node-browse-handle");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).expect("register author");
+
+    let acl_path = work.join("acl");
+    std::fs::write(&acl_path, "alice @node write\nalice @node auditor\nalice * write\n")
+        .expect("acl file");
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+
+    let root = work.join("repos");
+    let mut node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/one.git").expect("repo created");
+    node.watch_acl_file(acl_path).expect("acl loads");
+    node.enable_accounts(work.join("accounts.json"), None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Onboard a person the D46 way: the invite names them, the account
+    // is issued under a handle.
+    let (code, issued) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
+        r#"{"display_name":"Ada Lovelace","grants":["agents/one.git write"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    assert_eq!(code, 200, "invite refused: {issued}");
+    let handle = issued["user"].as_str().expect("a handle").to_string();
+    let pair = issued["invite"].as_str().expect("invite pair").to_string();
+    let (code, redeemed) = crate::support::curl(&[
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "--data-binary",
+        "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    assert_eq!(code, 200, "redeem refused: {redeemed}");
+
+    let clone = work.join("clone");
+    let url = format!("http://alice:a@127.0.0.1:{port}/agents/one.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()]).status.success());
+    std::fs::write(clone.join("f.txt"), "base\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "base"]).status.success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    let proposal = String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    // The handle is the reviewer seat, because the handle is the
+    // principal — which is exactly why the page has to resolve it.
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-handle".into(),
+        target: choir_oplog::ContentHash::from_git_oid(&proposal).expect("a git oid"),
+        reviewers: vec![handle.clone()],
+        target_ref: Some("agents/one.git:refs/heads/main".into()),
+    });
+    let (code, resp) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        &crate::support::submit_body_legacy(&author, "author", &request),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    let comment = ViewOp::new(OpKind::PostComment {
+        id: "r-handle".into(),
+        comment: "c1".into(),
+        author: handle.clone(),
+        body: "looks right to me".into(),
+    });
+    let (code, resp) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        &crate::support::submit_body_legacy(&author, &handle, &comment),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    let (status, _, page) = get(
+        &format!("{base}/r/agents/one/review/r-handle"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200, "{page}");
+    // Both renders of a channel, asserted separately: one wired and one
+    // missed is the failure this test exists for, and a single
+    // `contains` would pass on either.
+    // Each slice is bounded at its own `</section>`. An unbounded split
+    // takes everything below the header, so the comment author's name
+    // satisfies the reviewer assertion and the reviewer seat can be
+    // unwired without failing anything — which is what an early draft of
+    // this test did.
+    let section = |heading: &str| -> String {
+        page.split(heading)
+            .nth(1)
+            .and_then(|rest| rest.split("</section>").next())
+            .unwrap_or_else(|| panic!("no {heading} section in the page"))
+            .to_string()
+    };
+    let reviewer_row = section("<h2>Reviewers</h2>");
+    assert!(
+        reviewer_row.contains("Ada Lovelace"),
+        "the reviewer seat still reads as a handle: {reviewer_row}"
+    );
+    let discussion = section("<h2>Discussion</h2>");
+    assert!(
+        discussion.contains("Ada Lovelace"),
+        "the comment author still reads as a handle: {discussion}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
