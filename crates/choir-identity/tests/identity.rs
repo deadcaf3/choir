@@ -35,7 +35,10 @@ fn sign_verify_roundtrip_and_tamper_detection() {
     );
     let mut rews = e.clone();
     rews.channel = "someone-else".into();
-    assert_eq!(registry.verify_entry(&rews), Err(IdentityError::BadSignature));
+    assert_eq!(
+        registry.verify_entry(&rews),
+        Err(IdentityError::BadSignature)
+    );
 
     // seq/parent are deliberately NOT covered: the sequencer assigns
     // them after signing (witnesses cover placement from Phase 2).
@@ -111,7 +114,14 @@ fn an_es256_assertion_verifies_and_a_tampered_one_does_not() {
     let spki = work.join("signer.der");
 
     let ok = std::process::Command::new("openssl")
-        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+        .args([
+            "ecparam",
+            "-name",
+            "prime256v1",
+            "-genkey",
+            "-noout",
+            "-out",
+        ])
         .arg(&secret)
         .output()
         .expect("openssl runs");
@@ -176,7 +186,10 @@ fn an_es256_assertion_verifies_and_a_tampered_one_does_not() {
     let point = &spki_der[choir_identity::P256_SPKI_PREFIX.len()..];
     assert_eq!(point.len(), 65, "uncompressed point is 65 bytes");
     let rebuilt = choir_identity::p256_point_to_spki(point).expect("a valid point");
-    assert_eq!(rebuilt, spki_der, "the prefix is exactly what openssl emits");
+    assert_eq!(
+        rebuilt, spki_der,
+        "the prefix is exactly what openssl emits"
+    );
     assert_eq!(
         choir_identity::verify_es256(&rebuilt, &message, &signature),
         Ok(()),
@@ -224,7 +237,14 @@ fn p256_credential(work: &std::path::Path) -> (Vec<u8>, std::path::PathBuf) {
     let secret = work.join("cred.key");
     let spki = work.join("cred.der");
     let ok = std::process::Command::new("openssl")
-        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+        .args([
+            "ecparam",
+            "-name",
+            "prime256v1",
+            "-genkey",
+            "-noout",
+            "-out",
+        ])
         .arg(&secret)
         .output()
         .expect("openssl runs");
@@ -294,7 +314,10 @@ fn a_valid_assertion_is_refused_when_it_attests_to_a_different_operation() {
 
     let approved = choir_oplog::signing_hash("agents/demo", b"the op the human read");
     let other = choir_oplog::signing_hash("agents/demo", b"an op the human never saw");
-    assert_ne!(approved, other, "the two operations must differ to test this");
+    assert_ne!(
+        approved, other,
+        "the two operations must differ to test this"
+    );
 
     let challenge = base64url_via_openssl(&choir_identity::webauthn_challenge(&approved), &work);
     let client_data =
@@ -354,7 +377,9 @@ fn a_valid_assertion_is_refused_when_it_attests_to_a_different_operation() {
 fn each_verifier_refuses_the_other_scheme_by_name() {
     let key = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&key.public_key_bytes()).expect("valid key");
+    registry
+        .register(&key.public_key_bytes())
+        .expect("valid key");
 
     let signing = choir_oplog::signing_hash("w", b"payload");
     let passkey = choir_oplog::Witness::webauthn_es256("cred", vec![1], vec![2], b"{}".to_vec());

@@ -211,7 +211,10 @@ fn submit_path_budget() {
         .map(|(_, d)| *d)
         .expect("measured");
 
-    println!("\n  everything except the clone           {:>10.3} us", base.as_secs_f64() * 1e6);
+    println!(
+        "\n  everything except the clone           {:>10.3} us",
+        base.as_secs_f64() * 1e6
+    );
     println!(
         "  + clone @ 100 refs                    {:>10.3} us  (clone is {:.0}% of the op)",
         (base + clone_small).as_secs_f64() * 1e6,

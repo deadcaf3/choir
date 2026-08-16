@@ -37,7 +37,10 @@ fn try_submit(
         .to_string()
         .as_bytes(),
     );
-    (status, serde_json::from_str(&body).expect("response is json"))
+    (
+        status,
+        serde_json::from_str(&body).expect("response is json"),
+    )
 }
 
 fn view(platform: &Platform) -> serde_json::Value {
@@ -145,7 +148,10 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     let concentration = &before["concentration"];
     // Attribution is replayable evidence; the population is not, and the
     // report says so rather than presenting one provenance for both.
-    assert_eq!(concentration["bindings"]["attribution_source"], "durable_log");
+    assert_eq!(
+        concentration["bindings"]["attribution_source"],
+        "durable_log"
+    );
     assert_eq!(concentration["bindings"]["population_source"], "keys_file");
     assert_eq!(concentration["as_of_seq"], 199);
     assert_eq!(concentration["totals"]["active_branches"], 100);
@@ -208,7 +214,10 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     );
     // It does change *coverage*, and that is reported rather than hidden:
     // a trusted key with no sequenced binding holds evaluation incomplete.
-    assert_eq!(trusted_only["concentration"]["totals"]["unbound_agent_keys"], 1);
+    assert_eq!(
+        trusted_only["concentration"]["totals"]["unbound_agent_keys"],
+        1
+    );
     assert_eq!(trusted_only["concentration"]["evaluation_complete"], false);
 
     // Only the sequenced binding moves the number.
@@ -264,8 +273,7 @@ fn exact_t3_boundaries_count_unknown_ownership_in_the_denominator() {
     assert_eq!(first_body, second_body);
     let operator_json = first_body.split_once("\"operators\":{").unwrap().1;
     assert!(
-        operator_json.find("\"alpha\":").unwrap()
-            < operator_json.find("\"many\":").unwrap(),
+        operator_json.find("\"alpha\":").unwrap() < operator_json.find("\"many\":").unwrap(),
         "operator rows must be lexicographically ordered: {first_body}"
     );
 
@@ -390,10 +398,8 @@ fn a_key_claimed_by_two_operators_in_the_file_is_decided_only_by_the_record() {
 
 #[test]
 fn protected_updates_follow_the_exact_approved_requester_and_replay() {
-    let work = std::env::temp_dir().join(format!(
-        "choir-concentration-replay-{}",
-        std::process::id()
-    ));
+    let work =
+        std::env::temp_dir().join(format!("choir-concentration-replay-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     let keys_file = work.join("keys");
@@ -423,12 +429,7 @@ fn protected_updates_follow_the_exact_approved_requester_and_replay() {
 
     let registry = || {
         let mut registry = Registry::new();
-        for key in [
-            &requester,
-            &unbound_requester,
-            &reviewer_a,
-            &reviewer_b,
-        ] {
+        for key in [&requester, &unbound_requester, &reviewer_a, &reviewer_b] {
             registry.register(&key.public_key_bytes()).unwrap();
         }
         registry
@@ -542,8 +543,8 @@ fn protected_updates_follow_the_exact_approved_requester_and_replay() {
                     target_ref: Some(protected_ref.into()),
                 }),
             );
-            let drawn: Vec<String> = serde_json::from_value(response["reviewers"].clone())
-                .expect("drawn reviewers");
+            let drawn: Vec<String> =
+                serde_json::from_value(response["reviewers"].clone()).expect("drawn reviewers");
             for who in drawn {
                 let key = match who.as_str() {
                     "review-a/agent" => &reviewer_a,

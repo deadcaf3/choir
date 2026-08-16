@@ -93,9 +93,17 @@ pub(crate) enum Page {
     Index,
     /// A directory listing at `rev`, rooted at `path` (empty for the
     /// repository root).
-    Tree { repo: String, rev: String, path: String },
+    Tree {
+        repo: String,
+        rev: String,
+        path: String,
+    },
     /// One file's contents at `rev`.
-    Blob { repo: String, rev: String, path: String },
+    Blob {
+        repo: String,
+        rev: String,
+        path: String,
+    },
     /// Recent history reachable from `rev`.
     Commits { repo: String, rev: String },
     /// One commit and its diff.
@@ -174,7 +182,13 @@ pub(crate) fn route(url: &str) -> Option<Page> {
         // `/r/owner/repo` is the repository's front door: its default
         // branch at the root, so a reader who followed a link from the
         // index does not have to know a ref name to see anything.
-        None | Some("") => return Some(Page::Tree { repo, rev: "HEAD".into(), path: String::new() }),
+        None | Some("") => {
+            return Some(Page::Tree {
+                repo,
+                rev: "HEAD".into(),
+                path: String::new(),
+            })
+        }
         Some(kind) => kind,
     };
     let rev_or_oid = decode(segments.next()?)?;
@@ -197,8 +211,14 @@ pub(crate) fn route(url: &str) -> Option<Page> {
             safe_path(&path)?;
             Some(Page::Blob { repo, rev, path })
         }
-        "commits" if path.is_empty() => Some(Page::Commits { repo, rev: safe_rev(&rev_or_oid)? }),
-        "commit" if path.is_empty() => Some(Page::Commit { repo, oid: safe_oid(&rev_or_oid)? }),
+        "commits" if path.is_empty() => Some(Page::Commits {
+            repo,
+            rev: safe_rev(&rev_or_oid)?,
+        }),
+        "commit" if path.is_empty() => Some(Page::Commit {
+            repo,
+            oid: safe_oid(&rev_or_oid)?,
+        }),
         _ => None,
     }
 }
@@ -345,7 +365,9 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         // revision" and "not a tree object" send a reader to different
         // fixes), and the path carries none of that, so it goes.
         let path = dir.to_string_lossy();
-        Err(String::from_utf8_lossy(&out.stderr).trim().replace(path.as_ref(), "<repository>"))
+        Err(String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .replace(path.as_ref(), "<repository>"))
     }
 }
 
@@ -357,7 +379,10 @@ fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 /// The commit oid a page is really about, which is its cache identity.
 fn resolve(dir: &Path, rev: &str) -> Result<String, String> {
-    let out = git_text(dir, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])?;
+    let out = git_text(
+        dir,
+        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+    )?;
     let oid = out.trim().to_string();
     if oid.is_empty() {
         return Err("no such revision".to_string());
@@ -386,6 +411,7 @@ pub(crate) fn render(
     readable: &dyn Fn(&str) -> bool,
     platform: Option<&crate::platform::Platform>,
     user: &str,
+    browser_writes: bool,
 ) -> Rendered {
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
@@ -409,7 +435,9 @@ pub(crate) fn render(
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev),
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid),
         Page::Reviews { repo } => reviews(repo, platform),
-        Page::Review { repo, id } => review(&bare(root, repo), repo, id, platform, user),
+        Page::Review { repo, id } => {
+            review(&bare(root, repo), repo, id, platform, user, browser_writes)
+        }
     }
 }
 
@@ -514,7 +542,11 @@ fn index(
         h.push_str("</tbody></table>");
     }
     h.push_str("</section>");
-    Rendered { status: 200, etag: None, html: close(h) }
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
 }
 
 /// A directory listing.
@@ -530,7 +562,11 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
     };
     // The trailing slash is what makes `ls-tree` list a directory's
     // children rather than the directory entry itself.
-    let spec = if path.is_empty() { String::new() } else { format!("{path}/") };
+    let spec = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
     let listing = if spec.is_empty() {
         git_text(dir, &["ls-tree", "--long", &oid])
     } else {
@@ -561,7 +597,10 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
     // every file browser has used for thirty years.
     rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
-    let mut h = shell(&format!("{repo}: {}", if path.is_empty() { "/" } else { path }));
+    let mut h = shell(&format!(
+        "{repo}: {}",
+        if path.is_empty() { "/" } else { path }
+    ));
     repo_header(&mut h, repo, rev, &oid, path, "tree");
     h.push_str("<section>");
     if rows.is_empty() {
@@ -620,7 +659,11 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
         h.push_str("</tbody></table>");
     }
     h.push_str("</section>");
-    Rendered { status: 200, etag: Some(tag(&oid, path)), html: close(h) }
+    Rendered {
+        status: 200,
+        etag: Some(tag(&oid, path)),
+        html: close(h),
+    }
 }
 
 /// One file.
@@ -649,8 +692,10 @@ fn blob(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
                 // path that is not a blob — most often a directory asked
                 // for with the wrong verb, which is a link away from
                 // working rather than a fault.
-                h.push_str("<p class=\"lede\">This revision holds nothing readable at that \
-                            path. A directory asked for as a file lands here.</p>");
+                h.push_str(
+                    "<p class=\"lede\">This revision holds nothing readable at that \
+                            path. A directory asked for as a file lands here.</p>",
+                );
                 h.push_str("<p class=\"note\">git says: ");
                 h.push_str(&esc(&why));
                 h.push_str("</p>");
@@ -683,7 +728,11 @@ fn blob(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
         }
     }
     h.push_str("</section>");
-    Rendered { status: 200, etag: Some(tag(&oid, path)), html: close(h) }
+    Rendered {
+        status: 200,
+        etag: Some(tag(&oid, path)),
+        html: close(h),
+    }
 }
 
 /// Recent history.
@@ -700,7 +749,12 @@ fn commits(dir: &Path, repo: &str, rev: &str) -> Rendered {
     // say so instead of ending mid-sentence.
     let log = match git_text(
         dir,
-        &["log", &format!("--max-count={}", COMMIT_PAGE + 1), format, &oid],
+        &[
+            "log",
+            &format!("--max-count={}", COMMIT_PAGE + 1),
+            format,
+            &oid,
+        ],
     ) {
         Ok(text) => text,
         Err(why) => return missing(repo, rev, &why),
@@ -742,7 +796,11 @@ fn commits(dir: &Path, repo: &str, rev: &str) -> Rendered {
         h.push_str(".git for the full history.</p>");
     }
     h.push_str("</section>");
-    Rendered { status: 200, etag: Some(tag(&oid, "commits")), html: close(h) }
+    Rendered {
+        status: 200,
+        etag: Some(tag(&oid, "commits")),
+        html: close(h),
+    }
 }
 
 /// One commit, with its diff.
@@ -781,7 +839,11 @@ fn commit(dir: &Path, repo: &str, oid: &str) -> Rendered {
         }
     }
     h.push_str("</section>");
-    Rendered { status: 200, etag: Some(tag(&id, "commit")), html: close(h) }
+    Rendered {
+        status: 200,
+        etag: Some(tag(&id, "commit")),
+        html: close(h),
+    }
 }
 
 /// What one patch line is, decided exactly as the old renderer did:
@@ -879,7 +941,11 @@ fn stat_row(h: &mut String, files: &[(&str, &str, &str)]) {
     }
     h.push_str("<p class=\"muted\">");
     h.push_str(&files.len().to_string());
-    h.push_str(if files.len() == 1 { " file changed, " } else { " files changed, " });
+    h.push_str(if files.len() == 1 {
+        " file changed, "
+    } else {
+        " files changed, "
+    });
     h.push_str("<span class=\"plus\">+");
     h.push_str(&added.to_string());
     h.push_str("</span> <span class=\"minus\">−");
@@ -925,9 +991,9 @@ fn patch(h: &mut String, output: &str, where_else: &str) {
         match (fields.next(), fields.next(), fields.next()) {
             (Some(a), Some(d), Some(path))
                 if !path.is_empty()
-                    && [a, d]
-                        .iter()
-                        .all(|n| *n == "-" || (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))) =>
+                    && [a, d].iter().all(|n| {
+                        *n == "-" || (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                    }) =>
             {
                 files.push((a, d, path));
                 body += 1;
@@ -1086,7 +1152,11 @@ fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered
         h.push_str("</tbody></table>");
     }
     h.push_str("</section>");
-    Rendered { status: 200, etag: None, html: close(h) }
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
 }
 
 /// One review: the proposal, the people, and the diff between what is
@@ -1103,6 +1173,7 @@ fn review(
     id: &str,
     platform: Option<&crate::platform::Platform>,
     user: &str,
+    browser_writes: bool,
 ) -> Rendered {
     let Some(platform) = platform else {
         return unavailable(repo);
@@ -1173,7 +1244,9 @@ fn review(
         h.push_str("</tr></thead><tbody>");
         for who in reviewers.iter().filter_map(serde_json::Value::as_str) {
             let verdict = &state["verdicts"][who];
-            let slashed = state["slashes"].get(who).and_then(serde_json::Value::as_str);
+            let slashed = state["slashes"]
+                .get(who)
+                .and_then(serde_json::Value::as_str);
             h.push_str("<tr><td class=\"mono\">");
             h.push_str(&esc(&crate::ui::person(who, &roster)));
             h.push_str("</td><td>");
@@ -1268,8 +1341,16 @@ fn review(
     }
     h.push_str("</section>");
 
-    write_sections(&mut h, id, &state, user);
-    Rendered { status: 200, etag: None, html: close(h) }
+    if browser_writes {
+        write_sections(&mut h, id, &state, user);
+    } else {
+        h.push_str("<section><h2>Writes</h2><p class=\"note\">This beta keeps browser access read-only. Use the signed CLI for verdicts and comments.</p></section>");
+    }
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
 }
 
 /// Both write affordances, and the one `<script>` element that serves
@@ -1324,10 +1405,12 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
     }
 
     h.push_str("<section><h2>Your verdict</h2>");
-    h.push_str("<noscript><p class=\"note\">Casting a verdict needs a passkey, which the \
+    h.push_str(
+        "<noscript><p class=\"note\">Casting a verdict needs a passkey, which the \
                 browser can only produce with scripting enabled. With it off, use \
                 <code>choir verdict</code> — the CLI is the write path this page is an \
-                alternative to, never a replacement for.</p></noscript>");
+                alternative to, never a replacement for.</p></noscript>",
+    );
     // The channel travels on the element rather than in the script, so
     // the script is one file with nothing interpolated into it — the one
     // property that makes "is this page's script safe" a question you
@@ -1335,8 +1418,10 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
     // shared resource at all.
     h.push_str("<div id=\"verdict\" hidden data-user=\"");
     h.push_str(&esc(user));
-    h.push_str("\"><p class=\"note\">Signed by your passkey on this device. Nothing is sent \
-                until you approve the prompt.</p>");
+    h.push_str(
+        "\"><p class=\"note\">Signed by your passkey on this device. Nothing is sent \
+                until you approve the prompt.</p>",
+    );
     for (verdict, label, class) in [
         ("Approve", "Approve", "ok"),
         ("RequestChanges", "Request changes", "danger"),
@@ -1377,14 +1462,18 @@ fn comment_box(h: &mut String, id: &str, state: &serde_json::Value, user: &str) 
         return;
     }
     h.push_str("<section><h2>Say something</h2>");
-    h.push_str("<noscript><p class=\"note\">Commenting signs an operation with your passkey, \
-                which needs scripting. With it off, use <code>choir comment</code>.</p></noscript>");
+    h.push_str(
+        "<noscript><p class=\"note\">Commenting signs an operation with your passkey, \
+                which needs scripting. With it off, use <code>choir comment</code>.</p></noscript>",
+    );
     h.push_str("<div id=\"comment\" hidden data-review=\"");
     h.push_str(&esc(id));
     h.push_str("\" data-user=\"");
     h.push_str(&esc(user));
-    h.push_str("\"><textarea id=\"comment-body\" rows=\"3\" maxlength=\"4096\" \
-                placeholder=\"What do you make of it?\"></textarea>");
+    h.push_str(
+        "\"><textarea id=\"comment-body\" rows=\"3\" maxlength=\"4096\" \
+                placeholder=\"What do you make of it?\"></textarea>",
+    );
     h.push_str("<p><button id=\"comment-go\">Sign and post</button></p>");
     h.push_str("<p id=\"comment-said\" class=\"note\" hidden></p></div>");
     h.push_str("</section>");
@@ -1456,7 +1545,10 @@ fn unavailable(repo: &str) -> Rendered {
                 next: "Browse the code instead — the link above works. Reviews appear here only \
                        once the operator restarts this node with the platform API on.",
             },
-            &[(&format!("/r/{repo}"), "this repository"), ("/r/", "all repositories")],
+            &[
+                (&format!("/r/{repo}"), "this repository"),
+                ("/r/", "all repositories"),
+            ],
         ),
     }
 }
@@ -1508,15 +1600,21 @@ fn empty(repo: &str) -> Rendered {
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\">empty</span>");
     h.push_str("<span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
     h.push_str("</div></header><main id=\"main\"><section>");
-    h.push_str("<p class=\"lede\">No commits yet. This repository exists and you may read it; \
-                nobody has pushed to it.</p>");
+    h.push_str(
+        "<p class=\"lede\">No commits yet. This repository exists and you may read it; \
+                nobody has pushed to it.</p>",
+    );
     crate::ui::next_action(
         &mut h,
         "Clone it, commit, and push — <code>git push origin HEAD:main</code>. The tree, the \
          history and the diffs all appear here on the first push.",
     );
     h.push_str("</section>");
-    Rendered { status: 200, etag: None, html: close(h) }
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
 }
 
 /// The page for a revision that does not resolve.
@@ -1546,7 +1644,10 @@ fn missing(repo: &str, rev: &str, why: &str) -> Rendered {
                 next: "Open the repository above and read the branch names off its front page. \
                        A shortened object id will not work here; browsing wants the whole one.",
             },
-            &[(&format!("/r/{repo}"), "this repository"), ("/r/", "all repositories")],
+            &[
+                (&format!("/r/{repo}"), "this repository"),
+                ("/r/", "all repositories"),
+            ],
         ),
     }
 }
@@ -1765,25 +1866,43 @@ mod tests {
         assert_eq!(route("/r/"), Some(Page::Index));
         assert_eq!(
             route("/r/o/p/tree/main/src/lib"),
-            Some(Page::Tree { repo: "o/p".into(), rev: "main".into(), path: "src/lib".into() })
+            Some(Page::Tree {
+                repo: "o/p".into(),
+                rev: "main".into(),
+                path: "src/lib".into()
+            })
         );
         assert_eq!(
             route("/r/o/p/blob/main/src/lib.rs"),
-            Some(Page::Blob { repo: "o/p".into(), rev: "main".into(), path: "src/lib.rs".into() })
+            Some(Page::Blob {
+                repo: "o/p".into(),
+                rev: "main".into(),
+                path: "src/lib.rs".into()
+            })
         );
         assert_eq!(
             route("/r/o/p/commits/main"),
-            Some(Page::Commits { repo: "o/p".into(), rev: "main".into() })
+            Some(Page::Commits {
+                repo: "o/p".into(),
+                rev: "main".into()
+            })
         );
         let oid = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
             route(&format!("/r/o/p/commit/{oid}")),
-            Some(Page::Commit { repo: "o/p".into(), oid: oid.into() })
+            Some(Page::Commit {
+                repo: "o/p".into(),
+                oid: oid.into()
+            })
         );
         // A query string is not part of the route.
         assert_eq!(
             route("/r/o/p/tree/main?x=1"),
-            Some(Page::Tree { repo: "o/p".into(), rev: "main".into(), path: String::new() })
+            Some(Page::Tree {
+                repo: "o/p".into(),
+                rev: "main".into(),
+                path: String::new()
+            })
         );
     }
 
@@ -1898,9 +2017,18 @@ mod tests {
         let mut h = String::new();
         patch(&mut h, out, "clone hint");
         assert!(!h.contains("<script"), "raw markup reached the page: {h}");
-        assert!(h.contains("<mark>one</mark>"), "the changed word vanished: {h}");
-        assert!(h.contains("<mark>two</mark>"), "the changed word vanished: {h}");
-        assert!(h.contains("&lt;script&gt;"), "the shared markup was dropped, not escaped: {h}");
+        assert!(
+            h.contains("<mark>one</mark>"),
+            "the changed word vanished: {h}"
+        );
+        assert!(
+            h.contains("<mark>two</mark>"),
+            "the changed word vanished: {h}"
+        );
+        assert!(
+            h.contains("&lt;script&gt;"),
+            "the shared markup was dropped, not escaped: {h}"
+        );
     }
 
     /// Unequal runs are not a modification, and a pair sharing nothing
@@ -1942,9 +2070,15 @@ mod tests {
         let mut h = String::new();
         patch(&mut h, out, "clone hint");
         assert!(h.contains("2 files changed"), "no summary line: {h}");
-        assert!(h.contains("+10") && h.contains("−2"), "per-file counts missing: {h}");
+        assert!(
+            h.contains("+10") && h.contains("−2"),
+            "per-file counts missing: {h}"
+        );
         assert!(h.contains("binary"), "the binary file lost its label: {h}");
-        assert!(h.contains("href=\"#f0\""), "the stat row links nowhere: {h}");
+        assert!(
+            h.contains("href=\"#f0\""),
+            "the stat row links nowhere: {h}"
+        );
         assert!(
             h.contains("<span class=\"file\" id=\"f0\">") && h.contains("id=\"f1\""),
             "the file headers carry no anchors: {h}"
@@ -2014,14 +2148,26 @@ mod tests {
         let mut comment = String::new();
         super::comment_box(&mut comment, "review-1", &state, "carol");
         for (what, html) in [("verdict", &verdict), ("comment", &comment)] {
-            assert!(!html.is_empty(), "{what}: nothing rendered, so nothing was checked");
-            assert!(!html.contains("<script"), "{what} grew a script element: {html}");
+            assert!(
+                !html.is_empty(),
+                "{what}: nothing rendered, so nothing was checked"
+            );
+            assert!(
+                !html.contains("<script"),
+                "{what} grew a script element: {html}"
+            );
         }
         // And the ids each section hands the shared script, named on
         // both sides so a rename fails a test rather than a person: the
         // control renders, nothing binds to it, and the page looks
         // exactly as it should.
-        for id in ["verdict", "verdict-said", "comment", "comment-go", "comment-body"] {
+        for id in [
+            "verdict",
+            "verdict-said",
+            "comment",
+            "comment-go",
+            "comment-body",
+        ] {
             assert!(
                 crate::ui::WEBAUTHN_JS.contains(&format!("'{id}'")),
                 "the shared script never looks for {id}"
@@ -2056,7 +2202,10 @@ mod tests {
         let mut h = String::new();
         super::write_sections(&mut h, "review-1", &live, "carol");
         assert_eq!(h.matches("<script").count(), 1, "{h}");
-        assert!(h.contains("Your verdict") && h.contains("comment-go"), "{h}");
+        assert!(
+            h.contains("Your verdict") && h.contains("comment-go"),
+            "{h}"
+        );
     }
 
     /// Discussion is wider than judgement, and narrower than the page.
@@ -2078,8 +2227,14 @@ mod tests {
             rendered("mallory").contains("comment-go"),
             "someone who is not a reviewer may still discuss"
         );
-        assert!(rendered("anon").is_empty(), "an anonymous reader was offered a box");
-        assert!(rendered("").is_empty(), "an unnamed caller was offered a box");
+        assert!(
+            rendered("anon").is_empty(),
+            "an anonymous reader was offered a box"
+        );
+        assert!(
+            rendered("").is_empty(),
+            "an unnamed caller was offered a box"
+        );
 
         let archived = serde_json::json!({
             "reviewers": ["carol"], "verdicts": {}, "archived": true,
@@ -2103,9 +2258,15 @@ mod tests {
             super::verdict_buttons(&mut h, "review-1", &state, user);
             h
         };
-        assert!(rendered("carol").contains("button class=\"verdict"), "an asked reviewer");
+        assert!(
+            rendered("carol").contains("button class=\"verdict"),
+            "an asked reviewer"
+        );
         assert!(rendered("dave").is_empty(), "dave already answered");
-        assert!(rendered("mallory").is_empty(), "not a reviewer on this review");
+        assert!(
+            rendered("mallory").is_empty(),
+            "not a reviewer on this review"
+        );
 
         let archived = serde_json::json!({
             "reviewers": ["carol"], "verdicts": {}, "archived": true,
@@ -2126,11 +2287,16 @@ mod tests {
         let mut h = String::new();
         super::verdict_buttons(&mut h, "review-1", &state, "carol");
         assert!(h.contains("<noscript>"), "no fallback at all");
-        assert!(h.contains("choir verdict"), "the fallback must name the CLI");
+        assert!(
+            h.contains("choir verdict"),
+            "the fallback must name the CLI"
+        );
         // The controls start hidden and are revealed by the script, so a
         // reader with scripting off is never shown a button that cannot
         // work.
-        assert!(h.contains("id=\"verdict\" hidden"), "the controls are not hidden by default");
+        assert!(
+            h.contains("id=\"verdict\" hidden"),
+            "the controls are not hidden by default"
+        );
     }
-
 }

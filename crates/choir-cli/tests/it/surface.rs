@@ -36,7 +36,10 @@ fn assert_local_links_resolve(root: &std::path::Path, rel: &str) {
             continue;
         }
         assert!(
-            path.parent().expect("document parent").join(target).exists(),
+            path.parent()
+                .expect("document parent")
+                .join(target)
+                .exists(),
             "{rel} links to missing local target `{raw}`"
         );
     }
@@ -46,7 +49,11 @@ fn assert_local_links_resolve(root: &std::path::Path, rel: &str) {
 fn every_generated_artifact_is_current() {
     let root = repo_root();
     let artifacts = surface::artifacts(&root).expect("render artifacts");
-    assert!(artifacts.len() >= 6, "expected every artifact, got {}", artifacts.len());
+    assert!(
+        artifacts.len() >= 6,
+        "expected every artifact, got {}",
+        artifacts.len()
+    );
     let mut stale = Vec::new();
     for (path, expected) in artifacts {
         let actual = std::fs::read_to_string(&path).unwrap_or_default();
@@ -82,29 +89,13 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
         assert!(readme.contains(required), "README.md omits `{required}`");
     }
     let gate = readme
-        .split_once("Full gate:\n\n```bash\n")
+        .split_once("Full release gate:\n\n```bash\n")
         .and_then(|(_, rest)| rest.split_once("\n```").map(|(gate, _)| gate))
-        .expect("README.md has a Full gate shell block");
-    for command in [
-        "cargo test --workspace",
-        "cargo clippy --workspace --all-targets",
-        "cargo run -p choir-spike --release",
-    ] {
-        assert!(
-            gate.lines().any(|line| line == command),
-            "README.md Full gate omits `{command}`"
-        );
-    }
-    for path in [
-        "internal/design.md",
-        "internal/integration-workflows.md",
-        "internal/measurements.md",
-    ] {
-        assert!(
-            repo_root().join(path).is_file(),
-            "README target is missing: {path}"
-        );
-    }
+        .expect("README.md has a Full release gate shell block");
+    assert!(
+        gate.lines().any(|line| line == "sh scripts/gate full"),
+        "README.md must point at the fail-closed gate rather than duplicate a partial command list"
+    );
 }
 
 #[test]
@@ -128,7 +119,10 @@ fn local_only_files_stay_ignored() {
             .current_dir(&root)
             .output()
             .expect("git check-ignore runs");
-        assert!(ignored.status.success(), "local file became publishable: {local}");
+        assert!(
+            ignored.status.success(),
+            "local file became publishable: {local}"
+        );
     }
 
     // Nothing under `internal/` may be tracked, whatever the ignore rules
@@ -152,7 +146,10 @@ fn local_only_files_stay_ignored() {
             .expect("git check-ignore runs");
         assert!(!check.status.success(), "public file is ignored: {public}");
     }
-    assert!(root.join("agents.md").is_file(), "generated agents.md is missing");
+    assert!(
+        root.join("agents.md").is_file(),
+        "generated agents.md is missing"
+    );
     assert!(
         !root.join("AGENT_GUIDE.md").exists(),
         "the transport brief requires the root artifact to remain agents.md"
@@ -176,8 +173,8 @@ fn local_markdown_links_resolve() {
 #[test]
 fn operator_and_template_guidance_matches_the_shipped_paths() {
     let root = repo_root();
-    let runbook = std::fs::read_to_string(root.join("scripts/flip/RUNBOOK.md"))
-        .expect("flip runbook");
+    let runbook =
+        std::fs::read_to_string(root.join("scripts/flip/RUNBOOK.md")).expect("flip runbook");
     for required in [
         "current branch by name",
         "target/release/choir --auth-file",
@@ -197,7 +194,10 @@ fn operator_and_template_guidance_matches_the_shipped_paths() {
         "--auth-file <path> --auth-user <name>",
         "/api/submit-batch",
     ] {
-        assert!(templates.contains(required), "template guide omits `{required}`");
+        assert!(
+            templates.contains(required),
+            "template guide omits `{required}`"
+        );
     }
     let env_template =
         std::fs::read_to_string(root.join("templates/choir.env.sh")).expect("environment template");
@@ -215,8 +215,16 @@ fn the_binarys_help_is_the_tables_help() {
         .output()
         .expect("choir runs");
     let printed = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(printed, surface::usage(), "binary help drifted from the table");
-    assert_eq!(out.status.code(), Some(2), "bare invocation is a usage error");
+    assert_eq!(
+        printed,
+        surface::usage(),
+        "binary help drifted from the table"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "bare invocation is a usage error"
+    );
 }
 
 #[test]
@@ -338,7 +346,11 @@ fn splicing_refuses_a_file_without_markers_rather_than_appending() {
     let reversed = format!("{} then {}", surface::GEN_END, surface::GEN_START);
     assert!(surface::splice(&reversed, "x").is_err());
 
-    let doc = format!("before\n{}\nold\n{}\nafter", surface::GEN_START, surface::GEN_END);
+    let doc = format!(
+        "before\n{}\nold\n{}\nafter",
+        surface::GEN_START,
+        surface::GEN_END
+    );
     let spliced = surface::splice(&doc, "new").expect("splice");
     assert!(spliced.contains("before") && spliced.contains("after"));
     assert!(spliced.contains("new") && !spliced.contains("old"));
@@ -388,7 +400,10 @@ fn node_sources() -> String {
             if path.is_dir() {
                 dirs.push(path);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                src.push_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")));
+                src.push_str(
+                    &std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("read {path:?}: {e}")),
+                );
             }
         }
     }
@@ -434,7 +449,11 @@ fn the_generated_shell_library_parses_as_shell() {
 
     // The hand-written flows live outside the generated region and must
     // survive regeneration, which is the whole point of the split.
-    for flow in ["choir_submit_all()", "choir_verify_log()", "choir_capabilities()"] {
+    for flow in [
+        "choir_submit_all()",
+        "choir_verify_log()",
+        "choir_capabilities()",
+    ] {
         assert!(text.contains(flow), "a hand-written flow was lost: {flow}");
     }
 

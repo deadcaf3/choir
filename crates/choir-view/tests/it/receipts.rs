@@ -69,7 +69,10 @@ fn a_viewer_is_refused_twice_on_the_same_review() {
         }
         other => panic!("a replayed receipt was admitted: {other:?}"),
     }
-    assert_eq!(View::materialize(&log).unwrap().reviews["r1"].viewed["ana"], 1);
+    assert_eq!(
+        View::materialize(&log).unwrap().reviews["r1"].viewed["ana"],
+        1
+    );
 
     // Scoped to its review: the same viewer reads another review freely.
     append_op(
@@ -114,7 +117,9 @@ fn a_receipt_needs_a_review_and_a_viewer() {
         append_op(&mut log, "ana", viewed("")),
         Err(ViewError::Review(_))
     ));
-    assert!(View::materialize(&log).unwrap().reviews["r1"].viewed.is_empty());
+    assert!(View::materialize(&log).unwrap().reviews["r1"]
+        .viewed
+        .is_empty());
 }
 
 /// Receipts are bulk: they grow with readers and authorize nothing, so

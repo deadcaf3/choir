@@ -104,7 +104,10 @@ fn page_get(url: &str, args: &[&str]) -> (u16, String, String) {
 /// missed because two writes landed inside one timestamp tick.
 fn rewrite(path: &std::path::Path, text: &str) {
     std::fs::write(path, text).expect("acl rewrite");
-    let file = std::fs::File::options().write(true).open(path).expect("reopen acl");
+    let file = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("reopen acl");
     let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
     file.set_times(std::fs::FileTimes::new().set_modified(ahead))
         .expect("stamp acl mtime");
@@ -113,17 +116,26 @@ fn rewrite(path: &std::path::Path, text: &str) {
 /// Seeds `repo` with one commit, using a credential that may push, and
 /// returns the clone directory.
 fn seed(work: &std::path::Path, base: &str, creds: &str, repo: &str) -> std::path::PathBuf {
-    let url = format!("http://{creds}@{}/{repo}", base.trim_start_matches("http://"));
+    let url = format!(
+        "http://{creds}@{}/{repo}",
+        base.trim_start_matches("http://")
+    );
     let dir = work.join("seed");
     assert!(
-        git(work, &["clone", "-q", &url, dir.to_str().unwrap()]).status.success(),
+        git(work, &["clone", "-q", &url, dir.to_str().unwrap()])
+            .status
+            .success(),
         "seeding clone failed"
     );
     std::fs::write(dir.join("f.txt"), "seed\n").unwrap();
     assert!(git(&dir, &["add", "."]).status.success());
     assert!(git(&dir, &["commit", "-q", "-m", "seed"]).status.success());
     let push = git(&dir, &["push", "-q", "origin", "HEAD:main"]);
-    assert!(push.status.success(), "{}", String::from_utf8_lossy(&push.stderr));
+    assert!(
+        push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push.stderr)
+    );
     dir
 }
 
@@ -145,19 +157,27 @@ fn a_grant_on_one_repository_is_not_a_grant_on_the_node() {
     // Write grant: clone and push both land.
     let alice = format!("http://alice:a@{host}/agents/one.git");
     let dir = work.join("alice");
-    assert!(git(&work, &["clone", "-q", &alice, dir.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &alice, dir.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(dir.join("g.txt"), "alice\n").unwrap();
     assert!(git(&dir, &["add", "."]).status.success());
     assert!(git(&dir, &["commit", "-q", "-m", "alice"]).status.success());
-    assert!(git(&dir, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&dir, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
 
     // Read grant: clone lands, push is refused.
     let bob = format!("http://bob:b@{host}/agents/one.git");
     let bobdir = work.join("bob");
-    assert!(git(&work, &["clone", "-q", &bob, bobdir.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &bob, bobdir.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(bobdir.join("h.txt"), "bob\n").unwrap();
     assert!(git(&bobdir, &["add", "."]).status.success());
-    assert!(git(&bobdir, &["commit", "-q", "-m", "bob"]).status.success());
+    assert!(git(&bobdir, &["commit", "-q", "-m", "bob"])
+        .status
+        .success());
     let refused = git(&bobdir, &["push", "origin", "HEAD:main"]);
     assert!(!refused.status.success(), "a read grant pushed");
     let stderr = String::from_utf8_lossy(&refused.stderr);
@@ -175,12 +195,19 @@ fn a_grant_on_one_repository_is_not_a_grant_on_the_node() {
         stderr.contains("not found") || stderr.contains("404"),
         "expected a not-found: {stderr}"
     );
-    assert!(!stderr.contains("403"), "a denial confirmed the repo exists: {stderr}");
+    assert!(
+        !stderr.contains("403"),
+        "a denial confirmed the repo exists: {stderr}"
+    );
 
     // The wildcard reaches every repository at its level, and no further.
     let carol = format!("http://carol:c@{host}/agents/two.git");
     let out = git(&work, &["clone", "-q", &carol, "carol"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// A submitted op is authorized against the repository it names, which
@@ -221,7 +248,10 @@ fn a_submitted_ref_op_is_authorized_against_the_repository_it_names() {
         &submit_body(&key, "node/test", &ungranted),
         &url,
     ]);
-    assert_eq!(status, 404, "a write grant on one repo moved another one's ref");
+    assert_eq!(
+        status, 404,
+        "a write grant on one repo moved another one's ref"
+    );
 
     // Repository-less ops fail closed. `BindKey` is the sharp case: with
     // no admission rule wired, any key can bind any other, so reaching it
@@ -292,13 +322,24 @@ fn editing_the_file_takes_effect_without_a_restart_in_both_directions() {
     // A broken file keeps the last good table rather than locking
     // everyone out or, worse, letting everyone in.
     rewrite(&acl, "alice agents/one sideways\n");
-    let still_granted = git(&work, &["clone", "-q", &format!("http://alice:a@{host}/agents/one.git"), "alice-after-break"]);
+    let still_granted = git(
+        &work,
+        &[
+            "clone",
+            "-q",
+            &format!("http://alice:a@{host}/agents/one.git"),
+            "alice-after-break",
+        ],
+    );
     assert!(
         still_granted.status.success(),
         "a malformed edit dropped a grant that was already in force"
     );
     let still_denied = git(&work, &["clone", "-q", &bob_url, "bob-after-break"]);
-    assert!(!still_denied.status.success(), "a malformed edit opened the node");
+    assert!(
+        !still_denied.status.success(),
+        "a malformed edit opened the node"
+    );
 }
 
 /// The pre-receive hook's callback submits a ref op under any user's
@@ -307,7 +348,11 @@ fn editing_the_file_takes_effect_without_a_restart_in_both_directions() {
 /// and skip every check above.
 #[test]
 fn the_hook_callback_is_not_reachable_with_a_user_credential() {
-    let (base, _, _work, _) = served("internal", "alice  agents/one  write\n", &["agents/one.git"]);
+    let (base, _, _work, _) = served(
+        "internal",
+        "alice  agents/one  write\n",
+        &["agents/one.git"],
+    );
     let body = serde_json::json!({
         "repo": "agents/one.git",
         "refname": "refs/heads/main",
@@ -434,7 +479,10 @@ fn the_view_and_the_page_show_only_the_repositories_a_reader_holds() {
         );
     }
     // ...and what a writer needs to keep submitting survives.
-    assert!(alice["log"]["node"].is_string(), "the log scope was withheld from a writer");
+    assert!(
+        alice["log"]["node"].is_string(),
+        "the log scope was withheld from a writer"
+    );
 
     // The wildcard sees both, which is what makes the assertion above a
     // statement about the grant rather than about the seeding.
@@ -449,7 +497,10 @@ fn the_view_and_the_page_show_only_the_repositories_a_reader_holds() {
     // must not survive in the HTML either.
     let (status, _, page) = page_get(&format!("{base}/"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "the page was refused");
-    assert!(page.contains("agents/one"), "the granted repository is missing from the page");
+    assert!(
+        page.contains("agents/one"),
+        "the granted repository is missing from the page"
+    );
     assert!(
         !page.contains("agents/two"),
         "the page named a repository its reader cannot read"
@@ -495,14 +546,19 @@ fn a_conditional_request_is_answered_per_reader() {
             .lines()
             .find_map(|line| {
                 let (name, value) = line.split_once(':')?;
-                name.trim().eq_ignore_ascii_case("ETag").then(|| value.trim().to_string())
+                name.trim()
+                    .eq_ignore_ascii_case("ETag")
+                    .then(|| value.trim().to_string())
             })
             .expect("the page carries an ETag")
     };
 
     let alice = tag_of("alice:a");
     let carol = tag_of("carol:c");
-    assert_ne!(alice, carol, "two readers of different pages share one ETag");
+    assert_ne!(
+        alice, carol,
+        "two readers of different pages share one ETag"
+    );
 
     // The reader's own tag still short-circuits.
     let (status, _, _) = page_get(
@@ -554,12 +610,11 @@ fn every_section_the_view_serves_is_classified() {
     // name here — as this test used to do for `pending` — is how a
     // section can be classified for an endpoint nobody checks. Asking
     // the second endpoint costs one request and removes the exemption.
-    let (status, queue) = curl(&[
-        "-u",
-        "dave:d",
-        &format!("{base}/api/reviews?reviewer=dave"),
-    ]);
-    assert_eq!(status, 200, "the auditor's review queue was refused: {queue}");
+    let (status, queue) = curl(&["-u", "dave:d", &format!("{base}/api/reviews?reviewer=dave")]);
+    assert_eq!(
+        status, 200,
+        "the auditor's review queue was refused: {queue}"
+    );
     let mut served_sections = view.as_object().expect("the view is a JSON object").clone();
     served_sections.extend(
         queue

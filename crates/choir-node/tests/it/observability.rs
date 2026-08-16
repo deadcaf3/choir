@@ -58,11 +58,17 @@ fn the_view_reports_the_build_and_the_latency_gate() {
     let (code, before) = curl(&[&format!("{api}/view")]);
     assert_eq!(code, 200, "{before}");
     assert_eq!(before["sequencer_lag"]["observed_ops"], 0);
-    assert!(before["sequencer_lag"]["durable"]["p99_us"].is_null(), "{before}");
+    assert!(
+        before["sequencer_lag"]["durable"]["p99_us"].is_null(),
+        "{before}"
+    );
     assert_eq!(before["sequencer_lag"]["gate_us"], 100_000);
 
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &set_ref("main")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &set_ref("main")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -70,7 +76,10 @@ fn the_view_reports_the_build_and_the_latency_gate() {
     let (code, after) = curl(&[&format!("{api}/view")]);
     assert_eq!(code, 200, "{after}");
     let lag = &after["sequencer_lag"];
-    assert_eq!(lag["observed_ops"], 1, "the accepted op must be measured: {lag}");
+    assert_eq!(
+        lag["observed_ops"], 1,
+        "the accepted op must be measured: {lag}"
+    );
     assert!(lag["durable"]["p99_us"].as_u64().is_some(), "{lag}");
     // Durable includes the barrier that decision excludes, so it can
     // never be the smaller of the two.
@@ -78,7 +87,10 @@ fn the_view_reports_the_build_and_the_latency_gate() {
         lag["durable"]["max_us"].as_u64().unwrap() >= lag["decision"]["max_us"].as_u64().unwrap(),
         "{lag}"
     );
-    assert_eq!(lag["durable"]["breaches"], 0, "a local MemLog op is not a breach: {lag}");
+    assert_eq!(
+        lag["durable"]["breaches"], 0,
+        "a local MemLog op is not a breach: {lag}"
+    );
     // No lag log configured here, so the node says so rather than
     // implying breaches are being recorded somewhere.
     assert_eq!(lag["log_configured"], false, "{lag}");
@@ -89,7 +101,8 @@ fn the_view_reports_the_build_and_the_latency_gate() {
     let build = &after["build"];
     let commit = build["commit"].as_str().expect("commit is a string");
     assert!(
-        commit == "unknown" || (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())),
+        commit == "unknown"
+            || (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())),
         "build stamp must be a commit or an explicit unknown: {build}"
     );
     assert!(
@@ -122,7 +135,10 @@ fn a_breached_gate_reaches_the_operators_lag_log() {
     let api = format!("http://127.0.0.1:{port}/api");
 
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &set_ref("main")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &set_ref("main")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -143,7 +159,10 @@ fn a_breached_gate_reaches_the_operators_lag_log() {
     let record: serde_json::Value =
         serde_json::from_str(written.lines().next().expect("one line per breach")).unwrap();
     assert_eq!(record["event"], "gate_breach");
-    assert_eq!(record["seq"], 0, "a breach names the op it happened to: {record}");
+    assert_eq!(
+        record["seq"], 0,
+        "a breach names the op it happened to: {record}"
+    );
     assert_eq!(record["gate_us"], 0);
     assert_eq!(record["batch"], 1);
     assert!(record["durable_us"].as_u64().is_some(), "{record}");

@@ -48,9 +48,7 @@ use choir_oplog::{signing_hash, OpEntry, Witness, FORMAT_VERSION as OPLOG_FORMAT
 use choir_store::{ChunkerParams, Manifest, FORMAT_VERSION as STORE_FORMAT_VERSION};
 use choir_view::{
     ArchiveAuthorization, Authorization, Basis, Commit, CreateAuthorization, OpKind, RefSnapshot,
-    TreeEntry, Verdict,
-    ViewOp,
-    FORMAT_VERSION as VIEW_FORMAT_VERSION,
+    TreeEntry, Verdict, ViewOp, FORMAT_VERSION as VIEW_FORMAT_VERSION,
 };
 
 /// Whether this run prints fresh constants instead of checking frozen ones.
@@ -430,11 +428,7 @@ fn authorization_is_frozen() {
 fn archive_authorization_is_frozen() {
     assert_golden(
         "ArchiveAuthorization",
-        &ArchiveAuthorization::new(
-            "change-1".into(),
-            "repo/agent".into(),
-            h(b"commit two"),
-        ),
+        &ArchiveAuthorization::new("change-1".into(), "repo/agent".into(), h(b"commit two")),
         r#"{"format_version":1,"id":"change-1","workspace":"repo/agent","prev_revision":{"codec":30,"digest":[85,132,118,97,239,147,219,56,81,251,10,83,89,23,246,20,25,60,73,118,206,203,90,41,65,69,251,150,168,140,62,8]}}"#,
         "1e-d8ea0a752dd478142674409c07b78547d8833ee57a31671088cd288c578448a7",
     );
@@ -618,7 +612,9 @@ fn commit_resolves_additive_field_is_frozen() {
     let mut tree = BTreeMap::new();
     tree.insert(
         "src/main.rs".to_string(),
-        TreeEntry::File { blob: h(b"blob resolved") },
+        TreeEntry::File {
+            blob: h(b"blob resolved"),
+        },
     );
     let linked = Commit {
         format_version: VIEW_FORMAT_VERSION,
@@ -634,9 +630,14 @@ fn commit_resolves_additive_field_is_frozen() {
         r#"{"format_version":1,"parents":[{"codec":30,"digest":[158,88,178,142,14,97,64,170,144,53,214,249,211,140,203,122,104,251,114,190,138,56,225,108,150,242,138,31,47,24,47,61]}],"tree":{"src/main.rs":{"File":{"blob":{"codec":30,"digest":[117,53,3,227,181,133,221,21,27,184,36,159,127,115,56,139,179,121,136,176,118,29,23,43,237,74,196,33,170,153,68,223]}}}},"author":"agent-1","message":"resolve","resolves":{"codec":30,"digest":[158,88,178,142,14,97,64,170,144,53,214,249,211,140,203,122,104,251,114,190,138,56,225,108,150,242,138,31,47,24,47,61]}}"#,
         "1e-9291fcce721a687acc12c766a36bf3fab3041a7801ffa3e403228a4dded5610b",
     );
-    let unlinked = Commit { resolves: None, ..linked };
+    let unlinked = Commit {
+        resolves: None,
+        ..linked
+    };
     assert!(
-        !serde_json::to_string(&unlinked).expect("serializes").contains("resolves"),
+        !serde_json::to_string(&unlinked)
+            .expect("serializes")
+            .contains("resolves"),
         "a commit that resolves nothing must not emit the additive field"
     );
 }
@@ -677,7 +678,10 @@ fn manifest_is_frozen() {
 #[test]
 fn ref_snapshot_is_frozen() {
     let mut refs = BTreeMap::new();
-    refs.insert("choir/choir.git:refs/heads/main".to_string(), h(b"main head"));
+    refs.insert(
+        "choir/choir.git:refs/heads/main".to_string(),
+        h(b"main head"),
+    );
     refs.insert(
         "choir/choir.git:refs/heads/a\"β".to_string(),
         h(b"hostile ref"),

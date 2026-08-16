@@ -70,7 +70,10 @@ pub(crate) fn render(store: Option<&Accounts>, user: &str) -> Page {
         h.push_str("<section><p class=\"note\">This node does not run account self-service, ");
         h.push_str("so there is nothing here to manage. Credentials are whatever the operator ");
         h.push_str("wrote in the node's auth file.</p></section>");
-        return Page { status: 200, html: close(h) };
+        return Page {
+            status: 200,
+            html: close(h),
+        };
     };
 
     h.push_str("<section><h2>Passkeys</h2>");
@@ -88,7 +91,10 @@ pub(crate) fn render(store: Option<&Accounts>, user: &str) -> Page {
         // to infer.
         h.push_str("<p class=\"note\">Your write path is the CLI, signed with your actor key. ");
         h.push_str("That is unchanged and stays available whatever anyone enrols.</p></section>");
-        return Page { status: 200, html: close(h) };
+        return Page {
+            status: 200,
+            html: close(h),
+        };
     }
     if enrolled.is_empty() {
         h.push_str("<p class=\"empty\">None yet. A passkey lets you approve reviews from this ");
@@ -110,9 +116,11 @@ pub(crate) fn render(store: Option<&Accounts>, user: &str) -> Page {
         h.push_str("</tbody></table>");
     }
 
-    h.push_str("<noscript><p class=\"note\">Enrolling a passkey needs the browser to create a \
+    h.push_str(
+        "<noscript><p class=\"note\">Enrolling a passkey needs the browser to create a \
                 key pair, which it will only do with scripting enabled. With it off, POST a \
-                credential you already hold to <code>/api/accounts/passkey</code>.</p></noscript>");
+                credential you already hold to <code>/api/accounts/passkey</code>.</p></noscript>",
+    );
     h.push_str("<div id=\"enrol\" hidden data-user=\"");
     h.push_str(&esc(user));
     h.push_str("\"><button id=\"enrol-go\">Add a passkey</button> ");
@@ -120,7 +128,10 @@ pub(crate) fn render(store: Option<&Accounts>, user: &str) -> Page {
     h.push_str("<p id=\"enrol-said\" class=\"note\" hidden></p></div>");
     h.push_str(crate::ui::CEREMONY_SCRIPT);
     h.push_str("</section>");
-    Page { status: 200, html: close(h) }
+    Page {
+        status: 200,
+        html: close(h),
+    }
 }
 
 /// Closing tags, matching the browse shell.

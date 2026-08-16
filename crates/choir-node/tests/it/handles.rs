@@ -74,7 +74,10 @@ fn a_display_name_never_reaches_the_channel() {
         )),
     );
     assert_eq!(status, 200, "{body}");
-    let user = json(&body)["user"].as_str().expect("a principal").to_string();
+    let user = json(&body)["user"]
+        .as_str()
+        .expect("a principal")
+        .to_string();
 
     let channel = choir_node::quota::channel_for(&user);
     assert_eq!(channel, format!("git/{user}"));
@@ -141,7 +144,10 @@ fn a_handle_and_its_display_name_survive_a_reopen() {
         )),
     );
     assert_eq!(status, 200, "{body}");
-    let user = json(&body)["user"].as_str().expect("a principal").to_string();
+    let user = json(&body)["user"]
+        .as_str()
+        .expect("a principal")
+        .to_string();
     let invite = json(&body)["invite"].as_str().expect("invite").to_string();
 
     let on_disk = std::fs::read_to_string(&path).expect("store readable");
@@ -181,7 +187,10 @@ fn revoking_forgets_the_name_and_keeps_the_handle() {
         )),
     );
     assert_eq!(status, 200, "{body}");
-    let user = json(&body)["user"].as_str().expect("a principal").to_string();
+    let user = json(&body)["user"]
+        .as_str()
+        .expect("a principal")
+        .to_string();
     let invite = json(&body)["invite"].as_str().expect("invite").to_string();
     let (id, secret) = invite.split_once(':').expect("invite is id:secret");
     let (status, body) = store.redeem(id, &json(&format!(r#"{{"secret":"{secret}"}}"#)));
@@ -191,7 +200,11 @@ fn revoking_forgets_the_name_and_keeps_the_handle() {
     let (status, body) = store.revoke(&json(&format!(r#"{{"user":"{user}"}}"#)));
     assert_eq!(status, 200, "{body}");
 
-    assert_eq!(store.display_name(&user), None, "the name outlived the account");
+    assert_eq!(
+        store.display_name(&user),
+        None,
+        "the name outlived the account"
+    );
     let on_disk = std::fs::read_to_string(&path).expect("store readable");
     assert!(
         !on_disk.contains(NAME) && !on_disk.contains("Lovelace"),
@@ -256,7 +269,11 @@ fn the_roster_pairs_handles_with_names_and_omits_the_rest() {
         !roster.contains_key("buildbot"),
         "an account with no display name should not appear: {roster:?}"
     );
-    assert_eq!(roster.len(), 1, "exactly one account has a name: {roster:?}");
+    assert_eq!(
+        roster.len(),
+        1,
+        "exactly one account has a name: {roster:?}"
+    );
 
     std::fs::remove_dir_all(&work).ok();
 }

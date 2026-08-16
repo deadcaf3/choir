@@ -5,11 +5,13 @@
 use choir_bridge::github::app_jwt;
 
 fn b64url_decode(s: &str) -> Vec<u8> {
-    let table: std::collections::HashMap<u8, u32> =
-        (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9').chain(*b"-_")
-            .enumerate()
-            .map(|(i, c)| (c, i as u32))
-            .collect();
+    let table: std::collections::HashMap<u8, u32> = (b'A'..=b'Z')
+        .chain(b'a'..=b'z')
+        .chain(b'0'..=b'9')
+        .chain(*b"-_")
+        .enumerate()
+        .map(|(i, c)| (c, i as u32))
+        .collect();
     let mut out = Vec::new();
     let mut buf = 0u32;
     let mut bits = 0;
@@ -58,8 +60,7 @@ fn jwt_signs_and_verifies() {
     assert_eq!(parts.len(), 3, "header.payload.signature");
 
     // Claims: issuer matches, expiry ~9 minutes out.
-    let payload: serde_json::Value =
-        serde_json::from_slice(&b64url_decode(parts[1])).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&b64url_decode(parts[1])).unwrap();
     assert_eq!(payload["iss"], "12345");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

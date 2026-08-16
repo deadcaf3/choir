@@ -13,7 +13,12 @@ use choir_oplog::MemLog;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -144,7 +149,10 @@ fn the_runner_drives_one_lifecycle_end_to_end() {
     let (ok, again) = runner(&config_path, &ensure);
     assert!(ok, "the idempotent retry failed: {again}");
     assert_eq!(again["binding"]["change_id"], change_id.as_str());
-    assert_eq!(again["workspace"]["created_now"], false, "retry re-provisioned");
+    assert_eq!(
+        again["workspace"]["created_now"], false,
+        "retry re-provisioned"
+    );
 
     // A different attempt at the same work is a different change.
     let mut second_attempt = ensure.clone();
@@ -156,22 +164,23 @@ fn the_runner_drives_one_lifecycle_end_to_end() {
     // The change is in the view under the derived identity, which is
     // what makes the binding real rather than a string the adapter made
     // up and echoed back to itself.
-    let view: serde_json::Value = serde_json::from_str(
-        &String::from_utf8_lossy(
-            &std::process::Command::new(env!("CARGO_BIN_EXE_choir"))
-                .args(["view", &api])
-                .output()
-                .expect("choir view")
-                .stdout,
-        ),
-    )
+    let view: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
+        &std::process::Command::new(env!("CARGO_BIN_EXE_choir"))
+            .args(["view", &api])
+            .output()
+            .expect("choir view")
+            .stdout,
+    ))
     .expect("view is JSON");
     assert!(
         view["changes"][&change_id].is_object(),
         "the derived change is absent from the view: {}",
         view["changes"]
     );
-    assert_eq!(view["changes"][&change_id]["workspace_id"], workspace_id.as_str());
+    assert_eq!(
+        view["changes"][&change_id]["workspace_id"],
+        workspace_id.as_str()
+    );
 
     // Archive detaches the workspace under the same binding.
     let mut archive = ensure;
@@ -271,7 +280,10 @@ fn a_rate_limited_node_is_reported_as_worth_retrying() {
             "generation": "1",
         }),
     );
-    assert!(!ok, "the metered request was reported as success: {refused}");
+    assert!(
+        !ok,
+        "the metered request was reported as success: {refused}"
+    );
     assert_eq!(
         refused["error"]["retryable"], true,
         "rate limiting was reported as permanent, which strands work that would succeed: {refused}"

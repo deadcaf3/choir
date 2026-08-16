@@ -1,0 +1,49 @@
+#!/bin/sh
+# Fail-closed adapter from one private-beta state directory to a hardened
+# system service. It renders only; installation and service restart remain
+# explicit operator actions.
+set -eu
+
+[ "$#" -eq 6 ] || {
+  echo "usage: render_private_beta_service.sh <service-user> <choir-node-bin> <repo-root> <port> <state-dir> <log-file>" >&2
+  exit 2
+}
+
+SERVICE_USER=$1
+BIN=$2
+ROOT=$3
+PORT=$4
+STATE=$5
+LOG=$6
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+fail() { echo "render-private-beta: $1" >&2; exit 1; }
+
+case "$SERVICE_USER" in ''|*[!a-zA-Z0-9_-]*) fail "invalid service user" ;; esac
+[ -x "$BIN" ] || fail "node binary is not executable: $BIN"
+[ -d "$STATE" ] || fail "state directory is missing: $STATE"
+
+for file in auth keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl repos.list acl private-beta.manifest; do
+  [ -f "$STATE/$file" ] || fail "required beta state is missing: $STATE/$file"
+done
+cmp -s "$HERE/private-beta.manifest" "$STATE/private-beta.manifest" \
+  || fail "private-beta.manifest differs from the limits and feature set this renderer emits"
+
+# Auth and policy are operator material. Group/world-readable files are
+# refused before they become command-line inputs to a public service.
+for file in auth keys reviewers protected-refs acl; do
+  mode=$(stat -c '%a' "$STATE/$file" 2>/dev/null) \
+    || fail "cannot read Linux permissions for $STATE/$file"
+  case "$mode" in *00) ;; *) fail "$STATE/$file must not be group/world accessible (mode $mode)" ;; esac
+done
+
+grep -Eq '^[[:space:]]*[^#[:space:]]' "$STATE/acl" \
+  || fail "ACL has no grants; add beta users explicitly"
+grep -Eq '^[[:space:]]*[^#[:space:]]' "$STATE/repos.list" \
+  || fail "repos.list has no repositories"
+sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$STATE/protected-refs"
+
+sh "$HERE/render_node_service.sh" choir-node "$BIN" "$ROOT" "$PORT" \
+  "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$LOG" "$STATE/repos.list" \
+  "$STATE/newcomer-audit.jsonl" "$STATE/newcomer-adjudications.jsonl" \
+  "$STATE/protected-refs" require-scope '' '' "$STATE/acl" "$SERVICE_USER"

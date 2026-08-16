@@ -112,7 +112,9 @@ impl RefEvent {
     /// Ref name half of the ref key, or the whole key when it has no
     /// repository prefix.
     fn refname(&self) -> &str {
-        self.key.split_once(':').map_or(self.key.as_str(), |(_, r)| r)
+        self.key
+            .split_once(':')
+            .map_or(self.key.as_str(), |(_, r)| r)
     }
 
     fn body(&self) -> String {
@@ -379,9 +381,7 @@ impl Hooks {
         let dropped = Arc::new(AtomicU64::new(0));
         let worker = Worker {
             rx,
-            mtime: std::fs::metadata(&config)
-                .and_then(|m| m.modified())
-                .ok(),
+            mtime: std::fs::metadata(&config).and_then(|m| m.modified()).ok(),
             config,
             subscriptions,
             log,
@@ -635,7 +635,12 @@ fn post(
             // Connect to the address that was vetted, so a second DNS
             // answer cannot send this somewhere else.
             "--resolve",
-            &format!("{}:{}:{}", target.host, target.port, resolve_form(target.addr)),
+            &format!(
+                "{}:{}:{}",
+                target.host,
+                target.port,
+                resolve_form(target.addr)
+            ),
             "-H",
             "Content-Type: application/json",
             "--config",
@@ -656,7 +661,9 @@ fn post(
 }
 
 fn run(command: &mut std::process::Command, secret: &str) -> Result<u16, String> {
-    let mut child = command.spawn().map_err(|_| "could not start curl".to_string())?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| "could not start curl".to_string())?;
     // parse_line refused quotes and backslashes in a secret, so this
     // quoted line cannot grow a second config directive.
     let config = format!("header = \"X-Choir-Hook-Secret: {secret}\"\n");

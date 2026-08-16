@@ -19,6 +19,7 @@ mod account_page;
 pub mod accounts;
 pub mod acl;
 mod bound;
+mod browse;
 pub mod hooks;
 pub mod limits;
 pub mod platform;
@@ -26,7 +27,6 @@ mod prepare;
 pub mod provision;
 pub mod quota;
 pub mod reject;
-mod browse;
 pub mod ssh;
 mod ui;
 
@@ -83,6 +83,12 @@ pub fn build_line() -> String {
 /// replace the token *check* later without changing the wire shape.
 pub type AuthTable = std::collections::HashMap<String, String>;
 
+/// Default maximum body size for every `/api/...` request: 1 MiB.
+pub const DEFAULT_API_BODY_BYTES: u64 = 1024 * 1024;
+
+/// Readiness refuses when the filesystem reports less than 1 GiB free.
+pub const DEFAULT_READY_MIN_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// A running node daemon serving repos under a root directory.
 pub struct Node {
     root: PathBuf,
@@ -122,6 +128,19 @@ pub struct Node {
     /// unset = nothing is ever refused for quota, which is the pre-D37
     /// behaviour.
     quotas: quota::Quotas,
+    /// Absolute API request-body ceiling. Unlike per-user quotas this is
+    /// never exempt: parsing an operator's unbounded JSON consumes the
+    /// same memory as parsing anyone else's.
+    api_body_limit: std::num::NonZeroU64,
+    /// Whether authenticated review pages expose passkey-backed write
+    /// controls. The private beta disables this and keeps signed CLI
+    /// submissions as the only mutation path.
+    browser_writes: bool,
+    /// Free-space floor used by the authenticated readiness endpoint.
+    ready_min_free_bytes: u64,
+    /// Distinguishes an intentional `unblock()` from a receive timeout.
+    /// tiny_http reports both as `Ok(None)` from `recv_timeout`.
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A watched trusted-keys file and the mtime last folded into
@@ -232,7 +251,27 @@ impl Node {
             accounts: None,
             acl_merged: std::sync::RwLock::new(None),
             quotas: quota::Quotas::default(),
+            api_body_limit: std::num::NonZeroU64::new(DEFAULT_API_BODY_BYTES)
+                .expect("the default API body limit is nonzero"),
+            browser_writes: true,
+            ready_min_free_bytes: DEFAULT_READY_MIN_FREE_BYTES,
+            shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// Sets the absolute body ceiling for every `/api/...` route.
+    pub fn enable_api_body_limit(&mut self, bytes: std::num::NonZeroU64) {
+        self.api_body_limit = bytes;
+    }
+
+    /// Removes browser mutation controls and their preparation endpoint.
+    pub fn disable_browser_writes(&mut self) {
+        self.browser_writes = false;
+    }
+
+    /// Sets the free-space floor below which `/readyz` refuses traffic.
+    pub fn enable_ready_min_free_bytes(&mut self, bytes: u64) {
+        self.ready_min_free_bytes = bytes;
     }
 
     /// Records every served request to `path` (D33), rotating it at
@@ -322,9 +361,7 @@ impl Node {
     /// verification and left the two lists out of step.
     pub fn watch_keys_file(&mut self, path: PathBuf) {
         self.keys_watch = Some(std::sync::Arc::new(KeysWatch {
-            mtime: std::sync::Mutex::new(
-                std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
-            ),
+            mtime: std::sync::Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok()),
             path,
         }));
     }
@@ -340,7 +377,9 @@ impl Node {
         let Some(watch) = &self.keys_watch else {
             return;
         };
-        let mtime = std::fs::metadata(&watch.path).and_then(|m| m.modified()).ok();
+        let mtime = std::fs::metadata(&watch.path)
+            .and_then(|m| m.modified())
+            .ok();
         let mut last = watch.mtime.lock().expect("keys mtime lock");
         if mtime.is_none() || mtime == *last {
             return;
@@ -378,9 +417,7 @@ impl Node {
         let table = acl::Acl::load(&path)?;
         eprintln!("acl enabled ({} grants)", table.len());
         self.acl_watch = Some(std::sync::Arc::new(AclWatch {
-            mtime: std::sync::Mutex::new(
-                std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
-            ),
+            mtime: std::sync::Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok()),
             table: std::sync::RwLock::new(std::sync::Arc::new(table)),
             epoch: std::sync::atomic::AtomicU64::new(0),
             path,
@@ -445,7 +482,9 @@ impl Node {
         let Some(watch) = &self.acl_watch else {
             return;
         };
-        let mtime = std::fs::metadata(&watch.path).and_then(|m| m.modified()).ok();
+        let mtime = std::fs::metadata(&watch.path)
+            .and_then(|m| m.modified())
+            .ok();
         let mut last = watch.mtime.lock().expect("acl mtime lock");
         if mtime.is_none() || mtime == *last {
             return;
@@ -480,8 +519,11 @@ impl Node {
         };
         let epoch = watch.epoch.load(std::sync::atomic::Ordering::Acquire);
         let generation = store.generation();
-        if let Some((cached_epoch, cached_generation, table)) =
-            self.acl_merged.read().expect("merged acl read lock").as_ref()
+        if let Some((cached_epoch, cached_generation, table)) = self
+            .acl_merged
+            .read()
+            .expect("merged acl read lock")
+            .as_ref()
         {
             if *cached_epoch == epoch && *cached_generation == generation {
                 return Some(std::sync::Arc::clone(table));
@@ -755,7 +797,45 @@ impl Node {
     /// rule: whether a request is metered is one question, and answering
     /// it twice is how the two answers start to differ.
     pub fn serve_forever(&self) {
-        for request in self.server.incoming_requests() {
+        loop {
+            // A writer that has failed a durability barrier refuses every
+            // submission from then on. Staying up in that state is worse
+            // than being down: process supervision only restarts a process
+            // that *exits*, so the node would sit there looking healthy
+            // to launchd while rejecting everything, and a transient fsync
+            // error would become permanent downtime that reads as uptime.
+            // Exiting hands it back to supervision, which restarts into
+            // the same replay path the D20 flip proved with `kill -9`.
+            if self
+                .platform
+                .as_ref()
+                .is_some_and(|p| p.durability_failed())
+            {
+                eprintln!(
+                    "choir: the op log is no longer durable, so this node has stopped \
+                     accepting writes; exiting so supervision restarts it. Check the \
+                     filesystem backing the log."
+                );
+                // EX_TEMPFAIL: the condition may well clear on restart.
+                std::process::exit(75);
+            }
+            // Do not block forever in `accept`: durability loss is
+            // published by the writer thread and must take an otherwise
+            // idle daemon down without waiting for another client to
+            // arrive. One tenth of a second is far below supervisor and
+            // human timescales while still avoiding a busy poll.
+            let request = match self
+                .server
+                .recv_timeout(std::time::Duration::from_millis(100))
+            {
+                Ok(Some(request)) => request,
+                Ok(None) if self.shutdown.load(std::sync::atomic::Ordering::Acquire) => return,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!("choir: HTTP accept loop failed: {error}");
+                    return;
+                }
+            };
             // Cheap stat between accepting a request and handling it, so
             // an edited keys file takes effect on *this* request: an
             // appended signing key becomes usable, and a newly bound
@@ -765,23 +845,6 @@ impl Node {
             // Same reasoning, same cost: an appended grant takes effect
             // on this request rather than on a restart.
             self.refresh_acl();
-            // A writer that has failed a durability barrier refuses every
-            // submission from then on. Staying up in that state is worse
-            // than being down: process supervision only restarts a process
-            // that *exits*, so the node would sit there looking healthy
-            // to launchd while rejecting everything, and a transient fsync
-            // error would become permanent downtime that reads as uptime.
-            // Exiting hands it back to supervision, which restarts into
-            // the same replay path the D20 flip proved with `kill -9`.
-            if self.platform.as_ref().is_some_and(|p| p.durability_failed()) {
-                eprintln!(
-                    "choir: the op log is no longer durable, so this node has stopped \
-                     accepting writes; exiting so supervision restarts it. Check the \
-                     filesystem backing the log."
-                );
-                // EX_TEMPFAIL: the condition may well clear on restart.
-                std::process::exit(75);
-            }
             // Same reasoning, quieter failure: the writer thread can only
             // record that an op missed the latency gate, never decide what
             // to do about it. Draining here puts the breach in the
@@ -799,6 +862,9 @@ impl Node {
             let rate = self.rate.clone();
             let accounts = self.accounts.clone();
             let quotas = self.quotas;
+            let api_body_limit = self.api_body_limit;
+            let browser_writes = self.browser_writes;
+            let ready_min_free_bytes = self.ready_min_free_bytes;
             let authenticated = self.auth.is_some();
             let port = self.port;
             let scheme = self.scheme;
@@ -822,7 +888,7 @@ impl Node {
                 // suppressed because scripting is in fact enabled. A
                 // write path that silently disappears is worse than a
                 // public constant.
-                if request.url().split('?').next() == Some(ui::WEBAUTHN_JS_PATH) {
+                if browser_writes && request.url().split('?').next() == Some(ui::WEBAUTHN_JS_PATH) {
                     let outcome = respond_static_script(request);
                     // "anon" and not a name: no credential was
                     // evaluated on this path, and the request log must
@@ -901,11 +967,27 @@ impl Node {
                 // node running none of this pays no ACL lookup per
                 // request for it.
                 let metered = (rate.is_some() || quotas.is_active()) && {
-                    let node_wide = acl
-                        .as_deref()
-                        .is_some_and(|table| table.allows(&user, &acl::Scope::Node, acl::Level::Read));
+                    let node_wide = acl.as_deref().is_some_and(|table| {
+                        table.allows(&user, &acl::Scope::Node, acl::Level::Read)
+                    });
                     !(internal_ok || !authenticated || node_wide)
                 };
+                // Operational endpoints are authenticated by reaching this
+                // point. Readiness performs independent checks rather than
+                // echoing liveness: verified log structure, a live durable
+                // sequencer, writable storage, free space, and ref agreement.
+                if request.method().as_str() == "GET"
+                    && matches!(request.url(), "/healthz" | "/readyz" | "/metrics")
+                {
+                    let outcome = handle_observability(
+                        &root,
+                        platform.as_deref(),
+                        ready_min_free_bytes,
+                        request,
+                    );
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
                 // D33. After authentication, because the bucket is per
                 // user; before any work, because a refused request should
                 // cost the node as little as possible. The exemptions are
@@ -1003,7 +1085,22 @@ impl Node {
                 // Ahead of the platform API for the same reason the
                 // account routes are: it needs no sequencer.
                 if request.url().split('?').next().unwrap_or("") == "/api/prepare" {
-                    let outcome = handle_prepare(&user, acl.as_deref(), request);
+                    if !browser_writes {
+                        let body = r#"{"error":"browser writes are disabled; use the signed CLI"}"#;
+                        let response = tiny_http::Response::from_string(body)
+                            .with_status_code(403)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .expect("static header"),
+                            );
+                        let outcome = served(request, response, 403, body.len() as u64);
+                        access.finish(log, &user, &outcome);
+                        return;
+                    }
+                    let outcome = handle_prepare(&user, acl.as_deref(), api_body_limit, request);
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -1012,6 +1109,23 @@ impl Node {
                 // and it is gated by nothing but being authenticated: the
                 // only account it can ever show is the caller's own.
                 if request.url().split('?').next().unwrap_or("") == "/account" {
+                    if !browser_writes {
+                        let html = ui::refusal(
+                            "Browser writes are disabled",
+                            403,
+                            &ui::Refusal {
+                                code: "browser_read_only",
+                                error: "This beta keeps every browser page read-only.",
+                                expected: Some("a read-only browser session"),
+                                actual: Some("a passkey enrollment page"),
+                                next: "Use the signed CLI for mutations; the operator may enable browser writes after the WebAuthn launch gate is complete.",
+                            },
+                            &[],
+                        );
+                        let outcome = respond_page(request, 403, html, None);
+                        access.finish(log, &user, &outcome);
+                        return;
+                    }
                     let page = account_page::render(accounts.as_deref(), &user);
                     let bytes = page.html.len() as u64;
                     // The same headers every other browser surface
@@ -1056,6 +1170,7 @@ impl Node {
                         &user,
                         invite.as_deref(),
                         acl.as_deref(),
+                        api_body_limit,
                         request,
                     );
                     access.finish(log, &user, &outcome);
@@ -1134,6 +1249,7 @@ impl Node {
                         &user,
                         acl.as_deref(),
                         platform.as_deref(),
+                        browser_writes,
                         request,
                     );
                     access.finish(log, &user, &outcome);
@@ -1145,12 +1261,15 @@ impl Node {
                     // than a user's grants, so it is not an ACL subject.
                     let acl_for_api = if internal_ok { None } else { acl.as_deref() };
                     let outcome = handle_api(
-                        platform.as_deref(),
-                        &root,
-                        &base_url,
-                        &user,
-                        acl_for_api,
-                        metered.then_some(quotas.workspaces).flatten(),
+                        ApiRequestContext {
+                            platform: platform.as_deref(),
+                            root: &root,
+                            base_url: &base_url,
+                            user: &user,
+                            acl: acl_for_api,
+                            workspaces: metered.then_some(quotas.workspaces).flatten(),
+                            body_limit: api_body_limit,
+                        },
                         request,
                     );
                     access.finish(log, &user, &outcome);
@@ -1177,8 +1296,10 @@ impl Node {
                             code: "no_such_page",
                             error: "This node answers on a small, fixed set of addresses, and \
                                     that is not one of them.",
-                            expected: Some("/ for node state, /r/ for repositories, /api/… \
-                                            for the JSON surface"),
+                            expected: Some(
+                                "/ for node state, /r/ for repositories, /api/… \
+                                            for the JSON surface",
+                            ),
                             actual: Some(access.path()),
                             next: "Start from the node page and follow links; every address \
                                    this surface has is reachable from one of the two below. \
@@ -1199,9 +1320,7 @@ impl Node {
                 if let Some(table) = acl.as_ref() {
                     let method = request.method().as_str().to_string();
                     let denial = match acl::git_requirement(&method, request.url()) {
-                        Some((repo, level)) => {
-                            table.check(&user, &acl::Scope::Repo(repo), level)
-                        }
+                        Some((repo, level)) => table.check(&user, &acl::Scope::Repo(repo), level),
                         None => Some(acl::Denial {
                             status: 404,
                             reason: "no such repository".to_string(),
@@ -1244,6 +1363,8 @@ impl Node {
 
     /// Handle for stopping the accept loop (used by tests).
     pub fn unblock(&self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
         self.server.unblock();
     }
 }
@@ -1316,11 +1437,8 @@ fn respond_rate_limited(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(
-                &b"Retry-After"[..],
-                retry_after.to_string().as_bytes(),
-            )
-            .expect("retry-after header"),
+            tiny_http::Header::from_bytes(&b"Retry-After"[..], retry_after.to_string().as_bytes())
+                .expect("retry-after header"),
         );
     served(request, response, 429, bytes)
 }
@@ -1346,6 +1464,28 @@ fn respond_push_too_large(
         .with_status_code(413)
         .with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+                .expect("static header"),
+        );
+    served(request, response, 413, bytes)
+}
+
+/// Answers an API request whose body exceeded the node-wide ceiling.
+fn respond_api_too_large(
+    request: tiny_http::Request,
+    limit: u64,
+    size: u64,
+) -> std::io::Result<(u16, u64)> {
+    let body = serde_json::json!({
+        "error": "request body too large",
+        "limit_bytes": limit,
+        "actual_bytes": size,
+    })
+    .to_string();
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(413)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                 .expect("static header"),
         );
     served(request, response, 413, bytes)
@@ -1519,9 +1659,10 @@ fn respond_git_denial(
 /// `/owner/repo.git/git-receive-pack`.
 pub(crate) fn repo_from_path(url: &str) -> Option<String> {
     let path = url.split('?').next().unwrap_or(url);
-    let end = path.find(".git/").map(|i| i + 4).or_else(|| {
-        path.ends_with(".git").then_some(path.len())
-    })?;
+    let end = path
+        .find(".git/")
+        .map(|i| i + 4)
+        .or_else(|| path.ends_with(".git").then_some(path.len()))?;
     Some(path[1..end].to_string())
 }
 
@@ -1585,10 +1726,15 @@ fn basic_auth(request: &tiny_http::Request) -> Option<(String, String)> {
 fn handle_prepare(
     user: &str,
     acl: Option<&acl::Acl>,
+    body_limit: std::num::NonZeroU64,
     mut request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
-    let mut req_body = Vec::new();
-    request.as_reader().read_to_end(&mut req_body)?;
+    let req_body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
+        quota::Body::Complete(body) => body,
+        quota::Body::OverLimit { limit, size } => {
+            return respond_api_too_large(request, limit, size)
+        }
+    };
     let method = request.method().as_str().to_string();
     let path = request.url().split('?').next().unwrap_or("").to_string();
     let (status, body) = match acl {
@@ -1678,10 +1824,15 @@ fn handle_accounts(
     user: &str,
     invite: Option<&str>,
     acl: Option<&acl::Acl>,
+    body_limit: std::num::NonZeroU64,
     mut request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
-    let mut req_body = Vec::new();
-    request.as_reader().read_to_end(&mut req_body)?;
+    let req_body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
+        quota::Body::Complete(body) => body,
+        quota::Body::OverLimit { limit, size } => {
+            return respond_api_too_large(request, limit, size)
+        }
+    };
     let method = request.method().as_str().to_string();
     let path = request.url().split('?').next().unwrap_or("").to_string();
     let (status, body) = match (store, acl) {
@@ -1710,10 +1861,7 @@ fn handle_accounts(
                     serde_json::from_slice::<serde_json::Value>(&req_body).ok()
                 };
                 match (json, method.as_str(), path.as_str()) {
-                    (None, _, _) => (
-                        400,
-                        r#"{"error":"body must be JSON"}"#.to_string(),
-                    ),
+                    (None, _, _) => (400, r#"{"error":"body must be JSON"}"#.to_string()),
                     (Some(json), "POST", "/api/accounts/invite") => store.invite(user, &json),
                     (Some(json), "POST", "/api/accounts/redeem") => match invite {
                         Some(id) => store.redeem(id, &json),
@@ -1751,7 +1899,11 @@ fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
@@ -1838,7 +1990,9 @@ pub fn parse_keys_file(path: &Path) -> std::io::Result<Vec<TrustedKey>> {
         // prevent: either holder could speak as that channel.
         if let Some(name) = &name {
             if out.iter().any(|k| k.name.as_ref() == Some(name)) {
-                return Err(invalid(format!("keys file binds {name:?} to more than one key")));
+                return Err(invalid(format!(
+                    "keys file binds {name:?} to more than one key"
+                )));
             }
         }
         let mut key = [0u8; 32];
@@ -2073,6 +2227,7 @@ fn handle_browse(
     user: &str,
     acl: Option<&acl::Acl>,
     platform: Option<&Platform>,
+    browser_writes: bool,
     request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
     let readable = |repo: &str| match acl {
@@ -2091,7 +2246,7 @@ fn handle_browse(
         }
     }
 
-    let rendered = browse::render(root, page, &readable, platform, user);
+    let rendered = browse::render(root, page, &readable, platform, user, browser_writes);
     // Revalidation happens after the ACL check and before the body is
     // written, so a `304` costs the reader nothing and still cannot be
     // obtained for a repository they may not read.
@@ -2127,7 +2282,7 @@ fn handle_browse(
             tiny_http::Header::from_bytes(
                 &b"Content-Security-Policy"[..],
                 match page {
-                    browse::Page::Review { .. } => SCRIPTED_PAGE_CSP,
+                    browse::Page::Review { .. } if browser_writes => SCRIPTED_PAGE_CSP,
                     _ => BROWSER_CSP,
                 },
             )
@@ -2142,6 +2297,158 @@ fn handle_browse(
             tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
         );
     }
+    served(request, response, status, bytes)
+}
+
+#[derive(Debug)]
+struct Readiness {
+    log_verified: bool,
+    sequencer_live: bool,
+    storage_writable: bool,
+    free_disk_bytes: Option<u64>,
+    disk_space_ok: bool,
+    ref_disagreements: usize,
+}
+
+impl Readiness {
+    fn ready(&self) -> bool {
+        self.log_verified
+            && self.sequencer_live
+            && self.storage_writable
+            && self.disk_space_ok
+            && self.ref_disagreements == 0
+    }
+}
+
+fn storage_probe(root: &Path) -> bool {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = root.join(format!(
+        ".choir-ready-probe-{}-{sequence}",
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, b"ready\n")?;
+        file.sync_all()
+    })();
+    std::fs::remove_file(path).ok();
+    result.is_ok()
+}
+
+fn free_disk_bytes(root: &Path) -> Option<u64> {
+    let output = std::process::Command::new("df")
+        .args(["-Pk"])
+        .arg(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let available_kib = text
+        .lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(3)?
+        .parse::<u64>()
+        .ok()?;
+    available_kib.checked_mul(1024)
+}
+
+fn readiness(root: &Path, platform: Option<&Platform>, min_free_bytes: u64) -> Readiness {
+    let log_verified = choir_oplog::repair::verify(&root.join(".choir/ops.jsonl"))
+        .is_ok_and(|report| report.fault.is_none());
+    let sequencer_live = platform.is_some_and(|p| !p.durability_failed());
+    let free_disk_bytes = free_disk_bytes(root);
+    let ref_disagreements = platform.map_or(usize::MAX, |p| p.survey_git_refs(root).len());
+    Readiness {
+        log_verified,
+        sequencer_live,
+        storage_writable: storage_probe(root),
+        free_disk_bytes,
+        disk_space_ok: free_disk_bytes.is_some_and(|bytes| bytes >= min_free_bytes),
+        ref_disagreements,
+    }
+}
+
+fn handle_observability(
+    root: &Path,
+    platform: Option<&Platform>,
+    min_free_bytes: u64,
+    request: tiny_http::Request,
+) -> std::io::Result<(u16, u64)> {
+    if request.url() == "/healthz" {
+        let healthy = platform.is_none_or(|p| !p.durability_failed());
+        let body = serde_json::json!({
+            "format_version": 1,
+            "healthy": healthy,
+        })
+        .to_string();
+        let status = if healthy { 200 } else { 503 };
+        let bytes = body.len() as u64;
+        let response = tiny_http::Response::from_string(body)
+            .with_status_code(status)
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .expect("static header"),
+            );
+        return served(request, response, status, bytes);
+    }
+
+    let state = readiness(root, platform, min_free_bytes);
+    if request.url() == "/metrics" {
+        let body = format!(
+            "# TYPE choir_ready gauge\nchoir_ready {}\n\
+             # TYPE choir_log_verified gauge\nchoir_log_verified {}\n\
+             # TYPE choir_sequencer_live gauge\nchoir_sequencer_live {}\n\
+             # TYPE choir_storage_writable gauge\nchoir_storage_writable {}\n\
+             # TYPE choir_free_disk_bytes gauge\nchoir_free_disk_bytes {}\n\
+             # TYPE choir_ref_disagreements gauge\nchoir_ref_disagreements {}\n",
+            u8::from(state.ready()),
+            u8::from(state.log_verified),
+            u8::from(state.sequencer_live),
+            u8::from(state.storage_writable),
+            state.free_disk_bytes.unwrap_or(0),
+            state.ref_disagreements,
+        );
+        let bytes = body.len() as u64;
+        let response = tiny_http::Response::from_string(body).with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"text/plain; version=0.0.4; charset=utf-8"[..],
+            )
+            .expect("static header"),
+        );
+        return served(request, response, 200, bytes);
+    }
+
+    let status = if state.ready() { 200 } else { 503 };
+    let body = serde_json::json!({
+        "format_version": 1,
+        "ready": state.ready(),
+        "checks": {
+            "log_verified": state.log_verified,
+            "sequencer_live": state.sequencer_live,
+            "storage_writable": state.storage_writable,
+            "free_disk_bytes": state.free_disk_bytes,
+            "minimum_free_disk_bytes": min_free_bytes,
+            "disk_space_ok": state.disk_space_ok,
+            "ref_agreement": state.ref_disagreements == 0,
+            "ref_disagreements": state.ref_disagreements,
+        }
+    })
+    .to_string();
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        );
     served(request, response, status, bytes)
 }
 
@@ -2163,7 +2470,12 @@ fn workspace_quota_refusal(
 ) -> Option<(u16, String)> {
     let ceiling = ceiling?.get() as usize;
     let request: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let field = |key: &str| request.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+    let field = |key: &str| {
+        request
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+    };
     let (repo, name) = (field("repo"), field("name"));
     if repo.is_empty() || name.is_empty() {
         // Malformed: let `provision` say so, in its own words.
@@ -2196,28 +2508,51 @@ fn workspace_quota_refusal(
 /// already `None` for anyone the metering exempts. It is checked here
 /// rather than inside [`provision::create_workspace`] so the quota
 /// observes the creation path instead of editing it.
-fn handle_api(
-    platform: Option<&Platform>,
-    root: &Path,
-    base_url: &str,
-    user: &str,
-    acl: Option<&acl::Acl>,
+struct ApiRequestContext<'a> {
+    platform: Option<&'a Platform>,
+    root: &'a Path,
+    base_url: &'a str,
+    user: &'a str,
+    acl: Option<&'a acl::Acl>,
     workspaces: Option<std::num::NonZeroU32>,
+    body_limit: std::num::NonZeroU64,
+}
+
+fn handle_api(
+    context: ApiRequestContext<'_>,
     mut request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
+    let ApiRequestContext {
+        platform,
+        root,
+        base_url,
+        user,
+        acl,
+        workspaces,
+        body_limit,
+    } = context;
     let (status, body) = match platform {
         Some(p) => {
-            let mut req_body = Vec::new();
-            request.as_reader().read_to_end(&mut req_body)?;
+            let req_body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
+                quota::Body::Complete(body) => body,
+                quota::Body::OverLimit { limit, size } => {
+                    return respond_api_too_large(request, limit, size)
+                }
+            };
             let method = request.method().as_str().to_string();
             let path = request.url().to_string();
             // The body is already in hand, which is the only place the
             // repository a submission touches can be recovered from.
             let denial = acl.and_then(|table| {
-                acl::api_denial(table, user, &method, &path, &req_body, |id| p.review_repo(id))
+                acl::api_denial(table, user, &method, &path, &req_body, |id| {
+                    p.review_repo(id)
+                })
             });
             if let Some(denial) = denial {
-                (denial.status, serde_json::json!({ "error": denial.reason }).to_string())
+                (
+                    denial.status,
+                    serde_json::json!({ "error": denial.reason }).to_string(),
+                )
             } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
                 match workspace_quota_refusal(p, user, workspaces, &req_body) {
                     Some(refusal) => refusal,
@@ -2246,9 +2581,7 @@ fn handle_api(
                 // platform keeps answering one question, and the ACL
                 // stays the only thing that knows about grants.
                 let body = match acl {
-                    Some(table) if status == 200 => {
-                        acl::filter_response(table, user, &path, &body)
-                    }
+                    Some(table) if status == 200 => acl::filter_response(table, user, &path, &body),
                     _ => body,
                 };
                 // Bounded last, after any narrowing, because
@@ -2328,11 +2661,7 @@ fn handle(
         .spawn()?;
 
     use std::io::Write;
-    child
-        .stdin
-        .take()
-        .expect("stdin piped")
-        .write_all(&body)?;
+    child.stdin.take().expect("stdin piped").write_all(&body)?;
     let mut out = Vec::new();
     child
         .stdout
@@ -2346,7 +2675,11 @@ fn handle(
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|i| (i, i + 4))
-        .or_else(|| out.windows(2).position(|w| w == b"\n\n").map(|i| (i, i + 2)));
+        .or_else(|| {
+            out.windows(2)
+                .position(|w| w == b"\n\n")
+                .map(|i| (i, i + 2))
+        });
     let (head, rest) = match split {
         Some((h, b)) => (&out[..h], &out[b..]),
         None => (&[][..], &out[..]),

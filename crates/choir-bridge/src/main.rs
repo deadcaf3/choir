@@ -186,8 +186,8 @@ fn submit_batch(api_base: &str, ops: &[serde_json::Value]) -> Result<usize, Stri
             .output()
             .map_err(|e| format!("spawn curl: {e}"))?;
         std::fs::remove_file(&tmp).ok();
-        let resp: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| format!("batch response: {e}"))?;
+        let resp: serde_json::Value =
+            serde_json::from_slice(&out.stdout).map_err(|e| format!("batch response: {e}"))?;
         accepted += resp["accepted"].as_u64().unwrap_or(0) as usize;
         if resp["rejected"].as_u64().unwrap_or(0) > 0 {
             for r in resp["results"].as_array().into_iter().flatten() {
@@ -215,7 +215,12 @@ fn sync_once(
         std::fs::create_dir_all(mirror.parent().unwrap_or(Path::new(".")))
             .map_err(|e| format!("create mirror dir: {e}"))?;
         git(
-            &["clone", "--mirror", upstream, mirror.to_str().expect("utf8 path")],
+            &[
+                "clone",
+                "--mirror",
+                upstream,
+                mirror.to_str().expect("utf8 path"),
+            ],
             None,
         )?;
     }
@@ -398,23 +403,30 @@ fn queue_round(
     let mut fetch: Vec<String> = vec!["fetch".into(), "-q".into(), url.clone()];
     fetch.push(format!("+refs/heads/{base_branch}:refs/choirq/base"));
     for pr in &prs {
-        fetch.push(format!("+refs/pull/{}/head:refs/choirq/pr/{}", pr.number, pr.number));
+        fetch.push(format!(
+            "+refs/pull/{}/head:refs/choirq/pr/{}",
+            pr.number, pr.number
+        ));
     }
     let fetch_refs: Vec<&str> = fetch.iter().map(String::as_str).collect();
     git(&fetch_refs, Some(workdir))?;
-    let base = git(&["rev-parse", "refs/choirq/base"], Some(workdir))?.trim().to_string();
+    let base = git(&["rev-parse", "refs/choirq/base"], Some(workdir))?
+        .trim()
+        .to_string();
 
-    let heads: Vec<(u64, String)> =
-        prs.iter().map(|p| (p.number, format!("refs/choirq/pr/{}", p.number))).collect();
+    let heads: Vec<(u64, String)> = prs
+        .iter()
+        .map(|p| (p.number, format!("refs/choirq/pr/{}", p.number)))
+        .collect();
     let train = choir_bridge::queue::build_train(workdir, &base, &heads)?;
     if let Some(config) = differential {
         for (entry_id, result) in choir_bridge::queue::run_train_differentials(
-                workdir,
-                &train,
-                &config.runner,
-                &config.command,
-                &config.state,
-            ) {
+            workdir,
+            &train,
+            &config.runner,
+            &config.command,
+            &config.state,
+        ) {
             match result {
                 Ok(outcome) => println!(
                     "queue: PR #{}: advisory differential {} (observation {}, pending {})",
@@ -434,10 +446,19 @@ fn queue_round(
         println!("queue: no PR merged cleanly; train == base, skipping CI");
     } else {
         git(
-            &["push", "-q", &url, &format!("+{}:refs/heads/choir/train", train.tip)],
+            &[
+                "push",
+                "-q",
+                &url,
+                &format!("+{}:refs/heads/choir/train", train.tip),
+            ],
             Some(workdir),
         )?;
-        println!("queue: train {} pushed ({} PRs considered)", train.tip, prs.len());
+        println!(
+            "queue: train {} pushed ({} PRs considered)",
+            train.tip,
+            prs.len()
+        );
     }
 
     let verdict = if train.tip == base {
@@ -461,7 +482,9 @@ fn queue_round(
 
     for entry in &train.entries {
         // Statuses land on the PR head sha, which the fetched ref points at.
-        let sha = git(&["rev-parse", &entry.head], Some(workdir))?.trim().to_string();
+        let sha = git(&["rev-parse", &entry.head], Some(workdir))?
+            .trim()
+            .to_string();
         let (state, desc) = if entry.already_landed {
             // Recognized by patch identity, not re-merged (item 4): the
             // change is in, so reporting a failure here would ask the
@@ -493,16 +516,23 @@ fn queue_round(
             match v {
                 github::Verdict::Failure => {
                     let new_tip = choir_bridge::queue::revert_train(
-                        workdir, &url, &base, &train.tip, &base_branch,
+                        workdir,
+                        &url,
+                        &base,
+                        &train.tip,
+                        &base_branch,
                     )?;
-                    println!(
-                        "queue: post-land CI red; reverted train, {base_branch} -> {new_tip}"
-                    );
+                    println!("queue: post-land CI red; reverted train, {base_branch} -> {new_tip}");
                     for entry in train.entries.iter().filter(|e| e.merged) {
-                        let sha =
-                            git(&["rev-parse", &entry.head], Some(workdir))?.trim().to_string();
+                        let sha = git(&["rev-parse", &entry.head], Some(workdir))?
+                            .trim()
+                            .to_string();
                         github::post_status(
-                            &token, repo, &sha, "choir/queue", "failure",
+                            &token,
+                            repo,
+                            &sha,
+                            "choir/queue",
+                            "failure",
                             "landed train reverted: post-land CI red",
                         )?;
                         println!("queue: PR #{}: reverted", entry.id);
@@ -527,7 +557,10 @@ fn queue_round(
 fn load_or_create_key(path: &str) -> ActorKey {
     if Path::new(path).exists() {
         let bytes = std::fs::read(path).expect("read key file");
-        let bytes: [u8; 32] = bytes.as_slice().try_into().expect("key file must be 32 bytes");
+        let bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .expect("key file must be 32 bytes");
         ActorKey::from_secret_bytes(&bytes)
     } else {
         let key = ActorKey::generate();
@@ -562,11 +595,7 @@ fn main() {
             Ok(body) => {
                 let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                 for i in v.as_array().into_iter().flatten() {
-                    println!(
-                        "installation {}: permissions {}",
-                        i["id"],
-                        i["permissions"]
-                    );
+                    println!("installation {}: permissions {}", i["id"], i["permissions"]);
                 }
             }
             Err(e) => {
@@ -758,7 +787,7 @@ fn main() {
         let mut session =
             (!fresh_worktrees).then(|| choir_bridge::queue::DifferentialSession::open(repo));
         let run_once = |session: &mut Option<choir_bridge::queue::DifferentialSession>,
-                            merge: &str| match session.as_mut() {
+                        merge: &str| match session.as_mut() {
             Some(session) => choir_bridge::queue::run_differential_in(
                 session,
                 merge,
@@ -838,7 +867,8 @@ fn main() {
                     // would "reproduce" perfectly in it. Independent trees are
                     // what make a specimen's 6/6 mean semantic conflict rather
                     // than shared state.
-                    if outcome.verdict == choir_bridge::queue::DifferentialVerdict::InteractionFailure
+                    if outcome.verdict
+                        == choir_bridge::queue::DifferentialVerdict::InteractionFailure
                     {
                         let mut runs = vec![Ok(outcome)];
                         for _ in 0..choir_bridge::queue::SPECIMEN_REPRODUCTION_RUNS {
@@ -1014,8 +1044,13 @@ mod tests {
 
         let mut incomplete = base.to_vec();
         incomplete.extend(
-            ["--differential-runner", "runner", "--differential-state", "state"]
-                .map(str::to_string),
+            [
+                "--differential-runner",
+                "runner",
+                "--differential-state",
+                "state",
+            ]
+            .map(str::to_string),
         );
         assert!(parse_queue_args(&incomplete).is_err());
     }

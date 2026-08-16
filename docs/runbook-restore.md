@@ -65,7 +65,7 @@ mechanism in this repository is built to stop it having one.
 ### 2. Auth tokens
 
 ```bash
-printf 'choir:%s\n' "$(openssl rand -hex 32)" > /srv/choir-repos/.choir/auth
+printf '<operator>:%s\n' "$(openssl rand -hex 32)" > /srv/choir-repos/.choir/auth
 chmod 600 /srv/choir-repos/.choir/auth
 ```
 
@@ -78,11 +78,15 @@ file travels in the backup while the tokens it grades do not — a restored
 `acl` naming users whose tokens no longer exist is the correct state, not
 a broken one.
 
+The rehearsal credential's username must match an operator entry in the
+restored ACL with ownership of at least one restored repository. Otherwise
+the canary push is correctly refused.
+
 ### 3. TLS material
 
-Certificate and key are not in the backup. Until you have them, the node
-binds loopback only; it refuses a non-loopback bind without TLS, and that
-refusal is not something to work around during an incident.
+Certificate and key are not in the backup. The node always binds loopback
+for the private beta. Restore TLS only at the reverse proxy after the
+loopback rehearsal passes.
 
 ## The ordering rule, and why the script is strict about it
 
@@ -117,8 +121,10 @@ Two consequences worth knowing separately:
 
 Not "the files copied". In order:
 
-1. The backup's log is contiguous from seq 0 with no gap.
-2. The six policy files are present, and no secret is.
+1. The backup's supported format, sequence, parent chain, and recomputed
+   entry hashes verify through the final record.
+2. The nine beta policy and configuration files are present, and no secret
+   is.
 3. Every repo in `repos.list` has a bundle.
 4. The target root holds no log — an existing one is never overwritten.
 5. The node boots, replays, and retracts nothing.
@@ -144,11 +150,11 @@ you no longer want it:
 git push <node-url>/<repo> :refs/heads/restore-canary-<unix>
 ```
 
-Then start the node under your own supervisor with your own flags — the
-rehearsal used a minimal set and deliberately did not guess yours. See
-`scripts/flip/RUNBOOK.md` for the supervised install and the protected-ref
-gates, and re-point `~/.choir-mirror-ip` and `~/.choir-public-url` at the
-new host if it moved.
+Then render the hardened service with
+`scripts/flip/render_private_beta_service.sh`. The rehearsal used the same
+ACL, scope, review, read-only browser, logging, limit, and quota policy as
+the private-beta manifest. Re-point the off-host backup job at the new host
+if it moved.
 
 Finally, pull a backup *from the restored node* before trusting it. The
 node you just restored has no offsite copy of its own until you do, and

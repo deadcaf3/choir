@@ -16,7 +16,12 @@ fn choir(args: &[&str]) -> std::process::Output {
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -38,7 +43,10 @@ fn row_key(view: &serde_json::Value) -> String {
 
 fn json(out: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
-        panic!("json stdout, got {:?}", String::from_utf8_lossy(&out.stdout))
+        panic!(
+            "json stdout, got {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        )
     })
 }
 
@@ -99,21 +107,31 @@ fn cli_end_to_end() {
     // Seed a commit so provisioning has a head.
     let url = format!("{api}/agents/demo.git");
     let seed = work.join("seed");
-    assert!(git(&work, &["clone", "-q", &url, seed.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &url, seed.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(seed.join("f.txt"), "v1\n").unwrap();
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-q", "-m", "first"]);
-    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
     let head = String::from_utf8_lossy(&git(&seed, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();
 
     // Provision a workspace through the CLI.
     let out = choir(&["workspace", &api, "agents/demo", "cli-agent"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let ws = json(&out);
     assert_eq!(ws["head"].as_str().unwrap(), head);
-    assert!(std::path::Path::new(ws["path"].as_str().unwrap()).join("f.txt").exists());
+    assert!(std::path::Path::new(ws["path"].as_str().unwrap())
+        .join("f.txt")
+        .exists());
     // Rejection surfaces as exit 1 (duplicate name → 409).
     let dup = choir(&["workspace", &api, "agents/demo", "cli-agent"]);
     assert_eq!(dup.status.code(), Some(1));
@@ -157,14 +175,12 @@ fn cli_end_to_end() {
     let checkpoint_oid = String::from_utf8_lossy(&git(&change_path, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();
-    assert!(
-        git(
-            &change_path,
-            &["push", "-q", "origin", "HEAD:refs/heads/cli-change"]
-        )
-        .status
-        .success()
-    );
+    assert!(git(
+        &change_path,
+        &["push", "-q", "origin", "HEAD:refs/heads/cli-change"]
+    )
+    .status
+    .success());
     let wrong_owner = choir(&[
         "checkpoint",
         &api,
@@ -217,7 +233,10 @@ fn cli_end_to_end() {
         "request-1",
     ]);
     assert_eq!(wrong_archive.status.code(), Some(1));
-    assert!(change_path.exists(), "rejected archive must restore the live path");
+    assert!(
+        change_path.exists(),
+        "rejected archive must restore the live path"
+    );
     let archived = choir(&archive_args);
     assert!(archived.status.success());
     let archived = json(&archived);
@@ -229,11 +248,19 @@ fn cli_end_to_end() {
 
     // Review round: request (sugar), pending queue, verdict, view.
     let out = choir(&["review", &api, key_file, "cli-agent", "r1", &head, "bot"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let out = choir(&["reviews", &api, "bot"]);
     assert!(json(&out)["pending"].get("r1").is_some());
     let out = choir(&["verdict", &api, key_file, "bot", "r1", "approve", "lgtm"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let out = choir(&["view", &api]);
     let view = json(&out);
     assert_eq!(view["reviews"]["r1"]["approved"], true, "{view}");
@@ -250,7 +277,12 @@ fn cli_end_to_end() {
     // may authorize it. The operation remains visible and forces a fresh
     // review instead of erasing the original verdict.
     let out = choir(&[
-        "slash", &api, key_file, "r1", "bot", "retroactive policy finding",
+        "slash",
+        &api,
+        key_file,
+        "r1",
+        "bot",
+        "retroactive policy finding",
     ]);
     assert_eq!(out.status.code(), Some(1));
     let out = choir(&[
@@ -261,14 +293,17 @@ fn cli_end_to_end() {
         "bot",
         "retroactive policy finding",
     ]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let view = json(&choir(&["view", &api]));
     assert_eq!(view["reviews"]["r1"]["re_review_required"], true, "{view}");
     assert_eq!(view["reviews"]["r1"]["approved"], false, "{view}");
     assert_eq!(view["reviews"]["r1"]["approval_weight"], 0, "{view}");
     assert_eq!(
-        view["reviews"]["r1"]["slashes"]["bot"],
-        "retroactive policy finding",
+        view["reviews"]["r1"]["slashes"]["bot"], "retroactive policy finding",
         "{view}"
     );
 
@@ -277,12 +312,20 @@ fn cli_end_to_end() {
     // guards do the rest: a complete review cannot be lapsed, and an
     // archived one cannot be archived twice.
     let out = choir(&["review", &api, key_file, "cli-agent", "r3", &head, "bot"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let out = choir(&["abandon", &api, key_file, "r3"]);
     assert_eq!(out.status.code(), Some(1), "an agent key must not abandon");
     assert_eq!(json(&out)["code"], "node_only", "{:?}", json(&out));
     let out = choir(&["abandon", &api, node_key_file.to_str().unwrap(), "r3"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let view = json(&choir(&["view", &api]));
     assert_eq!(view["reviews"]["r3"]["archived"], true, "{view}");
     assert_eq!(view["reviews"]["r3"]["approved"], false, "{view}");
@@ -303,8 +346,19 @@ fn cli_end_to_end() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(json(&out)["code"], "node_only", "{:?}", json(&out));
     let node_key_arg = node_key_file.to_str().unwrap();
-    let out = choir(&["bind", &api, node_key_arg, "cli-op", &pub_hex, "cli-op/agent"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    let out = choir(&[
+        "bind",
+        &api,
+        node_key_arg,
+        "cli-op",
+        &pub_hex,
+        "cli-op/agent",
+    ]);
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The binding is observable through the fold rather than through a
     // second success: moving the same key to another operator is refused,
@@ -324,16 +378,38 @@ fn cli_end_to_end() {
     // Re-binding to exactly the same operator and channel changes nothing,
     // so the CLI reports it and submits no op. The fold still permits it;
     // this is a client-side courtesy, not a new persisted rule.
-    let out = choir(&["bind", &api, node_key_arg, "cli-op", &pub_hex, "cli-op/agent"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    let out = choir(&[
+        "bind",
+        &api,
+        node_key_arg,
+        "cli-op",
+        &pub_hex,
+        "cli-op/agent",
+    ]);
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let body = json(&out);
     assert_eq!(body["already_bound"], true, "{body}");
     assert_eq!(body["bound_at"], row["bound_at"], "{body}");
 
     // Correcting the channel stays allowed: a typo must not burn a key,
     // and it is a real change so it is submitted rather than short-circuited.
-    let out = choir(&["bind", &api, node_key_arg, "cli-op", &pub_hex, "cli-op/other"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    let out = choir(&[
+        "bind",
+        &api,
+        node_key_arg,
+        "cli-op",
+        &pub_hex,
+        "cli-op/other",
+    ]);
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(json(&out)["already_bound"].is_null(), "{:?}", json(&out));
     let view = json(&choir(&["view", &api]));
     let row = &view["bindings"][row_key(&view)];
@@ -346,11 +422,23 @@ fn cli_end_to_end() {
     // Revocation is node-only and terminal, and the second attempt must
     // carry different bytes or the retry index answers `already_applied`.
     assert_eq!(
-        choir(&["revoke", &api, key_file, &pub_hex, "not yours"]).status.code(),
+        choir(&["revoke", &api, key_file, &pub_hex, "not yours"])
+            .status
+            .code(),
         Some(1)
     );
-    let out = choir(&["revoke", &api, node_key_arg, &pub_hex, "key material rotated"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    let out = choir(&[
+        "revoke",
+        &api,
+        node_key_arg,
+        &pub_hex,
+        "key material rotated",
+    ]);
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = choir(&["revoke", &api, node_key_arg, &pub_hex, "a second attempt"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(json(&out)["code"], "identity_state", "{:?}", json(&out));
@@ -360,9 +448,11 @@ fn cli_end_to_end() {
     // does by design), and a key hex that is not 64 chars is a typo.
     assert_eq!(
         choir(&[
-            "bind", &api,
+            "bind",
+            &api,
             work.join("missing.key").to_str().unwrap(),
-            "cli-op", &pub_hex,
+            "cli-op",
+            &pub_hex,
         ])
         .status
         .code(),
@@ -373,11 +463,15 @@ fn cli_end_to_end() {
         "an operator-only command must not mint a key file from a typo"
     );
     assert_eq!(
-        choir(&["bind", &api, node_key_arg, "cli-op", "not-hex"]).status.code(),
+        choir(&["bind", &api, node_key_arg, "cli-op", "not-hex"])
+            .status
+            .code(),
         Some(2)
     );
     assert_eq!(
-        choir(&["revoke", &api, node_key_arg, "cafe", "reason"]).status.code(),
+        choir(&["revoke", &api, node_key_arg, "cafe", "reason"])
+            .status
+            .code(),
         Some(2)
     );
 
@@ -386,10 +480,20 @@ fn cli_end_to_end() {
     // `--ref` records where the change wants to land, which is what
     // per-ref policy reads; it is not a reviewer name.
     let out = choir(&[
-        "review", &api, key_file, "cli-agent", "r-assigned", &head,
-        "--ref", "cli/demo.git:refs/heads/main",
+        "review",
+        &api,
+        key_file,
+        "cli-agent",
+        "r-assigned",
+        &head,
+        "--ref",
+        "cli/demo.git:refs/heads/main",
     ]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let drawn = json(&out)["reviewers"].clone();
     assert_eq!(drawn.as_array().map(Vec::len), Some(2), "{drawn}");
     let view = json(&choir(&["view", &api]));
@@ -400,21 +504,48 @@ fn cli_end_to_end() {
     );
 
     // Raw `submit` accepts a hand-written op (second review request).
-    let target = serde_json::to_string(&choir_hash::ContentHash::from_git_oid(&head).unwrap())
-        .unwrap();
+    let target =
+        serde_json::to_string(&choir_hash::ContentHash::from_git_oid(&head).unwrap()).unwrap();
     let op = format!(
         r#"{{"format_version":1,"kind":{{"RequestReview":{{"id":"r2","target":{target},"reviewers":["bot"]}}}}}}"#
     );
     let out = choir(&["submit", &api, key_file, "cli-agent", &op]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 
     // Intent record (D22): latest per (subject, kind) wins in the view.
-    let out = choir(&["intent", &api, key_file, "cli-agent", "cli-agent", "task-spec", "add auth"]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stdout));
-    let out = choir(&["intent", &api, key_file, "cli-agent", "cli-agent", "task-spec", "add auth v2"]);
+    let out = choir(&[
+        "intent",
+        &api,
+        key_file,
+        "cli-agent",
+        "cli-agent",
+        "task-spec",
+        "add auth",
+    ]);
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = choir(&[
+        "intent",
+        &api,
+        key_file,
+        "cli-agent",
+        "cli-agent",
+        "task-spec",
+        "add auth v2",
+    ]);
     assert!(out.status.success());
     let view = json(&choir(&["view", &api]));
-    assert_eq!(view["provenance"]["cli-agent"]["task-spec"], "add auth v2", "{view}");
+    assert_eq!(
+        view["provenance"]["cli-agent"]["task-spec"], "add auth v2",
+        "{view}"
+    );
     // Empty subject is a view-semantics rejection → exit 1.
     let out = choir(&["intent", &api, key_file, "cli-agent", "", "task-spec", "x"]);
     assert_eq!(out.status.code(), Some(1));
@@ -437,9 +568,12 @@ fn cli_end_to_end() {
         .code(),
         Some(2)
     );
-    assert_eq!(choir(&["review", &api, key_file, "c", "r3", "not-an-oid", "bot"])
-        .status
-        .code(), Some(2));
+    assert_eq!(
+        choir(&["review", &api, key_file, "c", "r3", "not-an-oid", "bot"])
+            .status
+            .code(),
+        Some(2)
+    );
 
     node.unblock();
 }
@@ -486,7 +620,11 @@ fn cli_reads_auth_from_file_without_exposing_it() {
         "view",
         &api,
     ]);
-    assert!(out.status.success(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(json(&out)["workspaces"].is_object());
     assert!(!String::from_utf8_lossy(&out.stdout).contains("placeholder-token"));
     assert!(!String::from_utf8_lossy(&out.stderr).contains("placeholder-token"));

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 choir-fs = { path = "../choir-fs" }
+choir-hash = { path = "../choir-hash" }
 choir-identity = { path = "../choir-identity" }
 choir-oplog = { path = "../choir-oplog" }
 choir-sequencer = { path = "../choir-sequencer" }
@@ -17,4 +18,3 @@ tiny_http = { version = "0.12", features = ["ssl-rustls"] }
 workspace = true
 
 [dev-dependencies]
-choir-hash = { path = "../choir-hash" }

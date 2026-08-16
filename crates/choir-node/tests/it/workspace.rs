@@ -11,7 +11,14 @@ use choir_view::{ArchiveAuthorization, CreateAuthorization};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -30,10 +37,16 @@ fn api(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, serde_j
         args.extend(["-d", b]);
     }
     args.push(&url);
-    let out = std::process::Command::new("curl").args(&args).output().expect("curl runs");
+    let out = std::process::Command::new("curl")
+        .args(&args)
+        .output()
+        .expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout);
     let (body, code) = text.rsplit_once('\n').expect("status line");
-    (code.trim().parse().expect("numeric status"), serde_json::from_str(body).expect("json"))
+    (
+        code.trim().parse().expect("numeric status"),
+        serde_json::from_str(body).expect("json"),
+    )
 }
 
 fn signed_create_body(
@@ -92,39 +105,63 @@ fn workspace_provisioning_end_to_end() {
     }
 
     // Empty repo: provisioning must refuse, not create a broken dir.
-    let (code, resp) = api(port, "POST", "/api/workspace",
-        Some(r#"{"repo":"agents/demo","name":"too-early"}"#));
+    let (code, resp) = api(
+        port,
+        "POST",
+        "/api/workspace",
+        Some(r#"{"repo":"agents/demo","name":"too-early"}"#),
+    );
     assert_eq!(code, 400, "{resp}");
 
     // Seed a commit through the daemon (the sequenced path).
     let url = format!("http://127.0.0.1:{port}/agents/demo.git");
     let seed = work.join("seed");
-    assert!(git(&work, &["clone", "-q", &url, seed.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &url, seed.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(seed.join("f.txt"), "v1\n").unwrap();
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-q", "-m", "first"]);
-    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"]).status.success());
-    let head = String::from_utf8_lossy(&git(&seed, &["rev-parse", "HEAD"]).stdout).trim().to_string();
+    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+    let head = String::from_utf8_lossy(&git(&seed, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
 
     // Two workspaces provision and are independent.
-    let (code, ws1) = api(port, "POST", "/api/workspace",
-        Some(r#"{"repo":"agents/demo","name":"agent-1"}"#));
+    let (code, ws1) = api(
+        port,
+        "POST",
+        "/api/workspace",
+        Some(r#"{"repo":"agents/demo","name":"agent-1"}"#),
+    );
     assert_eq!(code, 200, "{ws1}");
     assert_eq!(ws1["head"].as_str().unwrap(), head);
-    let (code, ws2) = api(port, "POST", "/api/workspace",
-        Some(r#"{"repo":"agents/demo","name":"agent-2"}"#));
+    let (code, ws2) = api(
+        port,
+        "POST",
+        "/api/workspace",
+        Some(r#"{"repo":"agents/demo","name":"agent-2"}"#),
+    );
     assert_eq!(code, 200, "{ws2}");
 
     let p1 = std::path::PathBuf::from(ws1["path"].as_str().unwrap());
     let p2 = std::path::PathBuf::from(ws2["path"].as_str().unwrap());
     assert_eq!(std::fs::read_to_string(p1.join("f.txt")).unwrap(), "v1\n");
     std::fs::write(p1.join("f.txt"), "agent-1 edit\n").unwrap();
-    assert_eq!(std::fs::read_to_string(p2.join("f.txt")).unwrap(), "v1\n",
-        "workspaces must not share mutable state");
+    assert_eq!(
+        std::fs::read_to_string(p2.join("f.txt")).unwrap(),
+        "v1\n",
+        "workspaces must not share mutable state"
+    );
 
     // Both registered in the view under repo/name.
     let (_, view) = api(port, "GET", "/api/view", None);
-    assert!(view["workspaces"].get("agents/demo/agent-1").is_some(), "{view}");
+    assert!(
+        view["workspaces"].get("agents/demo/agent-1").is_some(),
+        "{view}"
+    );
     assert!(view["workspaces"].get("agents/demo/agent-2").is_some());
 
     // Workspace origin is the daemon URL, not the on-disk bare path.
@@ -136,20 +173,44 @@ fn workspace_provisioning_end_to_end() {
     git(&p1, &["add", "."]);
     git(&p1, &["commit", "-q", "-m", "ws edit"]);
     // Workspaces start on a detached HEAD, so pushes name the full ref.
-    let push = git(&p1, &["push", "-q", "origin", "HEAD:refs/heads/agent-1-work"]);
-    assert!(push.status.success(), "{}", String::from_utf8_lossy(&push.stderr));
+    let push = git(
+        &p1,
+        &["push", "-q", "origin", "HEAD:refs/heads/agent-1-work"],
+    );
+    assert!(
+        push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push.stderr)
+    );
     let (_, view) = api(port, "GET", "/api/view", None);
-    assert!(view["refs"].get("agents/demo.git:refs/heads/agent-1-work").is_some(), "{view}");
+    assert!(
+        view["refs"]
+            .get("agents/demo.git:refs/heads/agent-1-work")
+            .is_some(),
+        "{view}"
+    );
 
     // Guard rails: duplicate name, traversal, missing repo.
-    let (code, _) = api(port, "POST", "/api/workspace",
-        Some(r#"{"repo":"agents/demo","name":"agent-1"}"#));
+    let (code, _) = api(
+        port,
+        "POST",
+        "/api/workspace",
+        Some(r#"{"repo":"agents/demo","name":"agent-1"}"#),
+    );
     assert_eq!(code, 409);
-    let (code, _) = api(port, "POST", "/api/workspace",
-        Some(r#"{"repo":"agents/demo","name":"../escape"}"#));
+    let (code, _) = api(
+        port,
+        "POST",
+        "/api/workspace",
+        Some(r#"{"repo":"agents/demo","name":"../escape"}"#),
+    );
     assert_eq!(code, 400);
-    let (code, _) = api(port, "POST", "/api/workspace",
-        Some(r#"{"repo":"agents/nope","name":"x"}"#));
+    let (code, _) = api(
+        port,
+        "POST",
+        "/api/workspace",
+        Some(r#"{"repo":"agents/nope","name":"x"}"#),
+    );
     assert_eq!(code, 404);
 
     // Adapter-grade creation is pinned to an exact base even after the
@@ -158,7 +219,9 @@ fn workspace_provisioning_end_to_end() {
     std::fs::write(seed.join("f.txt"), "v2\n").unwrap();
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-q", "-m", "second"]);
-    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
     let head2 = String::from_utf8_lossy(&git(&seed, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();
@@ -189,7 +252,10 @@ fn workspace_provisioning_end_to_end() {
     assert_eq!(created["head"], head);
     assert_eq!(created["created"], true);
     let adapter_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
-    assert_eq!(std::fs::read_to_string(adapter_path.join("f.txt")).unwrap(), "v1\n");
+    assert_eq!(
+        std::fs::read_to_string(adapter_path.join("f.txt")).unwrap(),
+        "v1\n"
+    );
     let (code, reused) = api(port, "POST", "/api/workspace", Some(&advanced));
     assert_eq!(code, 200, "{reused}");
     assert_eq!(reused["created"], false);
@@ -222,12 +288,7 @@ fn workspace_provisioning_end_to_end() {
     ] {
         let mut mismatch: serde_json::Value = serde_json::from_str(&advanced).unwrap();
         mismatch[field] = serde_json::json!(value);
-        let (code, problem) = api(
-            port,
-            "POST",
-            "/api/workspace",
-            Some(&mismatch.to_string()),
-        );
+        let (code, problem) = api(port, "POST", "/api/workspace", Some(&mismatch.to_string()));
         assert_eq!(code, 409, "{field}: {problem}");
         assert_eq!(problem["code"], "workspace_state", "{field}: {problem}");
     }
@@ -239,7 +300,9 @@ fn workspace_provisioning_end_to_end() {
     .to_string();
     let (code, problem) = api(port, "POST", "/api/workspace", Some(&invalid));
     assert_eq!(code, 400, "{problem}");
-    assert!(!root.join(".choir/workspaces/agents/demo/invalid-base").exists());
+    assert!(!root
+        .join(".choir/workspaces/agents/demo/invalid-base")
+        .exists());
 
     // Archive retains dirty and unpushed workspace data, removes only the
     // active view row, and is idempotent under a lost response.
@@ -258,12 +321,7 @@ fn workspace_provisioning_end_to_end() {
         "signature_hex": hex_encode(&wrong_signature.signature),
     })
     .to_string();
-    let (code, problem) = api(
-        port,
-        "POST",
-        "/api/workspace/archive",
-        Some(&wrong_archive),
-    );
+    let (code, problem) = api(port, "POST", "/api/workspace/archive", Some(&wrong_archive));
     assert_eq!(code, 409, "{problem}");
     assert_eq!(problem["code"], "unknown_key", "{problem}");
     assert!(adapter_path.exists());
@@ -408,7 +466,11 @@ fn workspace_provisioning_end_to_end() {
     // may win.
     let handles: Vec<_> = (0..8)
         .map(|i| {
-            let name = if i < 2 { "racer".to_string() } else { format!("conc-{i}") };
+            let name = if i < 2 {
+                "racer".to_string()
+            } else {
+                format!("conc-{i}")
+            };
             std::thread::spawn(move || {
                 let body = format!(r#"{{"repo":"agents/demo","name":"{name}"}}"#);
                 api(port, "POST", "/api/workspace", Some(&body))
@@ -422,8 +484,11 @@ fn workspace_provisioning_end_to_end() {
     assert_eq!(results.iter().filter(|(code, _)| *code == 409).count(), 1);
     for (_, resp) in &ok {
         let p = std::path::PathBuf::from(resp["path"].as_str().unwrap());
-        assert_eq!(std::fs::read_to_string(p.join("f.txt")).unwrap(), "v2\n",
-            "no torn copies under concurrency");
+        assert_eq!(
+            std::fs::read_to_string(p.join("f.txt")).unwrap(),
+            "v2\n",
+            "no torn copies under concurrency"
+        );
     }
 
     // Small provisioning sample: p50 copy time over 9 more workspaces.
@@ -445,12 +510,14 @@ fn workspace_provisioning_end_to_end() {
     // flake; the config is what stops it happening again.
     let template = root.join(".choir/checkouts/agents/demo");
     for (key, want) in [("gc.auto", "0"), ("maintenance.auto", "false")] {
-        let got = String::from_utf8_lossy(
-            &git(&template, &["config", "--local", "--get", key]).stdout,
-        )
-        .trim()
-        .to_string();
-        assert_eq!(got, want, "template has {key} unset, so housekeeping can race the copy");
+        let got =
+            String::from_utf8_lossy(&git(&template, &["config", "--local", "--get", key]).stdout)
+                .trim()
+                .to_string();
+        assert_eq!(
+            got, want,
+            "template has {key} unset, so housekeeping can race the copy"
+        );
     }
 
     // ...and a template created before that config existed must still
@@ -459,13 +526,22 @@ fn workspace_provisioning_end_to_end() {
     // persisted keys is exactly what an older template looks like.
     for key in ["gc.auto", "maintenance.auto"] {
         assert!(
-            git(&template, &["config", "--local", "--unset", key]).status.success(),
+            git(&template, &["config", "--local", "--unset", key])
+                .status
+                .success(),
             "could not strip {key} to simulate an older template"
         );
     }
-    let (code, resp) = api(port, "POST", "/api/workspace",
-        Some(r#"{"repo":"agents/demo","name":"legacy-template"}"#));
-    assert_eq!(code, 200, "a template without the persisted config failed to provision: {resp}");
+    let (code, resp) = api(
+        port,
+        "POST",
+        "/api/workspace",
+        Some(r#"{"repo":"agents/demo","name":"legacy-template"}"#),
+    );
+    assert_eq!(
+        code, 200,
+        "a template without the persisted config failed to provision: {resp}"
+    );
 
     node.unblock();
 }

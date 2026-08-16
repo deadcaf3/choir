@@ -160,6 +160,10 @@ impl OpLog for CountingLog {
         self.inner.get(seq)
     }
 
+    fn last(&self) -> Option<&OpEntry> {
+        self.inner.last()
+    }
+
     fn sync(&mut self) -> Result<(), LogError> {
         self.syncs.fetch_add(1, Ordering::Relaxed);
         Ok(())

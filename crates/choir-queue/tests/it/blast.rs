@@ -83,7 +83,10 @@ fn several_changed_files_union_their_reach() {
     // store -> view -> node -> demo, and sequencer -> node -> demo.
     assert!(r.reached.contains(&"choir-view".to_string()));
     assert!(r.reached.contains(&"choir-demo".to_string()));
-    assert!(!r.reached.contains(&"choir-hash".to_string()), "reach runs up, not down");
+    assert!(
+        !r.reached.contains(&"choir-hash".to_string()),
+        "reach runs up, not down"
+    );
 }
 
 #[test]

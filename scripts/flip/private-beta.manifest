@@ -1,0 +1,17 @@
+format_version=1
+exposure=loopback-behind-reverse-proxy
+browser=authenticated-read-only
+writes=signed-cli-only
+accounts=disabled
+passkeys=disabled
+ssh=disabled
+webhooks=disabled
+bridge=disabled
+api_body_bytes=1048576
+batch_operations=256
+git_push_bytes_per_user=536870912
+workspaces_per_user=8
+api_requests_per_minute=120
+git_requests_per_minute=60
+ready_min_free_bytes=1073741824
+request_log_max_bytes=33554432

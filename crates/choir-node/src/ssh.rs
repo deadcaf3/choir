@@ -178,8 +178,7 @@ impl Handoff {
     ///
     /// Returns a message when the file cannot be read or does not parse.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
@@ -335,11 +334,15 @@ pub fn canonical_repo(raw: &str) -> Result<String, String> {
     let path = raw.trim_start_matches('/');
     let segments: Vec<&str> = path.split('/').collect();
     let [owner, name] = segments.as_slice() else {
-        return Err(format!("`{raw}` is not a repository; write `owner/repo.git`"));
+        return Err(format!(
+            "`{raw}` is not a repository; write `owner/repo.git`"
+        ));
     };
     for segment in [owner, name] {
         if segment.is_empty() {
-            return Err(format!("`{raw}` is not a repository; write `owner/repo.git`"));
+            return Err(format!(
+                "`{raw}` is not a repository; write `owner/repo.git`"
+            ));
         }
         // A leading dot would put `<root>/.choir` — the node's key, its
         // log, this very handoff file — one well-chosen path away from a
@@ -411,11 +414,7 @@ impl Shim {
         // that cannot be read is a request whose authorization cannot be
         // established. That fails the fetch rather than serving it
         // ungated.
-        let handoff = self
-            .handoff
-            .as_deref()
-            .map(Handoff::load)
-            .transpose()?;
+        let handoff = self.handoff.as_deref().map(Handoff::load).transpose()?;
         // The flag if the operator wrote one, otherwise whatever the
         // daemon says it is enforcing. Forgetting `--acl-file` on one
         // `authorized_keys` line should not be the difference between a
@@ -447,9 +446,11 @@ impl Shim {
             (None, None) => None,
         };
         if let Some(table) = table {
-            if let Some(denial) =
-                table.check(&self.user, &acl::Scope::Repo(acl::normalize_repo(&repo)), level)
-            {
+            if let Some(denial) = table.check(
+                &self.user,
+                &acl::Scope::Repo(acl::normalize_repo(&repo)),
+                level,
+            ) {
                 return Err(denial.reason);
             }
         }
@@ -500,18 +501,24 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_command("git-receive-pack 'owner/repo.git'").unwrap().service,
+            parse_command("git-receive-pack 'owner/repo.git'")
+                .unwrap()
+                .service,
             Service::ReceivePack
         );
         // The dashless spelling, and the leading slash an `ssh://` URL
         // produces, are the same request.
         assert_eq!(
-            parse_command("git upload-pack '/owner/repo.git'").unwrap().repo,
+            parse_command("git upload-pack '/owner/repo.git'")
+                .unwrap()
+                .repo,
             "/owner/repo.git"
         );
         // Unquoted is legal too; some clients do not quote a plain name.
         assert_eq!(
-            parse_command("git-upload-pack owner/repo.git").unwrap().repo,
+            parse_command("git-upload-pack owner/repo.git")
+                .unwrap()
+                .repo,
             "owner/repo.git"
         );
     }

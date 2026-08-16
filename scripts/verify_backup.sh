@@ -8,7 +8,7 @@
 #   1. the log arrives and every line carries a seq
 #   2. seq starts at 0 and has no gaps  (a truncated middle is the
 #      failure a checksum on the whole file cannot localise)
-#   3. the six policy files are present (a node restored without
+#   3. the nine policy/config files are present (a node restored without
 #      reviewers refuses to boot -- that is how this was found)
 #   4. no secret travelled: no auth, no *.key, no *.pem
 #   5. when this machine holds the live log, the backup is a byte-exact
@@ -24,14 +24,16 @@ IP=${1:-$(cat "$HOME/.choir-mirror-ip")}
 KEY=$HOME/.ssh/choir_bench_ed25519
 SSH_CONTROL=$HOME/.ssh/cm-choir-mirror.sock
 WORK=$(mktemp -d)
+VERIFY_BIN=${CHOIR_NODE_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/choir-node}
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 # After the D20 host move the directions swap: the live log is on the
-# node host and the backup is the local pull. The five checks are the
+# node host and the backup is the local pull. The checks are the
 # same; what changes is which side is read over ssh. The marker file is
 # the same one choirctl and pull_backup.sh key off.
 REMOTE_NODE=
 [ -f "$HOME/.choir/node-remote" ] && REMOTE_NODE=1
+POLICY_FILES='keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl repos.list acl private-beta.manifest'
 
 ssh_run() {
   ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
@@ -40,6 +42,8 @@ ssh_run() {
 }
 
 fail() { echo "verify-backup: $1" >&2; exit 1; }
+[ -x "$VERIFY_BIN" ] \
+  || fail "no verifier at $VERIFY_BIN (build choir-node --release or set CHOIR_NODE_BIN)"
 
 # 1. The log: whichever side holds the backup copy.
 if [ -n "$REMOTE_NODE" ]; then
@@ -52,14 +56,12 @@ fi
 lines=$(wc -l < "$WORK/ops.jsonl" | tr -d ' ')
 [ "$lines" -gt 0 ] || fail "the backed-up log is empty"
 
-# 2. Contiguity. Every entry carries exactly one "seq", so sed is enough
-#    and a JSON parser is not; awk then checks the run 0..n-1.
-sed -n 's/.*"seq":\([0-9][0-9]*\).*/\1/p' "$WORK/ops.jsonl" > "$WORK/seqs"
-seqcount=$(wc -l < "$WORK/seqs" | tr -d ' ')
-[ "$seqcount" = "$lines" ] \
-  || fail "$lines lines but $seqcount carry a seq: the log is not all op entries"
-awk 'NR-1 != $1 { printf "seq gap: line %d carries seq %d\n", NR, $1; exit 1 }' "$WORK/seqs" \
-  || fail "the backed-up log has a gap; it cannot be replayed to the head"
+# 2. The daemon's read-only verifier checks the supported wire format,
+#    sequence, every parent link, and every recomputed entry hash. Refuse
+#    even a repairable torn tail here: a completed backup must end on a
+#    completed record.
+"$VERIFY_BIN" --verify-log "$WORK/ops.jsonl" \
+  || fail "the backed-up log failed format/sequence/parent/hash verification"
 
 # 3. Policy. Without these a restore does not boot.
 if [ -n "$REMOTE_NODE" ]; then
@@ -68,7 +70,7 @@ else
   ssh_run 'ls ~/choir-oplog/policy' > "$WORK/policy" 2>/dev/null || : > "$WORK/policy"
 fi
 missing=
-for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list; do
+for f in $POLICY_FILES; do
   grep -qx "$f" "$WORK/policy" || missing="$missing $f"
 done
 [ -z "$missing" ] || fail "policy files missing from the backup:$missing"
@@ -99,4 +101,4 @@ if [ -f "$LIVE" ]; then
   prefix="ok ($backup_bytes of $live_bytes bytes)"
 fi
 
-echo "verify-backup: $lines ops, seq 0..$((lines - 1)), 6 policy files, no secrets, prefix $prefix"
+echo "verify-backup: $lines ops, full chain verified, 9 policy/config files, no secrets, prefix $prefix"

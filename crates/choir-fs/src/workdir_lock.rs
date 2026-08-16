@@ -278,9 +278,8 @@ mod tests {
         let dir = scratch("lock-wait");
         let held = WorkdirLock::acquire(&dir).unwrap();
         let dir2 = dir.clone();
-        let waiter = thread::spawn(move || {
-            WorkdirLock::acquire_wait(&dir2, Duration::from_secs(5)).is_ok()
-        });
+        let waiter =
+            thread::spawn(move || WorkdirLock::acquire_wait(&dir2, Duration::from_secs(5)).is_ok());
         thread::sleep(Duration::from_millis(30));
         drop(held);
         assert!(waiter.join().unwrap());

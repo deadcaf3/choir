@@ -2,13 +2,14 @@
 
 Agent-first code collaboration: many agents on one repo, one total order from a single-writer sequencer, merge conflicts as first-class values.
 
-**Status:** research prototype. Phase-0 gate passed; Phase 1 in progress. No CI — run the gate by hand. Not production software.
+**Status:** research prototype with a private-beta release path. Phase-0 gate passed; Phase 1 in progress. Not production software. Keep beta ingress closed until the [private-beta runbook](docs/private-beta-runbook.md) go-live receipts are complete.
 
 | You want to… | Start here |
 |---|---|
 | See it work once | [Try it](#try-it) |
 | Install tools / unblock build | [Prerequisites](#prerequisites) |
 | Run a local node | [Run a node](#run-a-node) |
+| Prepare a private beta | [`docs/private-beta-runbook.md`](docs/private-beta-runbook.md) |
 | Push, review, provision workspaces | [Use the node](#use-the-node) |
 | Wire coding agents | [Agent templates](#agent-templates) |
 | Why a decision was made the way it was | [`DECISIONS.md`](DECISIONS.md) |
@@ -42,12 +43,10 @@ git clone <this-repo> && cd choir
 cargo build --release -p choir-node -p choir-cli
 ```
 
-Default `cargo build` / `cargo test` skip `choir-actor` (heavy Rivet dep). Full gate:
+Default `cargo build` / `cargo test` skip `choir-actor` (heavy Rivet dep). Full release gate:
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets
-cargo run -p choir-spike --release
+sh scripts/gate full
 ```
 
 Put the CLI on your PATH (or use `cargo run -p choir-cli -- …`):
@@ -82,26 +81,11 @@ sh scripts/choirctl logs
 
 Override port with `CHOIR_PORT`. Full flip procedure: `scripts/flip/RUNBOOK.md`.
 
-### Option A2 — serving beyond loopback (TLS)
+### Option A2: private beta behind a TLS proxy
 
-A non-loopback bind requires TLS (invariant 9), so going public is a certificate step, not a flag you can just add. On a Linux node host:
+For the private beta, keep `choir-node` bound to `127.0.0.1` and terminate TLS at a hardened reverse proxy. Do not use the legacy direct-TLS installer. The beta service renderer requires an ACL, protected-ref review policy, scoped operations, operator-issued auth, and the read-only browser mode. The proxy renderer preserves authentication, streams Git separately, and applies route-specific limits.
 
-```bash
-sh scripts/flip/setup_tls.sh <your.domain> [port]   # certbot + renewal hook + marker
-sh scripts/flip/install_node_linux.sh <port> '' ~/bin   # re-render the unit
-```
-
-`setup_tls.sh` writes `~/.choir/tls.enabled` (cert path, then key path) and `~/.choir-public-url` (the certificate-valid API base). The first marker flips the rendered unit to `--bind 0.0.0.0 --tls-cert … --tls-key …`; the second keeps every CLI request on verified HTTPS instead of reaching the certificate by loopback IP or depending on an SSH tunnel. Delete the TLS marker and reinstall to go back to loopback. Keep inbound **80** open permanently because renewals rebind it, and keep your serving port open too.
-
-Auth stays mandatory when public: anonymous requests get **401** on both the API and git, and a browser opening the URL gets a login prompt. That is the expected state, not a misconfiguration. Give each additional person their own line in `~/.choir/auth`:
-
-```bash
-printf 'alice:%s\n' "$(openssl rand -hex 32)" >> ~/.choir/auth   # hand the token over out of band
-```
-
-On its own that token grants read and write on **every** repository the node serves (see the warning under file formats). Pair it with an `--acl-file` line before handing it over, or you are giving full node access.
-
-Operator scripts follow the public name automatically through the untracked `~/.choir-public-url`. `setup_tls.sh` creates it. For an existing TLS node, run `sh scripts/flip/configure_public_url.sh <your.domain> [port]` once. Do not replace this with `https://127.0.0.1` plus `-k`: that reaches the process but stops authenticating the server. Without the marker, a non-TLS installation uses the loopback tunnel. Details and the operator checklist: `scripts/flip/RUNBOOK.md`.
+See [`docs/private-beta-runbook.md`](docs/private-beta-runbook.md) for the network hold, service and proxy renderers, backups, CI packaging, staging promotion, monitoring, rollback, and go-live receipts. Every Choir route remains authenticated. A separate anonymous marketing page must use another host and origin.
 
 ### Option B — any Unix (foreground)
 
@@ -120,7 +104,7 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --reviewers-file ~/.choir/reviewers
 ```
 
-Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--quota-push-bytes` / `--quota-workspaces`, `--journal <file>`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
+Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--quota-push-bytes` / `--quota-workspaces`, `--api-body-limit`, `--batch-limit`, `--ready-min-free-bytes`, `--read-only-browser`, `--journal <file>`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Authenticated operations endpoints are `/healthz`, `/readyz`, and `/metrics`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.
 
 **File formats (all mode 0600)**
 

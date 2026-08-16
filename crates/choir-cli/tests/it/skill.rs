@@ -14,7 +14,10 @@ fn choir(args: &[&str]) -> std::process::Output {
 
 fn json(out: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
-        panic!("json stdout, got {:?}", String::from_utf8_lossy(&out.stdout))
+        panic!(
+            "json stdout, got {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        )
     })
 }
 
@@ -26,16 +29,26 @@ fn install_is_versioned_with_the_binary_and_idempotent() {
     let into = work.to_str().unwrap();
 
     let first = choir(&["skill", "install", "--into", into]);
-    assert!(first.status.success(), "{:?}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        first.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     let first = json(&first);
     assert_eq!(first["wrote"], true);
     let path = std::path::PathBuf::from(first["path"].as_str().unwrap());
     assert_eq!(path.file_name().unwrap(), "SKILL.md");
     // Skill loaders resolve by directory, so the frontmatter name and the
     // directory must agree, a lesson other skill loaders learned first.
-    assert_eq!(path.parent().unwrap().file_name().unwrap(), surface::SKILL_DIR);
+    assert_eq!(
+        path.parent().unwrap().file_name().unwrap(),
+        surface::SKILL_DIR
+    );
     let body = std::fs::read_to_string(&path).unwrap();
-    assert!(body.starts_with(&format!("---\nname: {}\n", surface::SKILL_DIR)), "{body}");
+    assert!(
+        body.starts_with(&format!("---\nname: {}\n", surface::SKILL_DIR)),
+        "{body}"
+    );
     // Rendered from the live table: a command added to the surface is in
     // the installed skill with no separate file to forget.
     assert!(body.contains("choir triage"), "{body}");

@@ -120,9 +120,7 @@ printf '{"format_version":1,"observation_id":9,"merge":"%s","report":{"verdict":
         Path::new("command.json"),
         Path::new("state"),
     );
-    assert!(stale_policy
-        .into_iter()
-        .all(|(_, result)| result.is_err()));
+    assert!(stale_policy.into_iter().all(|(_, result)| result.is_err()));
     std::fs::remove_dir_all(work).ok();
 }
 
@@ -248,10 +246,7 @@ fn calibrate_holds_one_worktree_triple_open_across_observations() {
 /// observation's merged tree and looks for it in the next parent-a tree.
 #[test]
 fn calibrate_hands_the_previous_merge_tree_to_the_next_parent_a() {
-    let work = std::env::temp_dir().join(format!(
-        "choir-bridge-chained-{}",
-        std::process::id()
-    ));
+    let work = std::env::temp_dir().join(format!("choir-bridge-chained-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     git(&work, &["init", "-q", "."]);
@@ -321,10 +316,7 @@ printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":
     assert!(output.status.success(), "{output:?}");
 
     let dirs = std::fs::read_to_string(state.join("dirs")).unwrap();
-    let rows: Vec<Vec<&str>> = dirs
-        .lines()
-        .map(|line| line.split(' ').collect())
-        .collect();
+    let rows: Vec<Vec<&str>> = dirs.lines().map(|line| line.split(' ').collect()).collect();
     assert_eq!(rows.len(), 2, "both observations must run");
     assert_eq!(
         rows[1][0], rows[0][2],
@@ -376,10 +368,7 @@ fn calibrate_fresh_worktrees_gives_each_observation_a_pristine_tree() {
 
 #[test]
 fn calibrate_cli_replays_each_merge_for_each_requested_round() {
-    let work = std::env::temp_dir().join(format!(
-        "choir-bridge-calibrate-{}",
-        std::process::id()
-    ));
+    let work = std::env::temp_dir().join(format!("choir-bridge-calibrate-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     git(&work, &["init", "-q", "."]);
@@ -582,7 +571,11 @@ printf '{"format_version":1,"observation_id":1,"merge":"%s","report":{"verdict":
         "{stdout}"
     );
     let ledger = std::fs::read_to_string(state.join("observations.jsonl")).unwrap();
-    assert_eq!(ledger.lines().count(), 2, "the re-run must not extend the ledger");
+    assert_eq!(
+        ledger.lines().count(),
+        2,
+        "the re-run must not extend the ledger"
+    );
     assert!(ledger.contains(&first) && ledger.contains(&second));
 
     std::fs::remove_dir_all(work).ok();
@@ -662,7 +655,10 @@ printf '{{"format_version":1,"observation_id":4,"merge":"%s","report":{{"verdict
     assert_eq!(specimen["interaction_failures"].as_u64(), Some(6));
     assert_eq!(specimen["run_errors"].as_u64(), Some(0));
     // The clean merge earned no specimen.
-    assert!(!state.join("specimens").join(format!("{second}.json")).exists());
+    assert!(!state
+        .join("specimens")
+        .join(format!("{second}.json"))
+        .exists());
 
     std::fs::remove_dir_all(work).ok();
 }
@@ -671,10 +667,8 @@ printf '{{"format_version":1,"observation_id":4,"merge":"%s","report":{{"verdict
 fn harvest_restricts_the_population_and_writes_down_that_it_did() {
     // The older merge touches only documentation on both sides; the newer
     // one touches code, so only it is a real observation.
-    let work = std::env::temp_dir().join(format!(
-        "choir-bridge-harvest-inert-{}",
-        std::process::id()
-    ));
+    let work =
+        std::env::temp_dir().join(format!("choir-bridge-harvest-inert-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     git(&work, &["init", "-q", "."]);
@@ -687,7 +681,10 @@ fn harvest_restricts_the_population_and_writes_down_that_it_did() {
         ("docs", "README.md", "CHANGELOG.md"),
         ("code", "src.rs", "other.rs"),
     ] {
-        git(&work, &["checkout", "-q", "-b", &format!("topic-{step}"), "main"]);
+        git(
+            &work,
+            &["checkout", "-q", "-b", &format!("topic-{step}"), "main"],
+        );
         std::fs::write(work.join(branch_file), format!("{step} branch\n")).unwrap();
         git(&work, &["add", "."]);
         git(&work, &["commit", "-q", "-m", step]);
@@ -695,7 +692,17 @@ fn harvest_restricts_the_population_and_writes_down_that_it_did() {
         std::fs::write(work.join(main_file), format!("{step} main\n")).unwrap();
         git(&work, &["add", "."]);
         git(&work, &["commit", "-q", "-m", &format!("main {step}")]);
-        git(&work, &["merge", "-q", "--no-ff", &format!("topic-{step}"), "-m", step]);
+        git(
+            &work,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                &format!("topic-{step}"),
+                "-m",
+                step,
+            ],
+        );
         merges.push(git(&work, &["rev-parse", "HEAD"]));
     }
     let (inert_merge, code_merge) = (merges[0].clone(), merges[1].clone());
@@ -802,7 +809,10 @@ fn harvest_stops_at_a_run_of_inconclusive_verdicts_and_records_it() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("stopping: 1 consecutive inconclusive"), "{stdout}");
+    assert!(
+        stdout.contains("stopping: 1 consecutive inconclusive"),
+        "{stdout}"
+    );
     // Oldest-first: the walk stopped after the older merge, never reaching
     // the newer one.
     assert_eq!(
@@ -810,10 +820,16 @@ fn harvest_stops_at_a_run_of_inconclusive_verdicts_and_records_it() {
         format!("{first}\n"),
         "the walk must stop, not continue past the horizon"
     );
-    let record: serde_json::Value =
-        serde_json::from_str(std::fs::read_to_string(state.join("population.jsonl")).unwrap().trim())
-            .unwrap();
-    assert_eq!(record["stopped_after_consecutive_inconclusive"].as_u64(), Some(1));
+    let record: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(state.join("population.jsonl"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        record["stopped_after_consecutive_inconclusive"].as_u64(),
+        Some(1)
+    );
 
     // A conclusive verdict resets the run, so a threshold of 2 never trips
     // on an alternating history: both merges are observed.

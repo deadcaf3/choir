@@ -214,7 +214,9 @@ fn the_total_order_survives_reordering() {
                     .collect();
                 for (i, result) in handle.try_submit_many(subs).into_iter().enumerate() {
                     let accepted = result.expect("admitted");
-                    seen.lock().expect("results").push((name.clone(), i, accepted.seq));
+                    seen.lock()
+                        .expect("results")
+                        .push((name.clone(), i, accepted.seq));
                 }
             })
         })

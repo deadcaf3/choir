@@ -9,8 +9,8 @@ use std::path::Path;
 
 use choir_queue::differential::run_merged_vs_parents;
 use choir_queue::differential_ledger::{
-    adjudicate, effective_environment, environment_hash, load_command, record_observation,
-    refresh, Revisions,
+    adjudicate, effective_environment, environment_hash, load_command, record_observation, refresh,
+    Revisions,
 };
 
 fn usage() -> ! {

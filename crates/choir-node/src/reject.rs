@@ -200,11 +200,7 @@ impl Rejection {
 
     /// Adds the two states a failed comparison was between.
     #[must_use]
-    pub fn with_states(
-        mut self,
-        expected: Option<String>,
-        actual: Option<String>,
-    ) -> Self {
+    pub fn with_states(mut self, expected: Option<String>, actual: Option<String>) -> Self {
         self.expected = expected;
         self.actual = actual;
         self
@@ -397,7 +393,6 @@ impl Code {
         }
     }
 }
-
 
 /// Collapses runs of whitespace to single spaces.
 ///

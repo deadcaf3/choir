@@ -148,7 +148,10 @@ pub fn load_command(path: &Path) -> Result<CommandSpec, String> {
             .iter()
             .map(|(name, value)| {
                 if name.is_empty() || name.contains(['=', '\0']) {
-                    return Err("differential command env names must be non-empty and free of = and NUL".to_string());
+                    return Err(
+                        "differential command env names must be non-empty and free of = and NUL"
+                            .to_string(),
+                    );
                 }
                 value
                     .as_str()
@@ -338,9 +341,7 @@ fn prepare_state(
             match value["environment_hash"].as_str() {
                 Some(recorded) if recorded == environment_hash => {}
                 Some(_) => {
-                    return Err(
-                        "calibration state belongs to a different environment".to_string()
-                    );
+                    return Err("calibration state belongs to a different environment".to_string());
                 }
                 // Activated before environments were hashed: adopt the
                 // current one and enforce it from here on. The rows already
@@ -349,9 +350,8 @@ fn prepare_state(
                 None => {
                     value["environment_hash"] =
                         serde_json::Value::String(environment_hash.to_string());
-                    let body = serde_json::to_vec(&value).map_err(|error| {
-                        format!("encode calibration activation: {error}")
-                    })?;
+                    let body = serde_json::to_vec(&value)
+                        .map_err(|error| format!("encode calibration activation: {error}"))?;
                     replace_file(state, &activation, &body)?;
                 }
             }
@@ -403,9 +403,7 @@ fn fold(state: &Path, command_hash: &str) -> Result<Folded, String> {
                 .filter(|revision| is_canonical_git_oid(revision))
                 .is_none()
             {
-                return Err(
-                    "observation row needs three canonical Git object ids".to_string(),
-                );
+                return Err("observation row needs three canonical Git object ids".to_string());
             }
         }
         unique_merge_commits.insert(
@@ -498,8 +496,7 @@ fn replace_file(state: &Path, path: &Path, body: &[u8]) -> Result<(), String> {
         REPLACE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
     ));
     write_new(&temp, body)?;
-    fs::rename(&temp, path)
-        .map_err(|error| format!("replace calibration file: {error}"))?;
+    fs::rename(&temp, path).map_err(|error| format!("replace calibration file: {error}"))?;
     chmod(path, 0o600)?;
     File::open(state)
         .and_then(|directory| directory.sync_all())

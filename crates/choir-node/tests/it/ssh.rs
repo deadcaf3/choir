@@ -25,11 +25,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     git_env(dir, args, &[])
 }
 
-fn git_env(
-    dir: &std::path::Path,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> std::process::Output {
+fn git_env(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
     let mut command = std::process::Command::new("git");
     command
         .args([
@@ -73,8 +69,12 @@ fn workdir(label: &str) -> std::path::PathBuf {
 fn node_with_repo(work: &std::path::Path) -> (std::sync::Arc<Node>, u16, std::path::PathBuf) {
     let mut node = Node::bind(&work.join("repos"), 0).expect("bind");
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform"),
     );
     let port = node.port();
     node.create_repo("agents/demo.git").expect("create repo");
@@ -260,7 +260,12 @@ fn an_ssh_push_lands_in_the_op_log() {
     let clone = work.join("clone");
     let out = git_env(
         &work,
-        &["clone", "-q", &sshd.url("agents/demo.git"), clone.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            &sshd.url("agents/demo.git"),
+            clone.to_str().unwrap(),
+        ],
         &[("GIT_SSH_COMMAND", &sshd.git_ssh_command())],
     );
     assert!(
@@ -345,11 +350,17 @@ fn the_acl_gates_ssh_the_way_it_gates_http() {
     let denied = run("reader", "git-receive-pack 'agents/demo.git'");
     assert!(!denied.status.success(), "a read grant must not push");
     let message = String::from_utf8_lossy(&denied.stderr).to_string();
-    assert!(message.contains("no write grant"), "message was {message:?}");
+    assert!(
+        message.contains("no write grant"),
+        "message was {message:?}"
+    );
 
     // A user with no grant at all learns nothing about the repository.
     let unknown = run("stranger", "git-upload-pack 'agents/demo.git'");
-    assert!(!unknown.status.success(), "an ungranted user must not fetch");
+    assert!(
+        !unknown.status.success(),
+        "an ungranted user must not fetch"
+    );
     assert!(
         String::from_utf8_lossy(&unknown.stderr).contains("no such repository"),
         "an ungranted repository must not be confirmed to exist"
@@ -378,7 +389,9 @@ fn the_acl_gates_ssh_the_way_it_gates_http() {
         String::from_utf8_lossy(&allowed.stdout)
     );
 
-    assert!(view(port)["refs"].as_object().is_none_or(|refs| refs.is_empty()));
+    assert!(view(port)["refs"]
+        .as_object()
+        .is_none_or(|refs| refs.is_empty()));
     node.unblock();
     std::fs::remove_dir_all(&work).ok();
 }
@@ -395,8 +408,12 @@ fn a_forced_command_without_the_acl_flag_inherits_the_daemon_s() {
 
     let mut node = Node::bind(&work.join("repos"), 0).expect("bind");
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform"),
     );
     node.create_repo("agents/demo.git").expect("create repo");
     node.watch_acl_file(acl).expect("acl loads");
@@ -429,7 +446,9 @@ fn a_forced_command_without_the_acl_flag_inherits_the_daemon_s() {
     // And the grant it does hold still works, so inheriting the table is
     // not the same as refusing everything.
     assert!(
-        shim(&args, "git-upload-pack 'agents/demo.git'").status.success(),
+        shim(&args, "git-upload-pack 'agents/demo.git'")
+            .status
+            .success(),
         "a read grant must still fetch"
     );
 

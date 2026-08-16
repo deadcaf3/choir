@@ -216,8 +216,8 @@ impl Registry {
             .keys
             .get(&sig.key_id)
             .ok_or_else(|| IdentityError::UnknownKey(sig.key_id.clone()))?;
-        let signature = Signature::from_slice(&sig.signature)
-            .map_err(|_| IdentityError::BadSignature)?;
+        let signature =
+            Signature::from_slice(&sig.signature).map_err(|_| IdentityError::BadSignature)?;
         key.verify(signing.to_hex().as_bytes(), &signature)
             .map_err(|_| IdentityError::BadSignature)?;
         Ok(ContentHash::blake3(&key.to_bytes()))
@@ -233,8 +233,8 @@ impl Registry {
 /// rather than a DER writer. Measured against `openssl`'s own output
 /// before it was relied on (D39).
 pub const P256_SPKI_PREFIX: [u8; 26] = [
-    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
-    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
 ];
 
 /// Wraps a raw uncompressed P-256 point as SubjectPublicKeyInfo DER.
@@ -365,8 +365,7 @@ pub fn webauthn_challenge(signing: &ContentHash) -> Vec<u8> {
 /// Base64url without padding, WebAuthn's encoding for the challenge
 /// inside clientDataJSON.
 fn base64url_nopad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [

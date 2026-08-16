@@ -147,11 +147,12 @@ impl MergeQueue {
         let from = self.window;
         self.window = to;
         if from != to {
-            self.journal.record(choir_sequencer::journal::Event::WindowResize {
-                from,
-                to,
-                cause: cause.to_string(),
-            });
+            self.journal
+                .record(choir_sequencer::journal::Event::WindowResize {
+                    from,
+                    to,
+                    cause: cause.to_string(),
+                });
         }
     }
 
@@ -409,11 +410,7 @@ impl MergeQueue {
 
 /// Convenience: drain `changes` through a fresh queue + sequencer and return
 /// the report plus the sequencer's op count (which must equal merged count).
-pub fn run_batch(
-    base: &str,
-    changes: Vec<Change>,
-    ci: &mut dyn CiRunner,
-) -> (QueueReport, u64) {
+pub fn run_batch(base: &str, changes: Vec<Change>, ci: &mut dyn CiRunner) -> (QueueReport, u64) {
     let mut queue = MergeQueue::new(base);
     for c in changes {
         queue.submit(c);

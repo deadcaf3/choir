@@ -93,7 +93,10 @@ fn a_bound_key_cannot_speak_as_another_channel() {
     let api = format!("http://127.0.0.1:{port}/api");
     let post = |key: &ActorKey, channel: &str, op: &ViewOp| {
         curl(&[
-            "-X", "POST", "-d", &submit_body(key, channel, op),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(key, channel, op),
             &format!("{api}/submit"),
         ])
     };
@@ -163,7 +166,10 @@ fn a_bound_key_cannot_speak_as_another_channel() {
     assert_eq!(resp["code"], "channel_not_owned", "{resp}");
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert!(
-        view["reviews"]["k-1"]["comments"].as_array().unwrap().is_empty(),
+        view["reviews"]["k-1"]["comments"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "a comment survived a refused submission: {view}"
     );
 
@@ -189,7 +195,10 @@ fn a_bound_key_cannot_speak_as_another_channel() {
     .unwrap();
     let stranger = ActorKey::generate();
     let (code, _) = post(&stranger, "nobody", &request("k-x", &[]));
-    assert_eq!(code, 400, "unknown key must be refused (and trigger reload)");
+    assert_eq!(
+        code, 400,
+        "unknown key must be refused (and trigger reload)"
+    );
 
     let (code, resp) = post(&unbound, "dave", &request("k-4", &["ana"]));
     assert_eq!(code, 400, "{resp}");
@@ -248,7 +257,10 @@ fn binding_a_name_takes_effect_without_waiting_for_a_failure() {
     };
     let post = |channel: &str, op: &ViewOp| {
         curl(&[
-            "-X", "POST", "-d", &submit_body(&agent, channel, op),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&agent, channel, op),
             &format!("{api}/submit"),
         ])
     };

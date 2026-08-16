@@ -12,7 +12,12 @@ use choir_view::{OpKind, Verdict, ViewOp};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -101,13 +106,18 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         "creating a protected ref should be allowed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c1}"));
+    assert_eq!(
+        refs()["agents/demo.git:refs/heads/main"],
+        format!("11-{c1}")
+    );
 
     // Advancing it without an approved review is refused, and the refusal
     // is real: the ref did not move.
     let c2 = commit(&clone, "two\n", "second");
     assert!(
-        !git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success(),
+        !git(&clone, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success(),
         "unreviewed push to a protected ref should be refused"
     );
     assert_eq!(
@@ -117,7 +127,9 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
     );
 
     // An unprotected ref is unaffected: the gate is per-ref.
-    assert!(git(&clone, &["push", "-q", "origin", "HEAD:feature"]).status.success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:feature"])
+        .status
+        .success());
 
     // Open a review that says where it wants to land. No reviewers named,
     // so the node draws them — on a protected ref that is the only form
@@ -131,8 +143,14 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         })
     };
     let (code, resp) = curl(&[
-        "-X", "POST", "-d",
-        &submit_body(&author, "carol", &review("land-1", &c2, "agents/demo.git:refs/heads/main")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(
+            &author,
+            "carol",
+            &review("land-1", &c2, "agents/demo.git:refs/heads/main"),
+        ),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -140,7 +158,9 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
 
     // A review that is open but unanswered does not authorize anything.
     assert!(
-        !git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success(),
+        !git(&clone, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success(),
         "an unapproved review must not authorize a landing"
     );
 
@@ -156,7 +176,10 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
             note: "lgtm".into(),
         });
         let (code, resp) = curl(&[
-            "-X", "POST", "-d", &submit_body(&author, who, &verdict),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&author, who, &verdict),
             &format!("{api}/submit"),
         ]);
         assert_eq!(code, 200, "{resp}");
@@ -169,13 +192,18 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         "approved push should land: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c2}"));
+    assert_eq!(
+        refs()["agents/demo.git:refs/heads/main"],
+        format!("11-{c2}")
+    );
 
     // The approval authorized exactly one (ref, commit) pair: it does not
     // carry forward to the next commit.
     let _c3 = commit(&clone, "three\n", "third");
     assert!(
-        !git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success(),
+        !git(&clone, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success(),
         "an approval must not authorize later commits"
     );
 
@@ -186,8 +214,14 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         .trim()
         .to_string();
     let (code, resp) = curl(&[
-        "-X", "POST", "-d",
-        &submit_body(&author, "carol", &review("land-2", &c3, "agents/demo.git:refs/heads/feature")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(
+            &author,
+            "carol",
+            &review("land-2", &c3, "agents/demo.git:refs/heads/feature"),
+        ),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -200,12 +234,17 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
             note: String::new(),
         });
         curl(&[
-            "-X", "POST", "-d", &submit_body(&author, who, &verdict),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&author, who, &verdict),
             &format!("{api}/submit"),
         ]);
     }
     assert!(
-        !git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success(),
+        !git(&clone, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success(),
         "an approval for another ref must not authorize main"
     );
     assert_eq!(
@@ -219,8 +258,14 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
     // verdicts are pruned: retention must not quietly become an expiry
     // policy on approvals.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d",
-        &submit_body(&author, "carol", &review("land-3", &c3, "agents/demo.git:refs/heads/main")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(
+            &author,
+            "carol",
+            &review("land-3", &c3, "agents/demo.git:refs/heads/main"),
+        ),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -233,7 +278,10 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
             note: "ok".into(),
         });
         let (code, resp) = curl(&[
-            "-X", "POST", "-d", &submit_body(&author, who, &verdict),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&author, who, &verdict),
             &format!("{api}/submit"),
         ]);
         assert_eq!(code, 200, "{resp}");
@@ -241,9 +289,15 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
 
     // Nobody but the node may archive -- otherwise archiving is a way to
     // erase a RequestChanges you did not like.
-    let archive = ViewOp::new(OpKind::ArchiveReview { id: "land-3".into(), lapsed: false });
+    let archive = ViewOp::new(OpKind::ArchiveReview {
+        id: "land-3".into(),
+        lapsed: false,
+    });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &archive),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &archive),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
@@ -254,14 +308,21 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
 
     let node_key = ActorKey::from_secret_bytes(&node_secret);
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&node_key, "node/archive", &archive),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&node_key, "node/archive", &archive),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(view["reviews"]["land-3"]["archived"], true, "{view}");
     assert_eq!(view["reviews"]["land-3"]["approved"], true, "{view}");
-    assert_eq!(view["reviews"]["land-3"]["verdicts"], serde_json::json!({}), "{view}");
+    assert_eq!(
+        view["reviews"]["land-3"]["verdicts"],
+        serde_json::json!({}),
+        "{view}"
+    );
 
     // ...and the push it authorized still lands, with the verdicts gone.
     let out = git(&clone, &["push", "-q", "origin", "HEAD:main"]);
@@ -270,7 +331,10 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         "archived approval failed to authorize: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
+    assert_eq!(
+        refs()["agents/demo.git:refs/heads/main"],
+        format!("11-{c3}")
+    );
 
     // Retroactive slashing is node-authorized. It invalidates one
     // operator's approval for future authorization and marks the review,
@@ -288,11 +352,13 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
     let (code, resp) = submit(&node_key, "node/slash", &slash);
     assert_eq!(code, 200, "{resp}");
     let (_, view) = curl(&[&format!("{api}/view")]);
-    assert_eq!(view["reviews"]["land-3"]["re_review_required"], true, "{view}");
+    assert_eq!(
+        view["reviews"]["land-3"]["re_review_required"], true,
+        "{view}"
+    );
     assert_eq!(view["reviews"]["land-3"]["approval_weight"], 1, "{view}");
     assert_eq!(
-        view["reviews"]["land-3"]["slashes"][&drawn3[0]],
-        "retroactive policy finding",
+        view["reviews"]["land-3"]["slashes"][&drawn3[0]], "retroactive policy finding",
         "{view}"
     );
     assert_eq!(
@@ -307,17 +373,28 @@ fn a_protected_ref_only_moves_to_a_commit_an_approved_review_named() {
         prev: Some(choir_oplog::ContentHash::from_git_oid(&c3).unwrap()),
     });
     let (code, resp) = submit(&author, "writer/agent", &retry);
-    assert_eq!(code, 400, "slashed approval must not authorize again: {resp}");
+    assert_eq!(
+        code, 400,
+        "slashed approval must not authorize again: {resp}"
+    );
     assert_eq!(resp["code"], "review_required", "{resp}");
     assert_eq!(resp["actual"], "approval weight 1", "{resp}");
-    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
+    assert_eq!(
+        refs()["agents/demo.git:refs/heads/main"],
+        format!("11-{c3}")
+    );
 
     // A protected ref cannot be deleted, reviewed or not.
     assert!(
-        !git(&clone, &["push", "-q", "origin", ":main"]).status.success(),
+        !git(&clone, &["push", "-q", "origin", ":main"])
+            .status
+            .success(),
         "a protected ref must not be deletable"
     );
-    assert_eq!(refs()["agents/demo.git:refs/heads/main"], format!("11-{c3}"));
+    assert_eq!(
+        refs()["agents/demo.git:refs/heads/main"],
+        format!("11-{c3}")
+    );
     assert!(refs()["agents/demo.git:refs/heads/main"].is_string());
 
     node.unblock();
@@ -401,10 +478,7 @@ fn one_operator_cannot_supply_enough_approval_weight_to_land() {
     });
     assert_eq!(submit(&author, &drawn[0], &verdict).0, 200);
     let (_, view) = curl(&[&format!("{api}/view")]);
-    assert_eq!(
-        view["reviews"]["thin-review"]["approved"], true,
-        "{view}"
-    );
+    assert_eq!(view["reviews"]["thin-review"]["approved"], true, "{view}");
     assert_eq!(
         view["reviews"]["thin-review"]["approval_weight"], 1,
         "{view}"

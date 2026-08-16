@@ -113,10 +113,7 @@ fn stable_change_survives_checkpoints_and_workspace_archive() {
     )
     .unwrap();
     let checkpointed = View::materialize(&log).unwrap();
-    assert_eq!(
-        checkpointed.changes["change-1"].revision_id,
-        checkpoint
-    );
+    assert_eq!(checkpointed.changes["change-1"].revision_id, checkpoint);
     assert_eq!(checkpointed.workspaces["repo/agent"], checkpoint);
 
     append_op(
@@ -252,7 +249,12 @@ fn conflicted_commit_is_valid_and_buildable_upon() {
     append_op(&mut log, "w1", set_head("w1", &merge_id, None)).unwrap();
 
     // Work continues on top: a child commit resolves the path.
-    let resolved = commit(&mut store, &[&merge_id], &[("hot.txt", "resolved\n")], "fix");
+    let resolved = commit(
+        &mut store,
+        &[&merge_id],
+        &[("hot.txt", "resolved\n")],
+        "fix",
+    );
     append_op(&mut log, "w1", set_head("w1", &resolved, Some(&merge_id))).unwrap();
 
     let view = View::materialize(&log).unwrap();
@@ -264,7 +266,12 @@ fn conflicted_commit_is_valid_and_buildable_upon() {
 #[test]
 fn commit_roundtrips_through_store() {
     let mut store = MemStore::new();
-    let c1 = commit(&mut store, &[], &[("a.txt", "one\n"), ("b.txt", "two\n")], "c1");
+    let c1 = commit(
+        &mut store,
+        &[],
+        &[("a.txt", "one\n"), ("b.txt", "two\n")],
+        "c1",
+    );
     let loaded = Commit::get(&store, &c1).unwrap();
     assert_eq!(loaded.tree.len(), 2);
     assert_eq!(loaded.message, "c1");
@@ -297,16 +304,29 @@ fn review_fan_out_semantics() {
         })
     };
     assert!(matches!(
-        append_op(&mut log, "ana", verdict("nope", "ana", choir_view::Verdict::Approve, "")),
+        append_op(
+            &mut log,
+            "ana",
+            verdict("nope", "ana", choir_view::Verdict::Approve, "")
+        ),
         Err(ViewError::Review(_))
     ));
     assert!(matches!(
-        append_op(&mut log, "mallory", verdict("r1", "mallory", choir_view::Verdict::Approve, "")),
+        append_op(
+            &mut log,
+            "mallory",
+            verdict("r1", "mallory", choir_view::Verdict::Approve, "")
+        ),
         Err(ViewError::Review(_))
     ));
 
     // First verdict: incomplete. RequestChanges: complete but not approved.
-    append_op(&mut log, "ana", verdict("r1", "ana", choir_view::Verdict::Approve, "lgtm")).unwrap();
+    append_op(
+        &mut log,
+        "ana",
+        verdict("r1", "ana", choir_view::Verdict::Approve, "lgtm"),
+    )
+    .unwrap();
     let view = View::materialize(&log).unwrap();
     let r = view.reviews.get("r1").unwrap();
     assert!(!r.complete() && !r.approved());
@@ -314,7 +334,12 @@ fn review_fan_out_semantics() {
     append_op(
         &mut log,
         "bot-reviewer",
-        verdict("r1", "bot-reviewer", choir_view::Verdict::RequestChanges, "missing test"),
+        verdict(
+            "r1",
+            "bot-reviewer",
+            choir_view::Verdict::RequestChanges,
+            "missing test",
+        ),
     )
     .unwrap();
     let view = View::materialize(&log).unwrap();
@@ -325,7 +350,12 @@ fn review_fan_out_semantics() {
     append_op(
         &mut log,
         "bot-reviewer",
-        verdict("r1", "bot-reviewer", choir_view::Verdict::Approve, "test added"),
+        verdict(
+            "r1",
+            "bot-reviewer",
+            choir_view::Verdict::Approve,
+            "test added",
+        ),
     )
     .unwrap();
     let view = View::materialize(&log).unwrap();
@@ -393,7 +423,12 @@ fn unassigned_reviews_are_never_complete_and_assign_once() {
         }),
     )
     .unwrap();
-    assert!(View::materialize(&log).unwrap().reviews.get("r1").unwrap().approved());
+    assert!(View::materialize(&log)
+        .unwrap()
+        .reviews
+        .get("r1")
+        .unwrap()
+        .approved());
 }
 
 #[test]
@@ -419,15 +454,41 @@ fn provenance_records_latest_wins() {
     assert_eq!(choir_oplog::OpLog::len(&log), 0);
 
     // Records accumulate per (subject, kind); latest body wins.
-    append_op(&mut log, "agent-1", record("agent-1", "task-spec", "add auth")).unwrap();
-    append_op(&mut log, "agent-1", record("agent-1", "plan", "1. schema 2. api")).unwrap();
-    append_op(&mut log, "agent-2", record("repo/shared", "task-spec", "living spec v1")).unwrap();
-    append_op(&mut log, "agent-1", record("agent-1", "task-spec", "add auth + rate limit")).unwrap();
+    append_op(
+        &mut log,
+        "agent-1",
+        record("agent-1", "task-spec", "add auth"),
+    )
+    .unwrap();
+    append_op(
+        &mut log,
+        "agent-1",
+        record("agent-1", "plan", "1. schema 2. api"),
+    )
+    .unwrap();
+    append_op(
+        &mut log,
+        "agent-2",
+        record("repo/shared", "task-spec", "living spec v1"),
+    )
+    .unwrap();
+    append_op(
+        &mut log,
+        "agent-1",
+        record("agent-1", "task-spec", "add auth + rate limit"),
+    )
+    .unwrap();
 
     let view = View::materialize(&log).unwrap();
-    assert_eq!(view.provenance["agent-1"]["task-spec"], "add auth + rate limit");
+    assert_eq!(
+        view.provenance["agent-1"]["task-spec"],
+        "add auth + rate limit"
+    );
     assert_eq!(view.provenance["agent-1"]["plan"], "1. schema 2. api");
-    assert_eq!(view.provenance["repo/shared"]["task-spec"], "living spec v1");
+    assert_eq!(
+        view.provenance["repo/shared"]["task-spec"],
+        "living spec v1"
+    );
 
     // An empty body is a visible withdrawn state, not a deletion.
     append_op(&mut log, "agent-2", record("repo/shared", "task-spec", "")).unwrap();
@@ -458,7 +519,13 @@ fn target_ref_is_additive_and_old_payloads_hash_the_same() {
         "re-serializing an old payload changed its bytes, so its hash moved"
     );
     assert!(
-        matches!(&op.kind, OpKind::RequestReview { target_ref: None, .. }),
+        matches!(
+            &op.kind,
+            OpKind::RequestReview {
+                target_ref: None,
+                ..
+            }
+        ),
         "absent field must read as unbound, not as some default ref"
     );
 
@@ -470,7 +537,11 @@ fn target_ref_is_additive_and_old_payloads_hash_the_same() {
         target_ref: Some("choir/choir.git:refs/heads/main".into()),
     });
     let wire = bound.to_payload();
-    assert_eq!(ViewOp::from_payload(&wire).unwrap(), bound, "bound review round-trips");
+    assert_eq!(
+        ViewOp::from_payload(&wire).unwrap(),
+        bound,
+        "bound review round-trips"
+    );
 
     let mut log = MemLog::new();
     append_op(&mut log, "author", op).unwrap();
@@ -511,17 +582,30 @@ fn archiving_freezes_a_review_and_keeps_its_outcome() {
             note: "reasoning that takes space".into(),
         })
     };
-    let archive = ViewOp::new(OpKind::ArchiveReview { id: "r1".into(), lapsed: false });
+    let archive = ViewOp::new(OpKind::ArchiveReview {
+        id: "r1".into(),
+        lapsed: false,
+    });
 
     // Incomplete: archiving would strand it, since no further verdict
     // could ever decide the outcome.
-    append_op(&mut log, "ana", verdict("ana", choir_view::Verdict::Approve)).unwrap();
+    append_op(
+        &mut log,
+        "ana",
+        verdict("ana", choir_view::Verdict::Approve),
+    )
+    .unwrap();
     assert!(matches!(
         append_op(&mut log, "node", archive.clone()),
         Err(ViewError::Review(_))
     ));
 
-    append_op(&mut log, "bot", verdict("bot", choir_view::Verdict::Approve)).unwrap();
+    append_op(
+        &mut log,
+        "bot",
+        verdict("bot", choir_view::Verdict::Approve),
+    )
+    .unwrap();
     let view = View::materialize(&log).unwrap();
     assert!(view.reviews["r1"].approved());
 
@@ -533,7 +617,10 @@ fn archiving_freezes_a_review_and_keeps_its_outcome() {
     assert!(r.approved(), "archived approval must not evaporate");
     assert!(r.complete(), "archived reviews are settled, not unfinished");
     assert!(r.verdicts.is_empty(), "verdicts should have been dropped");
-    assert!(r.reviewers.is_empty(), "reviewer list should have been dropped");
+    assert!(
+        r.reviewers.is_empty(),
+        "reviewer list should have been dropped"
+    );
     // The gate's other two fields are untouched.
     assert_eq!(r.target.as_ref(), Some(&target));
     assert_eq!(r.target_ref.as_deref(), Some("demo.git:refs/heads/main"));
@@ -547,7 +634,11 @@ fn archiving_freezes_a_review_and_keeps_its_outcome() {
 
     // Frozen: no further verdicts, and the refusal says archived rather
     // than absent, or a reviewer goes hunting for a typo.
-    let err = append_op(&mut log, "ana", verdict("ana", choir_view::Verdict::RequestChanges));
+    let err = append_op(
+        &mut log,
+        "ana",
+        verdict("ana", choir_view::Verdict::RequestChanges),
+    );
     match err {
         Err(ViewError::Review(msg)) => assert!(msg.contains("archived"), "{msg}"),
         other => panic!("expected an archived refusal, got {other:?}"),
@@ -830,7 +921,15 @@ fn archiving_preserves_a_rejection_too() {
         }),
     )
     .unwrap();
-    append_op(&mut log, "node", ViewOp::new(OpKind::ArchiveReview { id: "r2".into(), lapsed: false })).unwrap();
+    append_op(
+        &mut log,
+        "node",
+        ViewOp::new(OpKind::ArchiveReview {
+            id: "r2".into(),
+            lapsed: false,
+        }),
+    )
+    .unwrap();
 
     let view = View::materialize(&log).unwrap();
     assert!(
@@ -876,9 +975,15 @@ fn lapsing_settles_an_abandoned_review_without_inventing_an_outcome() {
     let view = View::materialize(&log).unwrap();
     let r = &view.reviews["abandoned"];
 
-    assert!(!r.approved(), "an abandoned review must never read as approved");
+    assert!(
+        !r.approved(),
+        "an abandoned review must never read as approved"
+    );
     assert!(r.complete(), "it is settled, not still waiting");
-    assert!(r.verdicts.is_empty() && r.reviewers.is_empty(), "bulk should be gone");
+    assert!(
+        r.verdicts.is_empty() && r.reviewers.is_empty(),
+        "bulk should be gone"
+    );
     assert_eq!(r.target_ref.as_deref(), Some("demo.git:refs/heads/main"));
     assert!(matches!(
         r.status,
@@ -932,7 +1037,10 @@ fn a_complete_review_cannot_be_lapsed_out_of_its_outcome() {
     match append_op(
         &mut log,
         "node",
-        ViewOp::new(OpKind::ArchiveReview { id: "answered".into(), lapsed: true }),
+        ViewOp::new(OpKind::ArchiveReview {
+            id: "answered".into(),
+            lapsed: true,
+        }),
     ) {
         Err(ViewError::Review(msg)) => assert!(msg.contains("cannot be lapsed"), "{msg}"),
         other => panic!("expected a refusal, got {other:?}"),
@@ -942,7 +1050,10 @@ fn a_complete_review_cannot_be_lapsed_out_of_its_outcome() {
     append_op(
         &mut log,
         "node",
-        ViewOp::new(OpKind::ArchiveReview { id: "answered".into(), lapsed: false }),
+        ViewOp::new(OpKind::ArchiveReview {
+            id: "answered".into(),
+            lapsed: false,
+        }),
     )
     .unwrap();
     assert!(View::materialize(&log).unwrap().reviews["answered"].approved());
@@ -965,6 +1076,12 @@ fn lapsed_is_additive_so_old_payloads_still_hash_the_same() {
         "absent must mean the previous strict behaviour"
     );
     // And a lapse round-trips, carrying the flag.
-    let lapsing = ViewOp::new(OpKind::ArchiveReview { id: "r2".into(), lapsed: true });
-    assert_eq!(ViewOp::from_payload(&lapsing.to_payload()).unwrap(), lapsing);
+    let lapsing = ViewOp::new(OpKind::ArchiveReview {
+        id: "r2".into(),
+        lapsed: true,
+    });
+    assert_eq!(
+        ViewOp::from_payload(&lapsing.to_payload()).unwrap(),
+        lapsing
+    );
 }

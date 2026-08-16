@@ -1,8 +1,8 @@
 #!/bin/sh
-# The gate, in two lanes. There is no CI service; this is it.
+# The release gate, in two lanes. The same full lane runs locally and in CI.
 #
 #   sh scripts/gate fast   everything except the measurement binaries
-#   sh scripts/gate        all three steps over everything (before a commit)
+#   sh scripts/gate full   every release check (before a commit or artifact)
 #
 # The fast lane is for the edit loop. **It is not a substitute for the
 # full lane**, and the rule it depends on is that the full lane runs
@@ -10,12 +10,47 @@
 # quietly stops checking, and "the slow tests are opt-in now" is how that
 # starts.
 #
-# Exit codes come from cargo directly, never through a pipe: `cargo test
-# | tail` reports tail's status and hides the verdict.
+# Exit codes come from each command directly, never through a pipe:
+# `cargo test | tail` reports tail's status and hides the verdict.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 LOG=${TMPDIR:-/tmp}/choir-gate
 mkdir -p "$LOG"
+
+# Test-only fault injection for the regression in
+# `crates/choir-cli/tests/it/gate.rs`. Test mode never runs Cargo; it
+# substitutes success for every stage except the named injected one, so
+# the test proves status propagation without recursively invoking this
+# entire gate from inside `cargo test`.
+run_check() {
+  stage=$1
+  logfile=$2
+  shift 2
+  if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
+    if [ "${CHOIR_GATE_INJECT_FAILURE:-}" = "$stage" ]; then
+      echo "injected $stage failure" >"$logfile"
+      return 97
+    fi
+    : >"$logfile"
+    return 0
+  fi
+  "$@" >"$logfile" 2>&1
+}
+
+freshness_check() {
+  output=$1
+  if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
+    if [ "${CHOIR_GATE_INJECT_FAILURE:-}" = freshness ]; then
+      echo "injected freshness failure" >"$output"
+      return 97
+    fi
+    : >"$output"
+    return 0
+  fi
+  find crates scripts docs templates Cargo.toml Cargo.lock README.md DECISIONS.md SYNC.md \
+    -newer "$MARK" -print >"$output" 2>/dev/null
+  [ ! -s "$output" ]
+}
 
 # The measurement binaries, skipped by the fast lane: throughput ~36 s,
 # alloc_budget ~13 s, retention_cost ~7 s.
@@ -38,33 +73,67 @@ fast_targets() {
   printf ' --test it'   # the merged harness, crates/choir-node/tests/it/
 }
 
+full_tests() {
+  # The three measurement targets state and enforce release-profile
+  # ceilings. Running them under the debug allocator/optimizer makes the
+  # number meaningless and can fail a healthy release. Everything still
+  # runs: ordinary targets in debug, measurements in release.
+  cargo test --workspace --no-fail-fast --exclude choir-node
+  a=$?
+  # shellcheck disable=SC2046
+  cargo test -p choir-node --no-fail-fast --lib --bins $(fast_targets)
+  b=$?
+  cargo test -p choir-node --doc
+  c=$?
+  cargo test -p choir-node --release --no-fail-fast \
+    --test alloc_budget --test retention_cost --test throughput
+  d=$?
+  [ "$a" -eq 0 ] && [ "$b" -eq 0 ] && [ "$c" -eq 0 ] && [ "$d" -eq 0 ]
+}
+
+MARK="$LOG/start"
+: >"$MARK"
+
+run_check format "$LOG/format.log" cargo fmt --all -- --check
+FORMAT_EXIT=$?
+
 if [ "${1:-full}" = "fast" ]; then
   echo "== fast lane: skipping $SLOW =="
-  # shellcheck disable=SC2046
-  cargo test --workspace --no-fail-fast --exclude choir-node >"$LOG/test.log" 2>&1
-  A=$?
-  # shellcheck disable=SC2046
-  cargo test -p choir-node --no-fail-fast --lib $(fast_targets) >>"$LOG/test.log" 2>&1
-  B=$?
-  # Doctests are a third invocation because cargo refuses `--doc`
-  # alongside any other target selector -- and they are not optional
-  # here: every crate's module doc carries a `# Examples` block that is a
-  # real test, so a lane that drops them is not the same lane.
-  cargo test -p choir-node --doc >>"$LOG/test.log" 2>&1
-  C=$?
-  [ "$A" -eq 0 ] && [ "$B" -eq 0 ] && [ "$C" -eq 0 ]; TEST_EXIT=$?
+  if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
+    run_check tests "$LOG/test.log" true
+    TEST_EXIT=$?
+  else
+    # shellcheck disable=SC2046
+    cargo test --workspace --no-fail-fast --exclude choir-node >"$LOG/test.log" 2>&1
+    A=$?
+    # shellcheck disable=SC2046
+    cargo test -p choir-node --no-fail-fast --lib $(fast_targets) >>"$LOG/test.log" 2>&1
+    B=$?
+    # Doctests are separate because cargo refuses `--doc` alongside any
+    # other target selector.
+    cargo test -p choir-node --doc >>"$LOG/test.log" 2>&1
+    C=$?
+    [ "$A" -eq 0 ] && [ "$B" -eq 0 ] && [ "$C" -eq 0 ]
+    TEST_EXIT=$?
+  fi
+  SPIKE_EXIT=0
 else
-  MARK="$LOG/start"; : > "$MARK"
-  cargo test --workspace --no-fail-fast >"$LOG/test.log" 2>&1
+  run_check tests "$LOG/test.log" full_tests
   TEST_EXIT=$?
+  run_check spike "$LOG/spike.log" cargo run -p choir-spike --release
+  SPIKE_EXIT=$?
 fi
 
-cargo clippy --workspace --all-targets >"$LOG/clippy.log" 2>&1
+run_check clippy "$LOG/clippy.log" cargo clippy --workspace --all-targets -- -D warnings
 CLIPPY_EXIT=$?
-cargo doc --workspace --no-deps >"$LOG/doc.log" 2>&1
+run_check rustdoc "$LOG/doc.log" env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps
 DOC_EXIT=$?
 
-echo "TEST_EXIT=$TEST_EXIT  CLIPPY_EXIT=$CLIPPY_EXIT  DOC_EXIT=$DOC_EXIT"
+freshness_check "$LOG/freshness.log"
+FRESHNESS_EXIT=$?
+
+echo "FORMAT_EXIT=$FORMAT_EXIT  TEST_EXIT=$TEST_EXIT  CLIPPY_EXIT=$CLIPPY_EXIT"
+echo "DOC_EXIT=$DOC_EXIT  SPIKE_EXIT=$SPIKE_EXIT  FRESHNESS_EXIT=$FRESHNESS_EXIT"
 awk '/^test result:/ {
   for (i = 1; i <= NF; i++) {
     if ($i == "passed;")  p += $(i-1);
@@ -74,16 +143,19 @@ awk '/^test result:/ {
 } END { printf "passed %d  failed %d  ignored %d\n", p, f, g }' "$LOG/test.log"
 grep -E '^(test .* FAILED|error(\[|:))' "$LOG/test.log" | head -30
 
-# Exit 0 is not the same as clean: clippy warnings do not fail the build,
-# and `cargo doc` is the only step that runs rustdoc at all.
 echo "clippy warn/error lines: $(grep -cE '^(warning|error)' "$LOG/clippy.log")"
 grep -E '^(warning|error)' "$LOG/clippy.log" | head -20
 echo "rustdoc warn/error lines: $(grep -cE '^(warning|error)' "$LOG/doc.log")"
 grep -E '^(warning|error)' "$LOG/doc.log" | head -20
 
 # A receipt describes the tree at its start. Edit anything after the run
-# begins -- including a comment -- and the receipt above is void.
-if [ "${1:-full}" != "fast" ]; then
-  echo "--- freshness (must be empty) ---"
-  find crates scripts docs Cargo.toml README.md DECISIONS.md SYNC.md -newer "$MARK" 2>/dev/null
+# begins, including a comment, and the receipt above is void.
+echo "--- freshness (must be empty) ---"
+sed -n '1,30p' "$LOG/freshness.log"
+
+if [ "$FORMAT_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ] \
+  || [ "$CLIPPY_EXIT" -ne 0 ] || [ "$DOC_EXIT" -ne 0 ] \
+  || [ "$SPIKE_EXIT" -ne 0 ] || [ "$FRESHNESS_EXIT" -ne 0 ]; then
+  exit 1
 fi
+exit 0

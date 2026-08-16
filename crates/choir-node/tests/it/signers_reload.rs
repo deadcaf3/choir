@@ -3,7 +3,7 @@
 //! submission keys already had. A broken keys file must not wipe the
 //! signer list.
 
-use choir_node::{Node, parse_keys_file, ssh_ed25519_pubkey, write_allowed_signers};
+use choir_node::{parse_keys_file, ssh_ed25519_pubkey, write_allowed_signers, Node};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -13,7 +13,12 @@ fn poke(port: u16) {
     // Any request drives the accept loop, which is where the refresh
     // runs; the response itself does not matter.
     std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", &format!("http://127.0.0.1:{port}/")])
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            &format!("http://127.0.0.1:{port}/"),
+        ])
         .output()
         .expect("curl runs");
 }
@@ -33,7 +38,13 @@ fn appending_a_key_updates_allowed_signers_without_a_restart() {
     std::fs::create_dir_all(&root).unwrap();
     let signers = parse_keys_file(&keys).unwrap();
     let signers_path = write_allowed_signers(&root, &signers).unwrap();
-    assert_eq!(std::fs::read_to_string(&signers_path).unwrap().lines().count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&signers_path)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 
     let mut node = Node::bind(&root, 0).unwrap();
     node.watch_keys_file(keys.clone());
@@ -61,7 +72,11 @@ fn appending_a_key_updates_allowed_signers_without_a_restart() {
 
     poke(port);
     let text = std::fs::read_to_string(&signers_path).unwrap();
-    assert_eq!(text.lines().count(), 2, "no restart should be needed: {text}");
+    assert_eq!(
+        text.lines().count(),
+        2,
+        "no restart should be needed: {text}"
+    );
     // Principal is the actor id; the key is in OpenSSH form, which is
     // what git checks a push certificate against.
     assert!(text.contains(&second.actor_id().to_hex()), "{text}");

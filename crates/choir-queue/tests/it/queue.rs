@@ -30,7 +30,9 @@ fn all_green_train_merges_everything_in_order() {
     assert!(report.rejected.is_empty());
     assert_eq!(ops, 15, "every merge recorded through the sequencer");
     for id in 0..15 {
-        assert!(report.final_state.contains(&format!("edited by change {id}")));
+        assert!(report
+            .final_state
+            .contains(&format!("edited by change {id}")));
     }
     // Green merges grow the window: 20 + 15.
     assert_eq!(*report.window_trace.last().unwrap(), DEFAULT_WINDOW + 15);
@@ -64,18 +66,25 @@ fn conflicting_change_evicted_first_class_without_blocking() {
     // change 0's edit is in the speculative state ahead of it.
     let mut lines: Vec<String> = base().lines().map(String::from).collect();
     lines[0] = "line 0 edited by change 99 differently".to_string();
-    changes.insert(1, Change {
-        id: 99,
-        workspace: "ws-99".into(),
-        base: base(),
-        proposed: lines.join("\n") + "\n",
-        depends: vec![],
-    });
+    changes.insert(
+        1,
+        Change {
+            id: 99,
+            workspace: "ws-99".into(),
+            base: base(),
+            proposed: lines.join("\n") + "\n",
+            depends: vec![],
+        },
+    );
 
     let (report, ops) = run_batch(&base(), changes, &mut |_: &Change, _: &str| true);
 
     assert_eq!(report.rejected, vec![(99, Rejection::Conflict)]);
-    assert_eq!(report.merged, vec![0, 1, 2, 3, 4, 5], "conflict did not block the train");
+    assert_eq!(
+        report.merged,
+        vec![0, 1, 2, 3, 4, 5],
+        "conflict did not block the train"
+    );
     assert_eq!(ops, 6);
     assert!(report.final_state.contains("edited by change 0"));
     assert!(!report.final_state.contains("change 99"));
@@ -92,17 +101,25 @@ fn fifty_in_flight_with_flaky_ci_keeps_main_green() {
     let expected_merge: Vec<u64> = (0..50).filter(|id| id % 8 != 7).collect();
     assert_eq!(report.merged, expected_merge);
     assert_eq!(
-        report.rejected.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        report
+            .rejected
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
         expected_fail
     );
     assert_eq!(ops, expected_merge.len() as u64);
 
     // Green main: every merged edit present, every failed edit absent.
     for id in expected_merge {
-        assert!(report.final_state.contains(&format!("edited by change {id}")));
+        assert!(report
+            .final_state
+            .contains(&format!("edited by change {id}")));
     }
     for id in expected_fail {
-        assert!(!report.final_state.contains(&format!("edited by change {id}")));
+        assert!(!report
+            .final_state
+            .contains(&format!("edited by change {id}")));
     }
     // Window halved on each of the 6 failures but recovered via greens.
     assert!(report.window_trace.iter().all(|w| *w >= 1));
@@ -113,10 +130,10 @@ fn fifty_in_flight_with_flaky_ci_keeps_main_green() {
 /// that distinction is the whole reason the number is worth watching.
 #[test]
 fn every_window_move_is_journalled_with_its_cause() {
+    use choir_oplog::MemLog;
     use choir_queue::MergeQueue;
     use choir_sequencer::journal::{Journal, MemJournal};
     use choir_sequencer::Sequencer;
-    use choir_oplog::MemLog;
 
     struct Handle(std::sync::Arc<MemJournal>);
     impl Journal for Handle {
@@ -142,7 +159,10 @@ fn every_window_move_is_journalled_with_its_cause() {
         .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid JSON"))
         .filter(|v| v["kind"] == "window_resize")
         .collect();
-    assert!(!resizes.is_empty(), "the window moved but nothing recorded it");
+    assert!(
+        !resizes.is_empty(),
+        "the window moved but nothing recorded it"
+    );
 
     // The shrink must be attributable, not merely visible.
     let shrink = resizes
@@ -152,7 +172,10 @@ fn every_window_move_is_journalled_with_its_cause() {
     assert_eq!(shrink["cause"], "combined build failed");
 
     // And growth must not be reported with the failure's cause.
-    for grew in resizes.iter().filter(|v| v["to"].as_u64() > v["from"].as_u64()) {
+    for grew in resizes
+        .iter()
+        .filter(|v| v["to"].as_u64() > v["from"].as_u64())
+    {
         assert_ne!(
             grew["cause"], "combined build failed",
             "a growing window was attributed to a failure"

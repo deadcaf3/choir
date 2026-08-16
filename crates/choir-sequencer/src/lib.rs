@@ -226,20 +226,12 @@ fn round_robin(
 enum Command {
     /// The op, the interned actor bucket holding its quota slot (see
     /// [`fairness`]), and where to answer.
-    Submit(
-        Submission,
-        Arc<str>,
-        mpsc::Sender<Result<Accepted, String>>,
-    ),
+    Submit(Submission, Arc<str>, mpsc::Sender<Result<Accepted, String>>),
     Shutdown,
 }
 
 /// One drained command awaiting its turn in the writer's round-robin.
-type Queued = (
-    Submission,
-    Arc<str>,
-    mpsc::Sender<Result<Accepted, String>>,
-);
+type Queued = (Submission, Arc<str>, mpsc::Sender<Result<Accepted, String>>);
 
 /// Cloneable client handle; one per workspace/agent.
 #[derive(Clone)]
@@ -436,21 +428,10 @@ impl Sequencer {
             // one-way: the alternative is ordering ops that may not
             // survive, which is the bug this whole change exists to close.
             //
-            // KNOWN LIMITATION, and it is a real one. This writer stays
-            // alive refusing everything, which is invisible to process
-            // supervision: launchd's `KeepAlive` only restarts a process
-            // that *exits*, so a transient fsync error becomes permanent
-            // downtime that looks like uptime. Exiting non-zero instead
-            // would make it self-clearing -- launchd restarts, FileLog
-            // replays from disk, and the diverged in-flight batch
-            // reconciles on the way back up, which is the recovery path
-            // the D20 flip already proved with `kill -9`.
-            //
-            // Not done here because "a storage hiccup takes the node
-            // down" is an operator-visible policy decision about the
-            // daemon's lifecycle, not something a sequencer library
-            // should impose on every embedder including the test suite.
-            // It is written up for whoever owns that call.
+            // The sequencer publishes this state through `writer_flag`;
+            // the daemon observes it and exits for supervision. The
+            // library itself only refuses subsequent work, which keeps
+            // the lifecycle choice with the embedder.
             let mut durability_failed = false;
             // Reused across wake-ups. A fresh buffer per batch would put
             // an allocation on the writer's hot path for no reason.
@@ -541,32 +522,66 @@ impl Sequencer {
                                 witnesses: Vec::new(),
                                 author_sig: sub.author_sig,
                             };
-                            let hash = entry.content_hash();
-                            if journalling {
-                                let (actor_id, op_type) = policy.subject();
-                                journal.record(journal::Event::Decision {
-                                    actor_id,
-                                    workspace,
-                                    op_type,
-                                    accepted: true,
-                                    reject_reason: None,
-                                    seq: Some(seq),
-                                    parent: entry.parent.as_ref().map(ContentHash::to_hex),
-                                    decision_latency_us: as_micros(started.elapsed()),
-                                });
+                            // `ContentHash::to_hex` formats each digest byte and
+                            // therefore allocates repeatedly. Preserve the
+                            // journal's zero-cost-disabled contract by building
+                            // this display value only when a journal will use it.
+                            let parent = journalling
+                                .then(|| entry.parent.as_ref().map(ContentHash::to_hex))
+                                .flatten();
+                            match log.append(entry) {
+                                Ok(hash) => {
+                                    // Storage first, projections second.
+                                    // `check` is deliberately read-only;
+                                    // no authoritative cached state may
+                                    // observe an entry the backend refused.
+                                    let appended = log
+                                        .last()
+                                        .expect("a successful append exposes its newest entry");
+                                    if journalling {
+                                        let (actor_id, op_type) = policy.subject();
+                                        journal.record(journal::Event::Decision {
+                                            actor_id,
+                                            workspace,
+                                            op_type,
+                                            accepted: true,
+                                            reject_reason: None,
+                                            seq: Some(seq),
+                                            parent,
+                                            decision_latency_us: as_micros(started.elapsed()),
+                                        });
+                                    }
+                                    policy.accepted(appended, &hash);
+                                    acks.push((
+                                        reply,
+                                        Accepted {
+                                            seq,
+                                            hash,
+                                            decision_latency: started.elapsed(),
+                                        },
+                                        started,
+                                    ));
+                                }
+                                Err(error) => {
+                                    durability_failed = true;
+                                    writer_flag.store(true, Ordering::Relaxed);
+                                    let reason = format!("log append failed: {error:?}");
+                                    if journalling {
+                                        let (actor_id, op_type) = policy.subject();
+                                        journal.record(journal::Event::Decision {
+                                            actor_id,
+                                            workspace,
+                                            op_type,
+                                            accepted: false,
+                                            reject_reason: Some(reason.clone()),
+                                            seq: None,
+                                            parent,
+                                            decision_latency_us: as_micros(started.elapsed()),
+                                        });
+                                    }
+                                    let _ = reply.send(Err(reason));
+                                }
                             }
-                            policy.accepted(&entry, &hash);
-                            log.append(entry)
-                                .expect("single writer never sees a stale head");
-                            acks.push((
-                                reply,
-                                Accepted {
-                                    seq,
-                                    hash,
-                                    decision_latency: started.elapsed(),
-                                },
-                                started,
-                            ));
                         }
                     }
                     // Decided, so the slot is no longer holding anyone

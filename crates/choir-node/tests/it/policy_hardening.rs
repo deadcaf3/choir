@@ -49,7 +49,10 @@ fn keys_hot_reload_and_reviewer_binding() {
 
     // Unregistered key: rejected.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&late, "late", &request),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&late, "late", &request),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
@@ -58,11 +61,18 @@ fn keys_hot_reload_and_reviewer_binding() {
     // Operator appends the key line; mtime must move for the reload
     // check, so nudge it past filesystem timestamp granularity.
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&keys_file, format!("{}\n", hex_encode(&late.public_key_bytes()))).unwrap();
+    std::fs::write(
+        &keys_file,
+        format!("{}\n", hex_encode(&late.public_key_bytes())),
+    )
+    .unwrap();
 
     // Same submission now admitted — no restart happened.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&late, "late", &request),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&late, "late", &request),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -77,18 +87,21 @@ fn keys_hot_reload_and_reviewer_binding() {
         note: String::new(),
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&late, "someone-else", &spoof),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&late, "someone-else", &spoof),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
-    assert!(
-        resp["code"] == "reviewer_mismatch",
-        "{resp}"
-    );
+    assert!(resp["code"] == "reviewer_mismatch", "{resp}");
 
     // The honest verdict (channel == reviewer) is admitted.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&late, "late", &spoof),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&late, "late", &spoof),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -107,7 +120,10 @@ fn keys_hot_reload_and_reviewer_binding() {
         target_ref: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&late, "late", &revoked_request),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&late, "late", &revoked_request),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");

@@ -137,7 +137,10 @@ fn a_rebased_resubmission_is_recognized_not_remerged() {
     // ordinary path and reports its ordinary outcome (pr-conflict
     // clashes with pr-1's file, which landed above).
     let fresh = build_train(&dir, &landed, &[(3, rev(&dir, "pr-conflict"))]).unwrap();
-    assert!(!fresh.entries[0].already_landed, "a real conflict is not a duplicate");
+    assert!(
+        !fresh.entries[0].already_landed,
+        "a real conflict is not a duplicate"
+    );
     assert!(!fresh.entries[0].merged);
     assert!(fresh.entries[0].note.contains("conflicts"));
 }
@@ -157,12 +160,25 @@ fn landing_fast_forwards_and_rejects_stale_trains() {
     let dir = tempdir("land");
     fixture(&dir);
     let remote = tempdir("land-remote");
-    git(&dir, &["clone", "-q", "--bare", dir.to_str().unwrap(), remote.to_str().unwrap()]);
+    git(
+        &dir,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            dir.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
     let url = remote.to_str().unwrap().to_string();
 
     let base = rev(&dir, "main");
-    let train =
-        build_train(&dir, &base, &[(1, rev(&dir, "pr-1")), (2, rev(&dir, "pr-2"))]).unwrap();
+    let train = build_train(
+        &dir,
+        &base,
+        &[(1, rev(&dir, "pr-1")), (2, rev(&dir, "pr-2"))],
+    )
+    .unwrap();
     choir_bridge::queue::land(&dir, &url, &train.tip, "main").unwrap();
     assert_eq!(rev(&remote, "main"), train.tip);
 
@@ -170,8 +186,15 @@ fn landing_fast_forwards_and_rejects_stale_trains() {
     let stale = build_train(&dir, &base, &[(3, rev(&dir, "pr-conflict"))]).unwrap();
     assert_ne!(stale.tip, train.tip);
     let err = choir_bridge::queue::land(&dir, &url, &stale.tip, "main").unwrap_err();
-    assert!(err.contains("rejected") || err.contains("fast-forward"), "{err}");
-    assert_eq!(rev(&remote, "main"), train.tip, "remote main must be untouched");
+    assert!(
+        err.contains("rejected") || err.contains("fast-forward"),
+        "{err}"
+    );
+    assert_eq!(
+        rev(&remote, "main"),
+        train.tip,
+        "remote main must be untouched"
+    );
 }
 
 #[test]
@@ -179,28 +202,49 @@ fn revert_restores_base_tree_and_respects_the_race_guard() {
     let dir = tempdir("revert");
     fixture(&dir);
     let remote = tempdir("revert-remote");
-    git(&dir, &["clone", "-q", "--bare", dir.to_str().unwrap(), remote.to_str().unwrap()]);
+    git(
+        &dir,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            dir.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
     let url = remote.to_str().unwrap().to_string();
 
     let base = rev(&dir, "main");
-    let train =
-        build_train(&dir, &base, &[(1, rev(&dir, "pr-1")), (2, rev(&dir, "pr-2"))]).unwrap();
+    let train = build_train(
+        &dir,
+        &base,
+        &[(1, rev(&dir, "pr-1")), (2, rev(&dir, "pr-2"))],
+    )
+    .unwrap();
     choir_bridge::queue::land(&dir, &url, &train.tip, "main").unwrap();
 
-    let new_tip =
-        choir_bridge::queue::revert_train(&dir, &url, &base, &train.tip, "main").unwrap();
+    let new_tip = choir_bridge::queue::revert_train(&dir, &url, &base, &train.tip, "main").unwrap();
     assert_eq!(rev(&remote, "main"), new_tip);
     // The reverted tree is exactly base's tree; history keeps the train.
-    assert_eq!(rev(&dir, &format!("{new_tip}^{{tree}}")), rev(&dir, &format!("{base}^{{tree}}")));
+    assert_eq!(
+        rev(&dir, &format!("{new_tip}^{{tree}}")),
+        rev(&dir, &format!("{base}^{{tree}}"))
+    );
     git(&dir, &["merge-base", "--is-ancestor", &train.tip, &new_tip]);
 
     // Race guard: if the branch moved past the tip, revert must not clobber.
     let moved = build_train(&dir, &new_tip, &[(3, rev(&dir, "pr-conflict"))]).unwrap();
     choir_bridge::queue::land(&dir, &url, &moved.tip, "main").unwrap();
-    let err =
-        choir_bridge::queue::revert_train(&dir, &url, &base, &train.tip, "main").unwrap_err();
-    assert!(err.contains("rejected") || err.contains("fast-forward"), "{err}");
-    assert_eq!(rev(&remote, "main"), moved.tip, "remote main must be untouched");
+    let err = choir_bridge::queue::revert_train(&dir, &url, &base, &train.tip, "main").unwrap_err();
+    assert!(
+        err.contains("rejected") || err.contains("fast-forward"),
+        "{err}"
+    );
+    assert_eq!(
+        rev(&remote, "main"),
+        moved.tip,
+        "remote main must be untouched"
+    );
 
     // No merges between base and base: refuse rather than push a no-op.
     assert!(choir_bridge::queue::revert_train(&dir, &url, &base, &base, "main").is_err());
@@ -341,7 +385,10 @@ fn a_merge_is_inert_only_when_both_parent_diffs_are() {
         ("docs", "README.md", "CHANGELOG.md", &mut inert_merge),
         ("code", "README.md", "src.rs", &mut live_merge),
     ] {
-        git(&work, &["checkout", "-q", "-b", &format!("topic-{step}"), "main"]);
+        git(
+            &work,
+            &["checkout", "-q", "-b", &format!("topic-{step}"), "main"],
+        );
         std::fs::write(work.join(branch_file), format!("{step} branch\n")).unwrap();
         git(&work, &["add", "."]);
         git(&work, &["commit", "-q", "-m", step]);
@@ -349,7 +396,17 @@ fn a_merge_is_inert_only_when_both_parent_diffs_are() {
         std::fs::write(work.join(main_file), format!("{step} main\n")).unwrap();
         git(&work, &["add", "."]);
         git(&work, &["commit", "-q", "-m", &format!("main {step}")]);
-        git(&work, &["merge", "-q", "--no-ff", &format!("topic-{step}"), "-m", step]);
+        git(
+            &work,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                &format!("topic-{step}"),
+                "-m",
+                step,
+            ],
+        );
         *target = rev(&work, "HEAD");
     }
 
@@ -379,7 +436,14 @@ fn harvestable_merges_walks_first_parent_history_newest_first() {
         git(&work, &["checkout", "-q", "main"]);
         git(
             &work,
-            &["merge", "-q", "--no-ff", &format!("topic-{step}"), "-m", &format!("merge {step}")],
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                &format!("topic-{step}"),
+                "-m",
+                &format!("merge {step}"),
+            ],
         );
         merges.push(rev(&work, "HEAD"));
     }
@@ -399,6 +463,9 @@ fn harvestable_merges_walks_first_parent_history_newest_first() {
     assert_eq!(all, vec![merges[1].clone(), merges[0].clone()]);
     assert!(!all.contains(&octopus));
     // limit keeps the most recent merges.
-    assert_eq!(harvestable_merges(&work, 1).unwrap(), vec![merges[1].clone()]);
+    assert_eq!(
+        harvestable_merges(&work, 1).unwrap(),
+        vec![merges[1].clone()]
+    );
     std::fs::remove_dir_all(work).ok();
 }

@@ -60,7 +60,9 @@ fn set_ref_to(name: &str, seed: &str, prev: Option<choir_oplog::ContentHash>) ->
 fn read_journal(path: &std::path::Path) -> Vec<serde_json::Value> {
     let body = std::fs::read_to_string(path).expect("journal file exists");
     body.lines()
-        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("bad JSONL line: {e}: {line}")))
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("bad JSONL line: {e}: {line}"))
+        })
         .collect()
 }
 
@@ -86,14 +88,20 @@ fn both_an_acceptance_and_a_refusal_reach_the_journal() {
     let api = format!("http://127.0.0.1:{port}/api");
 
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &set_ref("main", None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &set_ref("main", None)),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
 
     // An untrusted key: refused before it is ordered.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&mallory, "mallory", &set_ref("other", None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&mallory, "mallory", &set_ref("other", None)),
         &format!("{api}/submit"),
     ]);
     assert_ne!(code, 200, "an unknown key must not be admitted: {resp}");
@@ -101,7 +109,10 @@ fn both_an_acceptance_and_a_refusal_reach_the_journal() {
     // One more accepted op: the journal thread writes on its own
     // schedule, and this both flushes the burst and proves ordering.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &set_ref("second", None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &set_ref("second", None)),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -115,11 +126,17 @@ fn both_an_acceptance_and_a_refusal_reach_the_journal() {
         .iter()
         .filter(|v| v["decision"] == "accepted")
         .collect();
-    assert_eq!(accepted.len(), 2, "both acceptances recorded: {decisions:?}");
+    assert_eq!(
+        accepted.len(),
+        2,
+        "both acceptances recorded: {decisions:?}"
+    );
     assert_eq!(accepted[0]["seq"], 0);
     assert_eq!(accepted[0]["op_type"], "SetRef");
     assert!(
-        accepted[0]["actor_id"].as_str().is_some_and(|s| !s.is_empty()),
+        accepted[0]["actor_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
         "the verified author is carried, not re-derived"
     );
 
@@ -160,7 +177,10 @@ fn a_lost_race_on_one_ref_is_recorded_as_contention() {
 
     // First writer takes the ref.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &set_ref("main", None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &set_ref("main", None)),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -169,7 +189,9 @@ fn a_lost_race_on_one_ref_is_recorded_as_contention() {
     // CAS loses. Different bytes, so this is a genuine race rather than
     // the idempotent replay of the first submission.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d",
+        "-X",
+        "POST",
+        "-d",
         &submit_body(&alice, "alice", &set_ref_to("main", "rival", None)),
         &format!("{api}/submit"),
     ]);
@@ -177,14 +199,23 @@ fn a_lost_race_on_one_ref_is_recorded_as_contention() {
 
     // Flush the journal thread with a decision that must land after it.
     let (_, _) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &set_ref("flush", None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &set_ref("flush", None)),
         &format!("{api}/submit"),
     ]);
 
     let lines = read_journal(&path);
-    let cas: Vec<&serde_json::Value> =
-        lines.iter().filter(|v| v["kind"] == "cas_failure").collect();
-    assert_eq!(cas.len(), 1, "one lost race, one contention record: {lines:?}");
+    let cas: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v["kind"] == "cas_failure")
+        .collect();
+    assert_eq!(
+        cas.len(),
+        1,
+        "one lost race, one contention record: {lines:?}"
+    );
     assert!(
         cas[0]["actual"].as_str().is_some(),
         "the record names what the ref actually was, which is what a \
@@ -221,7 +252,10 @@ fn a_node_without_the_flag_writes_no_journal() {
     let api = format!("http://127.0.0.1:{port}/api");
 
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &set_ref("main", None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &set_ref("main", None)),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");

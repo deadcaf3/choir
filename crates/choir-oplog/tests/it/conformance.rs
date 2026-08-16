@@ -11,7 +11,7 @@ fn entry(parent: Option<choir_oplog::ContentHash>, seq: u64, ws: &str) -> OpEntr
         channel: ws.to_string(),
         payload: format!("op-{seq}").into_bytes(),
         witnesses: Vec::new(),
-            author_sig: None,
+        author_sig: None,
     }
 }
 
@@ -25,7 +25,9 @@ fn conformance(log: &mut dyn OpLog) {
     assert_eq!(log.len(), 1);
 
     // Chained append.
-    let h1 = log.append(entry(Some(h0.clone()), 1, "b")).expect("chained append");
+    let h1 = log
+        .append(entry(Some(h0.clone()), 1, "b"))
+        .expect("chained append");
     assert_eq!(log.head(), Some(h1));
 
     // Stale-parent append must be rejected (single-writer invariant).

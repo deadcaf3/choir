@@ -3,9 +3,9 @@
 //! a new base keeps it — and the queue refuses the resubmission as
 //! already landed instead of re-merging or duplicating it.
 
+use choir_oplog::MemLog;
 use choir_queue::identity::change_identity;
 use choir_queue::{run_batch, Change, MergeQueue, Rejection};
-use choir_oplog::MemLog;
 use choir_sequencer::Sequencer;
 
 fn base() -> String {

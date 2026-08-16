@@ -165,7 +165,9 @@ fn get_reads_across_the_flushed_and_pending_boundary() {
 
     assert_eq!(log.len(), 9);
     for seq in 0..9 {
-        let e = log.get(seq).expect("every entry readable regardless of side");
+        let e = log
+            .get(seq)
+            .expect("every entry readable regardless of side");
         assert_eq!(e.seq, seq, "entry {seq} came back as {}", e.seq);
         assert_eq!(e.payload, format!("op{seq}").into_bytes());
     }
@@ -200,7 +202,11 @@ fn get_handles_entries_of_differing_lengths() {
 
     for (seq, size) in sizes.iter().enumerate() {
         let e = log.get(seq as u64).expect("entry present");
-        assert_eq!(e.payload.len(), *size, "entry {seq} came back the wrong size");
+        assert_eq!(
+            e.payload.len(),
+            *size,
+            "entry {seq} came back the wrong size"
+        );
         assert!(e.payload.iter().all(|b| *b == b'x'));
     }
 
@@ -208,7 +214,11 @@ fn get_handles_entries_of_differing_lengths() {
     let reopened = FileLog::open(&scratch.path()).expect("reopen");
     for (seq, size) in sizes.iter().enumerate() {
         assert_eq!(
-            reopened.get(seq as u64).expect("entry present").payload.len(),
+            reopened
+                .get(seq as u64)
+                .expect("entry present")
+                .payload
+                .len(),
             *size,
             "entry {seq} wrong size after reopening"
         );
@@ -260,7 +270,9 @@ fn a_partly_written_trailing_record_is_truncated_not_fatal() {
     // And the file is now a whole number of records again, so appending
     // behind it produces a log that still reopens.
     let mut reopened = reopened;
-    let next = reopened.append(entry(3, head)).expect("append after recovery");
+    let next = reopened
+        .append(entry(3, head))
+        .expect("append after recovery");
     reopened.sync().expect("sync");
     drop(reopened);
     let again = FileLog::open(&scratch.path()).expect("reopen after recovery");
@@ -338,6 +350,38 @@ fn damage_before_the_end_still_refuses_to_open() {
     match FileLog::open(&scratch.path()).err() {
         Some(choir_oplog::LogError::Corrupt(_)) => {}
         other => panic!("expected Corrupt for mid-log damage, got {other:?}"),
+    }
+}
+
+#[test]
+fn startup_refuses_sequence_parent_and_format_corruption() {
+    for (tag, mutate) in [
+        ("bad-seq", 0_u8),
+        ("bad-parent", 1_u8),
+        ("bad-format", 2_u8),
+    ] {
+        let scratch = Scratch::new(tag);
+        let mut first = entry(0, None);
+        let mut second = entry(1, Some(first.content_hash()));
+        match mutate {
+            0 => second.seq = 9,
+            1 => second.parent = Some(choir_oplog::ContentHash::blake3(b"wrong parent")),
+            2 => first.format_version = FORMAT_VERSION + 1,
+            _ => unreachable!(),
+        }
+        let mut bytes = serde_json::to_vec(&first).expect("serialize first");
+        bytes.push(b'\n');
+        bytes.extend(serde_json::to_vec(&second).expect("serialize second"));
+        bytes.push(b'\n');
+        std::fs::write(scratch.path(), &bytes).expect("write corrupt fixture");
+
+        match FileLog::open(&scratch.path()).err() {
+            Some(choir_oplog::LogError::Corrupt(reason)) => assert!(
+                reason.contains("record"),
+                "{tag} must identify the bad record: {reason}"
+            ),
+            other => panic!("{tag} must fail startup as corruption, got {other:?}"),
+        }
     }
 }
 

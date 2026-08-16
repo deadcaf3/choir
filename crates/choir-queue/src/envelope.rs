@@ -59,7 +59,9 @@ impl Detector {
             return Err("precision and recall must be positive to recover a rate".to_string());
         }
         if prevalence >= 1.0 {
-            return Err("a corpus with no negatives cannot yield a false-positive rate".to_string());
+            return Err(
+                "a corpus with no negatives cannot yield a false-positive rate".to_string(),
+            );
         }
         // true positives per merge, then false positives per merge from
         // precision = TP / (TP + FP).

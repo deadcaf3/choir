@@ -69,7 +69,10 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
     });
     let post = |op: &ViewOp| {
         curl(&[
-            "-X", "POST", "-d", &submit_body(&author, "alice", op),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&author, "alice", op),
             &format!("{api}/submit"),
         ])
     };
@@ -94,10 +97,7 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
     let archive_authorization = ArchiveAuthorization::new(
         "change-1".into(),
         "demo/alice".into(),
-        choir_oplog::ContentHash::from_git_oid(
-            "1111111111111111111111111111111111111111",
-        )
-        .unwrap(),
+        choir_oplog::ContentHash::from_git_oid("1111111111111111111111111111111111111111").unwrap(),
     );
     let raw_archive = ViewOp::new(OpKind::ArchiveChange {
         id: "change-1".into(),
@@ -140,15 +140,11 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
 
     let legacy_move = ViewOp::new(OpKind::SetWorkspaceHead {
         workspace: "demo/alice".into(),
-        commit: choir_oplog::ContentHash::from_git_oid(
-            "3333333333333333333333333333333333333333",
-        )
-        .unwrap(),
-        prev: Some(
-            choir_oplog::ContentHash::from_git_oid(
-                "2222222222222222222222222222222222222222",
-            )
+        commit: choir_oplog::ContentHash::from_git_oid("3333333333333333333333333333333333333333")
             .unwrap(),
+        prev: Some(
+            choir_oplog::ContentHash::from_git_oid("2222222222222222222222222222222222222222")
+                .unwrap(),
         ),
     });
     let (code, bypass) = post(&legacy_move);
@@ -158,13 +154,19 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
     let (code, first) = post(&set_main);
     assert_eq!(code, 200, "{first}");
     let (seq, hash) = (first["seq"].clone(), first["hash"].clone());
-    assert!(first["already_applied"].is_null(), "first landing is not a replay");
+    assert!(
+        first["already_applied"].is_null(),
+        "first landing is not a replay"
+    );
 
     // Byte-identical resubmission: the same signed bytes a client would
     // send if its response were lost. CAS fails, but the honest answer is
     // "it already landed, here".
     let (code, replay) = post(&set_main);
-    assert_eq!(code, 200, "a completed retry should not read as a conflict: {replay}");
+    assert_eq!(
+        code, 200,
+        "a completed retry should not read as a conflict: {replay}"
+    );
     assert_eq!(replay["already_applied"], true, "{replay}");
     assert_eq!(replay["seq"], seq, "must report the original seq");
     assert_eq!(replay["hash"], hash, "must report the original hash");
@@ -179,7 +181,10 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
     let (code, resp) = post(&conflicting);
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "stale_head", "{resp}");
-    assert!(resp["actual"].is_string(), "conflict must name what it found: {resp}");
+    assert!(
+        resp["actual"].is_string(),
+        "conflict must name what it found: {resp}"
+    );
     assert!(
         resp["next"].as_str().unwrap().contains("resubmit"),
         "a conflict must name the repair: {resp}"
@@ -198,7 +203,10 @@ fn every_rejection_names_a_next_action() {
         let r = Rejection::new(*code, "something failed", "do the specific thing");
         let v = r.to_json();
         assert_eq!(v["code"], code.as_str());
-        assert!(v["next"].as_str().is_some_and(|s| !s.is_empty()), "{code:?}");
+        assert!(
+            v["next"].as_str().is_some_and(|s| !s.is_empty()),
+            "{code:?}"
+        );
         // Absent, not null, when no comparison happened -- a client
         // should find nothing rather than a null to special-case.
         assert!(v.get("expected").is_none(), "{code:?}");
@@ -226,7 +234,10 @@ fn decoding_never_drops_a_message_it_did_not_write() {
     // than reporting nothing.
     let partial = Rejection::decode(r#"{"code":"stale_head"}"#);
     assert_eq!(partial.code, "unclassified");
-    assert!(partial.error.contains("stale_head"), "original text kept: {partial:?}");
+    assert!(
+        partial.error.contains("stale_head"),
+        "original text kept: {partial:?}"
+    );
 }
 
 /// `Code::all()` is the list every documentation gate iterates, and until

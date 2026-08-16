@@ -95,10 +95,7 @@ fn canonical(e: &serde_json::Value) -> Vec<u8> {
     // Omitted entirely when absent, not null: the field is
     // `skip_serializing_if`, which is what keeps pre-L8 entries hashing
     // the same after author signatures were added.
-    if let (Some(key_id), Some(sig)) = (
-        e["author_key"].as_str(),
-        e["author_sig_hex"].as_str(),
-    ) {
+    if let (Some(key_id), Some(sig)) = (e["author_key"].as_str(), e["author_sig_hex"].as_str()) {
         s.push_str(&format!(
             ",\"author_sig\":{{\"key_id\":\"{}\",\"signature\":{}",
             key_id,
@@ -176,7 +173,9 @@ fn pages_join_into_one_verifiable_chain_across_the_source_boundary() {
 
     let key = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&key.public_key_bytes()).expect("valid key");
+    registry
+        .register(&key.public_key_bytes())
+        .expect("valid key");
     let log = FileLog::open(&log_path).expect("open log");
     let platform = Platform::start(registry, Box::new(log), ActorKey::generate())
         .expect("platform starts")
@@ -247,10 +246,12 @@ fn a_served_entry_verifies_against_a_key_the_client_already_holds() {
 
     let key = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&key.public_key_bytes()).expect("valid key");
+    registry
+        .register(&key.public_key_bytes())
+        .expect("valid key");
     let log = FileLog::open(&dir.join("ops.jsonl")).expect("open log");
-    let platform = Platform::start(registry, Box::new(log), ActorKey::generate())
-        .expect("platform starts");
+    let platform =
+        Platform::start(registry, Box::new(log), ActorKey::generate()).expect("platform starts");
     fill(&platform, &key, 3);
 
     let (status, out) = platform.handle_api("GET", "/api/log?from=1", b"");
@@ -276,7 +277,9 @@ fn a_served_entry_verifies_against_a_key_the_client_already_holds() {
     // check itself is the library's -- a test cannot reimplement ed25519
     // -- but the inputs it is handed all came out of the response.
     let mut client_side = Registry::new();
-    client_side.register(&key.public_key_bytes()).expect("valid key");
+    client_side
+        .register(&key.public_key_bytes())
+        .expect("valid key");
     let sig = Witness::ed25519(
         e["author_key"].as_str().expect("author_key").to_string(),
         hex_decode(e["author_sig_hex"].as_str().expect("sig hex")).expect("hex"),
@@ -295,7 +298,9 @@ fn a_served_entry_verifies_against_a_key_the_client_already_holds() {
     let mut tampered = payload;
     tampered.push(b'!');
     assert!(
-        client_side.verify_submission(workspace, &tampered, &sig).is_err(),
+        client_side
+            .verify_submission(workspace, &tampered, &sig)
+            .is_err(),
         "a modified payload must fail verification"
     );
 
@@ -371,10 +376,12 @@ fn every_served_field_is_documented() {
 
     let key = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&key.public_key_bytes()).expect("valid key");
+    registry
+        .register(&key.public_key_bytes())
+        .expect("valid key");
     let log = FileLog::open(&dir.join("ops.jsonl")).expect("open log");
-    let platform = Platform::start(registry, Box::new(log), ActorKey::generate())
-        .expect("platform starts");
+    let platform =
+        Platform::start(registry, Box::new(log), ActorKey::generate()).expect("platform starts");
     fill(&platform, &key, 1);
     let (_, out) = platform.handle_api("GET", "/api/log?from=0", b"");
     std::fs::remove_dir_all(&dir).ok();
@@ -394,7 +401,10 @@ fn every_served_field_is_documented() {
         );
     }
     for envelope in ["window_base", "source", "entries"] {
-        assert!(doc.contains(envelope), "SYNC.md omits the `{envelope}` field");
+        assert!(
+            doc.contains(envelope),
+            "SYNC.md omits the `{envelope}` field"
+        );
     }
     assert!(
         doc.contains(&PAGE.to_string()),

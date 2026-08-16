@@ -699,7 +699,10 @@ pub fn command_bullets() -> String {
          Credentials are read from the named file, never an environment variable.\n\n"
     );
     for c in COMMANDS.iter().filter(|c| c.agent_facing) {
-        out.push_str(&format!("- `choir {} {}` — {}\n", c.name, c.args, c.summary));
+        out.push_str(&format!(
+            "- `choir {} {}` — {}\n",
+            c.name, c.args, c.summary
+        ));
     }
     out
 }
@@ -1035,7 +1038,9 @@ pub fn splice_between(
     start_marker: &str,
     end_marker: &str,
 ) -> Result<String, String> {
-    let start = doc.find(start_marker).ok_or("missing generated-start marker")?;
+    let start = doc
+        .find(start_marker)
+        .ok_or("missing generated-start marker")?;
     let end = doc.find(end_marker).ok_or("missing generated-end marker")?;
     if end < start {
         return Err("generated markers are out of order".to_string());
@@ -1067,7 +1072,10 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
     let mut out = vec![
         (root.join("agents.md"), agents_md()),
         (root.join("crates/choir-node/src/llms.txt"), llms_txt()),
-        (root.join("crates/choir-node/src/schema.json"), schema_json()),
+        (
+            root.join("crates/choir-node/src/schema.json"),
+            schema_json(),
+        ),
         // Owned by choir-node's reject module, generated here so one
         // staleness test covers every generated artifact rather than two
         // tests each covering half.
@@ -1101,7 +1109,7 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
             SH_GEN_START,
             SH_GEN_END,
         )
-            .map_err(|e| format!("templates/shell/choir.sh: {e}"))?,
+        .map_err(|e| format!("templates/shell/choir.sh: {e}"))?,
     ));
     for rel in [
         "templates/claude-code/CLAUDE.snippet.md",

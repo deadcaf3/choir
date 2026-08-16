@@ -63,7 +63,11 @@ fn main() {
 /// if git is missing or the command failed.
 fn git(args: &[&str]) -> Option<String> {
     let dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    let out = Command::new("git").current_dir(dir).args(args).output().ok()?;
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

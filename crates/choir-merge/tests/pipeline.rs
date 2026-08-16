@@ -1,7 +1,7 @@
 //! Merge-strategy seam conformance (DECISIONS.md) plus the Phase-0
 //! "reproduce Mergiraf + first-class conflicts" spike check.
 
-use choir_merge::{MergeOutcome, MergirafMerge, MergeStrategy, Pipeline};
+use choir_merge::{MergeOutcome, MergeStrategy, MergirafMerge, Pipeline};
 
 // Edits separated by enough unchanged context that a line-based merge can
 // keep the hunks apart (adjacent-line edits legitimately conflict, in git too).
@@ -17,7 +17,10 @@ fn clean_disjoint_edits_resolve_via_line_merge() {
         MergeOutcome::Resolved(text) => {
             assert!(text.contains("left") && text.contains("right"));
         }
-        _ => panic!("disjoint edits must merge cleanly (strategy: {})", result.strategy),
+        _ => panic!(
+            "disjoint edits must merge cleanly (strategy: {})",
+            result.strategy
+        ),
     }
 }
 

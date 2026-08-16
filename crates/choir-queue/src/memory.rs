@@ -112,8 +112,7 @@ impl ResolutionMemory {
                 let Ok(text) = String::from_utf8(bytes) else {
                     continue;
                 };
-                let key_bytes =
-                    serde_json::to_vec(entry).expect("TreeEntry always serializes");
+                let key_bytes = serde_json::to_vec(entry).expect("TreeEntry always serializes");
                 map.insert(ContentHash::blake3(&key_bytes).to_hex(), text);
             }
         }

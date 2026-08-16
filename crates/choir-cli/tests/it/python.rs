@@ -53,7 +53,9 @@ fn the_generated_client_reads_a_real_node_with_only_the_standard_library() {
 
     let key = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&key.public_key_bytes()).expect("valid key");
+    registry
+        .register(&key.public_key_bytes())
+        .expect("valid key");
     let mut node = Node::bind(&work.join("repos"), 0).expect("node binds");
     let port = node.port();
     node.enable_platform(
@@ -169,7 +171,10 @@ json.dump({{
             "the client imports a non-standard module: {module} (all: {imports:?})"
         );
     }
-    assert!(!imports.is_empty(), "the import scan found nothing, so it proved nothing");
+    assert!(
+        !imports.is_empty(),
+        "the import scan found nothing, so it proved nothing"
+    );
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -186,8 +191,12 @@ fn a_refusal_arrives_with_the_nodes_own_words() {
     let mut node = Node::bind(&work.join("repos"), 0).expect("node binds");
     let port = node.port();
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
 
@@ -212,8 +221,14 @@ except ChoirError as error:
     let (ok, stdout, stderr) = python(&work, &program);
     assert!(ok, "the client crashed instead of raising: {stderr}");
     let result: serde_json::Value = serde_json::from_str(&stdout).expect("client emitted JSON");
-    assert_eq!(result["refused"], true, "a bad signature was accepted: {result}");
-    assert!(result["status"].as_u64().is_some_and(|s| s >= 400), "{result}");
+    assert_eq!(
+        result["refused"], true,
+        "a bad signature was accepted: {result}"
+    );
+    assert!(
+        result["status"].as_u64().is_some_and(|s| s >= 400),
+        "{result}"
+    );
     assert!(
         result["code"].as_str().is_some(),
         "the refusal lost its code on the way through the client: {result}"

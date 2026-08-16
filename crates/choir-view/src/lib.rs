@@ -1226,8 +1226,7 @@ impl ReviewState {
             // every settled review.
             return true;
         }
-        !self.reviewers.is_empty()
-            && self.reviewers.iter().all(|r| self.verdicts.contains_key(r))
+        !self.reviewers.is_empty() && self.reviewers.iter().all(|r| self.verdicts.contains_key(r))
     }
 
     /// Whether the review is complete with no `RequestChanges`.
@@ -1268,9 +1267,8 @@ impl ReviewState {
             approval_weight, ..
         } = self.status
         {
-            return approval_weight.saturating_sub(
-                self.slashed_operator_count() * MAX_APPROVAL_WEIGHT_PER_OPERATOR,
-            );
+            return approval_weight
+                .saturating_sub(self.slashed_operator_count() * MAX_APPROVAL_WEIGHT_PER_OPERATOR);
         }
         self.live_approval_weight(true)
     }
@@ -1655,7 +1653,9 @@ impl View {
                     return Err(ViewError::Review(format!("review {id} is archived")));
                 }
                 if !review.reviewers.is_empty() {
-                    return Err(ViewError::Review(format!("review {id} is already assigned")));
+                    return Err(ViewError::Review(format!(
+                        "review {id} is already assigned"
+                    )));
                 }
                 Ok(())
             }
@@ -1733,7 +1733,9 @@ impl View {
                     .get(id)
                     .ok_or_else(|| ViewError::Review(format!("no such review {id}")))?;
                 if matches!(review.status, ReviewStatus::Archived { .. }) {
-                    return Err(ViewError::Review(format!("review {id} is already archived")));
+                    return Err(ViewError::Review(format!(
+                        "review {id} is already archived"
+                    )));
                 }
                 if review.complete() && *lapsed {
                     // It reached an outcome; lapsing would discard it.
@@ -1976,11 +1978,13 @@ impl View {
                     // Re-binding to the *same* operator is how a channel
                     // is corrected, and it keeps `bound_at`. Re-binding
                     // elsewhere would transfer accumulated standing.
-                    Some(bound) if bound.operator != *operator => Err(ViewError::Identity(format!(
-                        "key {} is already bound to operator {}",
-                        key.to_hex(),
-                        bound.operator
-                    ))),
+                    Some(bound) if bound.operator != *operator => {
+                        Err(ViewError::Identity(format!(
+                            "key {} is already bound to operator {}",
+                            key.to_hex(),
+                            bound.operator
+                        )))
+                    }
                     Some(_) => Ok(()),
                 }
             }
@@ -1990,10 +1994,9 @@ impl View {
                         "a revocation must carry a non-empty reason".to_string(),
                     ));
                 }
-                let bound = self
-                    .bindings
-                    .get(&key.to_hex())
-                    .ok_or_else(|| ViewError::Identity(format!("key {} is not bound", key.to_hex())))?;
+                let bound = self.bindings.get(&key.to_hex()).ok_or_else(|| {
+                    ViewError::Identity(format!("key {} is not bound", key.to_hex()))
+                })?;
                 if bound.is_revoked() {
                     return Err(ViewError::Identity(format!(
                         "key {} is already revoked",
@@ -2197,7 +2200,11 @@ impl View {
                     .viewed
                     .insert(viewer.clone(), at);
             }
-            OpKind::RecordProvenance { subject, kind, body } => {
+            OpKind::RecordProvenance {
+                subject,
+                kind,
+                body,
+            } => {
                 self.provenance
                     .entry(subject.clone())
                     .or_default()
@@ -2483,7 +2490,7 @@ pub fn append_op(
         channel: submitter.to_string(),
         payload: op.to_payload(),
         witnesses: Vec::new(),
-            author_sig: None,
+        author_sig: None,
     };
     log.append(entry).map_err(ViewError::Log)
 }

@@ -109,28 +109,39 @@ fn a_push_over_the_ceiling_is_refused_without_the_hook_ever_running() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     let acl = work.join("acl");
-    std::fs::write(&acl, "alice   *       write\ncarol   *       write\ncarol   @node   auditor\n")
-        .expect("acl file");
+    std::fs::write(
+        &acl,
+        "alice   *       write\ncarol   *       write\ncarol   @node   auditor\n",
+    )
+    .expect("acl file");
     node.watch_acl_file(acl).expect("acl loads");
-    node.enable_request_log(request_log.clone(), choir_node::limits::DEFAULT_LOG_MAX_BYTES)
-        .expect("request log opens");
+    node.enable_request_log(
+        request_log.clone(),
+        choir_node::limits::DEFAULT_LOG_MAX_BYTES,
+    )
+    .expect("request log opens");
     // 100 KiB: comfortably over a one-file commit and comfortably under
     // the two oversized pushes below.
     node.enable_quotas(std::num::NonZeroU64::new(100 * 1024), None);
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(choir_oplog::MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(choir_oplog::MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
 
     let url = format!("http://alice:a@127.0.0.1:{port}/agents/demo.git");
     let view_url = format!("http://127.0.0.1:{port}/api/view");
     let clone = work.join("clone");
-    assert!(
-        git(&work, &["clone", "-q", &url, clone.to_str().expect("utf-8 path")])
-            .status
-            .success()
-    );
+    assert!(git(
+        &work,
+        &["clone", "-q", &url, clone.to_str().expect("utf-8 path")]
+    )
+    .status
+    .success());
 
     // Control first: an ordinary push is not refused, and it does reach
     // the sequencer. Without this the two refusals below could be a
@@ -148,9 +159,7 @@ fn a_push_over_the_ceiling_is_refused_without_the_hook_ever_running() {
     assert_eq!(code, 200, "{view}");
     let landed = view["refs"][ref_name].clone();
     assert!(
-        landed
-            .as_str()
-            .is_some_and(|value| value.ends_with(&head)),
+        landed.as_str().is_some_and(|value| value.ends_with(&head)),
         "the control push must have reached the sequencer as {head}: {view}"
     );
 
@@ -327,7 +336,10 @@ fn seed_commit(work: &Path, bare: &Path) {
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-q", "-m", "first"]);
     let refspec = format!("HEAD:{head_ref}");
-    let push = git(&seed, &["push", "-q", bare.to_str().expect("utf-8 path"), &refspec]);
+    let push = git(
+        &seed,
+        &["push", "-q", bare.to_str().expect("utf-8 path"), &refspec],
+    );
     assert!(push.status.success(), "{push:?}");
 }
 

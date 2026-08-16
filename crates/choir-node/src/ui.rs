@@ -231,7 +231,9 @@ pub(crate) fn esc(s: &str) -> String {
 /// Reads a string field, or a placeholder when it is absent or is not
 /// a string. Absent data is a normal state here, not an error.
 fn s<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
-    v.get(key).and_then(serde_json::Value::as_str).unwrap_or("—")
+    v.get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("—")
 }
 
 /// Shortens a content hash for display while keeping its codec prefix,
@@ -356,8 +358,14 @@ fn refs_section(h: &mut String, v: &serde_json::Value) {
     let mut pending: HashMap<&str, usize> = HashMap::new();
     if let Some(reviews) = v.get("reviews").and_then(serde_json::Value::as_object) {
         for r in reviews.values() {
-            let complete = r.get("complete").and_then(serde_json::Value::as_bool).unwrap_or(false);
-            let archived = r.get("archived").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let complete = r
+                .get("complete")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let archived = r
+                .get("archived")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             if complete || archived {
                 continue;
             }
@@ -602,8 +610,12 @@ fn attestation_section(h: &mut String, v: &serde_json::Value) {
             h.push_str("</td></tr><tr><td>id</td><td class=\"mono\">");
             h.push_str(&esc(&short(s(snap, "id"))));
             h.push_str("</td></tr><tr><td>chains from</td><td class=\"mono\">");
-            let prev = snap.get("prev_snapshot").and_then(serde_json::Value::as_str);
-            h.push_str(&esc(&prev.map(short).unwrap_or_else(|| "genesis".to_string())));
+            let prev = snap
+                .get("prev_snapshot")
+                .and_then(serde_json::Value::as_str);
+            h.push_str(&esc(&prev
+                .map(short)
+                .unwrap_or_else(|| "genesis".to_string())));
             h.push_str("</td></tr></tbody></table>");
             h.push_str("<p class=\"note\">Compare <code>id</code> at the same <code>at_seq</code> with another reader to check you were shown the same ref state. It is the node's own signature, so this is a comparison primitive, not proof of non-equivocation.</p>");
         }
@@ -880,7 +892,6 @@ pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &s
     h
 }
 
-
 /// The whole stylesheet, inline.
 ///
 /// Inline because an external file is a second request before first
@@ -926,7 +937,6 @@ pub(crate) const WEBAUTHN_JS: &str = include_str!("webauthn.js");
 /// and deferring to after parse is what makes that true wherever the tag
 /// sits.
 pub(crate) const CEREMONY_SCRIPT: &str = "<script src=\"/static/webauthn.js\" defer></script>";
-
 
 #[cfg(test)]
 mod tests {
@@ -1036,12 +1046,14 @@ mod tests {
     #[test]
     fn a_tripwire_the_node_cannot_evaluate_says_what_that_means() {
         let waiting = render(
-            &serde_json::json!({"concentration": {"tripwire_status": "indeterminate"}})
-                .to_string(),
+            &serde_json::json!({"concentration": {"tripwire_status": "indeterminate"}}).to_string(),
             1,
             &Roster::new(),
         );
-        assert!(waiting.contains("indeterminate"), "the status vanished: {waiting}");
+        assert!(
+            waiting.contains("indeterminate"),
+            "the status vanished: {waiting}"
+        );
         assert!(
             waiting.contains("evaluation_complete"),
             "the page shows `indeterminate` and never says what would resolve it: {waiting}"
@@ -1054,8 +1066,7 @@ mod tests {
         // ...and it is not boilerplate stapled under every health table:
         // a node that completed its evaluation has nothing to explain.
         let settled = render(
-            &serde_json::json!({"concentration": {"tripwire_status": "not_observed"}})
-                .to_string(),
+            &serde_json::json!({"concentration": {"tripwire_status": "not_observed"}}).to_string(),
             1,
             &Roster::new(),
         );
@@ -1116,15 +1127,23 @@ mod tests {
     /// there is no second version to drift from.
     #[test]
     fn the_client_half_is_one_same_origin_file() {
-        for probe in ["http://", "https://", "//cdn", "@import", "import ", "require("] {
-            assert!(!WEBAUTHN_JS.contains(probe), "the ceremony reaches out via {probe}");
+        for probe in [
+            "http://", "https://", "//cdn", "@import", "import ", "require(",
+        ] {
+            assert!(
+                !WEBAUTHN_JS.contains(probe),
+                "the ceremony reaches out via {probe}"
+            );
         }
         // Every fetch it makes is a path, never an origin, and it says
         // so twice: same-origin credentials and a leading slash.
         for path in ["'/api/submit'", "'/api/prepare'", "'/api/accounts/passkey'"] {
             assert!(WEBAUTHN_JS.contains(path), "{path} is not where this posts");
         }
-        assert!(!WEBAUTHN_JS.contains("<script"), "a script file carrying markup");
+        assert!(
+            !WEBAUTHN_JS.contains("<script"),
+            "a script file carrying markup"
+        );
         // Nothing is interpolated into it, which is what lets one
         // response serve every reader and every render.
         assert!(!WEBAUTHN_JS.contains("{}"));
@@ -1135,7 +1154,10 @@ mod tests {
             CEREMONY_SCRIPT.contains(WEBAUTHN_JS_PATH),
             "the tag points somewhere the node does not serve: {CEREMONY_SCRIPT}"
         );
-        assert!(CEREMONY_SCRIPT.contains(" defer"), "the ceremonies run before the DOM exists");
+        assert!(
+            CEREMONY_SCRIPT.contains(" defer"),
+            "the ceremonies run before the DOM exists"
+        );
     }
 
     /// ES256 only, because that is the one scheme the node can verify.
@@ -1172,7 +1194,10 @@ mod tests {
         // boundary 13), which is the exact case that panicked.
         assert_eq!(short("11-a日日日日日"), "11-a日日日日日");
         // Twelve characters kept, whatever they cost in bytes.
-        assert_eq!(short("11-日日日日日日日日日日日日日日"), "11-日日日日日日日日日日日日");
+        assert_eq!(
+            short("11-日日日日日日日日日日日日日日"),
+            "11-日日日日日日日日日日日日"
+        );
         // The ordinary case is unchanged: a hex digest still shortens.
         assert_eq!(short("11-deadbeefdeadbeef"), "11-deadbeefdead");
         // ...and a whole page built from such a payload still renders.
@@ -1205,8 +1230,14 @@ mod tests {
         );
         assert!(page.starts_with("<!doctype html>") && page.ends_with("</html>"));
         assert!(page.contains("404"), "the status is not on the page");
-        assert!(page.contains("no_such_repository"), "the code is not on the page");
-        assert!(page.contains("read grant"), "the expected state is not on the page");
+        assert!(
+            page.contains("no_such_repository"),
+            "the code is not on the page"
+        );
+        assert!(
+            page.contains("read grant"),
+            "the expected state is not on the page"
+        );
         assert!(
             page.contains("Open the repository list"),
             "the next action is not on the page: {page}"
@@ -1220,7 +1251,10 @@ mod tests {
             "a refused reader was given nowhere to go"
         );
         // `actual` was `None`, so no empty row may be invented for it.
-        assert!(!page.contains("<td>found</td>"), "an absent state got a row anyway");
+        assert!(
+            !page.contains("<td>found</td>"),
+            "an absent state got a row anyway"
+        );
     }
 
     /// A refusal renders values the node did not choose — a revision from
@@ -1251,7 +1285,10 @@ mod tests {
         ] {
             assert!(!page.contains(raw), "{raw} reached the page as markup");
         }
-        assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"), "the value vanished");
+        assert!(
+            page.contains("&lt;img src=x onerror=alert(1)&gt;"),
+            "the value vanished"
+        );
         assert!(
             !page.contains("\" onmouseover=alert(1) x=\""),
             "an attribute escaped its quotes"
@@ -1561,7 +1598,10 @@ mod tests {
 
         assert_eq!(person("7f3ac2ab19cd", &roster), "Alice Ng");
         assert_eq!(person("git/7f3ac2ab19cd", &roster), "git/Alice Ng");
-        assert_eq!(person("7f3ac2ab19cd/reviewer", &roster), "Alice Ng/reviewer");
+        assert_eq!(
+            person("7f3ac2ab19cd/reviewer", &roster),
+            "Alice Ng/reviewer"
+        );
     }
 
     /// A handle the roster cannot name is rendered as itself, silently.
@@ -1606,7 +1646,10 @@ mod tests {
         let mut roster = Roster::new();
         roster.insert("7f3ac2ab19cd".to_string(), "Alice Ng".to_string());
         let named = render(&json, 1, &roster);
-        assert!(named.contains("Alice Ng"), "a named handle rendered as a handle: {named}");
+        assert!(
+            named.contains("Alice Ng"),
+            "a named handle rendered as a handle: {named}"
+        );
 
         // Revocation deletes the row the name lived in; the handle
         // survives, because the log kept it and cannot be edited.
@@ -1628,7 +1671,9 @@ mod tests {
     fn a_cache_hit_does_not_rebuild_the_page() {
         let cache = UiCache::new();
         let first = cache.page(3, 0, "", &Roster::new(), || r#"{"refs":{}}"#.to_string());
-        let second = cache.page(3, 0, "", &Roster::new(), || panic!("rebuilt an unchanged page"));
+        let second = cache.page(3, 0, "", &Roster::new(), || {
+            panic!("rebuilt an unchanged page")
+        });
         assert!(Arc::ptr_eq(&first, &second), "same seq served a new page");
     }
 
@@ -1669,10 +1714,12 @@ mod tests {
     #[test]
     fn a_new_sequence_rebuilds_and_shows_the_new_state() {
         let cache = UiCache::new();
-        let before =
-            cache.page(1, 0, "", &Roster::new(), || r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string());
-        let after =
-            cache.page(2, 0, "", &Roster::new(), || r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string());
+        let before = cache.page(1, 0, "", &Roster::new(), || {
+            r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string()
+        });
+        let after = cache.page(2, 0, "", &Roster::new(), || {
+            r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string()
+        });
         assert!(before.contains("11-aaa"));
         assert!(after.contains("11-bbb"));
         assert_ne!(etag(1, 0, ""), etag(2, 0, ""));
@@ -1684,16 +1731,29 @@ mod tests {
     #[test]
     fn readers_seeing_different_things_get_different_pages() {
         let cache = UiCache::new();
-        let alice = cache.page(4, 0, "alice", &Roster::new(), || r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string());
-        let bob = cache.page(4, 0, "bob", &Roster::new(), || r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string());
+        let alice = cache.page(4, 0, "alice", &Roster::new(), || {
+            r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string()
+        });
+        let bob = cache.page(4, 0, "bob", &Roster::new(), || {
+            r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string()
+        });
         // On the repository name rather than the `.git` key it is stored
         // under: this test is about one reader never seeing the other's
         // page, and the negative half is stricter for the shorter string.
         assert!(alice.contains("o/a") && !alice.contains("o/b"));
         assert!(bob.contains("o/b") && !bob.contains("o/a"));
-        let again = cache.page(4, 0, "alice", &Roster::new(), || panic!("rebuilt a cached reader's page"));
-        assert!(Arc::ptr_eq(&alice, &again), "the reader's own page was dropped");
-        assert_ne!(etag(4, 0, "alice"), etag(4, 0, "bob"), "one ETag for two pages");
+        let again = cache.page(4, 0, "alice", &Roster::new(), || {
+            panic!("rebuilt a cached reader's page")
+        });
+        assert!(
+            Arc::ptr_eq(&alice, &again),
+            "the reader's own page was dropped"
+        );
+        assert_ne!(
+            etag(4, 0, "alice"),
+            etag(4, 0, "bob"),
+            "one ETag for two pages"
+        );
     }
 
     /// A new sequence must drop every reader's page, not only the one
@@ -1702,10 +1762,17 @@ mod tests {
     #[test]
     fn advancing_the_sequence_clears_every_readers_page() {
         let cache = UiCache::new();
-        let stale = cache.page(5, 0, "alice", &Roster::new(), || r#"{"refs":{}}"#.to_string());
+        let stale = cache.page(5, 0, "alice", &Roster::new(), || {
+            r#"{"refs":{}}"#.to_string()
+        });
         let _ = cache.page(6, 0, "bob", &Roster::new(), || r#"{"refs":{}}"#.to_string());
-        let fresh = cache.page(6, 0, "alice", &Roster::new(), || r#"{"refs":{}}"#.to_string());
-        assert!(!Arc::ptr_eq(&stale, &fresh), "a page from an older sequence survived");
+        let fresh = cache.page(6, 0, "alice", &Roster::new(), || {
+            r#"{"refs":{}}"#.to_string()
+        });
+        assert!(
+            !Arc::ptr_eq(&stale, &fresh),
+            "a page from an older sequence survived"
+        );
     }
 
     /// An ACL-less node's tags must stay what they were, and no tag may
@@ -1714,7 +1781,10 @@ mod tests {
     fn the_etag_hides_the_reader_and_is_unchanged_without_an_acl() {
         assert_eq!(etag(7, 0, ""), "W/\"7\"");
         let tagged = etag(7, 0, "alice\u{1f}*=r");
-        assert!(!tagged.contains("alice"), "the ETag carried the username: {tagged}");
+        assert!(
+            !tagged.contains("alice"),
+            "the ETag carried the username: {tagged}"
+        );
         assert_ne!(tagged, etag(7, 0, "bob\u{1f}*=r"));
     }
 }

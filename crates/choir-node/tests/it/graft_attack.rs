@@ -241,7 +241,10 @@ fn an_aba_replay_is_refused_and_a_scope_is_what_closes_the_second_node() {
     let (code, resp) = post(&grafted_body("ana", &advance, &advance_sig));
     assert_eq!(code, 200, "{resp}");
     assert_eq!(resp["already_applied"], true, "{resp}");
-    assert_eq!(resp["seq"], 1, "an ABA replay must not become a new entry: {resp}");
+    assert_eq!(
+        resp["seq"], 1,
+        "an ABA replay must not become a new entry: {resp}"
+    );
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(view["workspaces"]["ana/w"], at("c1"), "{view}");
 
@@ -251,9 +254,7 @@ fn an_aba_replay_is_refused_and_a_scope_is_what_closes_the_second_node() {
     // which is exactly what `--require-scope` refuses and why the flag
     // exists rather than being implied.
     let (other_api, other) = serving_node(&work.join("repos-2"), &[&ana]);
-    let other_post = |body: &str| {
-        curl(&["-X", "POST", "-d", body, &format!("{other_api}/submit")])
-    };
+    let other_post = |body: &str| curl(&["-X", "POST", "-d", body, &format!("{other_api}/submit")]);
     let (code, resp) = other_post(&grafted_body("ana", &create, &create_sig));
     assert_eq!(
         code, 200,
@@ -279,7 +280,11 @@ fn an_aba_replay_is_refused_and_a_scope_is_what_closes_the_second_node() {
     let (code, resp) = other_post(&grafted_body("ana", &scoped, &scoped_sig));
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "foreign_scope", "{resp}");
-    assert_eq!(resp["expected"], serde_json::json!(ana_node.to_hex()), "{resp}");
+    assert_eq!(
+        resp["expected"],
+        serde_json::json!(ana_node.to_hex()),
+        "{resp}"
+    );
     let (_, other_view) = curl(&[&format!("{other_api}/view")]);
     assert!(
         other_view["workspaces"]["ana/scoped"].is_null(),
@@ -335,18 +340,29 @@ fn a_scope_required_node_refuses_unscoped_foreign_and_aged_out_signatures() {
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(view["log"]["scope_required"], true, "{view}");
     let (node_id, genesis_head) = log_scope(&api);
-    assert!(view["log"]["head"].is_null(), "empty log has no head: {view}");
+    assert!(
+        view["log"]["head"].is_null(),
+        "empty log has no head: {view}"
+    );
 
     // Unscoped: refused, with the node's identity in the response so the
     // client can build the scope it was missing.
     let bare = head("ana/bare", "c1", None);
-    let (code, resp) = post(&grafted_body("ana", &bare, &ana.sign_submission("ana", &bare)));
+    let (code, resp) = post(&grafted_body(
+        "ana",
+        &bare,
+        &ana.sign_submission("ana", &bare),
+    ));
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "scope_required", "{resp}");
 
     // Scoped to another node's log: refused even though the signature is
     // genuine and the key is trusted here.
-    let elsewhere = scoped("ana/elsewhere", ContentHash::blake3(b"some other node"), None);
+    let elsewhere = scoped(
+        "ana/elsewhere",
+        ContentHash::blake3(b"some other node"),
+        None,
+    );
     let (code, resp) = post(&grafted_body(
         "ana",
         &elsewhere,
@@ -354,7 +370,11 @@ fn a_scope_required_node_refuses_unscoped_foreign_and_aged_out_signatures() {
     ));
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "foreign_scope", "{resp}");
-    assert_eq!(resp["actual"], serde_json::json!(node_id.to_hex()), "{resp}");
+    assert_eq!(
+        resp["actual"],
+        serde_json::json!(node_id.to_hex()),
+        "{resp}"
+    );
 
     // Correctly scoped: lands. `head` is null on an empty log, and a
     // headless scope is what a client signs then — including every op of
@@ -382,7 +402,11 @@ fn a_scope_required_node_refuses_unscoped_foreign_and_aged_out_signatures() {
     // enough to have left the index are also old enough that the head
     // they name has left the window.
     let stale = scoped("ana/stale", node_id, aged_head.clone());
-    let (code, resp) = post(&grafted_body("ana", &stale, &ana.sign_submission("ana", &stale)));
+    let (code, resp) = post(&grafted_body(
+        "ana",
+        &stale,
+        &ana.sign_submission("ana", &stale),
+    ));
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "stale_scope", "{resp}");
     assert_eq!(
@@ -479,7 +503,10 @@ fn a_log_sourced_replay_of_a_node_signed_ref_move_no_longer_lands() {
     let c1 = commit("one\n", "first");
     let c2 = commit("two\n", "second");
     let (_, view) = curl(&[&format!("{api}/view")]);
-    assert_eq!(view["refs"][ref_name], serde_json::json!(format!("11-{c2}")));
+    assert_eq!(
+        view["refs"][ref_name],
+        serde_json::json!(format!("11-{c2}"))
+    );
 
     // The whole capture: one GET, no credentials. Take the entry that
     // moved main to c2 and rebuild the submit body from the served
@@ -515,7 +542,10 @@ fn a_log_sourced_replay_of_a_node_signed_ref_move_no_longer_lands() {
         .status
         .success());
     let (_, view) = curl(&[&format!("{api}/view")]);
-    assert_eq!(view["refs"][ref_name], serde_json::json!(format!("11-{c1}")));
+    assert_eq!(
+        view["refs"][ref_name],
+        serde_json::json!(format!("11-{c1}"))
+    );
 
     // Replay, with the state the captured op expected restored. Refused
     // as the duplicate it is, and answered with the sequence the real
@@ -535,9 +565,12 @@ fn a_log_sourced_replay_of_a_node_signed_ref_move_no_longer_lands() {
         serde_json::json!(format!("11-{c1}")),
         "{view}"
     );
-    let remote = String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout)
-        .unwrap();
-    assert!(remote.starts_with(&c1), "git holds the reverted ref: {remote}");
+    let remote =
+        String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout).unwrap();
+    assert!(
+        remote.starts_with(&c1),
+        "git holds the reverted ref: {remote}"
+    );
 
     // The other node is closed too, and without the operator turning
     // anything on: the daemon scopes the ops it signs itself, so a
@@ -554,7 +587,11 @@ fn a_log_sourced_replay_of_a_node_signed_ref_move_no_longer_lands() {
     let (code, resp) = curl(&["-X", "POST", "-d", &stolen, &format!("{other_api}/submit")]);
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "foreign_scope", "{resp}");
-    assert_eq!(resp["expected"], serde_json::json!(node_id.to_hex()), "{resp}");
+    assert_eq!(
+        resp["expected"],
+        serde_json::json!(node_id.to_hex()),
+        "{resp}"
+    );
     let (_, other_view) = curl(&[&format!("{other_api}/view")]);
     assert!(other_view["refs"][ref_name].is_null(), "{other_view}");
 
@@ -717,9 +754,12 @@ fn the_landing_gate_cannot_refuse_the_replay_but_the_duplicate_check_does() {
         "an approved push must still land after a replay attempt: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let remote = String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout)
-        .unwrap();
-    assert!(remote.starts_with(&c3), "git advanced to the approved commit: {remote}");
+    let remote =
+        String::from_utf8(git(&clone, &["ls-remote", "origin", "refs/heads/main"]).stdout).unwrap();
+    assert!(
+        remote.starts_with(&c3),
+        "git advanced to the approved commit: {remote}"
+    );
     assert_eq!(
         refs()[ref_name],
         serde_json::json!(format!("11-{c3}")),
@@ -766,7 +806,11 @@ fn behind_an_auth_file_the_capture_needs_a_token_and_a_token_is_enough() {
     let payload = head("ana/w", "c1", None);
     let sig = ana.sign_submission("ana", &payload);
     let (code, resp) = curl(&[
-        "-u", creds, "-X", "POST", "-d",
+        "-u",
+        creds,
+        "-X",
+        "POST",
+        "-d",
         &grafted_body("ana", &payload, &sig),
         &format!("{api}/submit"),
     ]);
@@ -775,7 +819,14 @@ fn behind_an_auth_file_the_capture_needs_a_token_and_a_token_is_enough() {
     // No credentials: the log is not readable, so the capture channel is
     // shut. `curl` gets a plain-text 401 body, not JSON.
     let out = std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", &format!("{api}/log?from=0")])
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            &format!("{api}/log?from=0"),
+        ])
         .output()
         .expect("curl runs");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "401");
@@ -803,7 +854,13 @@ fn behind_an_auth_file_the_capture_needs_a_token_and_a_token_is_enough() {
     })
     .to_string();
     let (code, resp) = curl(&[
-        "-u", creds, "-X", "POST", "-d", &stolen, &format!("{api}/submit"),
+        "-u",
+        creds,
+        "-X",
+        "POST",
+        "-d",
+        &stolen,
+        &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
     assert_eq!(resp["already_applied"], true, "{resp}");
@@ -823,9 +880,18 @@ fn behind_an_auth_file_the_capture_needs_a_token_and_a_token_is_enough() {
     })
     .to_string();
     let (code, resp) = curl(&[
-        "-u", creds, "-X", "POST", "-d", &tampered, &format!("{api}/submit"),
+        "-u",
+        creds,
+        "-X",
+        "POST",
+        "-d",
+        &tampered,
+        &format!("{api}/submit"),
     ]);
-    assert_eq!(code, 400, "a bad signature must not be answered as success: {resp}");
+    assert_eq!(
+        code, 400,
+        "a bad signature must not be answered as success: {resp}"
+    );
     assert_ne!(resp["already_applied"], true, "{resp}");
 
     node.unblock();

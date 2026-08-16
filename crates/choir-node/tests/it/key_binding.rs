@@ -162,7 +162,10 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
     // A trusted key that is not the node's may not mint a binding, and in
     // particular may not bind a key to an operator name of its choosing.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &bind("carol", &subject, None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &bind("carol", &subject, None)),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
@@ -179,7 +182,10 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
         reason: "not yours to withdraw".into(),
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &revoke),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &revoke),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
@@ -187,7 +193,14 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
 
     // The node's own key is the one path that works.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&node_key, "node", &bind("carol", &subject, Some("carol/agent"))),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(
+            &node_key,
+            "node",
+            &bind("carol", &subject, Some("carol/agent")),
+        ),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -195,7 +208,14 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
     // Channel correction stays open to the node, and is the reason strict
     // assign-once was not adopted: a typo must not burn a key forever.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&node_key, "node", &bind("carol", &subject, Some("carol/other"))),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(
+            &node_key,
+            "node",
+            &bind("carol", &subject, Some("carol/other")),
+        ),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -205,7 +225,10 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
     // `unclassified` -- the mapping only exists because this path is now
     // reachable at all.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&node_key, "node", &bind("mallory", &subject, None)),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&node_key, "node", &bind("mallory", &subject, None)),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
@@ -217,7 +240,10 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
         reason: "key material rotated".into(),
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&node_key, "node", &node_revoke),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&node_key, "node", &node_revoke),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -228,7 +254,10 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
     // replayed revocation cannot double-count, and it is why the genuine
     // double-revoke below has to carry different bytes to be a new op.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&node_key, "node", &node_revoke),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&node_key, "node", &node_revoke),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -239,7 +268,10 @@ fn only_the_node_may_bind_or_revoke_operator_keys() {
         reason: "a genuinely different second attempt".into(),
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&node_key, "node", &second_revoke),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&node_key, "node", &second_revoke),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");

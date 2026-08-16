@@ -34,11 +34,7 @@ fn daemon_flags_enforce_the_reviewer_conflict_distance() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        &reviewers,
-        "alice/sibling\nbob/one\ncarol/one\ndave/one\n",
-    )
-    .unwrap();
+    std::fs::write(&reviewers, "alice/sibling\nbob/one\ncarol/one\ndave/one\n").unwrap();
     std::fs::write(&graph, "alice bob\nbob carol\n").unwrap();
 
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

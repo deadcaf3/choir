@@ -12,11 +12,14 @@ use std::path::Path;
 
 /// URL-safe base64 without padding (JWT alphabet).
 fn b64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
@@ -44,7 +47,12 @@ pub fn app_jwt(app_id: &str, pem: &Path) -> Result<String, String> {
     let header = b64url(br#"{"alg":"RS256","typ":"JWT"}"#);
     let payload = b64url(
         // iat backdated 60 s against clock skew, per GitHub's docs.
-        format!(r#"{{"iat":{},"exp":{},"iss":"{app_id}"}}"#, now - 60, now + 540).as_bytes(),
+        format!(
+            r#"{{"iat":{},"exp":{},"iss":"{app_id}"}}"#,
+            now - 60,
+            now + 540
+        )
+        .as_bytes(),
     );
     let signing_input = format!("{header}.{payload}");
 
@@ -300,8 +308,7 @@ pub enum Verdict {
 #[must_use]
 pub fn parse_check_verdict(body: &str) -> Verdict {
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let runs: Vec<&serde_json::Value> =
-        v["check_runs"].as_array().into_iter().flatten().collect();
+    let runs: Vec<&serde_json::Value> = v["check_runs"].as_array().into_iter().flatten().collect();
     if runs.is_empty() {
         return Verdict::NoRuns;
     }
@@ -343,7 +350,12 @@ pub fn check_verdict(token: &str, repo: &str, sha: &str) -> Result<Verdict, Stri
 ///
 /// API failures with GitHub's response body included.
 pub fn default_branch(token: &str, repo: &str) -> Result<String, String> {
-    let (status, body) = gh("GET", &format!("https://api.github.com/repos/{repo}"), token, None)?;
+    let (status, body) = gh(
+        "GET",
+        &format!("https://api.github.com/repos/{repo}"),
+        token,
+        None,
+    )?;
     if status != 200 {
         return Err(format!("repo info: {status}: {body}"));
     }

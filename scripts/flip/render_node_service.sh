@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 16 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 17 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [private-beta-service-user]" >&2
   exit 2
 fi
 
@@ -42,9 +42,19 @@ TLS_KEY=${15:-}
 # Same contract as the plist renderer: a non-empty 16th argument is the
 # D29 ACL path, empty means no per-repository authorization.
 ACL=${16:-}
+PRIVATE_BETA=${17:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
   exit 2
+fi
+if [ -n "$PRIVATE_BETA" ]; then
+  [ -n "$ACL" ] || { echo "render_node_service.sh: private beta needs an ACL" >&2; exit 2; }
+  [ -n "$PROTECTED_REFS" ] \
+    || { echo "render_node_service.sh: private beta needs protected refs and review gates" >&2; exit 2; }
+  [ -n "$REQUIRE_SCOPE" ] \
+    || { echo "render_node_service.sh: private beta needs --require-scope" >&2; exit 2; }
+  [ -z "$TLS_CERT$TLS_KEY" ] \
+    || { echo "render_node_service.sh: private beta terminates TLS at the reverse proxy; direct node TLS is refused" >&2; exit 2; }
 fi
 
 # Same repos-file contract as the plist renderer: one repo per line,
@@ -74,6 +84,16 @@ fi
 if [ -n "$REQUIRE_SCOPE" ]; then
   EXEC="$EXEC --require-scope"
 fi
+if [ -n "$PRIVATE_BETA" ]; then
+  STATE_DIR=$(dirname "$AUTH")
+  EXEC="$EXEC --review-adjudications $STATE_DIR/review-adjudications.jsonl"
+  EXEC="$EXEC --journal $ROOT/.choir/journal.jsonl"
+  EXEC="$EXEC --request-log $LOG.requests.jsonl --request-log-max-bytes 33554432"
+  EXEC="$EXEC --rate-limit-api 120 --rate-limit-git 60"
+  EXEC="$EXEC --quota-push-bytes 536870912 --quota-workspaces 8"
+  EXEC="$EXEC --api-body-limit 1048576 --batch-limit 256"
+  EXEC="$EXEC --ready-min-free-bytes 1073741824 --read-only-browser"
+fi
 if [ -n "$TLS_CERT" ]; then
   EXEC="$EXEC --bind 0.0.0.0"
   EXEC="$EXEC --tls-cert $TLS_CERT"
@@ -100,12 +120,32 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+$(if [ -n "$PRIVATE_BETA" ]; then printf 'User=%s\nGroup=%s\n' "$PRIVATE_BETA" "$PRIVATE_BETA"; fi)
 ExecStart=$EXEC
 Restart=always
 RestartSec=2
 StandardOutput=append:$LOG
 StandardError=append:$LOG
+$(if [ -n "$PRIVATE_BETA" ]; then cat <<HARDENING
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$ROOT $(dirname "$LOG")
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+TasksMax=128
+MemoryMax=1G
+LimitNOFILE=65536
+HARDENING
+fi)
 
 [Install]
-WantedBy=default.target
+WantedBy=$(if [ -n "$PRIVATE_BETA" ]; then echo multi-user.target; else echo default.target; fi)
 UNIT

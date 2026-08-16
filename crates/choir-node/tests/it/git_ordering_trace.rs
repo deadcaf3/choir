@@ -36,6 +36,10 @@ impl OpLog for BlockingSyncLog {
         self.inner.get(seq)
     }
 
+    fn last(&self) -> Option<&OpEntry> {
+        self.inner.last()
+    }
+
     fn sync(&mut self) -> Result<(), LogError> {
         // Signal only after the real FileLog durability barrier. Holding
         // the return keeps the sequencer from acknowledging the hook.

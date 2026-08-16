@@ -208,7 +208,8 @@ fn cleanup_worktrees(repo: &Path, root: &Path, paths: &[PathBuf]) -> Result<(), 
     }
     if root.exists() {
         if let Err(error) = std::fs::remove_dir_all(root) {
-            first_error.get_or_insert_with(|| format!("remove differential checkout root: {error}"));
+            first_error
+                .get_or_insert_with(|| format!("remove differential checkout root: {error}"));
         }
     }
     if let Some(parent) = root.parent() {
@@ -312,8 +313,8 @@ impl DifferentialSession {
             let mut assigned = [usize::MAX; 3];
             let mut used = [false; 3];
             for (role, revision) in revisions.iter().enumerate() {
-                if let Some(index) = (0..trees.len())
-                    .find(|&index| !used[index] && trees[index].1 == *revision)
+                if let Some(index) =
+                    (0..trees.len()).find(|&index| !used[index] && trees[index].1 == *revision)
                 {
                     assigned[role] = index;
                     used[index] = true;
@@ -363,8 +364,7 @@ impl DifferentialSession {
                 &self.repo,
                 &["worktree", "add", "-q", "--detach", &path_text, revision],
             ) {
-                let paths: Vec<PathBuf> =
-                    created.into_iter().map(|(path, _)| path).collect();
+                let paths: Vec<PathBuf> = created.into_iter().map(|(path, _)| path).collect();
                 cleanup_worktrees(&self.repo, &self.root, &paths).ok();
                 return Err(error);
             }
@@ -373,11 +373,7 @@ impl DifferentialSession {
         let trees: [(PathBuf, String); 3] = created
             .try_into()
             .map_err(|_| "differential session needs exactly three worktrees".to_string())?;
-        let paths = [
-            trees[0].0.clone(),
-            trees[1].0.clone(),
-            trees[2].0.clone(),
-        ];
+        let paths = [trees[0].0.clone(), trees[1].0.clone(), trees[2].0.clone()];
         self.trees = Some(trees);
         Ok(paths)
     }
@@ -557,9 +553,7 @@ pub fn run_train_differentials(
                 .merge
                 .as_deref()
                 .ok_or("merged train entry is missing its merge commit".to_string())
-                .and_then(|merge| {
-                    run_differential(repo, merge, runner, command_file, state_dir)
-                });
+                .and_then(|merge| run_differential(repo, merge, runner, command_file, state_dir));
             (entry.id, result)
         })
         .collect()
@@ -584,7 +578,10 @@ pub fn run_train_differentials(
 ///
 /// Git failing to spawn or exiting nonzero.
 pub fn harvestable_merges(repo: &Path, limit: usize) -> Result<Vec<String>, String> {
-    let log = git(repo, &["log", "--first-parent", "--merges", "--format=%H %P"])?;
+    let log = git(
+        repo,
+        &["log", "--first-parent", "--merges", "--format=%H %P"],
+    )?;
     let mut merges = parse_merge_list(&log);
     if limit > 0 {
         merges.truncate(limit);
@@ -724,8 +721,7 @@ pub fn record_population_restrictions(
         "inert_rule": "every path in the union of both parent diffs is documentation, licence, or forge bookkeeping",
         "stopped_after_consecutive_inconclusive": stopped_after_inconclusive,
     });
-    std::fs::create_dir_all(state_dir)
-        .map_err(|error| format!("create state dir: {error}"))?;
+    std::fs::create_dir_all(state_dir).map_err(|error| format!("create state dir: {error}"))?;
     let mut line = serde_json::to_vec(&record)
         .map_err(|error| format!("serialize population restrictions: {error}"))?;
     line.push(b'\n');
@@ -811,7 +807,11 @@ pub fn write_specimen(
 ///
 /// Push failures, including the non-fast-forward rejection.
 pub fn land(repo: &Path, url: &str, tip: &str, branch: &str) -> Result<(), String> {
-    git(repo, &["push", "-q", url, &format!("{tip}:refs/heads/{branch}")]).map(|_| ())
+    git(
+        repo,
+        &["push", "-q", url, &format!("{tip}:refs/heads/{branch}")],
+    )
+    .map(|_| ())
 }
 
 /// Reverts a landed train (D23 auto-revert arm): reverts each of the
@@ -826,10 +826,21 @@ pub fn land(repo: &Path, url: &str, tip: &str, branch: &str) -> Result<(), Strin
 /// Git failures, including a revert that itself conflicts (possible
 /// when later commits touched the same lines) and the non-fast-forward
 /// rejection — both leave the remote branch untouched.
-pub fn revert_train(repo: &Path, url: &str, base: &str, tip: &str, branch: &str) -> Result<String, String> {
+pub fn revert_train(
+    repo: &Path,
+    url: &str,
+    base: &str,
+    tip: &str,
+    branch: &str,
+) -> Result<String, String> {
     let merges = git(
         repo,
-        &["rev-list", "--first-parent", "--merges", &format!("{base}..{tip}")],
+        &[
+            "rev-list",
+            "--first-parent",
+            "--merges",
+            &format!("{base}..{tip}"),
+        ],
     )?;
     let merges: Vec<&str> = merges.split_whitespace().collect();
     if merges.is_empty() {
@@ -840,10 +851,15 @@ pub fn revert_train(repo: &Path, url: &str, base: &str, tip: &str, branch: &str)
         // -m 1 = revert to the first parent (the train spine).
         if let Err(e) = git(repo, &["revert", "-m", "1", "--no-edit", merge]) {
             git(repo, &["revert", "--abort"]).ok();
-            return Err(format!("revert of {merge} conflicts, leaving branch alone: {e}"));
+            return Err(format!(
+                "revert of {merge} conflicts, leaving branch alone: {e}"
+            ));
         }
     }
     let new_tip = git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
-    git(repo, &["push", "-q", url, &format!("{new_tip}:refs/heads/{branch}")])?;
+    git(
+        repo,
+        &["push", "-q", url, &format!("{new_tip}:refs/heads/{branch}")],
+    )?;
     Ok(new_tip)
 }

@@ -315,7 +315,11 @@ impl Accounts {
     /// How many accounts have been issued.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.state.read().expect("accounts read lock").accounts.len()
+        self.state
+            .read()
+            .expect("accounts read lock")
+            .accounts
+            .len()
     }
 
     /// Whether no account has been issued yet.
@@ -466,7 +470,9 @@ impl Accounts {
                  name's history to whoever held it. Choose another name."
             ));
         }
-        state.invites.retain(|_, invite| invite.expires_at > now_secs());
+        state
+            .invites
+            .retain(|_, invite| invite.expires_at > now_secs());
         if state.invites.values().any(|invite| invite.user == user) {
             return conflict(&format!(
                 "`{user}` already has an invite outstanding; revoke it first"
@@ -758,7 +764,9 @@ impl Accounts {
             return (404, error_json("no account record for this credential"));
         };
         let before = account.passkeys.len();
-        account.passkeys.retain(|k| k.credential_id != credential_id);
+        account
+            .passkeys
+            .retain(|k| k.credential_id != credential_id);
         if account.passkeys.len() == before {
             return (404, error_json("no such credential on this account"));
         }
@@ -1095,9 +1103,7 @@ pub fn validate_username(user: &str) -> Result<(), String> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
     {
-        return Err(
-            "a username may hold only ASCII letters, digits, `-`, `_` and `.`".to_string(),
-        );
+        return Err("a username may hold only ASCII letters, digits, `-`, `_` and `.`".to_string());
     }
     if user == "anon" {
         return Err("`anon` is the name an unauthenticated request already has".to_string());
@@ -1318,7 +1324,10 @@ fn parse_state(text: &str) -> Result<State, String> {
     }
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
-    match value.get("format_version").and_then(serde_json::Value::as_u64) {
+    match value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+    {
         Some(FORMAT_VERSION) => {}
         Some(other) => {
             return Err(format!(
@@ -1389,7 +1398,9 @@ fn parse_state(text: &str) -> Result<State, String> {
             entry.get("secret_hash").and_then(serde_json::Value::as_str),
             entry.get("user").and_then(serde_json::Value::as_str),
         ) else {
-            return Err("an invite record is missing `invite_id`, `secret_hash` or `user`".to_string());
+            return Err(
+                "an invite record is missing `invite_id`, `secret_hash` or `user`".to_string(),
+            );
         };
         state.invites.insert(
             id.to_string(),

@@ -149,8 +149,14 @@ fn a_refused_op_is_named_by_position_and_the_exit_code_is_nonzero() {
         .map(|l| serde_json::from_str(l).expect("a result object"))
         .collect();
     assert_eq!(results.len(), 3, "a result is missing: {stdout}");
-    assert!(results[0]["seq"].is_u64(), "op 1 should have landed: {stdout}");
-    assert!(results[1]["seq"].is_u64(), "op 2 should have landed: {stdout}");
+    assert!(
+        results[0]["seq"].is_u64(),
+        "op 1 should have landed: {stdout}"
+    );
+    assert!(
+        results[1]["seq"].is_u64(),
+        "op 2 should have landed: {stdout}"
+    );
     assert!(
         results[2]["error"].is_string(),
         "the third op should have been refused: {stdout}"
@@ -185,7 +191,11 @@ fn a_malformed_line_is_named_and_nothing_is_submitted() {
         "cli-agent",
         file.to_str().expect("utf-8"),
     ]);
-    assert_eq!(out.status.code(), Some(2), "usage failure expected: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "usage failure expected: {out:?}"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains(":2:"), "the bad line is not named: {err}");
     assert!(
@@ -199,8 +209,7 @@ fn a_malformed_line_is_named_and_nothing_is_submitted() {
         .args(["-s", &format!("{api}/api/view")])
         .output()
         .expect("curl runs");
-    let view: serde_json::Value =
-        serde_json::from_slice(&view.stdout).expect("view is JSON");
+    let view: serde_json::Value = serde_json::from_slice(&view.stdout).expect("view is JSON");
     assert_eq!(
         view["refs"].as_object().map(serde_json::Map::len),
         Some(0),
@@ -222,7 +231,11 @@ fn verify_checks_the_chain_and_is_honest_about_keys_it_does_not_hold() {
     let file = work.join("ops.jsonl");
     std::fs::write(&file, ops(&["alpha", "beta", "gamma"])).expect("ops file");
     assert!(choir(&[
-        "batch", &api, &key_file, "cli-agent", file.to_str().expect("utf-8")
+        "batch",
+        &api,
+        &key_file,
+        "cli-agent",
+        file.to_str().expect("utf-8")
     ])
     .status
     .success());
@@ -235,7 +248,10 @@ fn verify_checks_the_chain_and_is_honest_about_keys_it_does_not_hold() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("chain holds"), "{err}");
     assert!(err.contains("0 signatures verified"), "{err}");
-    assert!(err.contains("no key held"), "authorship was claimed without a key: {err}");
+    assert!(
+        err.contains("no key held"),
+        "authorship was claimed without a key: {err}"
+    );
 
     // The same page with the key that signed it: now the signatures are
     // actually checked, and the count says how many.
@@ -245,7 +261,11 @@ fn verify_checks_the_chain_and_is_honest_about_keys_it_does_not_hold() {
     let keys = work.join("keys");
     std::fs::write(&keys, format!("cli-agent {pub_hex}\n")).expect("keys file");
     let out = choir(&[
-        "log", &api, "--verify", "--keys", keys.to_str().expect("utf-8"),
+        "log",
+        &api,
+        "--verify",
+        "--keys",
+        keys.to_str().expect("utf-8"),
     ]);
     assert!(out.status.success(), "{out:?}");
     let err = String::from_utf8_lossy(&out.stderr);

@@ -48,7 +48,11 @@ struct Rng(u64);
 impl Rng {
     fn new(seed: u64) -> Self {
         // xorshift is stuck at zero, and any other state is fine.
-        Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+        Self(if seed == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seed
+        })
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -78,7 +82,9 @@ impl Rng {
             'a', 'Z', '0', '/', '-', ' ', '"', '\\', '\n', '\t', '\u{0}', '\u{7f}', 'é', '𝄞',
         ];
         let len = self.below(12);
-        (0..len).map(|_| ALPHABET[self.below(ALPHABET.len())]).collect()
+        (0..len)
+            .map(|_| ALPHABET[self.below(ALPHABET.len())])
+            .collect()
     }
 
     fn hash(&mut self) -> ContentHash {
@@ -559,7 +565,11 @@ fn the_d39_witness_fields_change_no_pre_d39_byte() {
         // would pass the check above and fail here.
         let back: OpEntry = serde_json::from_slice(&bytes).expect("decodes");
         assert_eq!(canonical(&back), bytes, "{at}: re-encode changed the bytes");
-        assert_eq!(back.content_hash(), entry.content_hash(), "{at}: hash moved");
+        assert_eq!(
+            back.content_hash(),
+            entry.content_hash(),
+            "{at}: hash moved"
+        );
     });
 }
 
@@ -595,7 +605,8 @@ fn a_witness_without_a_scheme_reads_as_ed25519_and_survives_a_round_trip() {
 #[test]
 fn a_witness_from_a_newer_writer_still_decodes() {
     let future = br#"{"key_id":"k","signature":[9],"scheme":2,"a_field_from_2027":{"x":1}}"#;
-    let w: Witness = serde_json::from_slice(future).expect("an unknown member must not stop a read");
+    let w: Witness =
+        serde_json::from_slice(future).expect("an unknown member must not stop a read");
     assert_eq!(w.scheme_id(), choir_oplog::scheme::WEBAUTHN_ES256);
     assert_eq!(w.signature, vec![9]);
 }
@@ -607,8 +618,8 @@ fn a_witness_from_a_newer_writer_still_decodes() {
 /// where refusing means an old node cannot read the log at all.
 #[test]
 fn an_unknown_scheme_decodes_and_is_reported_verbatim() {
-    let w: Witness =
-        serde_json::from_slice(br#"{"key_id":"k","signature":[1],"scheme":40000}"#).expect("decodes");
+    let w: Witness = serde_json::from_slice(br#"{"key_id":"k","signature":[1],"scheme":40000}"#)
+        .expect("decodes");
     assert_eq!(w.scheme_id(), 40_000, "the tag is reported, not normalised");
 }
 
@@ -672,8 +683,8 @@ fn the_hashed_kinds_cannot_be_mistaken_for_one_another() {
         // `content_hash` at the bare payload leaves this test green and
         // fails that one, which is the correct division rather than a
         // gap, but only because both exist.
-        let signing_preimage = serde_json::to_vec(&(&entry.channel, &entry.payload))
-            .expect("tuple serializes");
+        let signing_preimage =
+            serde_json::to_vec(&(&entry.channel, &entry.payload)).expect("tuple serializes");
         let content_preimage = canonical(entry);
         assert_eq!(signing_preimage.first(), Some(&b'['), "{at}");
         assert_eq!(content_preimage.first(), Some(&b'{'), "{at}");
@@ -692,5 +703,9 @@ fn the_hashed_kinds_cannot_be_mistaken_for_one_another() {
         "hashing a key and hashing its hex spelling landed on one value"
     );
     assert_eq!(raw.digest.len(), 32);
-    assert_eq!(raw.to_hex().len(), 67, "codec byte, dash, 64 hex characters");
+    assert_eq!(
+        raw.to_hex().len(),
+        67,
+        "codec byte, dash, 64 hex characters"
+    );
 }

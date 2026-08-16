@@ -55,7 +55,18 @@ fn seed_commit(work: &std::path::Path, bare: &std::path::Path) {
 fn api(port: u16, user: &str, body: &str) -> (u16, serde_json::Value) {
     let url = format!("http://127.0.0.1:{port}/api/workspace");
     let out = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}", "-u", user, "-X", "POST", "-d", body, &url])
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-u",
+            user,
+            "-X",
+            "POST",
+            "-d",
+            body,
+            &url,
+        ])
         .output()
         .expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout);
@@ -90,8 +101,12 @@ fn the_workspace_ceiling_is_per_user_and_names_its_own_repair() {
     seed_commit(&work, &root.join("agents/demo.git"));
     node.enable_quotas(None, std::num::NonZeroU32::new(2));
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
 
@@ -146,13 +161,20 @@ fn a_node_wide_grant_holder_is_exempt_from_the_workspace_ceiling() {
     node.create_repo("agents/demo.git").expect("repo created");
     seed_commit(&work, &root.join("agents/demo.git"));
     let acl = work.join("acl");
-    std::fs::write(&acl, "alice   *       write\ncarol   *       write\ncarol   @node   auditor\n")
-        .expect("acl file");
+    std::fs::write(
+        &acl,
+        "alice   *       write\ncarol   *       write\ncarol   @node   auditor\n",
+    )
+    .expect("acl file");
     node.watch_acl_file(acl).expect("acl loads");
     node.enable_quotas(None, std::num::NonZeroU32::new(1));
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
 
@@ -165,7 +187,10 @@ fn a_node_wide_grant_holder_is_exempt_from_the_workspace_ceiling() {
     // Carol holds `@node`, so the same ceiling does not apply to her.
     for name in ["carol-one", "carol-two", "carol-three"] {
         let (code, body) = create(port, "carol:c", name);
-        assert_eq!(code, 200, "the @node grant holder was refused: {name}: {body}");
+        assert_eq!(
+            code, 200,
+            "the @node grant holder was refused: {name}: {body}"
+        );
     }
 }
 
@@ -188,8 +213,12 @@ fn an_unset_workspace_ceiling_limits_nothing() {
     seed_commit(&work, &root.join("agents/demo.git"));
     node.enable_quotas(None, None);
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
 

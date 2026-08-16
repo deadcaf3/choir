@@ -77,7 +77,10 @@ fn the_page_is_behind_the_same_auth_wall_as_everything_else() {
     let (url, _) = served_node();
 
     let (status, headers, body) = get(&url, &[]);
-    assert_eq!(status, 401, "the browser surface served an anonymous reader");
+    assert_eq!(
+        status, 401,
+        "the browser surface served an anonymous reader"
+    );
     assert!(!body.contains("<!doctype html>"), "a 401 leaked the page");
     assert!(
         header_value(&headers, "WWW-Authenticate").is_some(),
@@ -221,7 +224,10 @@ fn a_node_with_no_platform_explains_itself_rather_than_looking_broken() {
         "a reader met a wall and was given nowhere to go: {body}"
     );
     // The machine-readable reason, for quoting to an operator.
-    assert!(body.contains("platform_disabled"), "no code to quote: {body}");
+    assert!(
+        body.contains("platform_disabled"),
+        "no code to quote: {body}"
+    );
 }
 
 /// A mistyped address used to fall through to `git http-backend`, whose
@@ -250,7 +256,10 @@ fn a_mistyped_address_names_the_addresses_that_do_work() {
         "a reader who mistyped a clone URL is not told how one differs: {body}"
     );
     // ...and it echoes what was actually asked for, escaped.
-    let (_, _, hostile) = get(&format!("{url}<img src=x onerror=alert(1)>"), &["-u", "u:t"]);
+    let (_, _, hostile) = get(
+        &format!("{url}<img src=x onerror=alert(1)>"),
+        &["-u", "u:t"],
+    );
     assert!(
         !hostile.contains("<img src=x"),
         "the echoed path reached the page as markup: {hostile}"

@@ -42,7 +42,12 @@ fn comment(id: &str, author: &str, body: &str) -> ViewOp {
 fn comments_fold_into_the_review_in_log_order() {
     let mut log = review_log();
     append_op(&mut log, "ana", comment("c1", "ana", "why this base?")).unwrap();
-    append_op(&mut log, "author", comment("c2", "author", "it is the merge base")).unwrap();
+    append_op(
+        &mut log,
+        "author",
+        comment("c2", "author", "it is the merge base"),
+    )
+    .unwrap();
     append_op(&mut log, "ana", comment("c3", "ana", "then I am happy")).unwrap();
 
     let view = View::materialize(&log).unwrap();
@@ -100,7 +105,10 @@ fn a_comment_id_is_refused_twice_on_the_same_review() {
     // if one were attached: only the fold can refuse this.
     match append_op(&mut log, "ana", comment("c1", "ana", "said once")) {
         Err(ViewError::Review(msg)) => {
-            assert!(msg.contains("c1") && msg.contains("already exists"), "{msg}");
+            assert!(
+                msg.contains("c1") && msg.contains("already exists"),
+                "{msg}"
+            );
         }
         other => panic!("a replayed comment was admitted: {other:?}"),
     }
@@ -110,7 +118,12 @@ fn a_comment_id_is_refused_twice_on_the_same_review() {
         append_op(&mut log, "ana", comment("c1", "ana", "said differently")),
         Err(ViewError::Review(_))
     ));
-    assert_eq!(View::materialize(&log).unwrap().reviews["r1"].comments.len(), 1);
+    assert_eq!(
+        View::materialize(&log).unwrap().reviews["r1"]
+            .comments
+            .len(),
+        1
+    );
 
     // The id is unique within its review, not across the log: two
     // reviews may each hold a `c1`, and neither knows about the other.
@@ -166,7 +179,9 @@ fn a_comment_needs_a_review_an_id_an_author_and_a_body() {
             "an empty field was admitted: id={id:?} author={author:?} body={body:?}"
         );
     }
-    assert!(View::materialize(&log).unwrap().reviews["r1"].comments.is_empty());
+    assert!(View::materialize(&log).unwrap().reviews["r1"]
+        .comments
+        .is_empty());
 }
 
 /// Archiving drops the discussion with the verdicts, because discussion

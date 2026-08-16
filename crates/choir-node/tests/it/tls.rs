@@ -9,7 +9,14 @@ use choir_oplog::MemLog;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -43,7 +50,9 @@ fn git_and_api_work_over_https() {
     let cert = work.join("cert.pem");
     let key = work.join("key.pem");
     let out = std::process::Command::new("openssl")
-        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1"])
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        ])
         .args(["-subj", "/CN=localhost"])
         .arg("-keyout")
         .arg(&key)
@@ -51,7 +60,11 @@ fn git_and_api_work_over_https() {
         .arg(&cert)
         .output()
         .expect("openssl runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let mut node = Node::bind_full(
         &work.join("repos"),
@@ -62,7 +75,12 @@ fn git_and_api_work_over_https() {
     )
     .unwrap();
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .unwrap(),
     );
     let port = node.port();
     node.create_repo("agents/demo.git").unwrap();

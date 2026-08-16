@@ -111,11 +111,7 @@ pub type Revocations = std::collections::BTreeMap<String, u64>;
 /// next year over the same page gives the same answer, which is the
 /// property that makes the log auditable rather than merely current.
 #[must_use]
-pub fn page(
-    entries: &[serde_json::Value],
-    registry: &Registry,
-    revoked: &Revocations,
-) -> Report {
+pub fn page(entries: &[serde_json::Value], registry: &Registry, revoked: &Revocations) -> Report {
     let mut report = Report::default();
     let mut previous: Option<(u64, String)> = None;
     for entry in entries {
@@ -124,14 +120,14 @@ pub fn page(
 
         if let Some((last_seq, last_hash)) = &previous {
             if seq != last_seq + 1 {
-                report
-                    .failures
-                    .push(format!("seq {seq}: follows {last_seq}, so an entry is missing"));
+                report.failures.push(format!(
+                    "seq {seq}: follows {last_seq}, so an entry is missing"
+                ));
             }
             if entry["parent"].as_str() != Some(last_hash.as_str()) {
-                report
-                    .failures
-                    .push(format!("seq {seq}: parent is not the previous entry's hash"));
+                report.failures.push(format!(
+                    "seq {seq}: parent is not the previous entry's hash"
+                ));
             }
         }
 
@@ -141,9 +137,9 @@ pub fn page(
             Some(_) => report
                 .failures
                 .push(format!("seq {seq}: does not hash to the hash it claims")),
-            None => report
-                .failures
-                .push(format!("seq {seq}: cannot be rebuilt from the fields served")),
+            None => report.failures.push(format!(
+                "seq {seq}: cannot be rebuilt from the fields served"
+            )),
         }
 
         match (entry["author_key"].as_str(), &rebuilt) {
@@ -327,7 +323,9 @@ mod tests {
 
     fn registry_for(key: &ActorKey) -> Registry {
         let mut registry = Registry::new();
-        registry.register(&key.public_key_bytes()).expect("valid key");
+        registry
+            .register(&key.public_key_bytes())
+            .expect("valid key");
         registry
     }
 
@@ -370,7 +368,11 @@ mod tests {
         assert_eq!(report.checked, 1, "only seq 0 predates the revocation");
         assert_eq!(report.unverified, 0, "these are refusals, not unknowns");
         assert_eq!(report.failures.len(), 2, "{:?}", report.failures);
-        assert!(report.failures[0].contains("revoked at seq 1"), "{:?}", report.failures);
+        assert!(
+            report.failures[0].contains("revoked at seq 1"),
+            "{:?}",
+            report.failures
+        );
     }
 
     /// The boundary. A key revoked *at* seq N did not authorize the entry
@@ -396,7 +398,10 @@ mod tests {
         );
         let report = super::page(&entries, &registry_for(&key), &Revocations::new());
         assert!(
-            report.failures.iter().any(|f| f.contains("does not hash to")),
+            report
+                .failures
+                .iter()
+                .any(|f| f.contains("does not hash to")),
             "a forged hash passed: {report:?}"
         );
     }
@@ -414,7 +419,10 @@ mod tests {
             "a gap passed: {report:?}"
         );
         assert!(
-            report.failures.iter().any(|f| f.contains("an entry is missing")),
+            report
+                .failures
+                .iter()
+                .any(|f| f.contains("an entry is missing")),
             "the sequence gap was not reported: {report:?}"
         );
     }
@@ -429,7 +437,10 @@ mod tests {
         entries[2]["author_sig_hex"] = lifted;
         let report = super::page(&entries, &registry_for(&key), &Revocations::new());
         assert!(
-            report.failures.iter().any(|f| f.contains("does not verify")),
+            report
+                .failures
+                .iter()
+                .any(|f| f.contains("does not verify")),
             "a replayed signature passed: {report:?}"
         );
     }
@@ -468,7 +479,8 @@ mod tests {
     /// threads in one process, so a shared name is two tests overwriting
     /// each other's key files.
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("choir-verify-d45-{}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("choir-verify-d45-{}-{tag}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
@@ -481,7 +493,14 @@ mod tests {
         let secret = dir.join(format!("{name}.key"));
         let spki = dir.join(format!("{name}.der"));
         assert!(std::process::Command::new("openssl")
-            .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+            .args([
+                "ecparam",
+                "-name",
+                "prime256v1",
+                "-genkey",
+                "-noout",
+                "-out"
+            ])
             .arg(&secret)
             .output()
             .expect("openssl runs")
@@ -602,7 +621,10 @@ mod tests {
         // And never as a whole check: the credential arrived with the
         // entry, so nothing vouched for it, and reporting this as
         // `checked` would claim an anchor that does not exist.
-        assert_eq!(report.checked, 0, "an unanchored key was counted as checked");
+        assert_eq!(
+            report.checked, 0,
+            "an unanchored key was counted as checked"
+        );
         assert!(report
             .notes
             .iter()
@@ -656,7 +678,10 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.unverified, 1);
         assert_eq!(report.integrity_only, 0);
-        assert!(report.notes.iter().any(|n| n.contains("written before D45")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("written before D45")));
         std::fs::remove_dir_all(&dir).ok();
     }
 

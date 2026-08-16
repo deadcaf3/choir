@@ -30,7 +30,9 @@ fn an_old_signed_payload_still_verifies_after_round_trip() {
     )
     .into_bytes();
     assert!(
-        !String::from_utf8(old_payload.clone()).unwrap().contains("\"depends\":"),
+        !String::from_utf8(old_payload.clone())
+            .unwrap()
+            .contains("\"depends\":"),
         "the fixture must predate the field"
     );
 
@@ -61,8 +63,8 @@ fn depends_is_covered_by_the_signature() {
     let mut registry = Registry::new();
     registry.register(&key.public_key_bytes()).unwrap();
 
-    let declared = ViewOp::new(set_ref_kind())
-        .with_depends(vec![ContentHash::blake3(b"prerequisite change")]);
+    let declared =
+        ViewOp::new(set_ref_kind()).with_depends(vec![ContentHash::blake3(b"prerequisite change")]);
     let signed_bytes = declared.to_payload();
     let sig = key.sign_submission("agent-1", &signed_bytes);
     registry
@@ -74,7 +76,9 @@ fn depends_is_covered_by_the_signature() {
     let stripped = ViewOp::new(set_ref_kind()).to_payload();
     assert_ne!(stripped, signed_bytes);
     assert!(
-        registry.verify_submission("agent-1", &stripped, &sig).is_err(),
+        registry
+            .verify_submission("agent-1", &stripped, &sig)
+            .is_err(),
         "stripping depends must break the signature"
     );
 }

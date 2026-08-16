@@ -17,7 +17,12 @@ use crate::support::{curl, submit_body};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -37,7 +42,12 @@ fn a_push_derived_op_carries_its_provenance_in_the_payload() {
 
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .unwrap(),
     );
     let port = node.port();
     node.create_repo("agents/demo.git").unwrap();
@@ -77,8 +87,8 @@ fn a_push_derived_op_carries_its_provenance_in_the_payload() {
                 .is_some_and(|c| c.starts_with("git/"))
         })
         .expect("a git/-channel entry from the push");
-    let payload = hex_decode(push_entry["payload_hex"].as_str().expect("payload_hex"))
-        .expect("hex payload");
+    let payload =
+        hex_decode(push_entry["payload_hex"].as_str().expect("payload_hex")).expect("hex payload");
     let op = ViewOp::from_payload(&payload).expect("payload decodes");
     assert_eq!(op.provenance, Some(Provenance::PushTransport), "{op:?}");
 
@@ -116,13 +126,19 @@ fn a_claimed_push_provenance_is_refused_from_any_key_but_the_nodes() {
     })
     .with_provenance(Provenance::PushCertified);
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&ana, "ana", &dressed),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&ana, "ana", &dressed),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "node_only", "{resp}");
     assert!(
-        resp["error"].as_str().expect("error text").contains("provenance"),
+        resp["error"]
+            .as_str()
+            .expect("error text")
+            .contains("provenance"),
         "{resp}"
     );
 
@@ -134,7 +150,10 @@ fn a_claimed_push_provenance_is_refused_from_any_key_but_the_nodes() {
         prev: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&ana, "ana", &plain),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&ana, "ana", &plain),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");

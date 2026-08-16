@@ -130,7 +130,8 @@ fn the_clock_counts_log_position_not_bindings() {
 fn a_key_belongs_to_one_operator_forever() {
     let mut view = View::default();
     let key = h(b"agent key");
-    view.apply(&bind("ana", &key, None)).expect("fresh key binds");
+    view.apply(&bind("ana", &key, None))
+        .expect("fresh key binds");
 
     let stolen = view.apply(&bind("mal", &key, None));
     assert!(
@@ -196,7 +197,9 @@ fn a_bound_channel_must_read_as_its_own_operator() {
     ] {
         let mut probe = view.clone();
         assert!(
-            probe.apply(&bind("ana", &h(name.as_bytes()), Some(channel))).is_ok(),
+            probe
+                .apply(&bind("ana", &h(name.as_bytes()), Some(channel)))
+                .is_ok(),
             "{name}: {channel} reads as ana and must be accepted"
         );
     }
@@ -227,7 +230,11 @@ fn operator_keys_counts_every_key_including_revoked_ones() {
     }
     view.apply(&revoke(&h(b"k0"), "rotated")).expect("revokes");
 
-    assert_eq!(view.operator_keys("ana").count(), 3, "revoking must not lower the count");
+    assert_eq!(
+        view.operator_keys("ana").count(),
+        3,
+        "revoking must not lower the count"
+    );
     assert_eq!(view.operator_keys("bo").count(), 1);
     assert_eq!(view.operator_keys("nobody").count(), 0);
     assert_eq!(
@@ -300,7 +307,14 @@ fn the_fold_position_agrees_across_both_construction_paths() {
         "replaying the log must reproduce the incrementally built view"
     );
     assert_eq!(replayed.bindings[&key.to_hex()].bound_at, 0);
-    assert_eq!(replayed.bindings[&key.to_hex()].revoked.as_ref().expect("revoked").at, 3);
+    assert_eq!(
+        replayed.bindings[&key.to_hex()]
+            .revoked
+            .as_ref()
+            .expect("revoked")
+            .at,
+        3
+    );
 }
 
 /// Invariant 1 for the new variant: a payload written before `channel`

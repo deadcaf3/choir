@@ -9,7 +9,14 @@ use choir_oplog::MemLog;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -78,21 +85,29 @@ fn git_push_lands_in_the_op_log() {
     std::fs::write(c1.join("f.txt"), "sequenced twice\n").unwrap();
     git(&c1, &["add", "."]);
     git(&c1, &["commit", "-q", "-m", "second"]);
-    assert!(git(&c1, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&c1, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
     let head2 = String::from_utf8(git(&c1, &["rev-parse", "HEAD"]).stdout)
         .unwrap()
         .trim()
         .to_string();
     let v = view(port);
     assert_eq!(
-        v["refs"]["agents/demo.git:refs/heads/main"].as_str().unwrap(),
+        v["refs"]["agents/demo.git:refs/heads/main"]
+            .as_str()
+            .unwrap(),
         format!("11-{head2}")
     );
 
     // Branch create + delete round-trips out of the view.
-    assert!(git(&c1, &["push", "-q", "origin", "HEAD:feature"]).status.success());
+    assert!(git(&c1, &["push", "-q", "origin", "HEAD:feature"])
+        .status
+        .success());
     assert!(view(port)["refs"]["agents/demo.git:refs/heads/feature"].is_string());
-    assert!(git(&c1, &["push", "-q", "origin", ":feature"]).status.success());
+    assert!(git(&c1, &["push", "-q", "origin", ":feature"])
+        .status
+        .success());
     assert!(view(port)["refs"]["agents/demo.git:refs/heads/feature"].is_null());
 
     node.unblock();

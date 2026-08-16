@@ -5,9 +5,10 @@
 //! fixed ports in here.
 
 mod acl_render;
-mod claude_hooks;
 mod batch;
+mod claude_hooks;
 mod cli;
+mod gate;
 mod insight;
 mod install_policy;
 mod mcp;

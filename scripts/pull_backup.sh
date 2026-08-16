@@ -9,7 +9,7 @@
 #   - ~/.choir/repos/.choir/ops.jsonl   (the live log)
 #   - ~/.choir/repos/.choir/node.fingerprint
 #   - ~/.choir/repos/.choir/refs.snapshot  (the D25 ref attestation)
-#   - the five policy files a restore needs to boot
+#   - the nine public-policy/configuration files a beta restore needs
 #
 # Never pulled, and refused if seen: auth, *.key, *.pem. The signing key
 # stays on the node that owns it, and a bearer token in a backup is a
@@ -23,8 +23,10 @@ IP=${1:-$(cat "$HOME/.choir-mirror-ip")}
 KEY=$HOME/.ssh/choir_bench_ed25519
 SSH_CONTROL=$HOME/.ssh/cm-choir-mirror.sock
 DEST=${CHOIR_BACKUP_DIR:-$HOME/choir-oplog}
+VERIFY_BIN=${CHOIR_NODE_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/choir-node}
 REMOTE_STATE='~/.choir/repos/.choir'
 REMOTE_HOME='~/.choir'
+POLICY_FILES='keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl repos.list acl private-beta.manifest'
 
 # -n: nothing here feeds ssh stdin, and without it an ssh inside the
 # objects leg's while-read loop silently swallows the rest of
@@ -42,6 +44,8 @@ fail() { echo "pull-backup: $1" >&2; exit 1; }
 # backup relation with a self-copy that verifies vacuously.
 [ -f "$HOME/.choir/node-remote" ] \
   || fail "no ~/.choir/node-remote marker: this machine is not a follower of a remote node"
+[ -x "$VERIFY_BIN" ] \
+  || fail "no verifier at $VERIFY_BIN (build choir-node --release or set CHOIR_NODE_BIN)"
 
 mkdir -p "$DEST"
 
@@ -73,15 +77,13 @@ if [ -f "$DEST/ops.jsonl" ]; then
     || fail "the last pull is not a prefix of the live log: the two have diverged"
 fi
 
-# 4. Contiguity, same as verify_backup.sh: a truncated middle is the
-#    failure a whole-file checksum cannot localise.
-sed -n 's/.*"seq":\([0-9][0-9]*\).*/\1/p' "$DEST/ops.jsonl.part" > "$DEST/.seqs"
-seqcount=$(wc -l < "$DEST/.seqs" | tr -d ' ')
-[ "$seqcount" = "$lines" ] \
-  || fail "$lines lines but $seqcount carry a seq: the log is not all op entries"
-awk 'NR-1 != $1 { printf "seq gap: line %d carries seq %d\n", NR, $1; exit 1 }' "$DEST/.seqs" \
-  || fail "the pulled log has a gap; it cannot be replayed to the head"
-rm -f "$DEST/.seqs"
+# 4. Full format and chain verification. This is the same verifier the
+#    release daemon exposes for restore tooling: it checks the supported
+#    wire version, sequence, every parent link, and every recomputed entry
+#    hash. A checksum proves transport equality; it cannot prove that the
+#    bytes copied are a valid log.
+"$VERIFY_BIN" --verify-log "$DEST/ops.jsonl.part" \
+  || fail "the pulled log failed format/sequence/parent/hash verification"
 mv "$DEST/ops.jsonl.part" "$DEST/ops.jsonl"
 
 # 5. The pin travels with the log, so a restore onto a fresh host refuses
@@ -96,12 +98,12 @@ ssh_run "cat $REMOTE_STATE/node.fingerprint" > "$DEST/node.fingerprint.part" \
 #    repos.list joined the set when the served repos moved into it: a
 #    restore without it serves only the default repo, and the log's refs
 #    for the others would be retracted by reconcile at first boot.
-for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list; do
+for f in $POLICY_FILES; do
   ssh_run "cat $REMOTE_HOME/$f" > "$DEST/policy.part.$f" \
     || fail "policy file $f missing on the node host; a restore without it does not boot"
 done
 mkdir -p "$DEST/policy"
-for f in keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list; do
+for f in $POLICY_FILES; do
   mv "$DEST/policy.part.$f" "$DEST/policy/$f"
 done
 chmod 700 "$DEST" && chmod 600 "$DEST/policy/"*
@@ -226,7 +228,7 @@ done <"$DEST/policy/repos.list"
 leaked=$(ls "$DEST" "$DEST/policy" | grep -E '^(auth)$|\.key$|\.pem$' || true)
 [ -z "$leaked" ] || fail "SECRETS IN THE BACKUP: $leaked (a backup holding a token or key is a credential channel)"
 
-echo "pull-backup: $lines ops, fingerprint, 6 policy files, $bundles repo bundles -> $DEST"
+echo "pull-backup: $lines ops, fingerprint, 9 policy/config files, $bundles repo bundles -> $DEST"
 # Never let the run's last line read as full verification when it was
 # not. The per-repo line above already said which; this says how many,
 # because that is the number an operator would otherwise have to count

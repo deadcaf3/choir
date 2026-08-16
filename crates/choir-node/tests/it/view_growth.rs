@@ -78,7 +78,10 @@ fn bindings_are_measured_but_stay_out_of_the_authoritative_total() {
     let row = &bound["bindings"][subject.to_hex()];
     assert_eq!(row["operator"], "alpha", "{}", bound["bindings"]);
     assert_eq!(row["channel"], "alpha/agent");
-    assert_eq!(row["bound_at"], 0, "the first binding pins the log position");
+    assert_eq!(
+        row["bound_at"], 0,
+        "the first binding pins the log position"
+    );
     assert!(row["revoked"].is_null(), "an unrevoked row reports null");
     assert_eq!(bound["view_growth"]["counts"]["bindings"], 1);
     assert_eq!(bound["view_growth"]["counts"]["revoked_bindings"], 0);
@@ -88,8 +91,7 @@ fn bindings_are_measured_but_stay_out_of_the_authoritative_total() {
         "the binding map must be measured, not merely projected"
     );
     assert_eq!(
-        bound["view_growth"]["serialized_bytes"]["total_authoritative_view"],
-        total_before,
+        bound["view_growth"]["serialized_bytes"]["total_authoritative_view"], total_before,
         "a binding must not move the tracked authoritative total"
     );
 
@@ -101,14 +103,16 @@ fn bindings_are_measured_but_stay_out_of_the_authoritative_total() {
     let (_, revoked) = current_view(&platform);
     let row = &revoked["bindings"][subject.to_hex()];
     assert_eq!(row["operator"], "alpha", "attribution survives revocation");
-    assert_eq!(row["bound_at"], 0, "revoking must not move the first binding");
+    assert_eq!(
+        row["bound_at"], 0,
+        "revoking must not move the first binding"
+    );
     assert_eq!(row["revoked"]["at"], 1);
     assert_eq!(row["revoked"]["reason"], "key material rotated");
     assert_eq!(revoked["view_growth"]["counts"]["bindings"], 1);
     assert_eq!(revoked["view_growth"]["counts"]["revoked_bindings"], 1);
     assert_eq!(
-        revoked["view_growth"]["serialized_bytes"]["total_authoritative_view"],
-        total_before,
+        revoked["view_growth"]["serialized_bytes"]["total_authoritative_view"], total_before,
         "a revocation must not move the tracked authoritative total either"
     );
 }

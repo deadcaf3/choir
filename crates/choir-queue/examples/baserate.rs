@@ -89,7 +89,11 @@ fn main() {
     // Suitability before interpretation. A corpus that does not revert
     // reads as a corpus with no bad merges, and that reading is wrong in
     // the most flattering possible direction.
-    let sample = base_rate(&commits, *windows.iter().max().unwrap_or(&200), &attribution);
+    let sample = base_rate(
+        &commits,
+        *windows.iter().max().unwrap_or(&200),
+        &attribution,
+    );
     println!(
         "\nrevert commits anywhere in history: {} ({:.2} per 1000 commits)",
         sample.revert_commits,

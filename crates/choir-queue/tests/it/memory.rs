@@ -156,7 +156,11 @@ fn a_replayed_resolution_that_fails_ci_does_not_land() {
     let report = drain(&mut queue, &mut |_: &Change, _: &str| false);
     assert_eq!(report.merged, Vec::<u64>::new());
     assert_eq!(report.rejected, vec![(1, Rejection::CiFailure)]);
-    assert_eq!(report.replayed, vec![1], "replayed, then judged, then refused");
+    assert_eq!(
+        report.replayed,
+        vec![1],
+        "replayed, then judged, then refused"
+    );
     assert_eq!(report.final_state, "b\n", "the tip must not move");
 }
 
@@ -168,7 +172,10 @@ fn a_different_triple_misses_the_memory() {
     queue.set_memory(remembered_resolution());
     queue.submit(stale_change());
     let report = drain(&mut queue, &mut |_: &Change, _: &str| true);
-    assert!(report.replayed.is_empty(), "no recall for a different left side");
+    assert!(
+        report.replayed.is_empty(),
+        "no recall for a different left side"
+    );
     assert_eq!(report.rejected, vec![(1, Rejection::Conflict)]);
     assert_eq!(report.merge_invocations, 1);
 }

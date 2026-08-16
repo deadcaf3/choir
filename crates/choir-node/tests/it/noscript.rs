@@ -122,9 +122,12 @@ fn served() -> (String, String) {
     let clone = work.join("clone");
     let url = format!("http://u:t@127.0.0.1:{port}/agents/one.git");
     assert!(
-        git(&work, &["clone", "-q", &url, clone.to_str().expect("utf-8 path")])
-            .status
-            .success(),
+        git(
+            &work,
+            &["clone", "-q", &url, clone.to_str().expect("utf-8 path")]
+        )
+        .status
+        .success(),
         "seeding clone failed"
     );
     std::fs::create_dir_all(clone.join("src")).expect("src dir");
@@ -252,7 +255,10 @@ fn every_page_renders_its_content_with_scripting_disabled() {
             "/r/agents/one/tree/no-such-branch".to_string(),
             vec!["no such", "next"],
         ),
-        ("/definitely-not-a-route".to_string(), vec!["next", "node state"]),
+        (
+            "/definitely-not-a-route".to_string(),
+            vec!["next", "node state"],
+        ),
         // D39's account page, added when it landed rather than when
         // this list was written. This node runs no `--accounts-file`,
         // so the page says so — and saying so is exactly the content a

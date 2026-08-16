@@ -371,11 +371,7 @@ fn finish(status: u16, body: &str) -> ! {
 /// a reporting problem into an availability problem, and the node is the
 /// authority on whether a binding is admissible regardless of what this
 /// saw.
-fn current_binding(
-    api: &str,
-    auth: AuthOptions<'_>,
-    actor_id: &str,
-) -> Option<serde_json::Value> {
+fn current_binding(api: &str, auth: AuthOptions<'_>, actor_id: &str) -> Option<serde_json::Value> {
     let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
     if !(200..300).contains(&status) {
         return None;
@@ -625,7 +621,11 @@ fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions
     eprintln!(
         "choir log: {} entries, chain {}, {} signatures verified, {} unverified{passkeys}",
         entries.len(),
-        if report.failures.is_empty() { "holds" } else { "BROKEN" },
+        if report.failures.is_empty() {
+            "holds"
+        } else {
+            "BROKEN"
+        },
         report.checked,
         report.unverified
     );
@@ -817,12 +817,8 @@ fn runner(config_file: &str, auth: AuthOptions<'_>) -> ! {
                                 "ensure needs either a request base or a config base_ref",
                             )
                         })?;
-                        let (status, body) = http(
-                            &config.api,
-                            auth,
-                            "choir_view",
-                            serde_json::json!({}),
-                        );
+                        let (status, body) =
+                            http(&config.api, auth, "choir_view", serde_json::json!({}));
                         if !(200..300).contains(&status) {
                             return Err(choir_cli::runner::failure_from_response(
                                 &body,
@@ -1138,8 +1134,7 @@ fn main() {
                 format!("{repo}/{name}"),
                 prev_revision,
             );
-            let mut body =
-                signed_payload_body(key_file, channel, &authorization.to_payload());
+            let mut body = signed_payload_body(key_file, channel, &authorization.to_payload());
             body["repo"] = serde_json::json!(repo);
             body["name"] = serde_json::json!(name);
             body["change"] = serde_json::json!(change_id);
@@ -1162,7 +1157,9 @@ fn main() {
             while let Some(arg) = it.next() {
                 match *arg {
                     "--from" => {
-                        let Some(value) = it.next().and_then(|v| v.parse().ok()) else { usage() };
+                        let Some(value) = it.next().and_then(|v| v.parse().ok()) else {
+                            usage()
+                        };
                         from = value;
                     }
                     "--verify" => verify = true,
@@ -1387,7 +1384,9 @@ fn main() {
                     "--offset" => "offset",
                     _ => usage(),
                 };
-                let Some(value) = it.next().and_then(|v| v.parse::<u64>().ok()) else { usage() };
+                let Some(value) = it.next().and_then(|v| v.parse::<u64>().ok()) else {
+                    usage()
+                };
                 arguments.insert(field.to_string(), serde_json::json!(value));
             }
             let (status, resp) = http(api, auth, "choir_view", arguments.into());

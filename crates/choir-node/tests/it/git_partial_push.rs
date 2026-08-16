@@ -16,7 +16,12 @@ use crate::support::{curl, submit_body};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -57,7 +62,9 @@ fn a_refused_push_retracts_the_refs_it_already_had_accepted() {
     let bare = work.join("repos").join("agents/demo.git");
 
     let c1 = work.join("clone1");
-    assert!(git(&work, &["clone", "-q", &url, c1.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &url, c1.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(c1.join("f.txt"), "one\n").unwrap();
     git(&c1, &["add", "."]);
     git(&c1, &["commit", "-q", "-m", "first"]);
@@ -70,7 +77,10 @@ fn a_refused_push_retracts_the_refs_it_already_had_accepted() {
         prev: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &op),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &op),
         &format!("http://127.0.0.1:{port}/api/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");

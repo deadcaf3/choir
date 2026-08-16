@@ -113,7 +113,9 @@ impl MemStore {
 impl ChunkStore for MemStore {
     fn put(&mut self, data: &[u8]) -> Result<ContentHash, StoreError> {
         let hash = ContentHash::blake3(data);
-        self.chunks.entry(hash.clone()).or_insert_with(|| data.to_vec());
+        self.chunks
+            .entry(hash.clone())
+            .or_insert_with(|| data.to_vec());
         Ok(hash)
     }
 
@@ -226,7 +228,10 @@ pub fn put_blob(
 /// Returns [`StoreError::BadManifest`] when the manifest fails to decode,
 /// names an unsupported format version, or disagrees with the reassembled
 /// length, and propagates chunk lookup and verification failures.
-pub fn get_blob(store: &dyn ChunkStore, manifest_hash: &ContentHash) -> Result<Vec<u8>, StoreError> {
+pub fn get_blob(
+    store: &dyn ChunkStore,
+    manifest_hash: &ContentHash,
+) -> Result<Vec<u8>, StoreError> {
     let manifest: Manifest = serde_json::from_slice(&store.get(manifest_hash)?)
         .map_err(|e| StoreError::BadManifest(e.to_string()))?;
     if manifest.format_version != FORMAT_VERSION {

@@ -136,7 +136,10 @@ pub(crate) fn apply(url: &str, body: &str) -> String {
     let mut truncated = false;
     let mut marks: Vec<(String, usize)> = Vec::new();
     for section in SECTIONS {
-        let Some(rows) = object.get_mut(section).and_then(serde_json::Value::as_object_mut) else {
+        let Some(rows) = object
+            .get_mut(section)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
             continue;
         };
         let total = rows.len();
@@ -216,7 +219,9 @@ mod tests {
         assert_eq!(out["refs_omitted"], 40);
         assert_eq!(
             out["paging"]["next"],
-            serde_json::json!(format!("/api/view?limit={DEFAULT_LIMIT}&offset={DEFAULT_LIMIT}"))
+            serde_json::json!(format!(
+                "/api/view?limit={DEFAULT_LIMIT}&offset={DEFAULT_LIMIT}"
+            ))
         );
     }
 
@@ -228,9 +233,11 @@ mod tests {
         let source = body(25);
         let mut seen: Vec<String> = Vec::new();
         for offset in [0, 10, 20] {
-            let out: serde_json::Value =
-                serde_json::from_str(&apply(&format!("/api/view?limit=10&offset={offset}"), &source))
-                    .unwrap();
+            let out: serde_json::Value = serde_json::from_str(&apply(
+                &format!("/api/view?limit=10&offset={offset}"),
+                &source,
+            ))
+            .unwrap();
             seen.extend(out["refs"].as_object().unwrap().keys().cloned());
         }
         let mut expected: Vec<String> = (0..25).map(|i| format!("r{i:04}")).collect();
@@ -279,8 +286,15 @@ mod tests {
             "view_growth": { "serialized_bytes": { "refs": 10, "reviews": 20 } },
         })
         .to_string();
-        let out: serde_json::Value = serde_json::from_str(&apply("/api/view?limit=1", &source)).unwrap();
-        assert_eq!(out["view_growth"]["serialized_bytes"].as_object().unwrap().len(), 2);
+        let out: serde_json::Value =
+            serde_json::from_str(&apply("/api/view?limit=1", &source)).unwrap();
+        assert_eq!(
+            out["view_growth"]["serialized_bytes"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
         assert!(out.get("view_growth_omitted").is_none());
     }
 }

@@ -9,7 +9,14 @@ use choir_oplog::MemLog;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -27,7 +34,13 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn bridge_once(upstream: &str, mirror: &std::path::Path, api: &str, key: &std::path::Path, label: &str) -> String {
+fn bridge_once(
+    upstream: &str,
+    mirror: &std::path::Path,
+    api: &str,
+    key: &std::path::Path,
+    label: &str,
+) -> String {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_choir-bridge"))
         .args([
             upstream,
@@ -65,7 +78,15 @@ fn read_replica_tracks_upstream() {
     let upstream = work.join("upstream.git");
     git(&work, &["init", "-q", "--bare", upstream.to_str().unwrap()]);
     let src = work.join("src");
-    git(&work, &["clone", "-q", upstream.to_str().unwrap(), src.to_str().unwrap()]);
+    git(
+        &work,
+        &[
+            "clone",
+            "-q",
+            upstream.to_str().unwrap(),
+            src.to_str().unwrap(),
+        ],
+    );
     std::fs::write(src.join("a.txt"), "one\n").unwrap();
     git(&src, &["add", "."]);
     git(&src, &["commit", "-q", "-m", "c1"]);

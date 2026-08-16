@@ -34,7 +34,12 @@ fn taking_the_proposal_wholesale_reverts_target_work() {
 #[test]
 fn inventing_content_is_injection() {
     // Result carries both edits plus a line nobody proposed.
-    match check(BASE, TARGET, PROPOSED, "a2\nb\nc\nd2\ne\nllm-hallucination\n") {
+    match check(
+        BASE,
+        TARGET,
+        PROPOSED,
+        "a2\nb\nc\nd2\ne\nllm-hallucination\n",
+    ) {
         SafetyVerdict::Violation(v) => {
             assert!(v.reverted.is_empty());
             assert_eq!(v.injected, vec!["llm-hallucination".to_string()]);
@@ -57,7 +62,12 @@ fn partial_application_is_within_the_proposal() {
     // Target already contains half the author's edits (superseded-exact
     // half); the landing applies only the remainder. Fewer edits than
     // proposed is containment, not a violation.
-    let verdict = check(BASE, "a\nb\nc\nd2\ne\n", "a2\nb\nc\nd2\ne\n", "a2\nb\nc\nd2\ne\n");
+    let verdict = check(
+        BASE,
+        "a\nb\nc\nd2\ne\n",
+        "a2\nb\nc\nd2\ne\n",
+        "a2\nb\nc\nd2\ne\n",
+    );
     assert_eq!(verdict, SafetyVerdict::Upholds);
 }
 

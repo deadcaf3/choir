@@ -34,7 +34,8 @@ async fn total_order_hash_chain_fifo() -> anyhow::Result<()> {
 
     let mut tasks = Vec::new();
     for c in 0..CLIENTS {
-        let actor = h.actor_with_key::<SequencerActor>("choirSequencer", vec!["repo-1".to_string()]);
+        let actor =
+            h.actor_with_key::<SequencerActor>("choirSequencer", vec!["repo-1".to_string()]);
         tasks.push(tokio::spawn(async move {
             let workspace = format!("agent-{c}");
             let mut seqs = Vec::with_capacity(OPS);
@@ -81,10 +82,8 @@ async fn total_order_hash_chain_fifo() -> anyhow::Result<()> {
     // Per-client FIFO: each client's ops appear in submission order,
     // and the seqs the client saw match the log.
     for (workspace, seqs) in &per_client {
-        let mine: Vec<&choir_oplog::OpEntry> = entries
-            .iter()
-            .filter(|e| &e.channel == workspace)
-            .collect();
+        let mine: Vec<&choir_oplog::OpEntry> =
+            entries.iter().filter(|e| &e.channel == workspace).collect();
         assert_eq!(mine.len(), OPS);
         for (i, e) in mine.iter().enumerate() {
             assert_eq!(

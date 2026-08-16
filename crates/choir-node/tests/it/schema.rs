@@ -31,8 +31,12 @@ fn schema(tag: &str, enable: bool) -> serde_json::Value {
         node.enable_accounts(work.join("accounts.json"), None)
             .expect("accounts enable");
         node.enable_platform(
-            Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-                .expect("platform starts"),
+            Platform::start(
+                Registry::new(),
+                Box::new(MemLog::new()),
+                ActorKey::generate(),
+            )
+            .expect("platform starts"),
         );
     }
     std::thread::spawn(move || node.serve_forever());
@@ -73,8 +77,14 @@ fn the_schema_describes_the_surface_it_is_generated_from() {
         .iter()
         .find(|e| e["path"] == "/api/log")
         .expect("the log endpoint");
-    assert_eq!(log["query_parameters"][0], "from", "the cursor is not named: {log}");
-    assert_eq!(log["documented_as"], "/api/log?from=N", "the docs spelling is lost");
+    assert_eq!(
+        log["query_parameters"][0], "from",
+        "the cursor is not named: {log}"
+    );
+    assert_eq!(
+        log["documented_as"], "/api/log?from=N",
+        "the docs spelling is lost"
+    );
 
     for path in ["/api/submit", "/api/submit-batch", "/api/view", "/api/log"] {
         let found = endpoints
@@ -82,8 +92,14 @@ fn the_schema_describes_the_surface_it_is_generated_from() {
             .find(|e| e["path"] == path)
             .unwrap_or_else(|| panic!("the schema omits {path}: {doc}"));
         assert!(found["purpose"].as_str().is_some_and(|p| !p.is_empty()));
-        assert_eq!(found["agent_facing"], true, "{path} is not offered to agents");
-        assert!(found["name"].as_str().is_some(), "{path} has no stable name");
+        assert_eq!(
+            found["agent_facing"], true,
+            "{path} is not offered to agents"
+        );
+        assert!(
+            found["name"].as_str().is_some(),
+            "{path} has no stable name"
+        );
         assert!(
             found["input_schema"]["type"] == "object",
             "{path} has no argument schema: {found}"
@@ -125,18 +141,41 @@ fn the_capabilities_describe_the_node_rather_than_the_build() {
     let full = schema("full", true);
 
     for (name, off, on) in [
-        ("accounts", &bare["capabilities"]["accounts"], &full["capabilities"]["accounts"]),
-        ("acl", &bare["capabilities"]["acl"], &full["capabilities"]["acl"]),
-        ("platform", &bare["capabilities"]["platform"], &full["capabilities"]["platform"]),
+        (
+            "accounts",
+            &bare["capabilities"]["accounts"],
+            &full["capabilities"]["accounts"],
+        ),
+        (
+            "acl",
+            &bare["capabilities"]["acl"],
+            &full["capabilities"]["acl"],
+        ),
+        (
+            "platform",
+            &bare["capabilities"]["platform"],
+            &full["capabilities"]["platform"],
+        ),
     ] {
-        assert_eq!(off, &serde_json::Value::Bool(false), "{name} claimed on a bare node");
-        assert_eq!(on, &serde_json::Value::Bool(true), "{name} claimed off on a full node");
+        assert_eq!(
+            off,
+            &serde_json::Value::Bool(false),
+            "{name} claimed on a bare node"
+        );
+        assert_eq!(
+            on,
+            &serde_json::Value::Bool(true),
+            "{name} claimed off on a full node"
+        );
     }
 
     // The static half is identical across the two nodes: the same build
     // describes the same API, and only the deployment differs.
     for key in ["api_version", "endpoints", "commands", "deprecations"] {
-        assert_eq!(bare[key], full[key], "`{key}` differs between two nodes of one build");
+        assert_eq!(
+            bare[key], full[key],
+            "`{key}` differs between two nodes of one build"
+        );
     }
 
     // The live object *replaces* whatever the generated file carried

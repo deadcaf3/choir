@@ -28,7 +28,10 @@ fn curl(args: &[&str]) -> (u16, String) {
         .expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let (body, status) = text.rsplit_once('\n').expect("curl writes a status line");
-    (status.trim().parse().expect("numeric status"), body.to_string())
+    (
+        status.trim().parse().expect("numeric status"),
+        body.to_string(),
+    )
 }
 
 /// The operator's row: node-wide write mints invites, node-wide auditor
@@ -56,8 +59,12 @@ fn acl_render_names_the_handles_a_real_node_reports() {
     node.enable_accounts(work.join("accounts.json"), None)
         .expect("accounts enable");
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
     let api = format!("http://127.0.0.1:{port}");
@@ -126,13 +133,19 @@ fn acl_render_names_the_handles_a_real_node_reports() {
     // ...and the grants are untouched, which is the property that makes
     // rewriting an authorization file safe at all.
     for line in OPERATOR_ACL.lines() {
-        assert!(rendered.contains(line), "an operator grant was changed: {rendered}");
+        assert!(
+            rendered.contains(line),
+            "an operator grant was changed: {rendered}"
+        );
     }
 
     let summary: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("acl render prints json");
     assert_eq!(summary["named"], 1, "{summary}");
-    assert_eq!(summary["unresolved"], 3, "the operator's own rows: {summary}");
+    assert_eq!(
+        summary["unresolved"], 3,
+        "the operator's own rows: {summary}"
+    );
     assert_eq!(summary["wrote"], true, "{summary}");
 
     std::fs::remove_dir_all(&work).ok();

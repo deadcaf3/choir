@@ -211,9 +211,12 @@ fn run_one(
         .spawn()
         .map_err(|error| format!("run differential command in {}: {error}", dir.display()))?;
     let status = match timeout {
-        None => child
-            .wait()
-            .map_err(|error| format!("wait for differential command in {}: {error}", dir.display()))?,
+        None => child.wait().map_err(|error| {
+            format!(
+                "wait for differential command in {}: {error}",
+                dir.display()
+            )
+        })?,
         Some(timeout) => {
             // Hand-rolled deadline poll: no wait-with-timeout in std, and no
             // dependency for something this small. 100 ms of granularity is
@@ -458,8 +461,7 @@ impl Calibration {
     }
 
     fn confidence_claim(&self) -> Option<bool> {
-        (self.evaluated_merges >= CONFIDENCE_MIN_EVALUATED_MERGES
-            && self.pending_interactions == 0)
+        (self.evaluated_merges >= CONFIDENCE_MIN_EVALUATED_MERGES && self.pending_interactions == 0)
             .then_some(self.spurious_failures == 0)
     }
 

@@ -206,7 +206,10 @@ mod tests {
         let before = "# who can push to the demo repo\n\n7f3ac2ab19cd agents/demo write\n";
         let after = render(before, &roster());
         assert!(after.contains("# who can push to the demo repo"), "{after}");
-        assert!(after.contains("\n\n"), "the blank line was swallowed: {after}");
+        assert!(
+            after.contains("\n\n"),
+            "the blank line was swallowed: {after}"
+        );
     }
 
     /// A stale comment can mislead a reader; it must never be able to

@@ -37,13 +37,21 @@ fn main() {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
-    for flag in ["--root", "--user", "--acl-file", "--handoff", "--git-binary"] {
+    for flag in [
+        "--root",
+        "--user",
+        "--acl-file",
+        "--handoff",
+        "--git-binary",
+    ] {
         if args.iter().any(|a| a == flag) && value(flag).is_none() {
             refuse(&format!("{flag} needs a value"));
         }
     }
     let (Some(root), Some(user)) = (value("--root"), value("--user")) else {
-        refuse("choir-ssh needs --root and --user; it is meant to be run by sshd as a forced command");
+        refuse(
+            "choir-ssh needs --root and --user; it is meant to be run by sshd as a forced command",
+        );
     };
     let shim = Shim {
         root: PathBuf::from(root),

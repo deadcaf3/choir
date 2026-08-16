@@ -129,21 +129,35 @@ fn served(tag: &str, acl: &str) -> (String, std::path::PathBuf, String, std::pat
     let clone = work.join("clone");
     let url = format!("http://alice:a@127.0.0.1:{port}/agents/one.git");
     assert!(
-        git(&work, &["clone", "-q", &url, clone.to_str().unwrap()]).status.success(),
+        git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+            .status
+            .success(),
         "seeding clone failed"
     );
     std::fs::create_dir_all(clone.join("src")).unwrap();
     std::fs::write(clone.join("README.md"), "hello\nsecond line\n").unwrap();
     // Content that is markup, in a file whose name is also markup: both
     // halves reach the page, and both must arrive inert.
-    std::fs::write(clone.join("src/lib.rs"), "// <script>alert('x')</script>\nfn main() {}\n").unwrap();
-    std::fs::write(clone.join("src/<img src=x onerror=alert(1)>.txt"), "named like markup\n").unwrap();
+    std::fs::write(
+        clone.join("src/lib.rs"),
+        "// <script>alert('x')</script>\nfn main() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        clone.join("src/<img src=x onerror=alert(1)>.txt"),
+        "named like markup\n",
+    )
+    .unwrap();
     std::fs::write(clone.join("binary.dat"), [0u8, 1, 2, 3, 0, 9]).unwrap();
     // The shapes a real repository has and an invented fixture does not.
     // In the shared fixture rather than a test of their own so that every
     // test above walks them too: a listing that renders these wrongly is
     // a listing, and the walk test should notice.
-    std::fs::write(clone.join("src/ünïcode-café.rs"), "// unicode in the name\n").unwrap();
+    std::fs::write(
+        clone.join("src/ünïcode-café.rs"),
+        "// unicode in the name\n",
+    )
+    .unwrap();
     std::fs::write(clone.join("src/日本語.txt"), "outside latin-1 entirely\n").unwrap();
     // Legal filenames whose characters are URL syntax. Left un-encoded in
     // an href, `?` starts a query string and `#` a fragment, so the link
@@ -159,9 +173,15 @@ fn served(tag: &str, acl: &str) -> (String, std::path::PathBuf, String, std::pat
     )
     .unwrap();
     assert!(git(&clone, &["add", "."]).status.success());
-    assert!(git(&clone, &["commit", "-q", "-m", "seed the tree"]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "seed the tree"])
+        .status
+        .success());
     let push = git(&clone, &["push", "-q", "origin", "HEAD:main"]);
-    assert!(push.status.success(), "{}", String::from_utf8_lossy(&push.stderr));
+    assert!(
+        push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push.stderr)
+    );
     let oid = String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();
@@ -177,21 +197,41 @@ fn a_reader_can_walk_from_the_index_to_a_file() {
 
     let (status, _, index) = get(&format!("{base}/r/"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "the index was refused");
-    assert!(index.contains("agents/one"), "the index listed no repository: {index}");
+    assert!(
+        index.contains("agents/one"),
+        "the index listed no repository: {index}"
+    );
 
     let (status, _, root) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
     assert_eq!(status, 200);
-    assert!(root.contains("README.md"), "the root listing is missing a file: {root}");
-    assert!(root.contains("src"), "the root listing is missing a directory");
+    assert!(
+        root.contains("README.md"),
+        "the root listing is missing a file: {root}"
+    );
+    assert!(
+        root.contains("src"),
+        "the root listing is missing a directory"
+    );
 
-    let (status, _, dir) = get(&format!("{base}/r/agents/one/tree/main/src"), &["-u", "alice:a"]);
+    let (status, _, dir) = get(
+        &format!("{base}/r/agents/one/tree/main/src"),
+        &["-u", "alice:a"],
+    );
     assert_eq!(status, 200);
-    assert!(dir.contains("lib.rs"), "the directory listing is missing its file: {dir}");
+    assert!(
+        dir.contains("lib.rs"),
+        "the directory listing is missing its file: {dir}"
+    );
 
-    let (status, _, file) =
-        get(&format!("{base}/r/agents/one/blob/main/README.md"), &["-u", "alice:a"]);
+    let (status, _, file) = get(
+        &format!("{base}/r/agents/one/blob/main/README.md"),
+        &["-u", "alice:a"],
+    );
     assert_eq!(status, 200);
-    assert!(file.contains("second line"), "the file did not render: {file}");
+    assert!(
+        file.contains("second line"),
+        "the file did not render: {file}"
+    );
 }
 
 /// A repository can hold anything, so file content is attacker input
@@ -200,20 +240,31 @@ fn a_reader_can_walk_from_the_index_to_a_file() {
 fn file_content_and_file_names_cannot_inject() {
     let (base, _work, _oid, _) = served("inject", "");
 
-    let (_, _, file) =
-        get(&format!("{base}/r/agents/one/blob/main/src/lib.rs"), &["-u", "alice:a"]);
-    assert!(file.contains("&lt;script&gt;"), "the escaper did not run: {file}");
+    let (_, _, file) = get(
+        &format!("{base}/r/agents/one/blob/main/src/lib.rs"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        file.contains("&lt;script&gt;"),
+        "the escaper did not run: {file}"
+    );
     assert!(
         !file.contains("<script>alert"),
         "a file's contents reached the page as live markup"
     );
 
-    let (_, _, dir) = get(&format!("{base}/r/agents/one/tree/main/src"), &["-u", "alice:a"]);
+    let (_, _, dir) = get(
+        &format!("{base}/r/agents/one/tree/main/src"),
+        &["-u", "alice:a"],
+    );
     assert!(
         !dir.contains("<img src=x onerror"),
         "a file name reached the page as live markup: {dir}"
     );
-    assert!(dir.contains("&lt;img"), "the file named like markup vanished instead of escaping");
+    assert!(
+        dir.contains("&lt;img"),
+        "the file named like markup vanished instead of escaping"
+    );
 
     // The header is the same defence in depth the D28 page carries.
     let (_, headers, _) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
@@ -226,10 +277,15 @@ fn file_content_and_file_names_cannot_inject() {
 #[test]
 fn a_binary_file_is_described_rather_than_rendered() {
     let (base, _work, _oid, _) = served("binary", "");
-    let (status, _, page) =
-        get(&format!("{base}/r/agents/one/blob/main/binary.dat"), &["-u", "alice:a"]);
+    let (status, _, page) = get(
+        &format!("{base}/r/agents/one/blob/main/binary.dat"),
+        &["-u", "alice:a"],
+    );
     assert_eq!(status, 200);
-    assert!(page.contains("Binary file"), "a binary blob was rendered as text: {page}");
+    assert!(
+        page.contains("Binary file"),
+        "a binary blob was rendered as text: {page}"
+    );
 }
 
 /// History and one commit, including the diff a reader came for.
@@ -237,22 +293,48 @@ fn a_binary_file_is_described_rather_than_rendered() {
 fn history_and_a_commit_diff_render() {
     let (base, _work, oid, _) = served("history", "");
 
-    let (status, _, log) = get(&format!("{base}/r/agents/one/commits/main"), &["-u", "alice:a"]);
+    let (status, _, log) = get(
+        &format!("{base}/r/agents/one/commits/main"),
+        &["-u", "alice:a"],
+    );
     assert_eq!(status, 200);
-    assert!(log.contains("seed the tree"), "the subject is missing: {log}");
-    assert!(log.contains(&oid[..12]), "the commit is missing from its own history");
+    assert!(
+        log.contains("seed the tree"),
+        "the subject is missing: {log}"
+    );
+    assert!(
+        log.contains(&oid[..12]),
+        "the commit is missing from its own history"
+    );
 
-    let (status, _, commit) =
-        get(&format!("{base}/r/agents/one/commit/{oid}"), &["-u", "alice:a"]);
+    let (status, _, commit) = get(
+        &format!("{base}/r/agents/one/commit/{oid}"),
+        &["-u", "alice:a"],
+    );
     assert_eq!(status, 200);
-    assert!(commit.contains("seed the tree"), "the commit page lost its subject");
-    assert!(commit.contains("README.md"), "the diff names no file: {commit}");
-    assert!(commit.contains("class=\"add\""), "the diff has no added lines");
+    assert!(
+        commit.contains("seed the tree"),
+        "the commit page lost its subject"
+    );
+    assert!(
+        commit.contains("README.md"),
+        "the diff names no file: {commit}"
+    );
+    assert!(
+        commit.contains("class=\"add\""),
+        "the diff has no added lines"
+    );
     // The stat row, proven against git's real `--numstat` emission
     // rather than a fixture: a parser that misreads the real shape
     // renders no table and no anchors, and only a served node shows it.
-    assert!(commit.contains("class=\"stat\""), "the diff has no stat row: {commit}");
-    assert!(commit.contains("files changed"), "the stat row has no summary: {commit}");
+    assert!(
+        commit.contains("class=\"stat\""),
+        "the diff has no stat row: {commit}"
+    );
+    assert!(
+        commit.contains("files changed"),
+        "the stat row has no summary: {commit}"
+    );
     assert!(
         commit.contains("href=\"#f0\"") && commit.contains("id=\"f0\""),
         "the stat row and the file headers do not link up: {commit}"
@@ -271,7 +353,10 @@ fn a_repeat_visit_revalidates_on_the_commit() {
     let tag = header_value(&headers, "ETag").expect("the page carries an ETag");
     assert!(tag.contains(&oid), "the ETag is not the commit: {tag}");
 
-    let (status, _, body) = get(&url, &["-u", "alice:a", "-H", &format!("If-None-Match: {tag}")]);
+    let (status, _, body) = get(
+        &url,
+        &["-u", "alice:a", "-H", &format!("If-None-Match: {tag}")],
+    );
     assert_eq!(status, 304, "a repeat visit rebuilt the page");
     assert!(body.is_empty(), "a 304 carried a body");
 }
@@ -300,12 +385,19 @@ fn browsing_needs_the_same_read_grant_as_a_clone() {
 
     // The mutation.
     std::fs::write(&acl, "bob  agents/one  read\n").expect("acl rewrite");
-    let file = std::fs::File::options().write(true).open(&acl).expect("reopen acl");
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&acl)
+        .expect("reopen acl");
     let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
-    file.set_times(std::fs::FileTimes::new().set_modified(ahead)).expect("stamp mtime");
+    file.set_times(std::fs::FileTimes::new().set_modified(ahead))
+        .expect("stamp mtime");
 
     let (status, _, _) = get(&format!("{base}/r/agents/one"), &["-u", "bob:b"]);
-    assert_eq!(status, 200, "a granted reader was still refused after a reload");
+    assert_eq!(
+        status, 200,
+        "a granted reader was still refused after a reload"
+    );
     let (status, _, _) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
     assert_eq!(status, 404, "a revoked reader still browsed");
 }
@@ -321,7 +413,10 @@ fn the_browse_prefix_did_not_take_a_clone_url() {
     // meets the moment one is created rather than an error.
     let (status, _, page) = get(&format!("{base}/r/r/project"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "an owner named `r` cannot be browsed: {page}");
-    assert!(page.contains("No commits yet"), "an empty repository read as broken: {page}");
+    assert!(
+        page.contains("No commits yet"),
+        "an empty repository read as broken: {page}"
+    );
 
     // Give it a commit before cloning. An empty clone stops after the
     // ref advertisement, so it never sends `POST .../git-upload-pack` —
@@ -329,11 +424,17 @@ fn the_browse_prefix_did_not_take_a_clone_url() {
     // and therefore the only one that can prove the routing rule.
     let seed = work.join("r-seed");
     let url = format!("http://alice:a@{host}/r/project.git");
-    assert!(git(&work, &["clone", "-q", &url, seed.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &url, seed.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(seed.join("only.txt"), "content\n").unwrap();
     assert!(git(&seed, &["add", "."]).status.success());
-    assert!(git(&seed, &["commit", "-q", "-m", "first"]).status.success());
-    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&seed, &["commit", "-q", "-m", "first"])
+        .status
+        .success());
+    assert!(git(&seed, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
 
     for repo in ["agents/one.git", "r/project.git"] {
         let url = format!("http://alice:a@{host}/{repo}");
@@ -349,7 +450,10 @@ fn the_browse_prefix_did_not_take_a_clone_url() {
     // would be lost by fixing the collision with a reserved prefix.
     let (status, _, page) = get(&format!("{base}/r/r/project"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "an owner named `r` cannot be browsed: {page}");
-    assert!(page.contains("only.txt"), "the pushed file is not listed: {page}");
+    assert!(
+        page.contains("only.txt"),
+        "the pushed file is not listed: {page}"
+    );
 }
 
 /// A review page joins the three things reviews have always carried and
@@ -363,7 +467,9 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
 
     let author = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&author.public_key_bytes()).expect("register author");
+    registry
+        .register(&author.public_key_bytes())
+        .expect("register author");
 
     let mut node = Node::bind(&work.join("repos"), 0).expect("node binds free port");
     let port = node.port();
@@ -378,15 +484,27 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
     // A base branch and a proposal on top of it, both really pushed.
     let clone = work.join("clone");
     let url = format!("{base}/agents/one.git");
-    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(clone.join("f.txt"), "base\n").unwrap();
     assert!(git(&clone, &["add", "."]).status.success());
-    assert!(git(&clone, &["commit", "-q", "-m", "base"]).status.success());
-    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "base"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
     std::fs::write(clone.join("f.txt"), "proposed change\n").unwrap();
     assert!(git(&clone, &["add", "."]).status.success());
-    assert!(git(&clone, &["commit", "-q", "-m", "the proposal"]).status.success());
-    assert!(git(&clone, &["push", "-q", "origin", "HEAD:refs/heads/topic"]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "the proposal"])
+        .status
+        .success());
+    assert!(
+        git(&clone, &["push", "-q", "origin", "HEAD:refs/heads/topic"])
+            .status
+            .success()
+    );
     let proposal = String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();
@@ -395,11 +513,17 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
     // what makes the two-dot/three-dot distinction observable: a two-dot
     // diff would show this later commit as though the proposal reverted
     // it, crediting one author with another's work.
-    assert!(git(&clone, &["checkout", "-q", "-B", "later", "HEAD~1"]).status.success());
+    assert!(git(&clone, &["checkout", "-q", "-B", "later", "HEAD~1"])
+        .status
+        .success());
     std::fs::write(clone.join("other.txt"), "landed by somebody else\n").unwrap();
     assert!(git(&clone, &["add", "."]).status.success());
-    assert!(git(&clone, &["commit", "-q", "-m", "unrelated landing"]).status.success());
-    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "unrelated landing"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
 
     let request = ViewOp::new(OpKind::RequestReview {
         id: "r-page".into(),
@@ -424,16 +548,34 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
     let (status, _, page) = get(&format!("{base}/r/agents/one/review/r-page"), &[]);
     assert_eq!(status, 200);
     // The relationship.
-    assert!(page.contains(&proposal[..12]), "the proposed commit is missing: {page}");
-    assert!(page.contains("refs/heads/main"), "the destination ref is missing");
+    assert!(
+        page.contains(&proposal[..12]),
+        "the proposed commit is missing: {page}"
+    );
+    assert!(
+        page.contains("refs/heads/main"),
+        "the destination ref is missing"
+    );
     // The people, including the one who has not answered.
-    assert!(page.contains("ana") && page.contains("bot"), "a reviewer is missing");
-    assert!(page.contains("waiting"), "an unanswered reviewer is not shown as waiting");
+    assert!(
+        page.contains("ana") && page.contains("bot"),
+        "a reviewer is missing"
+    );
+    assert!(
+        page.contains("waiting"),
+        "an unanswered reviewer is not shown as waiting"
+    );
     assert!(page.contains("open"), "a live review is not shown as open");
     // The diff — and specifically the proposal's own change, not the
     // whole difference between two branches.
-    assert!(page.contains("proposed change"), "the diff is missing: {page}");
-    assert!(page.contains("class=\"add\""), "the diff has no added lines");
+    assert!(
+        page.contains("proposed change"),
+        "the diff is missing: {page}"
+    );
+    assert!(
+        page.contains("class=\"add\""),
+        "the diff has no added lines"
+    );
     assert!(
         page.contains("class=\"stat\""),
         "the review diff has no stat row: {page}"
@@ -459,7 +601,10 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
     ]);
     assert_eq!(code, 200, "{resp}");
     let (_, _, page) = get(&format!("{base}/r/agents/one/review/r-page"), &[]);
-    assert!(page.contains("reads fine to me"), "the verdict note is missing: {page}");
+    assert!(
+        page.contains("reads fine to me"),
+        "the verdict note is missing: {page}"
+    );
     assert!(page.contains("approve"), "the verdict is missing");
 
     // An unknown review is a 404, not an empty page pretending to be one.
@@ -489,7 +634,10 @@ fn a_review_page_shows_the_proposal_the_people_and_the_diff() {
         page.contains("names no commit"),
         "a non-git target was not reported as one: {page}"
     );
-    assert!(!page.contains("fatal:"), "a non-git target reached git anyway: {page}");
+    assert!(
+        !page.contains("fatal:"),
+        "a non-git target reached git anyway: {page}"
+    );
 }
 
 /// The review page renders the discussion (D38), in the order the
@@ -506,7 +654,9 @@ fn a_review_page_renders_the_discussion_thread() {
     // Archiving is the node's own op, so the test keeps the node's key.
     let node_secret = ActorKey::generate().secret_bytes();
     let mut registry = Registry::new();
-    registry.register(&author.public_key_bytes()).expect("register author");
+    registry
+        .register(&author.public_key_bytes())
+        .expect("register author");
 
     let mut node = Node::bind(&work.join("repos"), 0).expect("node binds free port");
     let port = node.port();
@@ -558,12 +708,22 @@ fn a_review_page_renders_the_discussion_thread() {
     );
 
     let (_, _, page) = get(&format!("{base}/r/agents/two/review/r-thread"), &[]);
-    assert!(page.contains("Discussion"), "the page has no discussion section: {page}");
-    assert!(page.contains("Nothing said yet"), "an empty thread is not reported: {page}");
+    assert!(
+        page.contains("Discussion"),
+        "the page has no discussion section: {page}"
+    );
+    assert!(
+        page.contains("Nothing said yet"),
+        "an empty thread is not reported: {page}"
+    );
 
     for (id, who, body) in [
         ("c1", "ana", "the base looks wrong to me"),
-        ("c2", "author", "<script>alert('x')</script> it is the merge base"),
+        (
+            "c2",
+            "author",
+            "<script>alert('x')</script> it is the merge base",
+        ),
     ] {
         post(
             &ViewOp::new(OpKind::PostComment {
@@ -578,18 +738,30 @@ fn a_review_page_renders_the_discussion_thread() {
 
     let (status, _, page) = get(&format!("{base}/r/agents/two/review/r-thread"), &[]);
     assert_eq!(status, 200);
-    assert!(page.contains("the base looks wrong to me"), "a comment is missing: {page}");
-    assert!(page.contains("it is the merge base"), "a comment is missing: {page}");
+    assert!(
+        page.contains("the base looks wrong to me"),
+        "a comment is missing: {page}"
+    );
+    assert!(
+        page.contains("it is the merge base"),
+        "a comment is missing: {page}"
+    );
     let first = page.find("the base looks wrong").expect("first comment");
     let second = page.find("it is the merge base").expect("second comment");
-    assert!(first < second, "the thread is not rendered in log order: {page}");
+    assert!(
+        first < second,
+        "the thread is not rendered in log order: {page}"
+    );
     // A comment body is text a stranger wrote, and this page is served to
     // a browser. Same rule as file contents on the D30 pages.
     assert!(
         !page.contains("<script>alert('x')</script>"),
         "a comment body reached the page unescaped: {page}"
     );
-    assert!(page.contains("&lt;script&gt;"), "the body was dropped rather than escaped: {page}");
+    assert!(
+        page.contains("&lt;script&gt;"),
+        "the body was dropped rather than escaped: {page}"
+    );
 
     // Archiving drops the thread, and the page says so rather than
     // reporting a discussion that happened as one that never did.
@@ -692,8 +864,14 @@ fn a_deep_path_keeps_every_step_of_its_breadcrumb_reachable() {
 
     let (status, _, page) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "a deep path did not render: {page}");
-    assert!(page.contains("leaf.txt"), "the deep directory is empty: {page}");
-    assert!(page.contains("crumbs"), "a deep path rendered no breadcrumb: {page}");
+    assert!(
+        page.contains("leaf.txt"),
+        "the deep directory is empty: {page}"
+    );
+    assert!(
+        page.contains("crumbs"),
+        "a deep path rendered no breadcrumb: {page}"
+    );
     // The last segment is where the reader is, so it is text rather than
     // a link; every one above it must be followable.
     assert!(
@@ -722,8 +900,7 @@ fn a_denied_repository_says_what_to_do_without_confirming_it_exists() {
     // `agents/one` exists; `agents/ghost` does not. A reader with no
     // grant must not be able to tell them apart — same status, and the
     // same bytes.
-    let (real_status, real_headers, real) =
-        get(&format!("{base}/r/agents/one"), &["-u", "bob:b"]);
+    let (real_status, real_headers, real) = get(&format!("{base}/r/agents/one"), &["-u", "bob:b"]);
     let (ghost_status, _, ghost) = get(&format!("{base}/r/agents/ghost"), &["-u", "bob:b"]);
     assert_eq!(real_status, 404);
     assert_eq!(ghost_status, 404);
@@ -738,7 +915,10 @@ fn a_denied_repository_says_what_to_do_without_confirming_it_exists() {
         header_value(&real_headers, "Content-Type").as_deref(),
         Some("text/html; charset=utf-8")
     );
-    assert!(real.contains("no_such_repository"), "no code to quote: {real}");
+    assert!(
+        real.contains("no_such_repository"),
+        "no code to quote: {real}"
+    );
     // What they may do, and the one action that changes it.
     assert!(
         real.contains("read grant"),
@@ -902,11 +1082,16 @@ fn a_review_page_names_the_person_behind_a_handle() {
 
     let author = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&author.public_key_bytes()).expect("register author");
+    registry
+        .register(&author.public_key_bytes())
+        .expect("register author");
 
     let acl_path = work.join("acl");
-    std::fs::write(&acl_path, "alice @node write\nalice @node auditor\nalice * write\n")
-        .expect("acl file");
+    std::fs::write(
+        &acl_path,
+        "alice @node write\nalice @node auditor\nalice * write\n",
+    )
+    .expect("acl file");
     let mut table = AuthTable::new();
     table.insert("alice".into(), "a".into());
 
@@ -951,11 +1136,17 @@ fn a_review_page_names_the_person_behind_a_handle() {
 
     let clone = work.join("clone");
     let url = format!("http://alice:a@127.0.0.1:{port}/agents/one.git");
-    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()]).status.success());
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
     std::fs::write(clone.join("f.txt"), "base\n").unwrap();
     assert!(git(&clone, &["add", "."]).status.success());
-    assert!(git(&clone, &["commit", "-q", "-m", "base"]).status.success());
-    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "base"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
     let proposal = String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
         .trim()
         .to_string();

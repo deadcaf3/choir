@@ -63,7 +63,10 @@ fn reverting_resolution_is_evicted_without_blocking_the_train() {
             violation,
         } => {
             assert_eq!(*strategy, "take-proposal");
-            assert_eq!(violation.reverted, vec!["line 0 edited by change 0".to_string()]);
+            assert_eq!(
+                violation.reverted,
+                vec!["line 0 edited by change 0".to_string()]
+            );
             assert_eq!(violation.injected, vec!["line 0".to_string()]);
         }
         other => panic!("expected a safety violation, got {other:?}"),
@@ -82,7 +85,11 @@ fn honest_resolutions_pass_the_safety_gate() {
         (0..15).map(disjoint_change).collect(),
         &mut |_: &Change, _: &str| true,
     );
-    assert!(report.rejected.is_empty(), "false positive: {:?}", report.rejected);
+    assert!(
+        report.rejected.is_empty(),
+        "false positive: {:?}",
+        report.rejected
+    );
     assert_eq!(report.merged.len(), 15);
     assert_eq!(ops, 15);
 }

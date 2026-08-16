@@ -175,9 +175,10 @@ impl RateLimiter {
         let per_second = capacity / 60.0;
 
         let mut buckets = self.buckets.lock().expect("rate bucket lock");
-        let bucket = buckets
-            .entry((user.to_string(), class))
-            .or_insert(Bucket { tokens: capacity, last: now });
+        let bucket = buckets.entry((user.to_string(), class)).or_insert(Bucket {
+            tokens: capacity,
+            last: now,
+        });
         // Saturating: a clock reading older than the last one (which
         // `Instant` forbids, but a caller-supplied one does not) refills
         // nothing rather than draining the bucket.
@@ -350,7 +351,12 @@ impl Access {
     ///
     /// A `None` log makes this a no-op, which is what a node started
     /// without `--request-log` pays.
-    pub fn finish(self, log: Option<&RequestLog>, user: &str, outcome: &std::io::Result<(u16, u64)>) {
+    pub fn finish(
+        self,
+        log: Option<&RequestLog>,
+        user: &str,
+        outcome: &std::io::Result<(u16, u64)>,
+    ) {
         let Some(log) = log else {
             return;
         };
@@ -457,7 +463,10 @@ mod tests {
 
     #[test]
     fn urls_are_charged_the_way_the_router_routes_them() {
-        assert_eq!(class_of("/owner/repo.git/info/refs?service=git-upload-pack"), Class::Git);
+        assert_eq!(
+            class_of("/owner/repo.git/info/refs?service=git-upload-pack"),
+            Class::Git
+        );
         assert_eq!(class_of("/owner/repo.git/git-receive-pack"), Class::Git);
         assert_eq!(class_of("/api/view"), Class::Api);
         assert_eq!(class_of("/api/log?from=0"), Class::Api);

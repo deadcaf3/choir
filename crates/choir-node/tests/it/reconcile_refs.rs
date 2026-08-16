@@ -19,7 +19,12 @@ use crate::support::{curl, submit_body};
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -68,14 +73,25 @@ impl Fixture {
 
         let url = format!("http://127.0.0.1:{port}/agents/demo.git");
         let clone = work.join("clone");
-        assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()]).status.success());
+        assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+            .status
+            .success());
         std::fs::write(clone.join("f.txt"), "one\n").unwrap();
         git(&clone, &["add", "."]);
         git(&clone, &["commit", "-q", "-m", "first"]);
-        assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"]).status.success());
+        assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success());
 
         let bare = work.join("repos").join("agents/demo.git");
-        Self { work, node, port, clone, bare, key }
+        Self {
+            work,
+            node,
+            port,
+            clone,
+            bare,
+            key,
+        }
     }
 
     fn head(&self) -> String {
@@ -116,11 +132,16 @@ fn a_ref_the_log_holds_and_git_lost_is_written_back_into_git() {
 
     // Delete the ref behind the node's back: the op stays in the log,
     // exactly as a crash between the hook's 200 and git's write leaves it.
-    assert!(git(&f.bare, &["update-ref", "-d", "refs/heads/main"]).status.success());
+    assert!(git(&f.bare, &["update-ref", "-d", "refs/heads/main"])
+        .status
+        .success());
     assert_eq!(f.git_ref("refs/heads/main"), None);
 
     let report = f.node.reconcile_refs();
-    assert_eq!(report.applied, vec!["agents/demo.git:refs/heads/main".to_string()]);
+    assert_eq!(
+        report.applied,
+        vec!["agents/demo.git:refs/heads/main".to_string()]
+    );
     assert!(report.retracted.is_empty(), "{report:?}");
     assert!(report.unreconciled.is_empty(), "{report:?}");
 
@@ -147,13 +168,19 @@ fn a_ref_naming_a_commit_git_does_not_have_is_retracted_from_the_log() {
         prev: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&f.key, "alice", &op),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&f.key, "alice", &op),
         &format!("http://127.0.0.1:{}/api/submit", f.port),
     ]);
     assert_eq!(code, 200, "{resp}");
 
     let report = f.node.reconcile_refs();
-    assert_eq!(report.retracted, vec!["agents/demo.git:refs/heads/ghost".to_string()]);
+    assert_eq!(
+        report.retracted,
+        vec!["agents/demo.git:refs/heads/ghost".to_string()]
+    );
     assert!(report.applied.is_empty(), "{report:?}");
     assert!(report.unreconciled.is_empty(), "{report:?}");
 
@@ -165,7 +192,10 @@ fn a_ref_naming_a_commit_git_does_not_have_is_retracted_from_the_log() {
     assert_eq!(f.git_ref("refs/heads/ghost"), None);
     // The retraction is an op, not an edit: `main` is untouched and the
     // history still explains itself.
-    assert!(v["refs"]["agents/demo.git:refs/heads/main"].is_string(), "{v}");
+    assert!(
+        v["refs"]["agents/demo.git:refs/heads/main"].is_string(),
+        "{v}"
+    );
 }
 
 /// A ref git holds and the log does not is reported and left alone.
@@ -175,7 +205,9 @@ fn a_ref_naming_a_commit_git_does_not_have_is_retracted_from_the_log() {
 fn a_ref_only_git_has_is_reported_never_adopted() {
     let f = Fixture::new("outofband");
     let head = f.head();
-    assert!(git(&f.bare, &["update-ref", "refs/heads/smuggled", &head]).status.success());
+    assert!(git(&f.bare, &["update-ref", "refs/heads/smuggled", &head])
+        .status
+        .success());
 
     let report = f.node.reconcile_refs();
     assert!(report.applied.is_empty(), "{report:?}");
@@ -189,7 +221,10 @@ fn a_ref_only_git_has_is_reported_never_adopted() {
         f.view()["refs"]["agents/demo.git:refs/heads/smuggled"].is_null(),
         "an out-of-band ref must not be laundered into the log"
     );
-    assert_eq!(f.git_ref("refs/heads/smuggled").as_deref(), Some(head.as_str()));
+    assert_eq!(
+        f.git_ref("refs/heads/smuggled").as_deref(),
+        Some(head.as_str())
+    );
 }
 
 /// The reason the survey exists apart from the repair: a divergence that
@@ -208,7 +243,9 @@ fn a_live_node_reports_a_divergence_without_a_restart() {
     assert_eq!(agreeing["findings"].as_array().unwrap().len(), 0);
 
     // Diverge behind the node's back, with it still serving.
-    assert!(git(&f.bare, &["update-ref", "-d", "refs/heads/main"]).status.success());
+    assert!(git(&f.bare, &["update-ref", "-d", "refs/heads/main"])
+        .status
+        .success());
 
     let (_, seen) = curl(&[&url]);
     assert_eq!(seen["agree"], serde_json::json!(false), "{seen}");
@@ -229,7 +266,10 @@ fn a_live_node_reports_a_divergence_without_a_restart() {
 
     // And the repair the survey feeds still agrees with what it reported.
     let report = f.node.reconcile_refs();
-    assert_eq!(report.applied, vec!["agents/demo.git:refs/heads/main".to_string()]);
+    assert_eq!(
+        report.applied,
+        vec!["agents/demo.git:refs/heads/main".to_string()]
+    );
     let (_, after) = curl(&[&url]);
     assert_eq!(after["agree"], serde_json::json!(true), "{after}");
 }
@@ -243,16 +283,21 @@ fn a_live_node_reports_a_divergence_without_a_restart() {
 fn a_remote_tracking_ref_is_not_reported_as_out_of_band() {
     let f = Fixture::new("tracking");
     let head = f.head();
-    assert!(
-        git(&f.bare, &["update-ref", "refs/remotes/follower/main", &head]).status.success()
-    );
+    assert!(git(
+        &f.bare,
+        &["update-ref", "refs/remotes/follower/main", &head]
+    )
+    .status
+    .success());
 
     let report = f.node.reconcile_refs();
     assert!(report.is_empty(), "{report:?}");
 
     // Only the tracking namespace is exempt: a branch smuggled in
     // beside it is still reported.
-    assert!(git(&f.bare, &["update-ref", "refs/heads/smuggled", &head]).status.success());
+    assert!(git(&f.bare, &["update-ref", "refs/heads/smuggled", &head])
+        .status
+        .success());
     let report = f.node.reconcile_refs();
     assert_eq!(
         report.unreconciled,
@@ -274,5 +319,9 @@ fn an_agreeing_node_reconciles_to_nothing() {
     // Twice, because an idempotence bug shows up on the second pass.
     let report = f.node.reconcile_refs();
     assert!(report.is_empty(), "{report:?}");
-    assert_eq!(f.view()["view_growth"]["as_of_seq"], before, "the log moved");
+    assert_eq!(
+        f.view()["view_growth"]["as_of_seq"],
+        before,
+        "the log moved"
+    );
 }

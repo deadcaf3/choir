@@ -8,8 +8,8 @@ use choir_queue::differential::{
     Verdict, CONFIDENCE_MIN_EVALUATED_MERGES,
 };
 use choir_queue::differential_ledger::{
-    adjudicate, effective_environment, environment_hash, load_command, record_observation,
-    refresh, Revisions,
+    adjudicate, effective_environment, environment_hash, load_command, record_observation, refresh,
+    Revisions,
 };
 
 fn report(verdict: Verdict) -> DifferentialReport {
@@ -66,7 +66,8 @@ fn same_command_finds_behavior_that_only_the_merge_breaks() {
 
     let args = vec![check.display().to_string()];
     let env = effective_environment(&BTreeMap::new());
-    let found = run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env, None).unwrap();
+    let found =
+        run_merged_vs_parents("sh", &args, &parent_a, &parent_b, &merged, &env, None).unwrap();
     assert_eq!(found.verdict, Verdict::InteractionFailure, "{found:?}");
     assert!(found.parent_a.success && found.parent_b.success);
     assert!(!found.merged.success);
@@ -289,7 +290,10 @@ fn confidence_requires_2995_adjudicated_zero_spurious_observations() {
     for _ in 0..CONFIDENCE_MIN_EVALUATED_MERGES - 1 {
         calibration.record(&clean, None).unwrap();
     }
-    assert_eq!(calibration.receipt()["confidence_claim"], serde_json::Value::Null);
+    assert_eq!(
+        calibration.receipt()["confidence_claim"],
+        serde_json::Value::Null
+    );
 
     calibration.record(&clean, None).unwrap();
     assert_eq!(calibration.receipt()["confidence_claim"], true);
@@ -310,13 +314,16 @@ fn confidence_requires_2995_adjudicated_zero_spurious_observations() {
         pending.record(&clean, None).unwrap();
     }
     pending.record_pending(&flagged).unwrap();
-    assert_eq!(pending.receipt()["confidence_claim"], serde_json::Value::Null);
+    assert_eq!(
+        pending.receipt()["confidence_claim"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]
 fn shipped_calibration_command_is_the_complete_workspace_test_gate() {
-    let command_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/differential-command.json");
+    let command_file =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/differential-command.json");
     let command = load_command(&command_file).unwrap();
     assert_eq!(command.program, "cargo");
     assert_eq!(
@@ -360,10 +367,8 @@ fn cargo_calibration_refuses_a_target_directory_shared_across_worktrees() {
 
 #[test]
 fn durable_calibration_stays_indeterminate_until_flags_are_adjudicated() {
-    let work = std::env::temp_dir().join(format!(
-        "choir-differential-ledger-{}",
-        std::process::id()
-    ));
+    let work =
+        std::env::temp_dir().join(format!("choir-differential-ledger-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     let command_file = work.join("command.json");
@@ -507,7 +512,8 @@ fn the_run_environment_is_the_declared_one_not_the_inherited_one() {
         "the pass-through list is what keeps subprocess commands runnable at all"
     );
     let args = vec![check.display().to_string()];
-    let report = run_merged_vs_parents("sh", &args, &trees[0], &trees[1], &trees[2], &env, None).unwrap();
+    let report =
+        run_merged_vs_parents("sh", &args, &trees[0], &trees[1], &trees[2], &env, None).unwrap();
     assert_eq!(report.verdict, Verdict::Clean, "{report:?}");
     std::fs::remove_dir_all(work).ok();
 }
@@ -519,10 +525,8 @@ fn the_run_environment_is_the_declared_one_not_the_inherited_one() {
 /// on its next observation rather than being orphaned.
 #[test]
 fn observations_refuse_a_changed_environment_and_legacy_state_adopts_one() {
-    let work = std::env::temp_dir().join(format!(
-        "choir-differential-envhash-{}",
-        std::process::id()
-    ));
+    let work =
+        std::env::temp_dir().join(format!("choir-differential-envhash-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     let command_file = work.join("command.json");
@@ -617,10 +621,8 @@ fn observations_refuse_a_changed_environment_and_legacy_state_adopts_one() {
 
 #[test]
 fn command_env_must_be_named_string_pairs() {
-    let work = std::env::temp_dir().join(format!(
-        "choir-differential-envspec-{}",
-        std::process::id()
-    ));
+    let work =
+        std::env::temp_dir().join(format!("choir-differential-envspec-{}", std::process::id()));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     let command_file = work.join("command.json");

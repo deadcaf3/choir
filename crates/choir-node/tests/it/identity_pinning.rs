@@ -56,7 +56,10 @@ fn boot(work: &std::path::Path, auth: &std::path::Path) -> (bool, String) {
         let (seen, text) = (seen.clone(), text.clone());
         std::thread::spawn(move || {
             use std::io::BufRead;
-            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
                 let serving = line.contains("choir-node serving");
                 text.lock().expect("stderr text").push_str(&line);
                 text.lock().expect("stderr text").push('\n');

@@ -35,7 +35,7 @@
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::{ContentHash, LogError, OpEntry};
+use crate::{ContentHash, LogError, OpEntry, FORMAT_VERSION};
 
 /// The first thing found wrong with a log, if anything was.
 ///
@@ -51,6 +51,13 @@ pub enum Fault {
         position: u64,
         /// What the decoder said.
         detail: String,
+    },
+    /// A record names a wire format this build does not support.
+    UnsupportedFormat {
+        /// Position in the file, counting records from zero.
+        position: u64,
+        /// Version carried by the record.
+        found: u16,
     },
     /// A record's `parent` is not the hash of the record before it.
     BrokenChain {
@@ -81,6 +88,7 @@ impl Fault {
     pub fn position(&self) -> u64 {
         match self {
             Fault::Undecodable { position, .. }
+            | Fault::UnsupportedFormat { position, .. }
             | Fault::BrokenChain { position, .. }
             | Fault::SeqMismatch { position, .. } => *position,
         }
@@ -93,6 +101,10 @@ impl std::fmt::Display for Fault {
             Fault::Undecodable { position, detail } => write!(
                 f,
                 "record {position} does not decode: {detail}"
+            ),
+            Fault::UnsupportedFormat { position, found } => write!(
+                f,
+                "record {position} uses unsupported format version {found}; this build supports {FORMAT_VERSION}"
             ),
             Fault::BrokenChain {
                 position,
@@ -194,6 +206,13 @@ pub fn verify(path: &Path) -> Result<ChainReport, LogError> {
                 break;
             }
         };
+        if entry.format_version != FORMAT_VERSION {
+            fault = Some(Fault::UnsupportedFormat {
+                position,
+                found: entry.format_version,
+            });
+            break;
+        }
         if entry.parent != head {
             fault = Some(Fault::BrokenChain {
                 position,
@@ -305,11 +324,7 @@ pub fn truncate_tail(path: &Path) -> Result<Option<Repaired>, LogError> {
 /// [`LogError::Io`] if the sidecar cannot be written or synced. Failing
 /// here fails the open, which is correct: the alternative is truncating
 /// with nowhere to put the bytes.
-pub(crate) fn quarantine_tail(
-    path: &Path,
-    bytes: &[u8],
-    offset: u64,
-) -> Result<PathBuf, LogError> {
+pub(crate) fn quarantine_tail(path: &Path, bytes: &[u8], offset: u64) -> Result<PathBuf, LogError> {
     let quarantine = quarantine_path(path, offset);
     let mut sidecar = std::fs::File::create(&quarantine).map_err(LogError::Io)?;
     sidecar.write_all(bytes).map_err(LogError::Io)?;
@@ -598,8 +613,7 @@ mod tests {
         let path = valid_log(&dir, 3);
         let text = std::fs::read_to_string(&path).expect("read");
         let mut lines: Vec<String> = text.lines().map(ToString::to_string).collect();
-        let mut entry: serde_json::Value =
-            serde_json::from_str(&lines[1]).expect("decodes");
+        let mut entry: serde_json::Value = serde_json::from_str(&lines[1]).expect("decodes");
         entry["seq"] = serde_json::json!(99);
         lines[1] = serde_json::to_string(&entry).expect("re-encode");
         std::fs::write(&path, lines.join("\n") + "\n").expect("write back");

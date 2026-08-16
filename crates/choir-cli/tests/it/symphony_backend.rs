@@ -32,7 +32,12 @@ fn tempdir() -> PathBuf {
 
 fn git(dir: &Path, args: &[&str]) -> Output {
     Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -205,7 +210,14 @@ fn backend_converges_replacement_workers_and_completes_the_lifecycle() {
     binding_fields.sort();
     assert_eq!(
         binding_fields,
-        ["base", "change_id", "idempotency_key", "owner", "repo", "workspace_id"]
+        [
+            "base",
+            "change_id",
+            "idempotency_key",
+            "owner",
+            "repo",
+            "workspace_id"
+        ]
     );
 
     let path = PathBuf::from(
@@ -295,12 +307,7 @@ fn a_workspace_is_refused_for_a_generation_it_is_not_bound_to() {
     let first = fixture.ok(&fixture.request("ensure", "run-1", None));
     let path = PathBuf::from(first["workspace"]["path"].as_str().unwrap());
 
-    let second = fixture.ok(&fixture.request_for(
-        "ensure",
-        "run-1",
-        "change-generation-2",
-        None,
-    ));
+    let second = fixture.ok(&fixture.request_for("ensure", "run-1", "change-generation-2", None));
     assert_ne!(
         second["binding"]["change_id"], first["binding"]["change_id"],
         "a new generation reused the previous change"
@@ -406,8 +413,12 @@ fn backend_runs_with_http_auth_configured() {
 
     let result = fixture.ok(&fixture.request("ensure", "run-1", None));
     assert_eq!(result["workspace"]["created_now"], true);
-    let stderr = String::from_utf8_lossy(&fixture.run(&fixture.request("ensure", "run-2", None)).stderr)
-        .to_string();
+    let stderr = String::from_utf8_lossy(
+        &fixture
+            .run(&fixture.request("ensure", "run-2", None))
+            .stderr,
+    )
+    .to_string();
     assert!(
         !stderr.contains("placeholder"),
         "the adapter echoed a credential to stderr"

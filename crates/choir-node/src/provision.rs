@@ -57,7 +57,8 @@ const TEMPLATE_CONFIG: [&str; 4] = ["-c", "gc.auto=0", "-c", "maintenance.auto=f
 pub(crate) fn safe_segment(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('.')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Runs git, returning stdout or a failure description.
@@ -95,7 +96,10 @@ fn cow_copy(src: &Path, dst: &Path) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("cow copy: {}", String::from_utf8_lossy(&out.stderr)))
+        Err(format!(
+            "cow copy: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
     }
 }
 
@@ -144,9 +148,11 @@ pub fn create_workspace(
     let advanced_fields = ["base", "owner", "change", "idempotency_key"];
     let advanced = advanced_fields.iter().any(|key| req.get(*key).is_some());
     if advanced
-        && advanced_fields
-            .iter()
-            .any(|key| req.get(*key).and_then(|v| v.as_str()).is_none_or(str::is_empty))
+        && advanced_fields.iter().any(|key| {
+            req.get(*key)
+                .and_then(|v| v.as_str())
+                .is_none_or(str::is_empty)
+        })
     {
         return problem(
             400,
@@ -302,11 +308,9 @@ pub fn create_workspace(
                 response["change_id"] = serde_json::json!(field("change"));
                 response["owner"] = serde_json::json!(field("owner"));
                 response["idempotency_key"] = serde_json::json!(field("idempotency_key"));
-                response["base_revision"] = serde_json::json!(
-                    ContentHash::from_git_oid(&head)
-                        .expect("verified git oid")
-                        .to_hex()
-                );
+                response["base_revision"] = serde_json::json!(ContentHash::from_git_oid(&head)
+                    .expect("verified git oid")
+                    .to_hex());
                 if let Some(accepted) = accepted {
                     response["operation"] = serde_json::json!({
                         "seq": accepted.seq,
@@ -314,10 +318,7 @@ pub fn create_workspace(
                     });
                 }
             }
-            (
-                200,
-                response.to_string(),
-            )
+            (200, response.to_string())
         }
         Err(e) => (500, serde_json::json!({ "error": e }).to_string()),
     }
@@ -334,21 +335,17 @@ pub fn archive_workspace(
 ) -> (u16, String) {
     let req: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
-        Err(e) => {
-            return problem(
-                400,
-                Code::MalformedRequest,
-                format!("request body is not valid JSON: {e}"),
-                "send repo, name, change, idempotency_key and an owner-signed archive authorization",
-            )
-        }
+        Err(e) => return problem(
+            400,
+            Code::MalformedRequest,
+            format!("request body is not valid JSON: {e}"),
+            "send repo, name, change, idempotency_key and an owner-signed archive authorization",
+        ),
     };
     let field = |key: &str| req.get(key).and_then(|v| v.as_str()).unwrap_or("");
     let (repo, name) = (field("repo"), field("name"));
     let mut segs = repo.split('/');
-    let (Some(repo_owner), Some(reponame), None) =
-        (segs.next(), segs.next(), segs.next())
-    else {
+    let (Some(repo_owner), Some(reponame), None) = (segs.next(), segs.next(), segs.next()) else {
         return problem(
             400,
             Code::MalformedRequest,
@@ -431,10 +428,7 @@ pub fn archive_workspace(
                     "already_applied": true,
                 });
             }
-            return (
-                200,
-                response.to_string(),
-            );
+            return (200, response.to_string());
         }
         return lifecycle_conflict(
             "the change is archived but its filesystem state is inconsistent",
@@ -467,10 +461,16 @@ pub fn archive_workspace(
             );
         }
         if let Err(e) = std::fs::create_dir_all(&archive_root) {
-            return (500, serde_json::json!({ "error": format!("create archive dir: {e}") }).to_string());
+            return (
+                500,
+                serde_json::json!({ "error": format!("create archive dir: {e}") }).to_string(),
+            );
         }
         if let Err(e) = std::fs::rename(&live, &archived) {
-            return (500, serde_json::json!({ "error": format!("archive workspace: {e}") }).to_string());
+            return (
+                500,
+                serde_json::json!({ "error": format!("archive workspace: {e}") }).to_string(),
+            );
         }
     }
 
@@ -497,10 +497,14 @@ pub fn archive_workspace(
         ),
         Err(reason) => {
             if let Err(e) = std::fs::rename(&archived, &live) {
-                return (500, serde_json::json!({
-                    "error": format!("sequencing failed and archive rollback failed: {e}"),
-                    "sequencer_error": Rejection::decode(&reason).to_json(),
-                }).to_string());
+                return (
+                    500,
+                    serde_json::json!({
+                        "error": format!("sequencing failed and archive rollback failed: {e}"),
+                        "sequencer_error": Rejection::decode(&reason).to_json(),
+                    })
+                    .to_string(),
+                );
             }
             (409, Rejection::decode(&reason).body())
         }
@@ -606,17 +610,17 @@ fn reuse_or_conflict(
     }
     let head_hex = git_oid_hex(&head).expect("workspace revisions are verified Git oids");
     let mut response = serde_json::json!({
-            "workspace": workspace,
-            "path": path.display().to_string(),
-            "head": head_hex,
-            "base_revision": change.base_revision.to_hex(),
-            "revision_id": change.revision_id.to_hex(),
-            "change_id": change_id,
-            "owner": owner,
-            "idempotency_key": idempotency_key,
-            "created": false,
-            "reused": true,
-        });
+        "workspace": workspace,
+        "path": path.display().to_string(),
+        "head": head_hex,
+        "base_revision": change.base_revision.to_hex(),
+        "revision_id": change.revision_id.to_hex(),
+        "change_id": change_id,
+        "owner": owner,
+        "idempotency_key": idempotency_key,
+        "created": false,
+        "reused": true,
+    });
     let accepted = match platform.create_change(
         AuthorizedChangeCreate {
             id: change_id,
@@ -651,7 +655,12 @@ fn git_oid_hex(hash: &ContentHash) -> Option<String> {
     if hash.digest.len() != expected {
         return None;
     }
-    Some(hash.digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    Some(
+        hash.digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
 }
 
 fn lifecycle_conflict(error: impl Into<String>) -> (u16, String) {
@@ -717,7 +726,10 @@ fn provision(
             None,
         )?;
     }
-    run(with_config(&["checkout", "-q", "--detach", head]), Some(&template))?;
+    run(
+        with_config(&["checkout", "-q", "--detach", head]),
+        Some(&template),
+    )?;
 
     std::fs::create_dir_all(ws_dir.parent().expect("has parent"))
         .map_err(|e| format!("create workspace dir: {e}"))?;
@@ -728,7 +740,12 @@ fn provision(
     // Pushes from the workspace must ride the sequenced smart-HTTP
     // path, never the bare repo's filesystem path.
     git(
-        &["remote", "set-url", "origin", &format!("{base_url}/{repo}.git")],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            &format!("{base_url}/{repo}.git"),
+        ],
         Some(ws_dir),
     )?;
     Ok(copy_ms)

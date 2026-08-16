@@ -37,7 +37,11 @@ struct Rng(u64);
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+        Self(if seed == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seed
+        })
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -381,8 +385,7 @@ fn commits_round_trip_byte_for_byte() {
                 arities_seen |= 1 << parents.len();
                 let commit = commit_from(&pairs, parents);
                 let bytes = canonical(&commit);
-                let decoded: Commit =
-                    serde_json::from_str(&bytes).expect("canonical bytes decode");
+                let decoded: Commit = serde_json::from_str(&bytes).expect("canonical bytes decode");
                 assert_eq!(decoded, commit, "{at}: commit did not round-trip");
                 assert_eq!(
                     canonical(&decoded),
@@ -448,9 +451,7 @@ fn view_ops_round_trip_byte_for_byte() {
                     snapshot: RefSnapshot {
                         format_version: FORMAT_VERSION,
                         refs: (0..4)
-                            .map(|_| {
-                                (format!("repo.git:refs/heads/{}", rng.path()), rng.hash())
-                            })
+                            .map(|_| (format!("repo.git:refs/heads/{}", rng.path()), rng.hash()))
                             .collect(),
                         at_seq: rng.next_u64() % 1_000,
                         prev_snapshot: None,

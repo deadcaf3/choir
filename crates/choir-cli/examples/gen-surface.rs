@@ -18,7 +18,9 @@ fn main() {
         }
     };
     for (path, contents) in artifacts {
-        let changed = std::fs::read_to_string(&path).map(|old| old != contents).unwrap_or(true);
+        let changed = std::fs::read_to_string(&path)
+            .map(|old| old != contents)
+            .unwrap_or(true);
         if changed {
             std::fs::write(&path, &contents).expect("write artifact");
             println!("wrote {}", path.display());

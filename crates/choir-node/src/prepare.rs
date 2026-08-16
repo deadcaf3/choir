@@ -87,8 +87,7 @@ pub(crate) fn comment(id: &str, author: &str, comment_id: &str, body: &str) -> P
 
 /// Base64url without padding, WebAuthn's challenge encoding.
 pub(crate) fn base64url_nopad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -113,7 +112,10 @@ mod tests {
     #[test]
     fn a_prepared_op_carries_the_challenge_its_own_payload_hashes_to() {
         for (channel, prepared) in [
-            ("carol", super::verdict("r-1", "carol", "Approve").expect("a known verdict")),
+            (
+                "carol",
+                super::verdict("r-1", "carol", "Approve").expect("a known verdict"),
+            ),
             ("dave", super::comment("r-1", "dave", "c-1", "looks fine")),
         ] {
             let payload = crate::platform::hex_decode(&prepared.payload_hex).expect("hex");
@@ -134,8 +136,16 @@ mod tests {
     fn the_payload_names_the_same_principal_the_challenge_binds() {
         let prepared = super::comment("r-1", "dave", "c-1", "looks fine");
         let payload = crate::platform::hex_decode(&prepared.payload_hex).expect("hex");
-        match choir_view::ViewOp::from_payload(&payload).expect("a ViewOp").kind {
-            choir_view::OpKind::PostComment { id, comment, author, body } => {
+        match choir_view::ViewOp::from_payload(&payload)
+            .expect("a ViewOp")
+            .kind
+        {
+            choir_view::OpKind::PostComment {
+                id,
+                comment,
+                author,
+                body,
+            } => {
                 assert_eq!((id.as_str(), comment.as_str()), ("r-1", "c-1"));
                 assert_eq!(author, "dave");
                 assert_eq!(body, "looks fine");

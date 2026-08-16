@@ -309,8 +309,7 @@ fn the_set_of_persisted_shapes_is_frozen() {
     found.dedup();
 
     assert_eq!(
-        found,
-        REGISTERED,
+        found, REGISTERED,
         "the set of persisted shapes changed.\n\
          A new one needs: a golden vector in choir-view/tests/it/golden.rs, \
          a canonicalization property, and an entry above.\n\
@@ -371,7 +370,11 @@ pub enum BadKind {
     ];
     for (what, source) in cases {
         let items = serializable_items(source);
-        assert_eq!(items.len(), 1, "{what}: expected exactly one item, got {items:?}");
+        assert_eq!(
+            items.len(),
+            1,
+            "{what}: expected exactly one item, got {items:?}"
+        );
         assert!(
             mentions(&items[0].body, "HashMap") || mentions(&items[0].body, "HashSet"),
             "{what}: the detector missed an unordered map it must catch"
@@ -433,7 +436,7 @@ fn the_scanner_sees_the_shapes_we_know() {
         "OpEntry",     // has a renamed field and a skipped option
         "Witness",
         "ViewOp",
-        "OpKind",   // an enum with struct variants
+        "OpKind", // an enum with struct variants
         "TreeEntry",
         "Commit",
         "Manifest",

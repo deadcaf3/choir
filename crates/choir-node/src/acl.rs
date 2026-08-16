@@ -140,7 +140,10 @@ impl Acl {
             };
             let scope = parse_scope(target).map_err(|e| format!("line {number}: {e}"))?;
             let level = parse_level(&scope, level).map_err(|e| format!("line {number}: {e}"))?;
-            grants.entry(user.to_string()).or_default().push((scope, level));
+            grants
+                .entry(user.to_string())
+                .or_default()
+                .push((scope, level));
         }
         Ok(Self { grants })
     }
@@ -152,8 +155,7 @@ impl Acl {
     /// Returns a message when the file cannot be read, or when it does
     /// not parse.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         Self::parse(&text)
     }
 
@@ -176,7 +178,8 @@ impl Acl {
         let Some(held) = self.grants.get(user) else {
             return false;
         };
-        held.iter().any(|(granted, at)| *at >= level && covers(granted, scope))
+        held.iter()
+            .any(|(granted, at)| *at >= level && covers(granted, scope))
     }
 
     /// Whether `user` holds at least `level` over repository `repo`,
@@ -332,16 +335,22 @@ fn parse_scope(target: &str) -> Result<Scope, String> {
         return Ok(Scope::Node);
     }
     if target.starts_with('@') {
-        return Err(format!("`{target}` is not a pseudo-repository; the only one is `@node`"));
+        return Err(format!(
+            "`{target}` is not a pseudo-repository; the only one is `@node`"
+        ));
     }
     let repo = normalize_repo(target);
     let mut segments = repo.split('/');
     let (Some(owner), Some(name), None) = (segments.next(), segments.next(), segments.next())
     else {
-        return Err(format!("`{target}` is not a repository name; write `owner/repo`"));
+        return Err(format!(
+            "`{target}` is not a repository name; write `owner/repo`"
+        ));
     };
     if owner.is_empty() || name.is_empty() {
-        return Err(format!("`{target}` is not a repository name; write `owner/repo`"));
+        return Err(format!(
+            "`{target}` is not a repository name; write `owner/repo`"
+        ));
     }
     Ok(Scope::Repo(repo))
 }
@@ -367,7 +376,9 @@ fn parse_level(scope: &Scope, level: &str) -> Result<Level, String> {
             Err("`own` is a repository grant; `@node` takes `auditor` or `write`".to_string())
         }
         (_, "own") => Ok(Level::Own),
-        (Scope::Node, other) => Err(format!("`{other}` is not a level; write `auditor` or `write`")),
+        (Scope::Node, other) => Err(format!(
+            "`{other}` is not a level; write `auditor` or `write`"
+        )),
         (_, other) => Err(format!(
             "`{other}` is not a level; write `read`, `write` or `own`"
         )),
@@ -396,7 +407,10 @@ pub fn git_requirement(method: &str, url: &str) -> Option<(String, Level)> {
     // Everything after `/<repo>`; a non-char-boundary index cannot
     // happen for an ASCII repo name, and yields a denial if it somehow
     // does.
-    let tail = path.get(1 + repo.len()..).unwrap_or("").trim_start_matches('/');
+    let tail = path
+        .get(1 + repo.len()..)
+        .unwrap_or("")
+        .trim_start_matches('/');
     let level = match (method, tail) {
         ("POST", "git-receive-pack") => Level::Write,
         ("POST", "git-upload-pack") => Level::Read,
@@ -465,12 +479,12 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
         // workspace move does, rather than falling to a node-wide grant.
         OpKind::CreateChange { workspace, .. }
         | OpKind::CheckpointChange { workspace, .. }
-        | OpKind::ArchiveChange { workspace, .. } => {
-            subject_repo(workspace).into_iter().collect()
-        }
-        OpKind::RequestReview { target_ref, .. } => {
-            target_ref.as_deref().and_then(ref_repo).into_iter().collect()
-        }
+        | OpKind::ArchiveChange { workspace, .. } => subject_repo(workspace).into_iter().collect(),
+        OpKind::RequestReview { target_ref, .. } => target_ref
+            .as_deref()
+            .and_then(ref_repo)
+            .into_iter()
+            .collect(),
         // A comment authorizes against the repository under review, the
         // same as a verdict on the same review: discussion is part of the
         // review surface, not a node-wide fact.
@@ -500,7 +514,10 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
 /// to [`Scope::Node`] rather than being waved through, so a caller
 /// without a node-wide grant gets a denial and one with it gets the
 /// handler's own `400`.
-fn submission_scopes(body: &serde_json::Value, review_repo: &impl Fn(&str) -> Option<String>) -> Vec<Scope> {
+fn submission_scopes(
+    body: &serde_json::Value,
+    review_repo: &impl Fn(&str) -> Option<String>,
+) -> Vec<Scope> {
     let decoded = body
         .get("payload_hex")
         .and_then(serde_json::Value::as_str)
@@ -581,7 +598,10 @@ pub fn api_denial(
                     if scopes.is_empty() {
                         scopes.push(Scope::Node);
                     }
-                    scopes.into_iter().map(|scope| (scope, Level::Write)).collect()
+                    scopes
+                        .into_iter()
+                        .map(|scope| (scope, Level::Write))
+                        .collect()
                 }
                 None => vec![(Scope::Node, Level::Write)],
             }
@@ -867,7 +887,10 @@ mod tests {
             ("alice @nope write", "an invented pseudo-repository"),
             ("alice owner write", "a repo name with no owner"),
             ("alice owner/a/b write", "a three-segment repo name"),
-            ("alice @node read", "`read` where the role is spelled `auditor`"),
+            (
+                "alice @node read",
+                "`read` where the role is spelled `auditor`",
+            ),
             ("alice owner/project auditor", "a node role on a repository"),
         ] {
             assert!(Acl::parse(bad).is_err(), "accepted {why}: {bad:?}");
@@ -923,7 +946,10 @@ mod tests {
     #[test]
     fn own_is_a_repository_grant_and_the_node_refuses_it() {
         assert!(Acl::parse("alice o/r own").is_ok());
-        assert!(Acl::parse("alice * own").is_ok(), "owning every repo is sayable");
+        assert!(
+            Acl::parse("alice * own").is_ok(),
+            "owning every repo is sayable"
+        );
         let error = Acl::parse("alice @node own").expect_err("@node cannot be owned");
         assert!(error.contains("repository grant"), "{error}");
     }
@@ -958,8 +984,16 @@ mod tests {
     #[test]
     fn the_smart_http_surface_maps_to_the_level_it_actually_needs() {
         let cases = [
-            ("GET", "/o/r.git/info/refs?service=git-upload-pack", Some(Level::Read)),
-            ("GET", "/o/r.git/info/refs?service=git-receive-pack", Some(Level::Write)),
+            (
+                "GET",
+                "/o/r.git/info/refs?service=git-upload-pack",
+                Some(Level::Read),
+            ),
+            (
+                "GET",
+                "/o/r.git/info/refs?service=git-receive-pack",
+                Some(Level::Write),
+            ),
             ("GET", "/o/r.git/info/refs", Some(Level::Read)),
             ("GET", "/o/r.git/HEAD", Some(Level::Read)),
             ("GET", "/o/r.git/objects/info/packs", Some(Level::Read)),
@@ -1056,7 +1090,10 @@ mod tests {
             commit: choir_oplog::ContentHash::blake3(b"c"),
             prev: None,
         };
-        assert_eq!(op_scopes(&op, none), vec![Scope::Repo("owner/project".into())]);
+        assert_eq!(
+            op_scopes(&op, none),
+            vec![Scope::Repo("owner/project".into())]
+        );
     }
 
     /// A view payload shaped like the one `/api/view` serves: two
@@ -1168,7 +1205,10 @@ mod tests {
         let auditor = Acl::parse("carol @node auditor").expect("parses");
         let whole = filter_response(&auditor, "carol", "/api/view", &sample_view());
         for section in node_wide_sections() {
-            assert!(whole.contains(section), "{section} was withheld from an auditor");
+            assert!(
+                whole.contains(section),
+                "{section} was withheld from an auditor"
+            );
         }
         // An auditor holds no repository grant, so the repository
         // sections are empty for them — `@node` is not a way around `*`.
@@ -1222,8 +1262,14 @@ mod tests {
     #[test]
     fn an_unrecognized_body_or_path_is_left_alone() {
         let acl = Acl::parse("alice owner/mine read").expect("parses");
-        assert_eq!(filter_response(&acl, "alice", "/api/view", "not json"), "not json");
-        assert_eq!(filter_response(&acl, "alice", "/api/view", "[1,2]"), "[1,2]");
+        assert_eq!(
+            filter_response(&acl, "alice", "/api/view", "not json"),
+            "not json"
+        );
+        assert_eq!(
+            filter_response(&acl, "alice", "/api/view", "[1,2]"),
+            "[1,2]"
+        );
         let other = r#"{"refs":{"owner/theirs.git:refs/heads/main":"git-2222"}}"#;
         assert_eq!(filter_response(&acl, "alice", "/api/submit", other), other);
     }

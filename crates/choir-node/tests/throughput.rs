@@ -255,8 +255,11 @@ fn batch_submit_throughput() {
     let started = Instant::now();
     let mut accepted = 0u64;
     for body in &bodies {
-        let (status, out) =
-            platform.handle_api("POST", "/api/submit-batch", std::hint::black_box(body.as_bytes()));
+        let (status, out) = platform.handle_api(
+            "POST",
+            "/api/submit-batch",
+            std::hint::black_box(body.as_bytes()),
+        );
         assert_eq!(status, 200, "batch rejected: {out}");
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("batch reply is json");
         accepted += parsed["accepted"].as_u64().expect("accepted count");

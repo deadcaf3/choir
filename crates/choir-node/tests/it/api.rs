@@ -23,7 +23,9 @@ fn signed_submit_and_view_over_http() {
     registry.register(&alice.public_key_bytes()).unwrap();
 
     let mut node = Node::bind(&work.join("repos"), 0).unwrap();
-    node.enable_platform(Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap());
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+    );
     let port = node.port();
     let node = std::sync::Arc::new(node);
     {
@@ -41,7 +43,10 @@ fn signed_submit_and_view_over_http() {
 
     // Alice's signed op is admitted at seq 0.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &op),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &op),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -60,26 +65,41 @@ fn signed_submit_and_view_over_http() {
     })
     .to_string();
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &conflicting_names,
+        "-X",
+        "POST",
+        "-d",
+        &conflicting_names,
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
-    assert!(resp["error"].as_str().unwrap().contains("disagree"), "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("disagree"),
+        "{resp}"
+    );
 
     // Mallory's unregistered key is rejected.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&mallory, "mallory", &op),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&mallory, "mallory", &op),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
     assert_eq!(resp["code"], "unknown_key", "{resp}");
-    assert!(resp["next"].as_str().unwrap().contains("trusted-keys"), "{resp}");
+    assert!(
+        resp["next"].as_str().unwrap().contains("trusted-keys"),
+        "{resp}"
+    );
 
     // Alice replaying the *identical* op. This fails CAS internally, but
     // the honest answer is that it already landed -- the two cases call
     // for opposite client actions, so they must not share a response.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &op),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &op),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "an identical replay is not a conflict: {resp}");
@@ -93,13 +113,19 @@ fn signed_submit_and_view_over_http() {
         prev: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&alice, "alice", &other),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&alice, "alice", &other),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "stale_head", "{resp}");
     assert!(resp["actual"].is_string(), "no actual state: {resp}");
-    assert!(resp["next"].as_str().unwrap().contains("resubmit"), "{resp}");
+    assert!(
+        resp["next"].as_str().unwrap().contains("resubmit"),
+        "{resp}"
+    );
 
     // The view shows exactly the admitted state.
     let (code, view) = curl(&[&format!("{api}/view")]);
@@ -201,7 +227,12 @@ fn llms_txt_is_served_and_describes_the_surface() {
     }
 
     let out = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}", &format!("http://127.0.0.1:{port}/llms.txt")])
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            &format!("http://127.0.0.1:{port}/llms.txt"),
+        ])
         .output()
         .expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout);
@@ -211,13 +242,21 @@ fn llms_txt_is_served_and_describes_the_surface() {
     // It must name the primary path, since teaching the wrong default is
     // the whole failure mode this file exists to prevent.
     assert!(body.contains("/api/submit-batch"), "{body}");
-    assert!(body.contains("git push is the compatibility path"), "{body}");
+    assert!(
+        body.contains("git push is the compatibility path"),
+        "{body}"
+    );
     assert!(body.contains("choir review"), "{body}");
 
     // And the document it tells the agent to follow is reachable from
     // the same node, not only from a clone of the repository.
     let out = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}", &format!("http://127.0.0.1:{port}/sync.md")])
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            &format!("http://127.0.0.1:{port}/sync.md"),
+        ])
         .output()
         .expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout);

@@ -79,6 +79,10 @@ impl OpLog for CountingLog {
         self.inner.get(seq)
     }
 
+    fn last(&self) -> Option<&OpEntry> {
+        self.inner.last()
+    }
+
     fn sync(&mut self) -> Result<(), LogError> {
         self.syncs.fetch_add(1, Ordering::Relaxed);
         if self.fail_sync {
@@ -179,6 +183,67 @@ fn a_failed_sync_is_reported_rather_than_acknowledged() {
         "the rejection must name durability as the cause, got {reason:?}"
     );
     sequencer.shutdown();
+}
+
+#[test]
+fn an_append_failure_poisoned_the_writer_without_mutating_policy_state() {
+    use choir_sequencer::{Submission, SubmitPolicy};
+
+    struct FailingAppendLog(MemLog);
+    impl OpLog for FailingAppendLog {
+        fn append(&mut self, _entry: OpEntry) -> Result<ContentHash, LogError> {
+            Err(LogError::Corrupt("injected append failure".into()))
+        }
+        fn head(&self) -> Option<ContentHash> {
+            self.0.head()
+        }
+        fn len(&self) -> u64 {
+            self.0.len()
+        }
+        fn get(&self, seq: u64) -> Option<OpEntry> {
+            self.0.get(seq)
+        }
+        fn last(&self) -> Option<&OpEntry> {
+            self.0.last()
+        }
+    }
+
+    struct Observed(Arc<AtomicUsize>);
+    impl SubmitPolicy for Observed {
+        fn check(&mut self, _sub: &Submission) -> Result<(), String> {
+            Ok(())
+        }
+        fn accepted(&mut self, _entry: &OpEntry, _hash: &ContentHash) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let sequencer = Sequencer::spawn_with_policy(
+        Box::new(FailingAppendLog(MemLog::new())),
+        Box::new(Observed(mutations.clone())),
+    );
+    let handle = sequencer.handle();
+    let failure = handle
+        .try_submit("ws", b"op".to_vec(), None)
+        .expect_err("the injected append failure must reach the caller");
+    assert!(failure.contains("append failed"), "{failure}");
+    assert_eq!(
+        mutations.load(Ordering::Relaxed),
+        0,
+        "policy state changed before storage accepted the entry"
+    );
+    assert!(
+        handle.durability_failed(),
+        "append failure must poison the writer"
+    );
+
+    let log = sequencer.shutdown();
+    assert_eq!(
+        log.len(),
+        0,
+        "a refused append must not leave an entry behind"
+    );
 }
 
 /// The barrier cost and the batch size, measured against a real

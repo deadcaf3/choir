@@ -58,7 +58,9 @@ fn receiver(status: u16) -> (u16, Receiver<Delivered>) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let Ok(peer) = stream.try_clone() else { continue };
+            let Ok(peer) = stream.try_clone() else {
+                continue;
+            };
             let mut reader = BufReader::new(peer);
             let mut request_line = String::new();
             if reader.read_line(&mut request_line).is_err() {
@@ -232,7 +234,10 @@ fn a_landed_ref_reaches_its_subscriber_with_the_subscription_secret() {
     assert_eq!(body["repo"], "owner/repo", "{body}");
     assert_eq!(body["ref"], "refs/heads/main", "{body}");
     assert_eq!(body["ref_key"], "owner/repo:refs/heads/main", "{body}");
-    assert!(body["old"].is_null(), "a created ref has no old value: {body}");
+    assert!(
+        body["old"].is_null(),
+        "a created ref has no old value: {body}"
+    );
     assert_eq!(
         body["new"],
         choir_oplog::ContentHash::blake3(b"owner/repo:refs/heads/main").to_hex(),
@@ -393,7 +398,8 @@ fn a_failing_receiver_is_retried_and_every_attempt_is_recorded() {
     // Best-effort, but never silent: the last attempt says it was the
     // last one, so an operator reading this file sees an abandoned
     // delivery rather than an absence.
-    let record = fixture.wait_for_record(|record| record["event"] == "failed" && record["final"] == true);
+    let record =
+        fixture.wait_for_record(|record| record["event"] == "failed" && record["final"] == true);
     assert_eq!(record["attempt"], 3, "{record}");
     assert_eq!(record["status"], 500, "{record}");
 

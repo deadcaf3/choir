@@ -11,9 +11,12 @@ use choir_queue::corpus::{
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
         .args([
-            "-c", "commit.gpgsign=false",
-            "-c", "tag.gpgsign=false",
-            "-c", "init.defaultBranch=main",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
         ])
         .args(args)
         .current_dir(dir)
@@ -53,9 +56,11 @@ fn a_reverted_merge_is_labelled_and_an_untouched_one_is_not() {
     git(&work, &["checkout", "-q", "-b", "bad"]);
     commit(&work, "bad.txt", "bad\n", "bad feature");
     git(&work, &["checkout", "-q", "main"]);
-    assert!(git(&work, &["merge", "-q", "--no-ff", "-m", "merge bad", "bad"])
-        .status
-        .success());
+    assert!(
+        git(&work, &["merge", "-q", "--no-ff", "-m", "merge bad", "bad"])
+            .status
+            .success()
+    );
     let bad_merge = String::from_utf8(git(&work, &["rev-parse", "HEAD"]).stdout)
         .unwrap()
         .trim()
@@ -65,15 +70,22 @@ fn a_reverted_merge_is_labelled_and_an_untouched_one_is_not() {
     // git's own revert wording is what the labeller matches, so this uses
     // git revert rather than a hand-written message.
     let out = git(&work, &["revert", "-m", "1", "--no-edit", &bad_merge]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Merge 2: never reverted.
     git(&work, &["checkout", "-q", "-b", "good"]);
     commit(&work, "good.txt", "good\n", "good feature");
     git(&work, &["checkout", "-q", "main"]);
-    assert!(git(&work, &["merge", "-q", "--no-ff", "-m", "merge good", "good"])
-        .status
-        .success());
+    assert!(git(
+        &work,
+        &["merge", "-q", "--no-ff", "-m", "merge good", "good"]
+    )
+    .status
+    .success());
     let good_merge = String::from_utf8(git(&work, &["rev-parse", "HEAD"]).stdout)
         .unwrap()
         .trim()
@@ -88,21 +100,33 @@ fn a_reverted_merge_is_labelled_and_an_untouched_one_is_not() {
         history.len(),
         5,
         "expected mainline only, got {:?}",
-        history.iter().map(|c| c.body.lines().next().unwrap_or("")).collect::<Vec<_>>()
+        history
+            .iter()
+            .map(|c| c.body.lines().next().unwrap_or(""))
+            .collect::<Vec<_>>()
     );
 
     let labelled = label_merges(&history, 10, &Attribution::new());
     assert_eq!(labelled.len(), 2, "two merges: {labelled:?}");
 
-    let bad = labelled.iter().find(|m| m.merge == bad_merge).expect("bad merge");
-    assert!(bad.reverted_by.is_some(), "reverted merge not labelled: {bad:?}");
+    let bad = labelled
+        .iter()
+        .find(|m| m.merge == bad_merge)
+        .expect("bad merge");
+    assert!(
+        bad.reverted_by.is_some(),
+        "reverted merge not labelled: {bad:?}"
+    );
     assert_eq!(
         bad.distance,
         Some(2),
         "revert lands 2 mainline commits after the merge: {bad:?}"
     );
 
-    let good = labelled.iter().find(|m| m.merge == good_merge).expect("good merge");
+    let good = labelled
+        .iter()
+        .find(|m| m.merge == good_merge)
+        .expect("good merge");
     assert_eq!(good.reverted_by, None, "clean merge labelled bad: {good:?}");
 
     let rate = base_rate(&history, 10, &Attribution::new());
@@ -123,7 +147,8 @@ fn parsing_survives_bodies_that_look_like_the_format() {
     // Multi-line bodies and blank lines are the normal case, and a commit
     // message may legitimately mention a hash. Fields are separated by
     // ASCII 0x1f/0x1e precisely so a body cannot forge a record boundary.
-    let log = "aaa\u{1f}bbb ccc\u{1f}merge: a thing\n\nrefs #12\n\u{1e}\nbbb\u{1f}\u{1f}root\n\u{1e}";
+    let log =
+        "aaa\u{1f}bbb ccc\u{1f}merge: a thing\n\nrefs #12\n\u{1e}\nbbb\u{1f}\u{1f}root\n\u{1e}";
     let history = parse_history(log);
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].id, "aaa");
@@ -143,7 +168,8 @@ fn revert_detection_matches_gits_wording_and_abbreviated_oids() {
     let full = Commit {
         id: "r1".into(),
         parents: vec!["p".into()],
-        body: "Revert \"x\"\n\nThis reverts commit 1234567890abcdef1234567890abcdef12345678.\n".into(),
+        body: "Revert \"x\"\n\nThis reverts commit 1234567890abcdef1234567890abcdef12345678.\n"
+            .into(),
     };
     assert_eq!(
         full.reverts().as_deref(),
@@ -233,8 +259,14 @@ fn corpus_suitability_separates_a_low_rate_from_an_unmeasurable_one() {
         .collect();
     let r = base_rate(&quiet, 50, &Attribution::new());
     assert_eq!(r.revert_commits, 0);
-    assert!(!r.corpus_is_suitable(), "a revert-free corpus cannot supply a rate");
-    assert!((r.rate() - 0.0).abs() < f64::EPSILON, "and it still reads 0.0");
+    assert!(
+        !r.corpus_is_suitable(),
+        "a revert-free corpus cannot supply a rate"
+    );
+    assert!(
+        (r.rate() - 0.0).abs() < f64::EPSILON,
+        "and it still reads 0.0"
+    );
 
     // One revert per 200 commits clears the bar.
     let mut reverting = quiet;
@@ -269,9 +301,12 @@ fn attribution_catches_a_revert_that_names_the_commit_not_the_merge() {
     git(&work, &["checkout", "-q", "-b", "feature"]);
     let change = commit(&work, "feature.txt", "feature\n", "the change");
     git(&work, &["checkout", "-q", "main"]);
-    assert!(git(&work, &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"])
-        .status
-        .success());
+    assert!(git(
+        &work,
+        &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"]
+    )
+    .status
+    .success());
     let merge = String::from_utf8(git(&work, &["rev-parse", "HEAD"]).stdout)
         .unwrap()
         .trim()
@@ -281,7 +316,11 @@ fn attribution_catches_a_revert_that_names_the_commit_not_the_merge() {
     // Revert the CHANGE, not the merge — no `-m 1`, because the target is
     // an ordinary commit.
     let out = git(&work, &["revert", "--no-edit", &change]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let log = choir_queue::corpus::history(&work, 0).expect("git log");
     let history = parse_history(&log);
@@ -294,13 +333,23 @@ fn attribution_catches_a_revert_that_names_the_commit_not_the_merge() {
 
     // With attribution the revert is charged to the merge that landed it.
     let targets = revert_targets(&history);
-    assert!(targets.contains(&change), "revert target should be the change");
+    assert!(
+        targets.contains(&change),
+        "revert target should be the change"
+    );
     let attribution = attribute(&work, &history, &targets).expect("attribute");
     assert_eq!(attribution.get(&change), Some(merge.as_str()));
-    assert!(attribution.unresolved().is_empty(), "{:?}", attribution.unresolved());
+    assert!(
+        attribution.unresolved().is_empty(),
+        "{:?}",
+        attribution.unresolved()
+    );
 
     let attributed = base_rate(&history, 20, &attribution);
-    assert_eq!(attributed.reverted, 1, "attribution should charge the merge");
+    assert_eq!(
+        attributed.reverted, 1,
+        "attribution should charge the merge"
+    );
     assert!((attributed.rate() - 1.0).abs() < 1e-9);
 
     // A commit already on the mainline maps to itself, not to its child.
@@ -308,11 +357,17 @@ fn attribution_catches_a_revert_that_names_the_commit_not_the_merge() {
         [history.last().unwrap().id.clone()].into_iter().collect();
     let self_attr = attribute(&work, &history, &root_targets).expect("attribute");
     let root = &history.last().unwrap().id;
-    assert_eq!(self_attr.get(root), Some(root.as_str()), "mainline maps to itself");
+    assert_eq!(
+        self_attr.get(root),
+        Some(root.as_str()),
+        "mainline maps to itself"
+    );
 
     // A commit from nowhere is unresolved, not silently attributed.
     let stranger: std::collections::BTreeSet<String> =
-        ["0000000000000000000000000000000000000000".to_string()].into_iter().collect();
+        ["0000000000000000000000000000000000000000".to_string()]
+            .into_iter()
+            .collect();
     let missing = attribute(&work, &history, &stranger);
     match missing {
         Ok(a) => assert_eq!(a.unresolved().len(), 1, "should be unresolved"),

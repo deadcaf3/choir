@@ -35,7 +35,10 @@ fn main() {
     }
 
     println!("\nWhat a useful detector would need here:");
-    println!("{:<34}{:>12}{:>16}", "target precision", "max FP rate", "vs Borba's 0.40");
+    println!(
+        "{:<34}{:>12}{:>16}",
+        "target precision", "max FP rate", "vs Borba's 0.40"
+    );
     for target in [0.25, 0.50, 0.75, 0.90] {
         let need = required_false_positive_rate(p, 0.60, target).expect("valid target");
         let label = format!("{:.0}%", target * 100.0);
@@ -43,9 +46,15 @@ fn main() {
     }
 
     println!("\nDifferential testing, where the FP rate IS the flake rate:");
-    println!("{:<34}{:>7}{:>12}{:>12}", "spurious-failure rate", "recall", "precision", "FP per hit");
+    println!(
+        "{:<34}{:>7}{:>12}{:>12}",
+        "spurious-failure rate", "recall", "precision", "FP per hit"
+    );
     for flake in [0.05, 0.01, 0.005, 0.001, 0.0005] {
-        let d = Detector { recall: 0.80, false_positive_rate: flake };
+        let d = Detector {
+            recall: 0.80,
+            false_positive_rate: flake,
+        };
         println!(
             "{:<34}{:>7.2}{:>12.3}{:>12.1}",
             format!("{:.2}%", flake * 100.0),

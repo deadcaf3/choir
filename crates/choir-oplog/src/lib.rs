@@ -264,6 +264,14 @@ pub trait OpLog: Send {
     /// Entry at sequence number `seq`, or `None` if out of range.
     fn get(&self, seq: u64) -> Option<OpEntry>;
 
+    /// Borrows the newest entry without cloning it.
+    ///
+    /// The sequencer uses this immediately after a successful append so
+    /// its cached policy state is updated only after storage accepted the
+    /// entry. Implementations must therefore return the entry whose hash
+    /// is [`OpLog::head`].
+    fn last(&self) -> Option<&OpEntry>;
+
     /// Makes every prior [`OpLog::append`] durable — survives power loss,
     /// not merely process death.
     ///
@@ -324,6 +332,10 @@ impl OpLog for MemLog {
 
     fn get(&self, seq: u64) -> Option<OpEntry> {
         self.entries.get(seq as usize).cloned()
+    }
+
+    fn last(&self) -> Option<&OpEntry> {
+        self.entries.last()
     }
 
     /// Nothing to do: a `MemLog` never outlives its process, so there is
@@ -438,6 +450,27 @@ impl FileLog {
             };
             let entry: OpEntry =
                 serde_json::from_slice(body).map_err(|e| LogError::Corrupt(e.to_string()))?;
+            let position = offsets.len() as u64;
+            if entry.format_version != FORMAT_VERSION {
+                return Err(LogError::Corrupt(format!(
+                    "record {position} uses unsupported format version {}; this build supports {FORMAT_VERSION}",
+                    entry.format_version
+                )));
+            }
+            if entry.seq != position {
+                return Err(LogError::Corrupt(format!(
+                    "record at position {position} carries seq {}",
+                    entry.seq
+                )));
+            }
+            if entry.parent != head {
+                return Err(LogError::Corrupt(format!(
+                    "record {position} does not chain to the previous entry"
+                )));
+            }
+            // Recompute the canonical entry hash while replaying. The
+            // next record must name this value as its parent, and the
+            // final value is the rebuilt head returned by `head()`.
             head = Some(entry.content_hash());
             offsets.push(write_pos);
             write_pos += n as u64;
@@ -456,11 +489,7 @@ impl FileLog {
             // of bytes still present in the log, which is harmless. The
             // reverse order would leave a truncation with no copy, which
             // is the deletion this exists to avoid.
-            torn_tail_quarantine = Some(repair::quarantine_tail(
-                path,
-                &line,
-                write_pos,
-            )?);
+            torn_tail_quarantine = Some(repair::quarantine_tail(path, &line, write_pos)?);
             // Cut it off before the writer can append behind it. `sync_all`
             // rather than `sync_data` because it is the file's *length*
             // that has to survive here.
@@ -594,6 +623,14 @@ impl OpLog for FileLog {
         file.read_exact(&mut buf).ok()?;
         let body = buf.strip_suffix(b"\n").unwrap_or(&buf);
         serde_json::from_slice(body).ok()
+    }
+
+    fn last(&self) -> Option<&OpEntry> {
+        // The sequencer observes an append before the batch barrier, so
+        // the newest entry is necessarily still in this pending queue.
+        // Returning a borrow avoids cloning the whole signed payload on
+        // every successful submission.
+        self.pending.back()
     }
 
     /// Flush the buffer to the OS, then ask the OS to put it on the

@@ -25,14 +25,20 @@ pub fn write_atomic_private(path: &Path, contents: impl AsRef<[u8]>) -> io::Resu
 }
 
 fn write_atomic_impl(path: &Path, contents: impl AsRef<[u8]>, private: bool) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "atomic write path has no parent"))?;
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic write path has no parent",
+        )
+    })?;
     fs::create_dir_all(parent)?;
 
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "atomic write path has no file name"))?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic write path has no file name",
+        )
+    })?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -113,7 +119,10 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .filter(|name| name.to_string_lossy().contains(".tmp-"))
             .collect();
-        assert!(leftovers.is_empty(), "left temp files behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "left temp files behind: {leftovers:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

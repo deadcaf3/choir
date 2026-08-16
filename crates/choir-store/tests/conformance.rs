@@ -49,7 +49,13 @@ fn fsstore_conforms() {
 #[test]
 fn blob_roundtrip_all_sizes() {
     let mut store = MemStore::new();
-    for (len, seed) in [(0usize, 1u64), (1, 2), (100, 3), (64 * 1024, 4), (3_000_000, 5)] {
+    for (len, seed) in [
+        (0usize, 1u64),
+        (1, 2),
+        (100, 3),
+        (64 * 1024, 4),
+        (3_000_000, 5),
+    ] {
         let data = pseudo_random(len, seed);
         let mh = put_blob(&mut store, &data, ChunkerParams::default()).unwrap();
         assert_eq!(get_blob(&store, &mh).unwrap(), data, "roundtrip len={len}");
@@ -113,7 +119,10 @@ fn unsupported_manifest_version_fails_loudly() {
 
     match get_blob(&store, &hash) {
         Err(StoreError::BadManifest(reason)) => {
-            assert!(reason.contains("unsupported manifest format version"), "{reason}");
+            assert!(
+                reason.contains("unsupported manifest format version"),
+                "{reason}"
+            );
         }
         other => panic!("unsupported manifest must fail, got {other:?}"),
     }

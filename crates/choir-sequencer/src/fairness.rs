@@ -306,11 +306,7 @@ mod tests {
             let key = quotas.admit(&format!("throwaway-{i}")).expect("admitted");
             quotas.release(&key);
         }
-        let tracked = quotas
-            .inflight
-            .lock()
-            .expect("not poisoned")
-            .len();
+        let tracked = quotas.inflight.lock().expect("not poisoned").len();
         assert!(
             tracked <= MAX_TRACKED + 1,
             "emptied buckets must be dropped once over the cap, or an \

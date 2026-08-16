@@ -113,8 +113,16 @@ fn train_entries_carry_only_bridge_authored_notes() {
     std::fs::create_dir_all(&work).unwrap();
     let git = |args: &[&str]| {
         std::process::Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
-                   "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .args(args)
             .current_dir(&work)
             .output()

@@ -241,7 +241,10 @@ fn an_owned_ref_refuses_every_approval_but_an_owner_s() {
     );
     assert_eq!(resp["code"], "review_required", "{resp}");
     assert!(
-        resp["error"].as_str().unwrap().contains("no owner has assented"),
+        resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("no owner has assented"),
         "the refusal must name the reason, not report a weight: {resp}"
     );
     assert_eq!(node.head(), format!("11-{}", "1".repeat(40)).as_str());

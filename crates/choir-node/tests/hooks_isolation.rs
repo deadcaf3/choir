@@ -55,7 +55,9 @@ fn receiver(delay: Option<Duration>) -> u16 {
         let mut held = Vec::new();
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let Ok(peer) = stream.try_clone() else { continue };
+            let Ok(peer) = stream.try_clone() else {
+                continue;
+            };
             match delay {
                 Some(delay) => {
                     std::thread::spawn(move || {
@@ -198,7 +200,10 @@ fn a_full_queue_drops_and_counts_rather_than_blocking_the_writer() {
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .find(|record| record["event"] == "dropped")
         {
-            assert!(record["dropped_total"].as_u64().unwrap_or(0) > 0, "{record}");
+            assert!(
+                record["dropped_total"].as_u64().unwrap_or(0) > 0,
+                "{record}"
+            );
             assert_eq!(record["queue_capacity"], QUEUE_CAPACITY, "{record}");
             break;
         }

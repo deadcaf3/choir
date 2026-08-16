@@ -208,8 +208,7 @@ impl WorkspaceTally {
                     .or_insert_with(|| entry.channel.clone());
             }
             // The two that take one out.
-            OpKind::DeleteWorkspace { workspace }
-            | OpKind::ArchiveChange { workspace, .. } => {
+            OpKind::DeleteWorkspace { workspace } | OpKind::ArchiveChange { workspace, .. } => {
                 self.owner_of.remove(workspace);
             }
             _ => {}
@@ -219,7 +218,10 @@ impl WorkspaceTally {
     /// How many workspaces `channel` currently holds.
     #[must_use]
     pub fn held_by(&self, channel: &str) -> usize {
-        self.owner_of.values().filter(|owner| *owner == channel).count()
+        self.owner_of
+            .values()
+            .filter(|owner| *owner == channel)
+            .count()
     }
 
     /// Every workspace the tally is tracking, for the test that pins it

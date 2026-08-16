@@ -80,7 +80,13 @@ fn resolution_links_its_conflict_and_a_dangling_link_is_refused() {
     append_op_with_store(&mut log, &store, "w1", set_head("w1", &conflict, None)).unwrap();
 
     let fix = resolution_commit(&mut store, &conflict, "hot.txt", Some(conflict.clone()));
-    append_op_with_store(&mut log, &store, "w1", set_head("w1", &fix, Some(&conflict))).unwrap();
+    append_op_with_store(
+        &mut log,
+        &store,
+        "w1",
+        set_head("w1", &fix, Some(&conflict)),
+    )
+    .unwrap();
 
     // The link holds in both directions: the head names the conflict it
     // resolves, and the conflicted commit is still a value in history
@@ -146,14 +152,19 @@ fn pre_change_commit_bytes_decode_and_hash_identically() {
     )
     .into_bytes();
     assert!(
-        !String::from_utf8(old_bytes.clone()).unwrap().contains("\"resolves\":"),
+        !String::from_utf8(old_bytes.clone())
+            .unwrap()
+            .contains("\"resolves\":"),
         "the fixture must predate the field"
     );
 
     let decoded: Commit = serde_json::from_slice(&old_bytes).unwrap();
     assert_eq!(decoded.resolves, None);
     let re_bytes = serde_json::to_vec(&decoded).unwrap();
-    assert_eq!(re_bytes, old_bytes, "old commits must re-serialize byte-identically");
+    assert_eq!(
+        re_bytes, old_bytes,
+        "old commits must re-serialize byte-identically"
+    );
     assert_eq!(
         ContentHash::blake3(&re_bytes),
         ContentHash::blake3(&old_bytes),
@@ -164,5 +175,7 @@ fn pre_change_commit_bytes_decode_and_hash_identically() {
     let mut linked = decoded;
     linked.resolves = Some(ContentHash::blake3(b"the conflict"));
     let linked_bytes = serde_json::to_vec(&linked).unwrap();
-    assert!(String::from_utf8(linked_bytes).unwrap().contains("resolves"));
+    assert!(String::from_utf8(linked_bytes)
+        .unwrap()
+        .contains("resolves"));
 }

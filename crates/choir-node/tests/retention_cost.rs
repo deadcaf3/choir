@@ -48,7 +48,9 @@ fn submit(platform: &Platform, key: &ActorKey, channel: &str, op: ViewOp) {
 fn build(retention: Option<ReviewRetention>) -> (ActorKey, Platform) {
     let key = ActorKey::generate();
     let mut registry = Registry::new();
-    registry.register(&key.public_key_bytes()).expect("valid key");
+    registry
+        .register(&key.public_key_bytes())
+        .expect("valid key");
     let platform = match retention {
         Some(r) => Platform::start_with_review_retention(
             registry,

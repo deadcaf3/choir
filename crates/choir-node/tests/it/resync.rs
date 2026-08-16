@@ -133,10 +133,16 @@ fn an_in_memory_log_reports_the_gap_instead_of_hiding_it() {
     fill(&api, &key, 5);
 
     let (code, resp) = curl(&[&format!("{api}/log?from=0")]);
-    assert_eq!(code, 409, "a gap must be an error, not a short page: {resp}");
+    assert_eq!(
+        code, 409,
+        "a gap must be an error, not a short page: {resp}"
+    );
     assert_eq!(resp["window_base"], 3, "{resp}");
     assert_eq!(resp["code"], "log_evicted", "{resp}");
-    assert!(resp["next"].as_str().unwrap().contains("resync from seq"), "{resp}");
+    assert!(
+        resp["next"].as_str().unwrap().contains("resync from seq"),
+        "{resp}"
+    );
 
     // Still inside the window: normal 200.
     let (code, page) = curl(&[&format!("{api}/log?from=3")]);

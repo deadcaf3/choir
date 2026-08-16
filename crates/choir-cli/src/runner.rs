@@ -609,7 +609,10 @@ impl Config {
         }
         let auth_file = string_field(value, "auth_file");
         let auth_user = string_field(value, "auth_user");
-        if auth_file.as_ref().is_some_and(|path| !path.starts_with('/')) {
+        if auth_file
+            .as_ref()
+            .is_some_and(|path| !path.starts_with('/'))
+        {
             return Err(Failure::terminal(
                 "invalid_config",
                 "config auth_file must be an absolute path",
@@ -672,7 +675,9 @@ impl Request {
     /// Returns a [`Failure`] when the protocol version, operation, or
     /// the fields the named scheme requires are missing or unusable.
     pub fn parse(value: &serde_json::Value, config: &Config) -> Result<Self, Failure> {
-        if value.get("protocol_version").and_then(serde_json::Value::as_u64)
+        if value
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_u64)
             != Some(PROTOCOL_VERSION)
         {
             return Err(Failure::terminal(
@@ -680,11 +685,9 @@ impl Request {
                 format!("request must be a protocol_version {PROTOCOL_VERSION} object"),
             ));
         }
-        let operation = Operation::parse(
-            &string_field(value, "operation").ok_or_else(|| {
-                Failure::terminal("invalid_request", "request needs string operation")
-            })?,
-        )?;
+        let operation = Operation::parse(&string_field(value, "operation").ok_or_else(|| {
+            Failure::terminal("invalid_request", "request needs string operation")
+        })?)?;
 
         let needs = |field: &str| {
             Failure::terminal(
@@ -752,15 +755,18 @@ mod tests {
     /// the wrong change or none at all.
     #[test]
     fn a_from_name_binding_is_recoverable_from_the_path_alone() {
-        let created = Identity::from_name("claude-code", "owner/repo", "cc-feature-abc123")
-            .expect("derives");
+        let created =
+            Identity::from_name("claude-code", "owner/repo", "cc-feature-abc123").expect("derives");
         // Teardown's only inputs: the repo it is configured for, and the
         // final component of the worktree path it was given.
-        let recovered = Identity::from_name("claude-code", "owner/repo", "cc-feature-abc123")
-            .expect("derives");
+        let recovered =
+            Identity::from_name("claude-code", "owner/repo", "cc-feature-abc123").expect("derives");
         assert_eq!(created, recovered);
         assert_eq!(created.scheme, Scheme::FromName);
-        assert_eq!(created.change_id, "claude-code:owner/repo:cc-feature-abc123");
+        assert_eq!(
+            created.change_id,
+            "claude-code:owner/repo:cc-feature-abc123"
+        );
         assert!(
             created.fingerprint.is_empty(),
             "a name-derived binding must not imply a fingerprint it cannot recover"
@@ -778,11 +784,7 @@ mod tests {
             !derived.change_id.contains(&derived.workspace_name),
             "the name would have carried the whole change id"
         );
-        let truncated = derived
-            .workspace_name
-            .rsplit('-')
-            .next()
-            .expect("a suffix");
+        let truncated = derived.workspace_name.rsplit('-').next().expect("a suffix");
         assert!(
             truncated.len() < derived.fingerprint.len(),
             "the name carries the full fingerprint, so durable state is not needed \
@@ -829,7 +831,10 @@ mod tests {
         let first = identity("ISSUE-7", "1");
         let second = identity("ISSUE-7", "1");
         assert_eq!(first, second, "derivation is not deterministic");
-        assert_eq!(first.workspace_id, format!("owner/repo/{}", first.workspace_name));
+        assert_eq!(
+            first.workspace_id,
+            format!("owner/repo/{}", first.workspace_name)
+        );
         assert!(first.workspace_name.starts_with("sy-issue-7-"));
         assert!(first.change_id.starts_with("sy:owner/repo:"));
     }
@@ -858,8 +863,10 @@ mod tests {
     /// repository from converging onto each other's change.
     #[test]
     fn the_namespace_separates_orchestrators() {
-        let symphony = Identity::from_external("sy", "owner/repo", "k", "ISSUE-7", "1").expect("derives");
-        let claude = Identity::from_external("cc", "owner/repo", "k", "ISSUE-7", "1").expect("derives");
+        let symphony =
+            Identity::from_external("sy", "owner/repo", "k", "ISSUE-7", "1").expect("derives");
+        let claude =
+            Identity::from_external("cc", "owner/repo", "k", "ISSUE-7", "1").expect("derives");
         assert_ne!(symphony.change_id, claude.change_id);
         assert_ne!(symphony.workspace_name, claude.workspace_name);
     }
@@ -888,8 +895,22 @@ mod tests {
             ("sy", "a/b/c", "k", "i", "1", "a three-segment repo"),
             ("../sy", "owner/repo", "k", "i", "1", "an unsafe namespace"),
             ("sy", "owner/repo", "k", "", "1", "an empty external id"),
-            ("sy", "owner/repo", "k", &long, "1", "an over-long external id"),
-            ("sy", "owner/repo", "k", "i", &long, "an over-long generation"),
+            (
+                "sy",
+                "owner/repo",
+                "k",
+                &long,
+                "1",
+                "an over-long external id",
+            ),
+            (
+                "sy",
+                "owner/repo",
+                "k",
+                "i",
+                &long,
+                "an over-long generation",
+            ),
         ];
         for (namespace, repo, key, external, generation, why) in cases {
             assert!(
@@ -905,11 +926,13 @@ mod tests {
         assert!(Identity::from_external("sy", "owner/repo", &too_long, "i", "1").is_err());
 
         let long = "k".repeat(MAX_WORKSPACE_KEY);
-        let derived = Identity::from_external("sy", "owner/repo", &long, "i", "1").expect("derives");
+        let derived =
+            Identity::from_external("sy", "owner/repo", &long, "i", "1").expect("derives");
         // Truncated for the directory name, but the change id still
         // separates two keys sharing that truncated prefix.
         assert!(derived.workspace_name.len() < long.len() + KEY_PREFIX);
-        let sibling = Identity::from_external("sy", "owner/repo", &long, "i", "2").expect("derives");
+        let sibling =
+            Identity::from_external("sy", "owner/repo", &long, "i", "2").expect("derives");
         assert_ne!(derived.workspace_name, sibling.workspace_name);
     }
 
@@ -928,7 +951,10 @@ mod tests {
             base_from_view(&view, "owner/repo.git:refs/heads/main").expect("resolves"),
             "a".repeat(40)
         );
-        assert_eq!(base_from_view(&view, "sha256").expect("resolves"), "b".repeat(64));
+        assert_eq!(
+            base_from_view(&view, "sha256").expect("resolves"),
+            "b".repeat(64)
+        );
         for (name, why) in [
             ("not-git", "a non-Git codec"),
             ("short", "a truncated oid"),
@@ -959,8 +985,14 @@ mod tests {
                 serde_json::json!({ "workspace": expected.workspace_id, "change_id": other.change_id }),
                 "another change",
             ),
-            (serde_json::json!({ "change_id": expected.change_id }), "no workspace"),
-            (serde_json::json!({ "workspace": expected.workspace_id }), "no change"),
+            (
+                serde_json::json!({ "change_id": expected.change_id }),
+                "no workspace",
+            ),
+            (
+                serde_json::json!({ "workspace": expected.workspace_id }),
+                "no change",
+            ),
             (
                 serde_json::json!({ "workspace": "", "change_id": expected.change_id }),
                 "an empty workspace",
@@ -989,7 +1021,10 @@ mod tests {
             assert!(!is_retryable(code), "{code} would be retried forever");
         }
         for code in ["policy_unavailable", "log_evicted", "unclassified"] {
-            assert!(is_retryable(code), "{code} stranded work that could succeed");
+            assert!(
+                is_retryable(code),
+                "{code} stranded work that could succeed"
+            );
         }
         // An unrecognised code is transient: a newer node is likelier
         // than a new permanent refusal, and failing fast is recoverable
@@ -1023,10 +1058,26 @@ mod tests {
             ("api", serde_json::json!(""), "an empty api"),
             ("repo", serde_json::json!("owner"), "a one-segment repo"),
             ("repo", serde_json::json!("a/b/c"), "a three-segment repo"),
-            ("repo", serde_json::json!("../etc/passwd"), "a traversal repo"),
-            ("key_file", serde_json::json!("relative.key"), "a relative key path"),
-            ("namespace", serde_json::json!("../sy"), "an unsafe namespace"),
-            ("auth_file", serde_json::json!("relative"), "a relative auth file"),
+            (
+                "repo",
+                serde_json::json!("../etc/passwd"),
+                "a traversal repo",
+            ),
+            (
+                "key_file",
+                serde_json::json!("relative.key"),
+                "a relative key path",
+            ),
+            (
+                "namespace",
+                serde_json::json!("../sy"),
+                "an unsafe namespace",
+            ),
+            (
+                "auth_file",
+                serde_json::json!("relative"),
+                "a relative auth file",
+            ),
             (
                 "base_ref",
                 serde_json::json!("other/repo.git:refs/heads/main"),
@@ -1035,10 +1086,7 @@ mod tests {
         ] {
             let mut raw = config_json();
             raw[field] = value;
-            assert!(
-                Config::parse(&raw).is_err(),
-                "config accepted {why}"
-            );
+            assert!(Config::parse(&raw).is_err(), "config accepted {why}");
         }
 
         let mut raw = config_json();
@@ -1093,13 +1141,31 @@ mod tests {
         assert!(Request::parse(&good, &config).is_ok());
 
         for (mutate, why) in [
-            (serde_json::json!({"protocol_version": 2}), "a future protocol version"),
-            (serde_json::json!({"protocol_version": null}), "no protocol version"),
-            (serde_json::json!({"operation": "delete"}), "an unknown operation"),
+            (
+                serde_json::json!({"protocol_version": 2}),
+                "a future protocol version",
+            ),
+            (
+                serde_json::json!({"protocol_version": null}),
+                "no protocol version",
+            ),
+            (
+                serde_json::json!({"operation": "delete"}),
+                "an unknown operation",
+            ),
             (serde_json::json!({"operation": null}), "no operation"),
-            (serde_json::json!({"scheme": "invented"}), "an unknown scheme"),
-            (serde_json::json!({"workspace_name": null}), "no workspace name"),
-            (serde_json::json!({"workspace_name": "../escape"}), "a traversal name"),
+            (
+                serde_json::json!({"scheme": "invented"}),
+                "an unknown scheme",
+            ),
+            (
+                serde_json::json!({"workspace_name": null}),
+                "no workspace name",
+            ),
+            (
+                serde_json::json!({"workspace_name": "../escape"}),
+                "a traversal name",
+            ),
         ] {
             let mut raw = good.clone();
             for (key, value) in mutate.as_object().expect("object") {

@@ -6,7 +6,14 @@ use choir_node::Node;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_AUTHOR_NAME", "t")
@@ -44,7 +51,10 @@ fn clone_push_clone_roundtrip() {
     git(&work, &["clone", "-q", &url, c1.to_str().unwrap()]);
     std::fs::write(c1.join("hello.txt"), "from the platform\n").unwrap();
     git(&c1, &["add", "."]);
-    git(&c1, &["commit", "-q", "-m", "first commit through choir-node"]);
+    git(
+        &c1,
+        &["commit", "-q", "-m", "first commit through choir-node"],
+    );
     git(&c1, &["push", "-q", "origin", "HEAD:main"]);
 
     // Fresh clone sees the pushed commit.

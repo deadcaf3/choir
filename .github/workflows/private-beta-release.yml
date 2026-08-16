@@ -1,0 +1,77 @@
+name: Private beta release
+
+on:
+  workflow_dispatch:
+    inputs:
+      promote_production:
+        description: Run the production environment approval and promotion after staging
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+          rustup override set 1.97.1
+      - name: Install pinned release tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Fail-closed quality gate
+        run: |
+          sh scripts/gate full
+          cargo audit
+      - name: Build checksummed artifact and SBOM
+        run: sh scripts/build_private_beta_artifact.sh "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: choir-private-beta-${{ github.sha }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 30
+
+  staging:
+    needs: package
+    runs-on: [self-hosted, choir-staging]
+    environment: staging
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: choir-private-beta-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+      - name: Atomic staging deployment
+        run: |
+          artifact=$(find "$RUNNER_TEMP/release" -mindepth 1 -maxdepth 1 -type d | head -1)
+          sudo sh scripts/deploy_private_beta.sh "$artifact" "${{ vars.CHOIR_INSTALL_ROOT }}" "${{ vars.CHOIR_SERVICE }}"
+      - name: Staging GUI, API, limits, clone, and push smoke
+        run: sh scripts/smoke_private_beta.sh "${{ vars.CHOIR_BASE_URL }}" "${{ vars.CHOIR_AUTH_FILE }}" "${{ vars.CHOIR_SMOKE_REPO }}" --push-canary
+
+  production:
+    if: inputs.promote_production
+    needs: staging
+    runs-on: [self-hosted, choir-production]
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: choir-private-beta-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+      - name: Manually approved atomic production promotion
+        run: |
+          artifact=$(find "$RUNNER_TEMP/release" -mindepth 1 -maxdepth 1 -type d | head -1)
+          sudo sh scripts/deploy_private_beta.sh "$artifact" "${{ vars.CHOIR_INSTALL_ROOT }}" "${{ vars.CHOIR_SERVICE }}"
+      - name: Production read-only smoke
+        run: sh scripts/smoke_private_beta.sh "${{ vars.CHOIR_BASE_URL }}" "${{ vars.CHOIR_AUTH_FILE }}" "${{ vars.CHOIR_SMOKE_REPO }}"

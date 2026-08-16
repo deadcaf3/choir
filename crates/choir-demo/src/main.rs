@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use choir_identity::{ActorKey, Registry};
 use choir_merge::{MergeOutcome, Pipeline};
 use choir_oplog::{MemLog, OpEntry};
-use choir_sequencer::{Sequencer, SubmitPolicy, Submission};
+use choir_sequencer::{Sequencer, Submission, SubmitPolicy};
 use choir_store::{get_blob, put_blob, ChunkerParams, MemStore};
 use choir_view::{Commit, OpKind, TreeEntry, View, ViewOp};
 
@@ -56,9 +56,18 @@ fn main() {
     let mut registry = Registry::new();
     registry.register(&alice.public_key_bytes()).unwrap();
     registry.register(&bob.public_key_bytes()).unwrap();
-    println!("  alice   -> actor id {}  (registered)", short(&alice.actor_id()));
-    println!("  bob     -> actor id {}  (registered)", short(&bob.actor_id()));
-    println!("  mallory -> actor id {}  (NOT registered)", short(&mallory.actor_id()));
+    println!(
+        "  alice   -> actor id {}  (registered)",
+        short(&alice.actor_id())
+    );
+    println!(
+        "  bob     -> actor id {}  (registered)",
+        short(&bob.actor_id())
+    );
+    println!(
+        "  mallory -> actor id {}  (NOT registered)",
+        short(&mallory.actor_id())
+    );
 
     section("2. Content-addressed commits (L0/L1): BLAKE3 + FastCDC");
     let base_src = "fn main() {\n    println!(\"v1\");\n}\n";
@@ -95,7 +104,12 @@ fn main() {
     .to_payload();
     let sig = alice.sign_submission("alice", &op);
     let acc = handle.try_submit("alice", op, Some(sig)).unwrap();
-    println!("  alice sets main -> {}   ACCEPTED seq={} ({:?})", short(&c_base), acc.seq, acc.decision_latency);
+    println!(
+        "  alice sets main -> {}   ACCEPTED seq={} ({:?})",
+        short(&c_base),
+        acc.seq,
+        acc.decision_latency
+    );
 
     let op = ViewOp::new(OpKind::SetWorkspaceHead {
         workspace: "bob".into(),
@@ -125,7 +139,10 @@ fn main() {
     .to_payload();
     let sig = bob.sign_submission("bob", &op);
     let err = handle.try_submit("bob", op, Some(sig)).unwrap_err();
-    println!("  bob with a stale CAS         REJECTED: {}", &err[..err.len().min(80)]);
+    println!(
+        "  bob with a stale CAS         REJECTED: {}",
+        &err[..err.len().min(80)]
+    );
 
     section("4. Merge pipeline (L4): disjoint edits fold, real conflicts stay first-class");
     let left = "fn main() {\n    println!(\"v1\");\n}\n// alice: added docs\n";
@@ -183,7 +200,11 @@ fn main() {
     .to_payload();
     let sig = bob.sign_submission("bob", &op);
     let acc = handle.try_submit("bob", op, Some(sig)).unwrap();
-    println!("  bob's head -> conflicted commit {} ACCEPTED seq={} (work continues!)", short(&c_conflict), acc.seq);
+    println!(
+        "  bob's head -> conflicted commit {} ACCEPTED seq={} (work continues!)",
+        short(&c_conflict),
+        acc.seq
+    );
     for l in annotated.lines().take(7) {
         println!("    | {l}");
     }
@@ -192,9 +213,18 @@ fn main() {
     let log = sequencer.shutdown();
     let now = View::materialize(log.as_ref()).unwrap();
     let before = View::at(log.as_ref(), 2).unwrap();
-    println!("  view NOW     : bob @ {} (conflicted)", short(now.workspaces.get("bob").unwrap()));
-    println!("  view at op 2 : bob @ {} (before the merge -- undo is just prefix replay)", short(before.workspaces.get("bob").unwrap()));
-    println!("  log entries  : {} total, every one signed + hash-chained", log.len());
+    println!(
+        "  view NOW     : bob @ {} (conflicted)",
+        short(now.workspaces.get("bob").unwrap())
+    );
+    println!(
+        "  view at op 2 : bob @ {} (before the merge -- undo is just prefix replay)",
+        short(before.workspaces.get("bob").unwrap())
+    );
+    println!(
+        "  log entries  : {} total, every one signed + hash-chained",
+        log.len()
+    );
 
     section("6. Round-trip a blob out of the store (verified on read)");
     let head = Commit::get(&store, now.workspaces.get("bob").unwrap()).unwrap();
@@ -222,7 +252,12 @@ fn main() {
     let clone_dir = work.join("clone");
     let git = |dir: &std::path::Path, args: &[&str]| {
         let out = std::process::Command::new("git")
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .args(args)
             .current_dir(dir)
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -232,7 +267,11 @@ fn main() {
             .env("GIT_COMMITTER_EMAIL", "demo@choir")
             .output()
             .expect("git runs");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
     git(&work, &["clone", "-q", &url, clone_dir.to_str().unwrap()]);

@@ -25,11 +25,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     git_env(dir, args, &[])
 }
 
-fn git_env(
-    dir: &std::path::Path,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> std::process::Output {
+fn git_env(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
     let mut command = std::process::Command::new("git");
     command
         .args([
@@ -68,7 +64,10 @@ fn raw(args: &[&str]) -> (u16, String) {
         .expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout);
     let (body, code) = text.rsplit_once('\n').expect("status line");
-    (code.trim().parse().expect("numeric status"), body.to_string())
+    (
+        code.trim().parse().expect("numeric status"),
+        body.to_string(),
+    )
 }
 
 /// A served node with exactly one hand-written credential — the
@@ -123,8 +122,12 @@ fn served(tag: &str, repos: &[&str], rate_limit: Option<u32>) -> Served {
         node.enable_rate_limit(std::num::NonZeroU32::new(per_minute), None);
     }
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     node.write_ssh_handoff(&handoff).expect("handoff");
     std::thread::spawn(move || node.serve_forever());
@@ -270,7 +273,10 @@ fn a_second_person_is_issued_a_credential_and_clones_over_https() {
 
     let other = format!("http://bob:{token}@{}/agents/secret.git", s.host);
     let out = git(&s.work, &["clone", "-q", &other, "bob-secret"]);
-    assert!(!out.status.success(), "an issued credential reached a repo it was not granted");
+    assert!(
+        !out.status.success(),
+        "an issued credential reached a repo it was not granted"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("403"),
@@ -292,9 +298,17 @@ fn a_second_person_is_issued_a_credential_and_clones_over_https() {
         .filter(|line| !line.starts_with('#'))
         .collect();
     assert_eq!(lines.len(), 1, "expected one forced command: {generated}");
-    assert!(lines[0].starts_with("command=\""), "not a forced command: {}", lines[0]);
+    assert!(
+        lines[0].starts_with("command=\""),
+        "not a forced command: {}",
+        lines[0]
+    );
     assert!(lines[0].contains("--user bob"), "no user: {}", lines[0]);
-    assert!(lines[0].ends_with(" bob"), "comment not replaced: {}", lines[0]);
+    assert!(
+        lines[0].ends_with(" bob"),
+        "comment not replaced: {}",
+        lines[0]
+    );
     assert!(
         !lines[0].contains("choir-test"),
         "the client's comment survived into the file: {}",
@@ -320,7 +334,10 @@ fn an_invite_reaches_nothing_but_its_own_redemption() {
     let (status, body) = curl(&[
         "-u",
         &pair,
-        &format!("{}/agents/demo.git/info/refs?service=git-upload-pack", s.base),
+        &format!(
+            "{}/agents/demo.git/info/refs?service=git-upload-pack",
+            s.base
+        ),
     ]);
     assert_eq!(status, 403, "an invite reached a git route: {body}");
 
@@ -343,9 +360,8 @@ fn an_invite_reaches_nothing_but_its_own_redemption() {
 #[test]
 fn an_expired_invite_stops_being_a_credential() {
     let s = served("expiry", &["agents/demo.git"], None);
-    let (status, invite) = s.invite(
-        r#"{"user":"bob","grants":["agents/demo read"],"expires_in_secs":1}"#,
-    );
+    let (status, invite) =
+        s.invite(r#"{"user":"bob","grants":["agents/demo read"],"expires_in_secs":1}"#);
     assert_eq!(status, 200, "invite refused: {invite}");
     let pair = invite["invite"].as_str().expect("invite pair").to_string();
     std::thread::sleep(std::time::Duration::from_millis(1_100));
@@ -353,7 +369,8 @@ fn an_expired_invite_stops_being_a_credential() {
     assert_eq!(status, 401, "an expired invite still authenticated: {body}");
     // Refused as a lifetime, not silently clamped: an invite the operator
     // believes expires tomorrow and does not is the failure worth naming.
-    let (status, body) = s.invite(r#"{"user":"carol","grants":["agents/demo read"],"expires_in_secs":0}"#);
+    let (status, body) =
+        s.invite(r#"{"user":"carol","grants":["agents/demo read"],"expires_in_secs":0}"#);
     assert_eq!(status, 400, "a zero lifetime was accepted: {body}");
 }
 
@@ -374,7 +391,9 @@ fn revocation_stops_the_token_and_removes_the_key() {
 
     let url = format!("http://bob:{token}@{}/agents/demo.git", s.host);
     assert!(
-        git(&s.work, &["clone", "-q", &url, "bob-before"]).status.success(),
+        git(&s.work, &["clone", "-q", &url, "bob-before"])
+            .status
+            .success(),
         "the issued credential could not clone before revocation"
     );
     let generated = std::fs::read_to_string(&s.keys_path).expect("generated keys");
@@ -441,7 +460,10 @@ fn a_revoked_name_is_never_reissued() {
     let (status, answer) = s.invite(r#"{"user":"bob","grants":["agents/demo read"]}"#);
     assert_eq!(status, 409, "a revoked name was reissued: {answer}");
     assert!(
-        answer["error"].as_str().unwrap_or_default().contains("never reused"),
+        answer["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("never reused"),
         "the refusal should say why: {answer}"
     );
     // And the operator can see the reason without guessing at it.
@@ -486,7 +508,10 @@ fn self_service_can_never_issue_a_node_grant() {
     ] {
         let body = format!(r#"{{"user":"bob","grants":{grants}}}"#);
         let (status, answer) = s.invite(&body);
-        assert_eq!(status, 400, "a node grant was issued for {grants}: {answer}");
+        assert_eq!(
+            status, 400,
+            "a node grant was issued for {grants}: {answer}"
+        );
     }
 
     let (_, invite) = s.invite(r#"{"user":"bob","grants":["agents/demo read"]}"#);
@@ -502,7 +527,10 @@ fn self_service_can_never_issue_a_node_grant() {
     // does not apply to them however many requests they make (D33).
     for attempt in 0..3 {
         let (status, body) = curl(&["-u", "alice:a", &format!("{}/api/view", s.base)]);
-        assert_eq!(status, 200, "the operator was throttled on attempt {attempt}: {body}");
+        assert_eq!(
+            status, 200,
+            "the operator was throttled on attempt {attempt}: {body}"
+        );
     }
     // The self-served account holds no node grant, so it is metered like
     // anybody else — one request per minute, then refused.
@@ -530,7 +558,11 @@ fn only_a_node_write_holder_may_issue_or_revoke() {
 
     // A write grant on a repository is not authority over the node.
     for (method, path, body) in [
-        ("POST", "/api/accounts/invite", r#"{"user":"mallory","grants":["agents/demo write"]}"#),
+        (
+            "POST",
+            "/api/accounts/invite",
+            r#"{"user":"mallory","grants":["agents/demo write"]}"#,
+        ),
         ("POST", "/api/accounts/revoke", r#"{"user":"bob"}"#),
     ] {
         let (status, answer) = curl(&[
@@ -555,7 +587,10 @@ fn only_a_node_write_holder_may_issue_or_revoke() {
         r#"{"user":"mallory","grants":["agents/demo write"]}"#,
         &format!("{}/api/accounts/invite", s.base),
     ]);
-    assert_eq!(status, 401, "an anonymous request minted an invite: {answer}");
+    assert_eq!(
+        status, 401,
+        "an anonymous request minted an invite: {answer}"
+    );
 }
 
 /// The registered key is the one field a newcomer controls freely, and
@@ -572,8 +607,14 @@ fn a_registered_key_cannot_forge_a_forced_command() {
             "a second line carrying its own forced command",
             format!("{real}\ncommand=\"/bin/sh\",restrict {real}"),
         ),
-        ("an unsupported algorithm", "ssh-rsa AAAAB3NzaC1yc2E= mallory".to_string()),
-        ("a blob that is not a key", "ssh-ed25519 AAAA mallory".to_string()),
+        (
+            "an unsupported algorithm",
+            "ssh-rsa AAAAB3NzaC1yc2E= mallory".to_string(),
+        ),
+        (
+            "a blob that is not a key",
+            "ssh-ed25519 AAAA mallory".to_string(),
+        ),
         ("not base64 at all", "ssh-ed25519 !!!! mallory".to_string()),
     ] {
         let (status, body) = s.redeem(&pair, &serde_json::json!({ "ssh_key": key }).to_string());
@@ -584,7 +625,10 @@ fn a_registered_key_cannot_forge_a_forced_command() {
     let (status, body) = s.redeem(&pair, &serde_json::json!({ "ssh_key": real }).to_string());
     assert_eq!(status, 200, "the real key was refused: {body}");
     let generated = std::fs::read_to_string(&s.keys_path).expect("generated keys");
-    let lines = generated.lines().filter(|line| !line.starts_with('#')).count();
+    let lines = generated
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .count();
     assert_eq!(lines, 1, "expected exactly one line: {generated}");
     assert!(
         !generated.contains("/bin/sh"),

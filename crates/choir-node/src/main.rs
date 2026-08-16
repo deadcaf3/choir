@@ -12,6 +12,8 @@
 //! [--request-log path [--request-log-max-bytes n]]
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--quota-push-bytes n] [--quota-workspaces n]
+//! [--api-body-limit bytes] [--batch-limit operations] [--ready-min-free-bytes bytes]
+//! [--read-only-browser]
 //! [--bind addr] [--ssh-handoff path]
 //! [--accounts-file path [--ssh-authorized-keys path [--ssh-shim path]]]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
@@ -110,6 +112,50 @@ use choir_node::{AuthTable, Node, Platform};
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--verify-log") {
+        let path = args.get(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--verify-log needs an op-log path",
+            )
+        })?;
+        if args.len() != 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: choir-node --verify-log <op-log>",
+            ));
+        }
+        let report = choir_oplog::repair::verify(std::path::Path::new(path)).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("could not verify {path}: {error:?}"),
+            )
+        })?;
+        if let Some(fault) = report.fault {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("op log refused at record {}: {fault}", fault.position()),
+            ));
+        }
+        if report.torn_tail_bytes != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "op log has an unterminated {}-byte tail; backups and restores require a complete record boundary",
+                    report.torn_tail_bytes
+                ),
+            ));
+        }
+        eprintln!(
+            "verified {} op-log records through {}",
+            report.intact_records,
+            report
+                .head
+                .as_ref()
+                .map_or_else(|| "empty".to_string(), choir_hash::ContentHash::to_hex)
+        );
+        return Ok(());
+    }
     let root = args
         .first()
         .map(std::path::PathBuf::from)
@@ -171,6 +217,9 @@ fn main() -> std::io::Result<()> {
         "--ssh-shim",
         "--quota-push-bytes",
         "--quota-workspaces",
+        "--api-body-limit",
+        "--batch-limit",
+        "--ready-min-free-bytes",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -240,6 +289,45 @@ fn main() -> std::io::Result<()> {
         }
     };
     let review_adjudications = flag_value("--review-adjudications").map(std::path::PathBuf::from);
+    let api_body_limit = flag_value("--api-body-limit")
+        .map(|value| {
+            value.parse::<std::num::NonZeroU64>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--api-body-limit needs a positive integer (bytes per API request)",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            std::num::NonZeroU64::new(choir_node::DEFAULT_API_BODY_BYTES)
+                .expect("default API body limit is nonzero")
+        });
+    let batch_limit = flag_value("--batch-limit")
+        .map(|value| {
+            value.parse::<std::num::NonZeroUsize>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--batch-limit needs a positive integer (operations per batch)",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            std::num::NonZeroUsize::new(choir_node::platform::DEFAULT_BATCH_OPS)
+                .expect("default batch limit is nonzero")
+        });
+    let ready_min_free_bytes = flag_value("--ready-min-free-bytes")
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--ready-min-free-bytes needs a non-negative integer",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(choir_node::DEFAULT_READY_MIN_FREE_BYTES);
     if review_lapse_after.is_some() && review_retention_count.is_none() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -271,6 +359,14 @@ fn main() -> std::io::Result<()> {
 
     let auth_enabled = auth.is_some();
     let mut node = Node::bind_full(&root, &bind, port, auth, tls)?;
+    node.enable_api_body_limit(api_body_limit);
+    node.enable_ready_min_free_bytes(ready_min_free_bytes);
+    eprintln!("limits: {api_body_limit} API body bytes, {batch_limit} operations per batch");
+    eprintln!("readiness: at least {ready_min_free_bytes} free storage bytes");
+    if rest.iter().any(|arg| arg == "--read-only-browser") {
+        node.disable_browser_writes();
+        eprintln!("browser: read-only; mutations require the signed CLI");
+    }
     // One writer per state dir, process-enforced: a second daemon on the
     // same root would append to the same ops.jsonl and fork the chain.
     // Held until after serve_forever; a stale lock from a dead process
@@ -284,9 +380,9 @@ fn main() -> std::io::Result<()> {
         let count = signers.len();
         let mut registry = choir_identity::Registry::new();
         for signer in &signers {
-            registry
-                .register(&signer.key)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))?;
+            registry.register(&signer.key).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}"))
+            })?;
         }
         let state_dir = root.join(".choir");
         std::fs::create_dir_all(&state_dir)?;
@@ -405,8 +501,12 @@ fn main() -> std::io::Result<()> {
         // because a breach is an observation about this node, not part of
         // the ordered history anyone else replays.
         .with_lag_log(state_dir.join("lag.jsonl"));
+        platform = platform.with_batch_limit(batch_limit.get());
         if let Some((audit, adjudications)) = newcomer_policy {
-            let incumbents = signers.iter().map(|signer| signer.actor_id.clone()).collect();
+            let incumbents = signers
+                .iter()
+                .map(|signer| signer.actor_id.clone())
+                .collect();
             platform = platform
                 .with_newcomer_audit(audit, adjudications, incumbents)
                 .map_err(std::io::Error::other)?;
@@ -433,6 +533,13 @@ fn main() -> std::io::Result<()> {
                 .with_hooks(path.into(), state_dir.join("hooks.jsonl"))
                 .map_err(std::io::Error::other)?;
         }
+        if rest.iter().any(|a| a == "--require-scope") {
+            platform = platform.with_required_scope();
+            eprintln!(
+                "signed op scopes required (a signature is admissible on this log \
+                 once, and on no other node)"
+            );
+        }
         if let Some(count) = review_retention_count {
             match review_lapse_after {
                 Some(age) => eprintln!(
@@ -454,13 +561,6 @@ fn main() -> std::io::Result<()> {
             if rest.iter().any(|a| a == "--require-assignment") {
                 platform = platform.with_required_assignment();
                 eprintln!("reviewer assignment required (self-named reviewers refused)");
-            }
-            if rest.iter().any(|a| a == "--require-scope") {
-                platform = platform.with_required_scope();
-                eprintln!(
-                    "signed op scopes required (a signature is admissible on this log \
-                     once, and on no other node)"
-                );
             }
             if let Some(refs) = flag_value("--protected-refs") {
                 platform = platform.with_protected_refs(refs.into());
@@ -508,6 +608,11 @@ fn main() -> std::io::Result<()> {
         }
         node.enable_platform(platform);
         eprintln!("platform API enabled ({count} actor keys)");
+    } else if rest.iter().any(|a| a == "--require-scope") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--require-scope needs --keys-file",
+        ));
     } else if review_retention.is_some() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -540,9 +645,9 @@ fn main() -> std::io::Result<()> {
         // Said out loud rather than assumed. Every operator running
         // without an ACL should know that one credential reaches
         // everything, especially before issuing a second one.
-        None => eprintln!(
-            "acl: no --acl-file, so every authenticated actor reaches every repository"
-        ),
+        None => {
+            eprintln!("acl: no --acl-file, so every authenticated actor reaches every repository")
+        }
     }
     // D36. Credential self-service. After the ACL, because it refuses to
     // start without one — a token issued on a node with nothing to grade
@@ -750,8 +855,10 @@ fn main() -> std::io::Result<()> {
         );
     }
     for note in &repair.unreconciled {
-        eprintln!("choir: UNRECONCILED {note} — the log and this repo disagree and only an \
-             operator can say which is right");
+        eprintln!(
+            "choir: UNRECONCILED {note} — the log and this repo disagree and only an \
+             operator can say which is right"
+        );
     }
     eprintln!(
         "choir-node serving {} on {}://{}:{}",

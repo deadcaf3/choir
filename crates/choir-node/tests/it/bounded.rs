@@ -114,7 +114,13 @@ fn following_the_next_page_reaches_every_ref_exactly_once() {
         assert!(hops < 20, "paging did not terminate");
         let (status, page) = curl(&["-u", "carol:c", &format!("{base}{path}")]);
         assert_eq!(status, 200);
-        seen.extend(page["refs"].as_object().expect("refs is a map").keys().cloned());
+        seen.extend(
+            page["refs"]
+                .as_object()
+                .expect("refs is a map")
+                .keys()
+                .cloned(),
+        );
         next = page["paging"]["next"].as_str().map(ToString::to_string);
     }
     assert_eq!(hops, 3, "130 refs at 50 a page is three pages");
@@ -190,7 +196,10 @@ fn the_growth_measurement_describes_the_view_and_not_the_page() {
 
     let (_, view) = curl(&["-u", "carol:c", &format!("{base}/api/view")]);
     assert_eq!(view["refs"].as_object().unwrap().len(), 200);
-    assert_eq!(view["view_growth"]["counts"]["refs"], 260, "the metric was capped too");
+    assert_eq!(
+        view["view_growth"]["counts"]["refs"], 260,
+        "the metric was capped too"
+    );
     let measured = view["view_growth"]["serialized_bytes"]["refs"]
         .as_u64()
         .expect("refs byte count");
@@ -219,6 +228,9 @@ fn an_endpoint_outside_the_contract_is_left_alone() {
     let (status, body) = curl(&["-u", "carol:c", &format!("{base}/api/log?from=0")]);
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["entries"].as_array().expect("entries").len(), 3);
-    assert!(body.get("paging").is_none(), "/api/log grew a second paging protocol");
+    assert!(
+        body.get("paging").is_none(),
+        "/api/log grew a second paging protocol"
+    );
     assert!(body.get("entries_omitted").is_none());
 }

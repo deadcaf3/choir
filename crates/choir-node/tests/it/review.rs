@@ -44,7 +44,10 @@ fn review_fan_out_over_http() {
         target_ref: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "author", &request),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "author", &request),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -63,7 +66,10 @@ fn review_fan_out_over_http() {
         note: "lgtm".into(),
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&reviewer, "ana", &approve),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&reviewer, "ana", &approve),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -80,7 +86,10 @@ fn review_fan_out_over_http() {
         note: "checks pass".into(),
     });
     let (code, _) = curl(&[
-        "-X", "POST", "-d", &submit_body(&reviewer, "bot", &approve),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&reviewer, "bot", &approve),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200);
@@ -98,12 +107,18 @@ fn review_fan_out_over_http() {
         note: String::new(),
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&reviewer, "mallory", &intrude),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&reviewer, "mallory", &intrude),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
     assert_eq!(resp["code"], "review_state", "{resp}");
-    assert!(resp["error"].as_str().unwrap().contains("not a reviewer"), "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("not a reviewer"),
+        "{resp}"
+    );
 
     node.unblock();
 }
@@ -114,7 +129,8 @@ fn review_fan_out_over_http() {
 /// admission rather than trusted from the payload.
 #[test]
 fn comments_land_on_a_review_and_carry_their_author() {
-    let work = std::env::temp_dir().join(format!("choir-node-review-comment-{}", std::process::id()));
+    let work =
+        std::env::temp_dir().join(format!("choir-node-review-comment-{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
 
     let author = ActorKey::generate();
@@ -142,7 +158,10 @@ fn comments_land_on_a_review_and_carry_their_author() {
         target_ref: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "author", &request),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "author", &request),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -164,7 +183,10 @@ fn comments_land_on_a_review_and_carry_their_author() {
         (&author, "author", "c2", "it is the merge base"),
     ] {
         let (code, resp) = curl(&[
-            "-X", "POST", "-d", &submit_body(key, who, &comment(id, who, body)),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(key, who, &comment(id, who, body)),
             &format!("{api}/submit"),
         ]);
         assert_eq!(code, 200, "{resp}");
@@ -185,7 +207,10 @@ fn comments_land_on_a_review_and_carry_their_author() {
     // it is rather than as a bad signature.
     let forged = comment("c3", "ana", "I withdraw my objection");
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "author", &forged),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "author", &forged),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
@@ -196,7 +221,10 @@ fn comments_land_on_a_review_and_carry_their_author() {
     // duplicate index answers 200 with the original seq, and no second
     // comment appears.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&reviewer, "ana", &comment("c1", "ana", "why this base?")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&reviewer, "ana", &comment("c1", "ana", "why this base?")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
@@ -207,22 +235,33 @@ fn comments_land_on_a_review_and_carry_their_author() {
     // only one a replaying reader has. `seq` and `parent` are assigned
     // after signing, so this is where the defence has to live.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&reviewer, "ana", &comment("c1", "ana", "and again")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&reviewer, "ana", &comment("c1", "ana", "and again")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
     assert_eq!(resp["code"], "review_state", "{resp}");
-    assert!(resp["error"].as_str().unwrap().contains("already exists"), "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("already exists"),
+        "{resp}"
+    );
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(
-        view["reviews"]["r-talk"]["comments"].as_array().unwrap().len(),
+        view["reviews"]["r-talk"]["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
         2,
         "a refused comment still reached the thread: {view}"
     );
 
     // And a comment on a review that does not exist says so.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d",
+        "-X",
+        "POST",
+        "-d",
         &submit_body(
             &reviewer,
             "ana",
@@ -236,7 +275,10 @@ fn comments_land_on_a_review_and_carry_their_author() {
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
-    assert!(resp["error"].as_str().unwrap().contains("no such review"), "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("no such review"),
+        "{resp}"
+    );
 
     node.unblock();
 }

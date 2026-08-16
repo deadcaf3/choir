@@ -9,7 +9,14 @@ use choir_oplog::MemLog;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
-        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -26,11 +33,13 @@ fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 fn raw_from_ssh_pub(line: &str) -> [u8; 32] {
     let b64 = line.split_whitespace().nth(1).expect("key field");
     let mut bytes = Vec::new();
-    let table: std::collections::HashMap<u8, u32> =
-        (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9').chain(*b"+/")
-            .enumerate()
-            .map(|(i, c)| (c, i as u32))
-            .collect();
+    let table: std::collections::HashMap<u8, u32> = (b'A'..=b'Z')
+        .chain(b'a'..=b'z')
+        .chain(b'0'..=b'9')
+        .chain(*b"+/")
+        .enumerate()
+        .map(|(i, c)| (c, i as u32))
+        .collect();
     let mut buf = 0u32;
     let mut bits = 0;
     for c in b64.trim_end_matches('=').bytes() {
@@ -68,7 +77,11 @@ fn signed_push_attributes_the_pushers_key() {
     std::fs::create_dir_all(&repos).unwrap();
     write_allowed_signers(
         &repos,
-        &[choir_node::TrustedKey { name: None, actor_id: principal.clone(), key: raw }],
+        &[choir_node::TrustedKey {
+            name: None,
+            actor_id: principal.clone(),
+            key: raw,
+        }],
     )
     .unwrap();
 
@@ -139,16 +152,15 @@ fn signed_push_attributes_the_pushers_key() {
     std::fs::write(c1.join("f.txt"), "unsigned\n").unwrap();
     git(&c1, &["add", "."]);
     git(&c1, &["commit", "-q", "-m", "unsigned work"]);
-    assert!(git(&c1, &["push", "-q", "origin", "HEAD:main"]).status.success());
+    assert!(git(&c1, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
     let out = std::process::Command::new("curl")
         .args(["-s", &format!("http://127.0.0.1:{port}/api/log?from=2")])
         .output()
         .expect("curl runs");
     let log: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(
-        log["entries"][0]["workspace"].as_str().unwrap(),
-        "git/anon"
-    );
+    assert_eq!(log["entries"][0]["workspace"].as_str().unwrap(), "git/anon");
 
     node.unblock();
     std::fs::remove_dir_all(&work).ok();

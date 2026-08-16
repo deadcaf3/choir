@@ -421,11 +421,7 @@ fn existing_commits(
 ///
 /// Git failing for any reason other than a clean "no" — most often an
 /// object missing from a filtered clone.
-fn is_ancestor(
-    repo: &std::path::Path,
-    ancestor: &str,
-    descendant: &str,
-) -> Result<bool, String> {
+fn is_ancestor(repo: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
     let out = std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(repo)

@@ -39,6 +39,9 @@ use choir_view::{
 
 use crate::reject::{Code, Rejection};
 
+/// Default maximum operations accepted in one `/api/submit-batch` body.
+pub const DEFAULT_BATCH_OPS: usize = 256;
+
 /// Operator-selected bound for live review detail retained in memory.
 ///
 /// Complete reviews older than `max_live` are archived immediately. An
@@ -322,9 +325,9 @@ impl NewcomerAudit {
             }
             let value: serde_json::Value = serde_json::from_str(line)
                 .map_err(|e| format!("newcomer audit line {}: {e}", index + 1))?;
-            audit.replay(&value).map_err(|e| {
-                format!("newcomer audit line {}: {e}", index + 1)
-            })?;
+            audit
+                .replay(&value)
+                .map_err(|e| format!("newcomer audit line {}: {e}", index + 1))?;
         }
         if audit.activated {
             return Ok(audit);
@@ -374,9 +377,7 @@ impl NewcomerAudit {
                 if !self.activated {
                     return Err("first_attempt precedes activation".to_string());
                 }
-                let attempt_id = value["attempt_id"]
-                    .as_u64()
-                    .ok_or("missing attempt_id")?;
+                let attempt_id = value["attempt_id"].as_u64().ok_or("missing attempt_id")?;
                 if self.attempts.contains_key(&attempt_id) {
                     return Err("duplicate first_attempt".to_string());
                 }
@@ -399,18 +400,15 @@ impl NewcomerAudit {
                     Some("rejected") => "rejected",
                     _ => return Err("outcome must be accepted or rejected".to_string()),
                 };
-                let first_rejection_code = value["rejection_code"]
-                    .as_str()
-                    .map(str::to_string);
+                let first_rejection_code = value["rejection_code"].as_str().map(str::to_string);
                 if (first_outcome == "rejected") != first_rejection_code.is_some() {
                     return Err("rejected first attempts need one rejection_code".to_string());
                 }
-                let first_accepted_at_unix_ms = (first_outcome == "accepted")
-                    .then_some(
-                        value["completed_at_unix_ms"]
-                            .as_u64()
-                            .ok_or("accepted attempt needs completed_at_unix_ms")?,
-                    );
+                let first_accepted_at_unix_ms = (first_outcome == "accepted").then_some(
+                    value["completed_at_unix_ms"]
+                        .as_u64()
+                        .ok_or("accepted attempt needs completed_at_unix_ms")?,
+                );
                 self.by_actor.insert(actor_key, attempt_id);
                 self.attempts.insert(
                     attempt_id,
@@ -424,9 +422,7 @@ impl NewcomerAudit {
                 self.next_attempt_id = self.next_attempt_id.max(attempt_id.saturating_add(1));
             }
             "first_accept" => {
-                let attempt_id = value["attempt_id"]
-                    .as_u64()
-                    .ok_or("missing attempt_id")?;
+                let attempt_id = value["attempt_id"].as_u64().ok_or("missing attempt_id")?;
                 let completed = value["completed_at_unix_ms"]
                     .as_u64()
                     .ok_or("first_accept needs completed_at_unix_ms")?;
@@ -437,14 +433,16 @@ impl NewcomerAudit {
                 if attempt.first_outcome != "rejected" {
                     return Err("first_accept follows an accepted first attempt".to_string());
                 }
-                if attempt.first_accepted_at_unix_ms.replace(completed).is_some() {
+                if attempt
+                    .first_accepted_at_unix_ms
+                    .replace(completed)
+                    .is_some()
+                {
                     return Err("duplicate first_accept".to_string());
                 }
             }
             "appeal" => {
-                let attempt_id = value["attempt_id"]
-                    .as_u64()
-                    .ok_or("missing attempt_id")?;
+                let attempt_id = value["attempt_id"].as_u64().ok_or("missing attempt_id")?;
                 if !self.attempts.contains_key(&attempt_id) {
                     return Err("appeal references an unknown attempt".to_string());
                 }
@@ -667,9 +665,9 @@ fn newcomer_harm_json(audit: Option<&Arc<Mutex<NewcomerAudit>>>) -> serde_json::
         legitimate += 1;
         legitimate_first_rejected += usize::from(attempt.first_outcome == "rejected");
         match attempt.first_accepted_at_unix_ms {
-            Some(accepted) => accepted_latencies.push(
-                accepted.saturating_sub(attempt.started_at_unix_ms),
-            ),
+            Some(accepted) => {
+                accepted_latencies.push(accepted.saturating_sub(attempt.started_at_unix_ms))
+            }
             None => legitimate_pending_acceptance += 1,
         }
     }
@@ -681,9 +679,8 @@ fn newcomer_harm_json(audit: Option<&Arc<Mutex<NewcomerAudit>>>) -> serde_json::
         .iter()
         .filter(|attempt_id| !rows.contains_key(attempt_id))
         .count();
-    let false_reject_rate_basis_points = (legitimate != 0).then(|| {
-        share_basis_points(legitimate_first_rejected, legitimate)
-    });
+    let false_reject_rate_basis_points =
+        (legitimate != 0).then(|| share_basis_points(legitimate_first_rejected, legitimate));
     let measurement_complete = audit.available
         && adjudications_available
         && legitimate != 0
@@ -939,9 +936,7 @@ impl KeyBindings {
         };
         match operators.len() {
             0 => AttributionResolution::Unknown,
-            1 => AttributionResolution::Operator(
-                operators.first().expect("one operator").clone(),
-            ),
+            1 => AttributionResolution::Operator(operators.first().expect("one operator").clone()),
             _ => AttributionResolution::Ambiguous,
         }
     }
@@ -952,8 +947,8 @@ impl KeyBindings {
             for actor in &self.unbound_actors {
                 records.entry(actor.clone()).or_default();
             }
-            let bytes = serde_json::to_vec(&records)
-                .expect("binding snapshot is always serializable");
+            let bytes =
+                serde_json::to_vec(&records).expect("binding snapshot is always serializable");
             ContentHash::blake3(&bytes).to_hex()
         })
     }
@@ -1035,11 +1030,7 @@ impl ConcentrationState {
                 self.review_requesters
                     .insert(id.clone(), ActorEvidence::from_entry(entry));
             }
-            OpKind::SetRef {
-                name,
-                commit,
-                prev,
-            } => {
+            OpKind::SetRef { name, commit, prev } => {
                 let mut approved_requesters: Vec<_> = view
                     .reviews
                     .iter()
@@ -1132,10 +1123,7 @@ fn resolve_attribution(
     match operators.len() {
         0 => AttributionResolution::Unknown,
         1 => AttributionResolution::Operator(
-            operators
-                .first()
-                .expect("one requester operator")
-                .clone(),
+            operators.first().expect("one requester operator").clone(),
         ),
         _ => AttributionResolution::Ambiguous,
     }
@@ -1249,10 +1237,7 @@ fn concentration_json(
                 protected_total += count;
                 match resolve_attribution(attribution, bindings) {
                     AttributionResolution::Operator(operator) => {
-                        operators
-                            .entry(operator)
-                            .or_default()
-                            .protected_updates += count;
+                        operators.entry(operator).or_default().protected_updates += count;
                     }
                     AttributionResolution::Unknown => unknown_protected += count,
                     AttributionResolution::Ambiguous => ambiguous_protected += count,
@@ -1509,7 +1494,8 @@ fn new_actor_review_outcomes_json(
     cohort: Option<&BTreeSet<String>>,
     adjudications_path: Option<&std::path::Path>,
 ) -> serde_json::Value {
-    let adjudications = adjudications_path.map(|path| read_review_adjudications(path, &view.reviews));
+    let adjudications =
+        adjudications_path.map(|path| read_review_adjudications(path, &view.reviews));
     let (classifications, snapshot_hash, adjudications_available, adjudications_error) =
         match &adjudications {
             None => (BTreeMap::new(), None, false, None),
@@ -1891,7 +1877,8 @@ fn materialize_platform_state(
     // Stored entries have no timestamp. Giving every pre-existing live
     // review `now` starts a fresh grace period after restart, which can
     // delay an incomplete-review lapse but can never trigger one early.
-    let observed_at = retention_config.and_then(|config| config.lapse_after.map(|_| Instant::now()));
+    let observed_at =
+        retention_config.and_then(|config| config.lapse_after.map(|_| Instant::now()));
     for seq in 0..log.len() {
         let entry = log.get(seq).expect("seq < len");
         let op = ViewOp::from_payload(&entry.payload)?;
@@ -2111,16 +2098,15 @@ impl ChoirPolicy {
         let Some(path) = guard.as_ref() else {
             return Ok(false);
         };
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| {
-                Rejection::new(
-                    Code::PolicyUnavailable,
-                    format!("protected-ref list unreadable: {e}"),
-                    "this is an operator problem, not a client one: the gate fails closed \
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            Rejection::new(
+                Code::PolicyUnavailable,
+                format!("protected-ref list unreadable: {e}"),
+                "this is an operator problem, not a client one: the gate fails closed \
                      rather than guessing. Retry after the operator restores the file",
-                )
-                .encode()
-            })?;
+            )
+            .encode()
+        })?;
         Ok(text.lines().map(str::trim).any(|p| {
             if p.is_empty() || p.starts_with('#') {
                 return false;
@@ -2213,12 +2199,7 @@ impl ChoirPolicy {
     ///   nobody, so a `git push --signed` cannot assert ownership; see
     ///   the rejection in [`Self::landing_is_authorized`], which says so
     ///   rather than reporting a generic refusal.
-    fn acting_user(
-        &self,
-        sub: &Submission,
-        op: &ViewOp,
-        actor_id: &ContentHash,
-    ) -> Option<String> {
+    fn acting_user(&self, sub: &Submission, op: &ViewOp, actor_id: &ContentHash) -> Option<String> {
         match op.provenance {
             Some(Provenance::PushTransport) => {
                 sub.channel.strip_prefix("git/").map(ToString::to_string)
@@ -2461,7 +2442,9 @@ impl ChoirPolicy {
         };
         Err(Rejection::new(
             Code::ReviewRequired,
-            format!("{name} is protected and {repo} is owned; no owner has assented to this commit"),
+            format!(
+                "{name} is protected and {repo} is owned; no owner has assented to this commit"
+            ),
             next,
         )
         .with_states(
@@ -2669,7 +2652,10 @@ impl ChoirPolicy {
             .encode());
         }
         let Some(scope) = &op.scope else {
-            if self.require_scope.load(std::sync::atomic::Ordering::Relaxed) {
+            if self
+                .require_scope
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 return Err(Rejection::new(
                     Code::ScopeRequired,
                     "this node admits only ops signed for its own log and a recent head",
@@ -2710,7 +2696,10 @@ impl ChoirPolicy {
                 "the op names no head, and this log has evicted entries since",
                 "re-read `log.head` from GET /api/view and sign a fresh op against it",
             )
-            .with_states(Some("a log with nothing evicted".to_string()), window_head())
+            .with_states(
+                Some("a log with nothing evicted".to_string()),
+                window_head(),
+            )
             .encode()),
             Some(head) => Err(Rejection::new(
                 Code::StaleScope,
@@ -2751,7 +2740,9 @@ impl ChoirPolicy {
         let Some(store) = store else {
             // No store at all: the node has no self-service, so it has no
             // enrolled credentials and this key id is unknown to it.
-            return Err(choir_identity::IdentityError::UnknownKey(sig.key_id.clone()));
+            return Err(choir_identity::IdentityError::UnknownKey(
+                sig.key_id.clone(),
+            ));
         };
         let spki = store
             .passkey_spki(channel, &sig.key_id)
@@ -3013,15 +3004,12 @@ impl SubmitPolicy for ChoirPolicy {
             owner_sig,
         } = &op.kind
         {
-            let authorization = ArchiveAuthorization::new(
-                id.clone(),
-                workspace.clone(),
-                prev_revision.clone(),
-            )
-            .to_payload();
-            let mut verified_owner = self
-                .registry
-                .verify_submission(owner, &authorization, owner_sig);
+            let authorization =
+                ArchiveAuthorization::new(id.clone(), workspace.clone(), prev_revision.clone())
+                    .to_payload();
+            let mut verified_owner =
+                self.registry
+                    .verify_submission(owner, &authorization, owner_sig);
             if verified_owner.is_err() && self.reload_keys() {
                 verified_owner = self
                     .registry
@@ -3042,14 +3030,14 @@ impl SubmitPolicy for ChoirPolicy {
         // change, non-node callers must use CheckpointChange and the
         // recoverable archive endpoint so identity cannot be bypassed.
         let bound_workspace = match &op.kind {
-            OpKind::SetWorkspaceHead { workspace, .. }
-            | OpKind::DeleteWorkspace { workspace } => self
-                .view
-                .lock()
-                .expect("view lock")
-                .changes
-                .values()
-                .any(|change| change.active_workspace.as_deref() == Some(workspace)),
+            OpKind::SetWorkspaceHead { workspace, .. } | OpKind::DeleteWorkspace { workspace } => {
+                self.view
+                    .lock()
+                    .expect("view lock")
+                    .changes
+                    .values()
+                    .any(|change| change.active_workspace.as_deref() == Some(workspace))
+            }
             _ => false,
         };
         if bound_workspace && actor_id != self.node_id {
@@ -3099,10 +3087,8 @@ impl SubmitPolicy for ChoirPolicy {
         // lets a binding correct its channel (keeping `bound_at` pinned),
         // and that correction is only safe while the node is the one
         // making it.
-        if matches!(
-            op.kind,
-            OpKind::BindKey { .. } | OpKind::RevokeKey { .. }
-        ) && actor_id != self.node_id
+        if matches!(op.kind, OpKind::BindKey { .. } | OpKind::RevokeKey { .. })
+            && actor_id != self.node_id
         {
             return Err(Rejection::new(
                 Code::NodeOnly,
@@ -3299,11 +3285,9 @@ impl ChoirPolicy {
             return;
         };
         let (name, old, new) = match &op.kind {
-            OpKind::SetRef { name, commit, prev } => (
-                name,
-                prev.as_ref().map(oid_text),
-                Some(oid_text(commit)),
-            ),
+            OpKind::SetRef { name, commit, prev } => {
+                (name, prev.as_ref().map(oid_text), Some(oid_text(commit)))
+            }
             OpKind::DeleteRef { name, prev } => (name, prev.as_ref().map(oid_text), None),
             _ => return,
         };
@@ -3344,6 +3328,8 @@ pub struct Platform {
     /// in-memory window. `None` (an in-memory log) means such a reader
     /// gets a loud gap error instead of a resync.
     log_path: Option<std::path::PathBuf>,
+    /// Absolute operation-count ceiling for one signed batch.
+    batch_limit: usize,
     /// Shared with the policy: when set, self-named reviewers are
     /// refused and every review goes through the node's draw.
     require_assignment: Arc<std::sync::atomic::AtomicBool>,
@@ -3602,6 +3588,7 @@ impl Platform {
             reviewer_pool: None,
             reviewer_conflict_graph: None,
             log_path: None,
+            batch_limit: DEFAULT_BATCH_OPS,
             require_assignment,
             protected_refs,
             acl_file,
@@ -3671,11 +3658,8 @@ impl Platform {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &adjudications_path,
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .map_err(|e| format!("chmod adjudications: {e}"))?;
+            std::fs::set_permissions(&adjudications_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("chmod adjudications: {e}"))?;
         }
         let audit = NewcomerAudit::open(
             &audit_path,
@@ -3703,10 +3687,7 @@ impl Platform {
     /// # Errors
     ///
     /// The file or its directory cannot be created.
-    pub fn with_review_adjudications(
-        mut self,
-        path: std::path::PathBuf,
-    ) -> Result<Self, String> {
+    pub fn with_review_adjudications(mut self, path: std::path::PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create review adjudications directory: {e}"))?;
@@ -3909,6 +3890,13 @@ impl Platform {
         self
     }
 
+    /// Sets the absolute operation-count ceiling for one batch request.
+    #[must_use]
+    pub fn with_batch_limit(mut self, max_ops: usize) -> Self {
+        self.batch_limit = max_ops.max(1);
+        self
+    }
+
     /// Replaces the actor-id → bound-name map from a freshly parsed
     /// trusted-keys file.
     ///
@@ -4084,7 +4072,9 @@ impl Platform {
             match finding.state {
                 // Git is behind on a commit it already has, so move it.
                 RefState::GitBehind => {
-                    let Some(want) = &finding.log_oid else { continue };
+                    let Some(want) = &finding.log_oid else {
+                        continue;
+                    };
                     let path = root.join(&finding.repo);
                     match write_git_ref(&path, &finding.refname, want, finding.git_oid.as_deref()) {
                         Ok(()) => report.applied.push(full),
@@ -4095,7 +4085,9 @@ impl Platform {
                 // `git_abort` builds exactly this inverse: back to git's
                 // value, or gone if git has none.
                 RefState::LogUnbackable => {
-                    let Some(want) = &finding.log_oid else { continue };
+                    let Some(want) = &finding.log_oid else {
+                        continue;
+                    };
                     let old = finding
                         .git_oid
                         .clone()
@@ -4258,10 +4250,7 @@ impl Platform {
             Some(("G", signer)) if !signer.is_empty() => {
                 (format!("key/{signer}"), Provenance::PushCertified)
             }
-            _ => (
-                crate::quota::channel_for(user),
-                Provenance::PushTransport,
-            ),
+            _ => (crate::quota::channel_for(user), Provenance::PushTransport),
         };
         let payload = ViewOp::new(kind)
             .in_scope(node, head)
@@ -4350,7 +4339,9 @@ impl Platform {
         .in_scope(node, head)
         .to_payload();
         let sig = self.node_key.sign_submission(attribution, &payload);
-        self.handle.try_submit(attribution, payload, Some(sig)).map(|_| ())
+        self.handle
+            .try_submit(attribution, payload, Some(sig))
+            .map(|_| ())
     }
 
     /// Atomically creates a stable change and registers its workspace at
@@ -4436,12 +4427,8 @@ impl Platform {
         expected_revision: &ContentHash,
         attribution: &str,
     ) -> Result<choir_sequencer::Accepted, String> {
-        let sub = decode_archive_submission(
-            request,
-            expected_id,
-            expected_workspace,
-            expected_revision,
-        )?;
+        let sub =
+            decode_archive_submission(request, expected_id, expected_workspace, expected_revision)?;
         let payload = ViewOp::new(OpKind::ArchiveChange {
             id: expected_id.to_string(),
             workspace: expected_workspace.to_string(),
@@ -4467,13 +4454,8 @@ impl Platform {
         expected_workspace: &str,
         expected_revision: &ContentHash,
     ) -> Result<(), String> {
-        decode_archive_submission(
-            request,
-            expected_id,
-            expected_workspace,
-            expected_revision,
-        )
-        .map(|_| ())
+        decode_archive_submission(request, expected_id, expected_workspace, expected_revision)
+            .map(|_| ())
     }
 
     /// Original operation identity for an identical completed archive
@@ -4487,13 +4469,9 @@ impl Platform {
         expected_revision: &ContentHash,
         attribution: &str,
     ) -> Option<(u64, ContentHash)> {
-        let sub = decode_archive_submission(
-            request,
-            expected_id,
-            expected_workspace,
-            expected_revision,
-        )
-        .ok()?;
+        let sub =
+            decode_archive_submission(request, expected_id, expected_workspace, expected_revision)
+                .ok()?;
         let payload = ViewOp::new(OpKind::ArchiveChange {
             id: expected_id.to_string(),
             workspace: expected_workspace.to_string(),
@@ -4616,13 +4594,14 @@ impl Platform {
     /// sequencer's rejection reason (e.g. the review was assigned by a
     /// concurrent request).
     pub fn assign_reviewers(&self, id: &str, requester: &str) -> Result<Vec<String>, String> {
-        let path = self.reviewer_pool.as_ref().ok_or("no reviewer pool configured")?;
+        let path = self
+            .reviewer_pool
+            .as_ref()
+            .ok_or("no reviewer pool configured")?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("read reviewer pool: {e}"))?;
         let mine = reviewer_operator(requester);
         let excluded_operators = match &self.reviewer_conflict_graph {
-            Some((path, max_distance)) => {
-                operators_within_distance(path, mine, *max_distance)?
-            }
+            Some((path, max_distance)) => operators_within_distance(path, mine, *max_distance)?,
             None => BTreeSet::from([mine.to_string()]),
         };
         let mut pool: Vec<String> = text
@@ -4805,7 +4784,10 @@ impl Platform {
         let Some(audit) = &self.newcomer_audit else {
             return;
         };
-        let Some(actor_key) = sub.author_sig.as_ref().map(|signature| signature.key_id.as_str())
+        let Some(actor_key) = sub
+            .author_sig
+            .as_ref()
+            .map(|signature| signature.key_id.as_str())
         else {
             return;
         };
@@ -4969,7 +4951,11 @@ impl Platform {
     /// The latency report as served under `/api/view`.
     fn lag_json(&self) -> serde_json::Value {
         let report = self.lag.report();
-        let last_error = self.lag_log_error.lock().expect("lag log error lock").clone();
+        let last_error = self
+            .lag_log_error
+            .lock()
+            .expect("lag log error lock")
+            .clone();
         serde_json::json!({
             "format_version": 1,
             "gate_us": report.gate_us,
@@ -5105,8 +5091,7 @@ impl Platform {
                 // at N-1. The guards are dropped before byte measurement
                 // and final response serialization.
                 let view = self.view.lock().expect("view lock");
-                let concentration_state =
-                    self.concentration.lock().expect("concentration lock");
+                let concentration_state = self.concentration.lock().expect("concentration lock");
                 let key_names = self.key_names.lock().expect("key names lock");
                 let ws: BTreeMap<_, _> = view
                     .workspaces
@@ -5168,11 +5153,8 @@ impl Platform {
                 // `key_names` still supplies the trusted population, which
                 // no op in the log can answer.
                 let durable_bindings = KeyBindings::from_view(&view, &key_names);
-                let concentration = concentration_json(
-                    &concentration_state,
-                    &durable_bindings,
-                    &protected,
-                );
+                let concentration =
+                    concentration_json(&concentration_state, &durable_bindings, &protected);
                 let new_actor_review_outcomes = new_actor_review_outcomes_json(
                     &concentration_state,
                     &view,
@@ -5282,7 +5264,11 @@ impl Platform {
                         .body(),
                     );
                 };
-                match audit.lock().expect("newcomer audit lock").appeal(attempt_id) {
+                match audit
+                    .lock()
+                    .expect("newcomer audit lock")
+                    .appeal(attempt_id)
+                {
                     Ok(()) => (
                         200,
                         serde_json::json!({ "appealed": attempt_id }).to_string(),
@@ -5312,6 +5298,17 @@ impl Platform {
                 let Some(ops) = req.get("ops").and_then(|v| v.as_array()) else {
                     return (400, r#"{"error":"need ops array"}"#.to_string());
                 };
+                if ops.len() > self.batch_limit {
+                    return (
+                        413,
+                        serde_json::json!({
+                            "error": "batch has too many operations",
+                            "limit_ops": self.batch_limit,
+                            "actual_ops": ops.len(),
+                        })
+                        .to_string(),
+                    );
+                }
                 // Ops are admitted in array order; each result is
                 // independent (a rejection does not abort the batch).
                 //
@@ -5331,8 +5328,7 @@ impl Platform {
                     }
                     decoded.push(one);
                 }
-                let started_at_unix_ms: Vec<u64> =
-                    decoded.iter().map(|_| unix_ms()).collect();
+                let started_at_unix_ms: Vec<u64> = decoded.iter().map(|_| unix_ms()).collect();
                 // Malformed ops never reach the sequencer. Well-formed
                 // ones are pushed in request order, so pulling one
                 // outcome per `Ok` below keeps results aligned with the
@@ -5412,7 +5408,12 @@ impl Platform {
                         )
                         .body()),
                 };
-                let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let f = |k: &str| {
+                    req.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
                 let (status, signer) = (f("cert_status"), f("signer"));
                 match self.git_update(
                     &f("repo"),
@@ -5438,7 +5439,12 @@ impl Platform {
                         )
                         .body()),
                 };
-                let f = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let f = |k: &str| {
+                    req.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
                 let (status, signer) = (f("cert_status"), f("signer"));
                 match self.git_abort(
                     &f("repo"),
@@ -5528,36 +5534,33 @@ impl Platform {
     }
 
     fn submit(&self, body: &[u8]) -> (u16, String) {
-        let req: serde_json::Value = match serde_json::from_slice(body) {
-            Ok(v) => v,
-            Err(e) => return (400, Rejection::new(
-                            Code::MalformedRequest,
-                            format!("request body is not valid JSON: {e}"),
-                            "send a JSON object; GET /llms.txt lists the fields each endpoint wants",
-                        )
-                        .body()),
-        };
+        let req: serde_json::Value =
+            match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(e) => return (
+                    400,
+                    Rejection::new(
+                        Code::MalformedRequest,
+                        format!("request body is not valid JSON: {e}"),
+                        "send a JSON object; GET /llms.txt lists the fields each endpoint wants",
+                    )
+                    .body(),
+                ),
+            };
         let mut sub = match decode_submission(&req) {
             Ok(sub) => sub,
             Err(reason) => return (400, Rejection::decode(&reason).body()),
         };
         self.stamp_credential_key(&mut sub);
         let started_at_unix_ms = unix_ms();
-        match self.handle.try_submit(
-            &sub.channel,
-            sub.payload.clone(),
-            sub.author_sig.clone(),
-        ) {
+        match self
+            .handle
+            .try_submit(&sub.channel, sub.payload.clone(), sub.author_sig.clone())
+        {
             Ok(acc) => {
                 let mut response = self.batch_result(acc, &sub);
                 self.add_retention_outcome(&mut response);
-                self.add_newcomer_outcome(
-                    &mut response,
-                    &sub,
-                    started_at_unix_ms,
-                    true,
-                    None,
-                );
+                self.add_newcomer_outcome(&mut response, &sub, started_at_unix_ms, true, None);
                 (200, response.to_string())
             }
             Err(reason) => {
@@ -5620,7 +5623,11 @@ impl Platform {
     /// assignment draw once the request itself is admitted. That draw is a
     /// *further* submission, so it deliberately happens here, after the
     /// batch's own barrier, rather than being folded into it.
-    fn batch_result(&self, acc: choir_sequencer::Accepted, sub: &DecodedSubmission) -> serde_json::Value {
+    fn batch_result(
+        &self,
+        acc: choir_sequencer::Accepted,
+        sub: &DecodedSubmission,
+    ) -> serde_json::Value {
         let mut resp = serde_json::json!({ "seq": acc.seq, "hash": acc.hash.to_hex() });
         if let Some(id) = &sub.unassigned_review {
             match self.assign_reviewers(id, &sub.channel) {
@@ -5803,8 +5810,8 @@ fn operators_within_distance(
     start: &str,
     max_distance: usize,
 ) -> Result<BTreeSet<String>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("read reviewer conflict graph: {e}"))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read reviewer conflict graph: {e}"))?;
     let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -6071,13 +6078,22 @@ fn entry_json(e: &OpEntry) -> serde_json::Value {
             object.insert("author_scheme".into(), serde_json::json!(scheme));
         }
         if let Some(data) = sig.authenticator_data.as_ref() {
-            object.insert("authenticator_data_hex".into(), serde_json::json!(hex_encode(data)));
+            object.insert(
+                "authenticator_data_hex".into(),
+                serde_json::json!(hex_encode(data)),
+            );
         }
         if let Some(data) = sig.client_data_json.as_ref() {
-            object.insert("client_data_json_hex".into(), serde_json::json!(hex_encode(data)));
+            object.insert(
+                "client_data_json_hex".into(),
+                serde_json::json!(hex_encode(data)),
+            );
         }
         if let Some(key) = sig.credential_key.as_ref() {
-            object.insert("credential_key_hex".into(), serde_json::json!(hex_encode(key)));
+            object.insert(
+                "credential_key_hex".into(),
+                serde_json::json!(hex_encode(key)),
+            );
         }
     }
     value

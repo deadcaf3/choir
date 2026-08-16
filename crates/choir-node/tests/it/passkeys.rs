@@ -40,7 +40,10 @@ fn store_with_bob(tag: &str) -> (Accounts, std::path::PathBuf, std::path::PathBu
         &json(r#"{"user":"bob","grants":["agents/demo read"]}"#),
     );
     assert_eq!(status, 200, "{body}");
-    let invite = json(&body)["invite"].as_str().expect("invite pair").to_string();
+    let invite = json(&body)["invite"]
+        .as_str()
+        .expect("invite pair")
+        .to_string();
     let id = invite.split(':').next().expect("invite id").to_string();
     let (status, body) = store.redeem(&id, &json("{}"));
     assert_eq!(status, 200, "{body}");
@@ -54,7 +57,14 @@ fn credential(work: &std::path::Path, name: &str) -> (String, std::path::PathBuf
     let secret = work.join(format!("{name}.key"));
     let der = work.join(format!("{name}.der"));
     let ok = std::process::Command::new("openssl")
-        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"])
+        .args([
+            "ecparam",
+            "-name",
+            "prime256v1",
+            "-genkey",
+            "-noout",
+            "-out",
+        ])
         .arg(&secret)
         .output()
         .expect("openssl runs");
@@ -115,7 +125,11 @@ fn assertion(
         .expect("openssl runs")
         .status
         .success());
-    (auth_data, client_data, std::fs::read(&der).expect("signature"))
+    (
+        auth_data,
+        client_data,
+        std::fs::read(&der).expect("signature"),
+    )
 }
 
 /// Base64url without padding, via `openssl` rather than through the
@@ -247,7 +261,10 @@ fn a_key_that_is_not_a_p256_spki_is_refused_at_enrolment() {
         // some keys byte-identical and the case passed vacuously. It was
         // written that way first and enrolled successfully, which is how
         // this comment came to exist.
-        ("standard alphabet, not url", format!("{}+", &good[..good.len() - 1])),
+        (
+            "standard alphabet, not url",
+            format!("{}+", &good[..good.len() - 1]),
+        ),
         ("truncated", good[..good.len() - 8].to_string()),
         // Right length, wrong prefix: an RSA or ed25519 SPKI would land
         // here, and a length-only check would accept it.
@@ -295,7 +312,10 @@ fn a_key_that_is_not_a_p256_spki_is_refused_at_enrolment() {
             r#"{{"credential_id":"c","public_key":"{good}","label":"again"}}"#
         )),
     );
-    assert_eq!(status, 409, "a duplicate credential id was accepted: {body}");
+    assert_eq!(
+        status, 409,
+        "a duplicate credential id was accepted: {body}"
+    );
 
     // And the ceiling holds. One account already has one key, so the
     // next `MAX_PASSKEYS - 1` fit and the one after that does not.
@@ -322,8 +342,7 @@ fn a_key_that_is_not_a_p256_spki_is_refused_at_enrolment() {
 /// Base64url decode, for building deliberately broken keys. Independent
 /// of the node's decoder, which is what these cases are testing.
 fn base64url_decode_for_test(input: &str) -> Vec<u8> {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut rev = [255u8; 256];
     for (i, &c) in ALPHABET.iter().enumerate() {
         rev[c as usize] = i as u8;
@@ -413,7 +432,8 @@ fn enrolment_survives_a_reopen_and_a_pre_d39_store_still_loads() {
         r#"{"format_version":1,"accounts":[{"user":"bob","token_hash":"1e-ab","grants":[],"ssh_keys":[],"created_at":1}],"invites":[],"retired":[]}"#,
     )
     .expect("write older store");
-    let old = Accounts::open(older, None, BTreeSet::new()).expect("a pre-D39 store must still load");
+    let old =
+        Accounts::open(older, None, BTreeSet::new()).expect("a pre-D39 store must still load");
     assert_eq!(old.len(), 1, "the account survived the load");
     assert_eq!(
         old.passkey_spki("bob", "anything"),
@@ -446,8 +466,12 @@ fn enrolment_acts_on_the_caller_and_refuses_the_principals_that_have_no_account(
     node.enable_accounts(work.join("accounts.json"), None)
         .expect("accounts enable");
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
     let base = format!("http://127.0.0.1:{port}");
@@ -482,7 +506,7 @@ fn enrolment_acts_on_the_caller_and_refuses_the_principals_that_have_no_account(
         "POST",
         "--data-binary",
         r#"{"user":"bob","grants":["agents/demo read"]}"#,
-        &format!("{base}/api/accounts/invite", ),
+        &format!("{base}/api/accounts/invite",),
     ]);
     assert_eq!(status, 200, "{invite}");
     let pair = invite["invite"].as_str().expect("invite pair").to_string();
@@ -555,7 +579,10 @@ fn enrolment_acts_on_the_caller_and_refuses_the_principals_that_have_no_account(
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["remaining"], 0);
     let (status, _) = curl(&args);
-    assert_eq!(status, 404, "removing an absent credential must not report success");
+    assert_eq!(
+        status, 404,
+        "removing an absent credential must not report success"
+    );
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -584,8 +611,12 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     node.enable_accounts(work.join("accounts.json"), None)
         .expect("accounts enable");
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
     let base = format!("http://127.0.0.1:{port}");
@@ -593,13 +624,22 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     // Bob gets an account, then enrols the authenticator he will sign
     // with.
     let (_, invite) = curl(&[
-        "-u", "alice:a", "-X", "POST", "--data-binary",
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
         r#"{"user":"bob","grants":["agents/demo write"]}"#,
         &format!("{base}/api/accounts/invite"),
     ]);
     let pair = invite["invite"].as_str().expect("invite").to_string();
     let (_, redeemed) = curl(&[
-        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "--data-binary",
+        "{}",
         &format!("{base}/api/accounts/redeem"),
     ]);
     let token = redeemed["token"].as_str().expect("token").to_string();
@@ -607,7 +647,11 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
 
     let (public_key, secret) = credential(&work, "submit");
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "--data-binary",
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "--data-binary",
         &format!(r#"{{"credential_id":"bobs-laptop","public_key":"{public_key}"}}"#),
         &format!("{base}/api/accounts/passkey"),
     ]);
@@ -685,7 +729,12 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     })
     .to_string();
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "-d", &forged,
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "-d",
+        &forged,
         &format!("{base}/api/submit"),
     ]);
     assert_eq!(status, 400, "{body}");
@@ -701,7 +750,12 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     // `signing_hash` covers the channel. The next case is the one that
     // isolates it.
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "-d", &submit("alice", 2),
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "-d",
+        &submit("alice", 2),
         &format!("{base}/api/submit"),
     ]);
     assert_eq!(status, 400, "{body}");
@@ -710,7 +764,12 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     // A scheme the node does not implement is named rather than
     // reinterpreted as ed25519 and reported as a bad signature.
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "-d", &submit("bob", 999),
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "-d",
+        &submit("bob", 999),
         &format!("{base}/api/submit"),
     ]);
     assert_eq!(status, 400, "{body}");
@@ -725,7 +784,12 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
 
     // And the real thing: bob's authenticator signs, and the op lands.
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "-d", &submit("bob", 2),
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "-d",
+        &submit("bob", 2),
         &format!("{base}/api/submit"),
     ]);
     assert_eq!(status, 200, "{body}");
@@ -747,7 +811,11 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     assert_eq!(status, 200, "{page}");
     let entry = page["entries"]
         .as_array()
-        .and_then(|entries| entries.iter().find(|e| e["author_scheme"].as_u64() == Some(2)))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|e| e["author_scheme"].as_u64() == Some(2))
+        })
         .unwrap_or_else(|| panic!("no passkey-signed entry in the page: {page}"));
     for field in [
         "authenticator_data_hex",
@@ -780,7 +848,8 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     // claims is the hash of what it sent.
     let rebuilt = choir_oplog::Witness::webauthn_es256(
         entry["author_key"].as_str().expect("author key"),
-        choir_node::platform::hex_decode(entry["author_sig_hex"].as_str().expect("sig")).expect("hex"),
+        choir_node::platform::hex_decode(entry["author_sig_hex"].as_str().expect("sig"))
+            .expect("hex"),
         choir_node::platform::hex_decode(entry["authenticator_data_hex"].as_str().expect("auth"))
             .expect("hex"),
         choir_node::platform::hex_decode(entry["client_data_json_hex"].as_str().expect("client"))
@@ -819,7 +888,8 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     // in, because `pull_backup.sh` takes the log and not `accounts.json`.
     let carried = choir_oplog::Witness::webauthn_es256(
         entry["author_key"].as_str().expect("author key"),
-        choir_node::platform::hex_decode(entry["author_sig_hex"].as_str().expect("sig")).expect("hex"),
+        choir_node::platform::hex_decode(entry["author_sig_hex"].as_str().expect("sig"))
+            .expect("hex"),
         choir_node::platform::hex_decode(entry["authenticator_data_hex"].as_str().expect("auth"))
             .expect("hex"),
         choir_node::platform::hex_decode(entry["client_data_json_hex"].as_str().expect("client"))
@@ -842,7 +912,11 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     let batched = second.to_payload();
     let (auth2, client2, sig2) = assertion(&work, &secret, "batch", &base, "bob", &batched);
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "--data-binary",
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "--data-binary",
         &serde_json::json!({"ops": [{
             "channel": "bob",
             "payload_hex": hex_encode(&batched),
@@ -934,7 +1008,11 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
         target_ref: Some("agents/demo.git:refs/heads/main".into()),
     });
     let (status, body) = curl(&[
-        "-u", "alice:a", "-X", "POST", "-d",
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
         &crate::support::submit_body(&author, "alice", &request),
         &format!("{base}/api/submit"),
     ]);
@@ -942,7 +1020,12 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
 
     let page = |who: &str| {
         let out = std::process::Command::new("curl")
-            .args(["-s", "-u", who, &format!("{base}/r/agents/demo/review/r-passkey")])
+            .args([
+                "-s",
+                "-u",
+                who,
+                &format!("{base}/r/agents/demo/review/r-passkey"),
+            ])
             .output()
             .expect("curl runs");
         String::from_utf8_lossy(&out.stdout).to_string()
@@ -951,25 +1034,47 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
     // Bob was asked, so bob is offered the control — and the one file
     // that makes it work is pulled in, from this node and nowhere else.
     let bobs = page("bob:b");
-    assert!(bobs.contains("Your verdict"), "the reviewer was offered nothing: {bobs}");
+    assert!(
+        bobs.contains("Your verdict"),
+        "the reviewer was offered nothing: {bobs}"
+    );
     assert!(bobs.contains("button class=\"verdict"), "no verdict button");
-    assert!(bobs.contains("src=\"/static/webauthn.js\""), "the ceremony is missing");
-    assert_eq!(bobs.matches("src=").count(), 1, "the review page fetches something else");
+    assert!(
+        bobs.contains("src=\"/static/webauthn.js\""),
+        "the ceremony is missing"
+    );
+    assert_eq!(
+        bobs.matches("src=").count(),
+        1,
+        "the review page fetches something else"
+    );
     assert!(bobs.contains("<noscript>"), "no scripting-off fallback");
-    assert!(bobs.contains("data-user=\"bob\""), "the channel is not the caller");
+    assert!(
+        bobs.contains("data-user=\"bob\""),
+        "the channel is not the caller"
+    );
 
     // Alice can read the review and has every grant on the node, but she
     // was not asked, so there is nothing here for her to press. Authority
     // is not the same question as being a reviewer.
     let alices = page("alice:a");
-    assert!(!alices.contains("Your verdict"), "a non-reviewer was offered a verdict");
-    assert!(!alices.contains("button class=\"verdict"), "a non-reviewer got a verdict button");
+    assert!(
+        !alices.contains("Your verdict"),
+        "a non-reviewer was offered a verdict"
+    );
+    assert!(
+        !alices.contains("button class=\"verdict"),
+        "a non-reviewer got a verdict button"
+    );
     // She does get the comment box, and that is the distinction rather
     // than an exception to it: judgement belongs to the people asked for
     // it, discussion to anyone who may write here. This assertion used
     // to read "no script at all" and was correct until the comment box
     // landed; the workspace gate caught it, the crate-scoped run did not.
-    assert!(alices.contains("Say something"), "a writer was offered no way to discuss");
+    assert!(
+        alices.contains("Say something"),
+        "a writer was offered no way to discuss"
+    );
 
     // A page offering a control must not also claim it takes no writes.
     // Found by reading the rendered page rather than by any assertion:
@@ -983,7 +1088,10 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
             "a page offering a write control still claims to be read-only: {page}"
         );
     }
-    assert!(bobs.contains("signed operation"), "the footer lost the half that is true");
+    assert!(
+        bobs.contains("signed operation"),
+        "the footer lost the half that is true"
+    );
 
     // And the read surface is the same page for both: the enhancement
     // added a section, it did not change what was already there.
@@ -1016,8 +1124,12 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     node.enable_accounts(work.join("accounts.json"), None)
         .expect("accounts enable");
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
     let base = format!("http://127.0.0.1:{port}");
@@ -1047,13 +1159,22 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     );
 
     let (_, invite) = curl(&[
-        "-u", "alice:a", "-X", "POST", "--data-binary",
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
         r#"{"user":"bob","grants":["agents/demo read"]}"#,
         &format!("{base}/api/accounts/invite"),
     ]);
     let pair = invite["invite"].as_str().expect("invite").to_string();
     let (_, redeemed) = curl(&[
-        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "--data-binary",
+        "{}",
         &format!("{base}/api/accounts/redeem"),
     ]);
     let token = redeemed["token"].as_str().expect("token").to_string();
@@ -1066,13 +1187,21 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     assert!(empty.contains("src=\"/static/webauthn.js\""), "no ceremony");
     assert!(empty.contains("Add a passkey"), "no control");
     assert!(empty.contains("<noscript>"), "no scripting-off fallback");
-    assert_eq!(empty.matches("src=").count(), 1, "the account page fetches something else");
+    assert_eq!(
+        empty.matches("src=").count(),
+        1,
+        "the account page fetches something else"
+    );
 
     // After enrolling, the page lists it under the name he gave it — and
     // lists it for him only.
     let (public_key, _secret) = credential(&work, "account");
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "--data-binary",
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "--data-binary",
         &format!(
             r#"{{"credential_id":"work-laptop-cred","public_key":"{public_key}","label":"work laptop"}}"#
         ),
@@ -1081,8 +1210,14 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     assert_eq!(status, 200, "{body}");
 
     let listed = page(&bob);
-    assert!(listed.contains("work laptop"), "the label is missing: {listed}");
-    assert!(listed.contains("work-laptop-cred"), "the credential is missing");
+    assert!(
+        listed.contains("work laptop"),
+        "the label is missing: {listed}"
+    );
+    assert!(
+        listed.contains("work-laptop-cred"),
+        "the credential is missing"
+    );
     assert!(
         !page("alice:a").contains("work-laptop-cred"),
         "one account's credential is shown on another's page"
@@ -1128,13 +1263,22 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
     let base = format!("http://127.0.0.1:{port}");
 
     let (_, invite) = curl(&[
-        "-u", "alice:a", "-X", "POST", "--data-binary",
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
         r#"{"user":"bob","grants":["agents/demo write"]}"#,
         &format!("{base}/api/accounts/invite"),
     ]);
     let pair = invite["invite"].as_str().expect("invite").to_string();
     let (_, redeemed) = curl(&[
-        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "--data-binary",
+        "{}",
         &format!("{base}/api/accounts/redeem"),
     ]);
     let bob = format!("bob:{}", redeemed["token"].as_str().expect("token"));
@@ -1142,10 +1286,15 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
     let (public_key, secret) = credential(&work, "commenter");
     assert_eq!(
         curl(&[
-            "-u", &bob, "-X", "POST", "--data-binary",
+            "-u",
+            &bob,
+            "-X",
+            "POST",
+            "--data-binary",
             &format!(r#"{{"credential_id":"bobs-key","public_key":"{public_key}"}}"#),
             &format!("{base}/api/accounts/passkey"),
-        ]).0,
+        ])
+        .0,
         200
     );
 
@@ -1157,28 +1306,42 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
     });
     assert_eq!(
         curl(&[
-            "-u", "alice:a", "-X", "POST", "-d",
+            "-u",
+            "alice:a",
+            "-X",
+            "POST",
+            "-d",
             &crate::support::submit_body(&author, "alice", &request),
             &format!("{base}/api/submit"),
-        ]).0,
+        ])
+        .0,
         200
     );
 
     // Prepare. The body names alice; the node must build bob's comment,
     // because the author is who authenticated and never who asked.
     let (status, prepared) = curl(&[
-        "-u", &bob, "-X", "POST", "--data-binary",
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "--data-binary",
         r#"{"kind":"comment","id":"r-talk","body":"the diff reads fine","author":"alice"}"#,
         &format!("{base}/api/prepare"),
     ]);
     assert_eq!(status, 200, "{prepared}");
-    assert_eq!(prepared["channel"], "bob", "the body chose the author: {prepared}");
+    assert_eq!(
+        prepared["channel"], "bob",
+        "the body chose the author: {prepared}"
+    );
 
-    let payload = choir_node::platform::hex_decode(
-        prepared["payload_hex"].as_str().expect("payload"),
-    )
-    .expect("hex");
-    match choir_view::ViewOp::from_payload(&payload).expect("a ViewOp").kind {
+    let payload =
+        choir_node::platform::hex_decode(prepared["payload_hex"].as_str().expect("payload"))
+            .expect("hex");
+    match choir_view::ViewOp::from_payload(&payload)
+        .expect("a ViewOp")
+        .kind
+    {
         OpKind::PostComment { author, body, .. } => {
             assert_eq!(author, "bob", "the prepared op names the wrong author");
             assert_eq!(body, "the diff reads fine");
@@ -1216,7 +1379,11 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
         .success());
 
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "-d",
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "-d",
         &serde_json::json!({
             "channel": prepared["channel"],
             "payload_hex": prepared["payload_hex"],
@@ -1233,18 +1400,30 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
 
     // And it is on the page, attributed to bob.
     let out = std::process::Command::new("curl")
-        .args(["-s", "-u", &bob, &format!("{base}/r/agents/demo/review/r-talk")])
+        .args([
+            "-s",
+            "-u",
+            &bob,
+            &format!("{base}/r/agents/demo/review/r-talk"),
+        ])
         .output()
         .expect("curl runs");
     let page = String::from_utf8_lossy(&out.stdout);
-    assert!(page.contains("the diff reads fine"), "the comment is missing: {page}");
+    assert!(
+        page.contains("the diff reads fine"),
+        "the comment is missing: {page}"
+    );
     assert!(page.contains("Say something"), "the box is missing");
 
     // An over-long comment is refused at prepare, where the person can
     // still edit it, rather than at admission where they cannot.
     let long = "x".repeat(5000);
     let (status, body) = curl(&[
-        "-u", &bob, "-X", "POST", "--data-binary",
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "--data-binary",
         &serde_json::json!({ "kind": "comment", "id": "r-talk", "body": long }).to_string(),
         &format!("{base}/api/prepare"),
     ]);
@@ -1296,10 +1475,15 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
     });
     assert_eq!(
         curl(&[
-            "-u", "alice:a", "-X", "POST", "-d",
+            "-u",
+            "alice:a",
+            "-X",
+            "POST",
+            "-d",
             &crate::support::submit_body(&author, "alice", &request),
             &format!("{base}/api/submit"),
-        ]).0,
+        ])
+        .0,
         200
     );
 
@@ -1327,8 +1511,16 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
             Some("'self'"),
             "{path} runs script it should not: {header}"
         );
-        assert_eq!(directive(&header, "connect-src").as_deref(), Some("'self'"), "{header}");
-        assert_eq!(directive(&header, "default-src").as_deref(), Some("'none'"), "{header}");
+        assert_eq!(
+            directive(&header, "connect-src").as_deref(),
+            Some("'self'"),
+            "{header}"
+        );
+        assert_eq!(
+            directive(&header, "default-src").as_deref(),
+            Some("'none'"),
+            "{header}"
+        );
     }
 
     // And every other browser surface still runs nothing at all. This is
@@ -1392,13 +1584,26 @@ fn directive(header: &str, name: &str) -> Option<String> {
 /// One header off the wire, by name, lowercased for comparison.
 fn header_of(base: &str, path: &str, name: &str) -> Option<String> {
     let out = std::process::Command::new("curl")
-        .args(["-s", "-D", "-", "-o", "/dev/null", "-u", "alice:a", &format!("{base}{path}")])
+        .args([
+            "-s",
+            "-D",
+            "-",
+            "-o",
+            "/dev/null",
+            "-u",
+            "alice:a",
+            &format!("{base}{path}"),
+        ])
         .output()
         .expect("curl runs");
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find(|line| line.to_ascii_lowercase().starts_with(&format!("{name}:")))
-        .map(|line| line[line.find(':').expect("a header colon") + 1..].trim().to_string())
+        .map(|line| {
+            line[line.find(':').expect("a header colon") + 1..]
+                .trim()
+                .to_string()
+        })
 }
 
 /// The text inside each `<script>` element, which is what a
@@ -1486,10 +1691,15 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
     });
     assert_eq!(
         curl(&[
-            "-u", "alice:a", "-X", "POST", "-d",
+            "-u",
+            "alice:a",
+            "-X",
+            "POST",
+            "-d",
             &crate::support::submit_body(&author, "alice", &request),
             &format!("{base}/api/submit"),
-        ]).0,
+        ])
+        .0,
         200
     );
 
@@ -1505,13 +1715,22 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
     // one is issued: alice's credential comes from the operator's auth
     // file and cannot hold a passkey.
     let (_, invite) = curl(&[
-        "-u", "alice:a", "-X", "POST", "--data-binary",
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
         r#"{"user":"bob","grants":["agents/demo read"]}"#,
         &format!("{base}/api/accounts/invite"),
     ]);
     let pair = invite["invite"].as_str().expect("invite").to_string();
     let (_, redeemed) = curl(&[
-        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "--data-binary",
+        "{}",
         &format!("{base}/api/accounts/redeem"),
     ]);
     let bob = format!("bob:{}", redeemed["token"].as_str().expect("token"));
@@ -1522,7 +1741,10 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
         // The ceremony is on the page at all — otherwise the two
         // assertions below hold for a page with no write path on it,
         // which is the shape of a test that checks nothing.
-        assert!(page.contains("<script"), "{what}: no ceremony rendered: {page}");
+        assert!(
+            page.contains("<script"),
+            "{what}: no ceremony rendered: {page}"
+        );
         assert_eq!(
             inline_script_bodies(page),
             Vec::<String>::new(),
@@ -1547,7 +1769,10 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
     // A reader with nothing to sign gets no ceremony and no request for
     // one: the read surface's guarantee, kept by construction.
     let listing = body("alice:a", "/r/agents/demo/reviews");
-    assert!(!listing.contains("<script"), "a read page fetched script: {listing}");
+    assert!(
+        !listing.contains("<script"),
+        "a read page fetched script: {listing}"
+    );
 
     // The file itself: typed as JavaScript, since under `script-src
     // 'self'` a browser with `nosniff` runs nothing that is not.
@@ -1561,7 +1786,10 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
     );
     let script = body("alice:a", "/static/webauthn.js");
     for ceremony in ["'verdict'", "'comment'", "'enrol'"] {
-        assert!(script.contains(ceremony), "the served file has lost {ceremony}");
+        assert!(
+            script.contains(ceremony),
+            "the served file has lost {ceremony}"
+        );
     }
     assert!(!script.contains("<script"), "a script file carrying markup");
 
@@ -1571,26 +1799,47 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
     // absent control rather than a visible failure. There is nothing in
     // this file to protect — it is the same constant on every node.
     let out = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}", &format!("{base}/static/webauthn.js")])
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            &format!("{base}/static/webauthn.js"),
+        ])
         .output()
         .expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let (anon, code) = text.rsplit_once('\n').expect("a status code");
-    assert_eq!(code.trim(), "200", "the ceremony needs a credential to load");
-    assert_eq!(anon, script, "an anonymous reader is served different bytes");
+    assert_eq!(
+        code.trim(),
+        "200",
+        "the ceremony needs a credential to load"
+    );
+    assert_eq!(
+        anon, script,
+        "an anonymous reader is served different bytes"
+    );
 
     // And it revalidates, so a page load costs a round trip and no
     // bytes rather than the file again.
     let tag = header_of(&base, "/static/webauthn.js", "etag").expect("an ETag");
     let out = std::process::Command::new("curl")
         .args([
-            "-s", "-o", "/dev/null", "-w", "%{http_code}",
-            "-H", &format!("If-None-Match: {tag}"),
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-H",
+            &format!("If-None-Match: {tag}"),
             &format!("{base}/static/webauthn.js"),
         ])
         .output()
         .expect("curl runs");
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "304", "no revalidation");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "304",
+        "no revalidation"
+    );
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -1627,20 +1876,33 @@ fn the_account_page_still_lists_your_passkeys_with_scripting_disabled() {
     node.enable_accounts(work.join("accounts.json"), None)
         .expect("accounts enable");
     node.enable_platform(
-        Platform::start(Registry::new(), Box::new(MemLog::new()), ActorKey::generate())
-            .expect("platform starts"),
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
     );
     std::thread::spawn(move || node.serve_forever());
     let base = format!("http://127.0.0.1:{port}");
 
     let (_, invite) = curl(&[
-        "-u", "alice:a", "-X", "POST", "--data-binary",
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
         r#"{"user":"bob","grants":["agents/demo read"]}"#,
         &format!("{base}/api/accounts/invite"),
     ]);
     let pair = invite["invite"].as_str().expect("invite").to_string();
     let (_, redeemed) = curl(&[
-        "-u", &pair, "-X", "POST", "--data-binary", "{}",
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "--data-binary",
+        "{}",
         &format!("{base}/api/accounts/redeem"),
     ]);
     let bob = format!("bob:{}", redeemed["token"].as_str().expect("token"));
@@ -1675,7 +1937,10 @@ fn the_account_page_still_lists_your_passkeys_with_scripting_disabled() {
     }
     readable.push_str(rest);
 
-    assert!(!readable.contains("<script"), "the stripper left script behind");
+    assert!(
+        !readable.contains("<script"),
+        "the stripper left script behind"
+    );
     // The credential id is shown truncated to sixteen characters, which
     // is a real browser's id cut to something a roster can hold. The
     // label is what a person identifies a key by; the prefix is there to

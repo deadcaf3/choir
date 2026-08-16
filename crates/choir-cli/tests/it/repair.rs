@@ -227,6 +227,35 @@ fn verify_locates_the_first_bad_record() {
     );
 }
 
+#[test]
+fn verify_refuses_an_unsupported_format_version() {
+    let dir = workdir("unsupported-format");
+    let path = valid_log(&dir, 2);
+    let text = std::fs::read_to_string(&path).expect("read");
+    let mut lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("entry"))
+        .collect();
+    lines[0]["format_version"] = serde_json::json!(choir_oplog::FORMAT_VERSION + 1);
+    let damaged = lines
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&path, damaged).expect("write back");
+
+    let (code, out, err) = choir(&["repair", path.to_str().expect("utf8"), "--verify"]);
+    assert_eq!(
+        code, 1,
+        "unsupported formats must fail verification: {out}{err}"
+    );
+    assert!(
+        out.contains("unsupported format version") || err.contains("unsupported format version"),
+        "the refusal must name the compatibility problem: {out}{err}"
+    );
+}
+
 fn torn_sidecars(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .expect("listing")

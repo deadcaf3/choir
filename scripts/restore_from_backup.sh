@@ -26,7 +26,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC=${1:-}
 ROOT=${2:-}
 NODE_BIN=${CHOIR_NODE_BIN:-$HERE/../target/release/choir-node}
-POLICY_FILES="keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl repos.list"
+POLICY_FILES="keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl repos.list acl private-beta.manifest"
 
 fail() { echo "restore: $1" >&2; exit 1; }
 decide() { echo "restore: $1" >&2; exit 3; }
@@ -58,16 +58,11 @@ trap cleanup EXIT INT TERM
 lines=$(wc -l < "$SRC/ops.jsonl" | tr -d ' ')
 [ "$lines" -gt 0 ] || fail "the backed-up log is empty"
 
-# Contiguity, the same check pull_backup.sh and verify_backup.sh make. A
-# missing middle is what a whole-file checksum cannot localise, and it is
-# fatal here for a specific reason: replay stops at the gap, so the node
-# would come up holding a view of the log's first half and append to it.
-sed -n 's/.*"seq":\([0-9][0-9]*\).*/\1/p' "$SRC/ops.jsonl" > "$WORK/seqs"
-seqcount=$(wc -l < "$WORK/seqs" | tr -d ' ')
-[ "$seqcount" = "$lines" ] \
-  || fail "$lines lines but $seqcount carry a seq: the backup is not all op entries"
-awk 'NR-1 != $1 { printf "seq gap: line %d carries seq %d\n", NR, $1; exit 1 }' "$WORK/seqs" \
-  || fail "the backup has a seq gap; it cannot be replayed to the head"
+# Verify before writing a byte into the target. This rejects unsupported
+# formats, sequence gaps, broken parent links, recomputed-hash mismatches,
+# and incomplete tails with the same code shipped in the daemon artifact.
+"$NODE_BIN" --verify-log "$SRC/ops.jsonl" \
+  || fail "the backup failed format/sequence/parent/hash verification"
 
 missing=
 for f in $POLICY_FILES; do
@@ -146,8 +141,8 @@ if [ ! -f "$ROOT/.choir/node.key" ]; then
 fi
 AUTH=${CHOIR_RESTORE_AUTH:-$ROOT/.choir/auth}
 [ -f "$AUTH" ] || decide "no auth file at $AUTH. Backups carry no credentials, so mint one now:
-    printf 'choir:%s\n' \"\$(openssl rand -hex 32)\" > $AUTH && chmod 600 $AUTH
-  Then re-run. Reuse of the old token is not possible and not wanted: it was last seen on a host you are restoring away from."
+    printf '<operator>:%s\n' \"\$(openssl rand -hex 32)\" > $AUTH && chmod 600 $AUTH
+  Replace <operator> with a username that the restored ACL grants ownership of a restored repository, then re-run. Reuse of the old token is not possible and not wanted: it was last seen on a host you are restoring away from."
 
 # ----------------------------------------------------- 5. rehearsal boot
 # Port 0: the daemon picks a free one and prints it, so a rehearsal never
@@ -162,6 +157,23 @@ for repo in $repos; do create_args="$create_args --create $repo"; done
   --protected-refs "$ROOT/.choir/policy/protected-refs" \
   --newcomer-audit "$ROOT/.choir/policy/newcomer-audit.jsonl" \
   --newcomer-adjudications "$ROOT/.choir/policy/newcomer-adjudications.jsonl" \
+  --review-adjudications "$ROOT/.choir/policy/review-adjudications.jsonl" \
+  --acl-file "$ROOT/.choir/policy/acl" \
+  --require-assignment \
+  --protected-refs "$ROOT/.choir/policy/protected-refs" \
+  --require-review \
+  --require-scope \
+  --read-only-browser \
+  --journal "$ROOT/.choir/journal.jsonl" \
+  --request-log "$ROOT/.choir/requests.jsonl" \
+  --request-log-max-bytes 33554432 \
+  --rate-limit-api 120 \
+  --rate-limit-git 60 \
+  --quota-push-bytes 536870912 \
+  --quota-workspaces 8 \
+  --api-body-limit 1048576 \
+  --batch-limit 256 \
+  --ready-min-free-bytes 1073741824 \
   $create_args > "$WORK/node.out" 2> "$WORK/node.err" &
 NODE_PID=$!
 

@@ -79,5 +79,9 @@ fn a_queued_dependent_behind_the_window_is_also_ejected() {
         .rejected
         .contains(&(2, Rejection::DependencyEjection { on: 1 })));
     assert!(!report.merged.contains(&2));
-    assert_eq!(report.merged.len(), (DEFAULT_WINDOW - 1), "everyone else lands");
+    assert_eq!(
+        report.merged.len(),
+        (DEFAULT_WINDOW - 1),
+        "everyone else lands"
+    );
 }

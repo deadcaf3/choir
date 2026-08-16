@@ -36,7 +36,10 @@ fn spawn(work: &std::path::Path) -> Daemon {
         let (seen, text) = (seen.clone(), text.clone());
         std::thread::spawn(move || {
             use std::io::BufRead;
-            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
                 let serving = line.contains("choir-node serving");
                 text.lock().expect("stderr text").push_str(&line);
                 text.lock().expect("stderr text").push('\n');
@@ -90,9 +93,16 @@ fn a_second_node_on_the_same_root_refuses_and_a_dead_ones_lock_is_reaped() {
     std::fs::write(work.join("keys"), "").unwrap();
 
     let mut first = spawn(&work);
-    assert!(first.wait_verdict(), "first daemon should serve: {}", first.text());
+    assert!(
+        first.wait_verdict(),
+        "first daemon should serve: {}",
+        first.text()
+    );
     let lock_path = work.join("repos/.choir/wdlock");
-    assert!(lock_path.is_file(), "serving daemon should hold the state lock");
+    assert!(
+        lock_path.is_file(),
+        "serving daemon should hold the state lock"
+    );
 
     let mut second = spawn(&work);
     assert!(
@@ -101,7 +111,9 @@ fn a_second_node_on_the_same_root_refuses_and_a_dead_ones_lock_is_reaped() {
         second.text()
     );
     assert!(
-        second.text().contains("in use by another running choir-node"),
+        second
+            .text()
+            .contains("in use by another running choir-node"),
         "the refusal must say who has it and why it matters, got: {}",
         second.text()
     );
@@ -109,7 +121,10 @@ fn a_second_node_on_the_same_root_refuses_and_a_dead_ones_lock_is_reaped() {
     // SIGKILL the holder: the lock file stays behind with a dead PID.
     // The next start must reap it rather than wedge.
     first.kill();
-    assert!(lock_path.is_file(), "a killed daemon leaves its lock behind");
+    assert!(
+        lock_path.is_file(),
+        "a killed daemon leaves its lock behind"
+    );
     let mut third = spawn(&work);
     assert!(
         third.wait_verdict(),

@@ -76,8 +76,7 @@ fn public_url_configuration_is_private_validated_and_wired_into_tls_setup() {
             "{name} does not require the certificate-valid route when TLS is active"
         );
         assert!(
-            installer.contains("--auth-file")
-                && installer.contains("\\$(cat ~/.choir-public-url)"),
+            installer.contains("--auth-file") && installer.contains("\\$(cat ~/.choir-public-url)"),
             "{name} does not recommend the CLI over verified HTTPS"
         );
         assert!(
@@ -280,6 +279,145 @@ fn render_unit_tls(
     String::from_utf8(output.stdout).expect("UTF-8 unit")
 }
 
+fn render_private_beta(protected: &str, scope: &str, acl: &str) -> std::process::Output {
+    let script = repo_root().join("scripts/flip/render_node_service.sh");
+    let repos_path = repos_file("owner/repo.git\n");
+    let output = std::process::Command::new("sh")
+        .arg(script)
+        .args([
+            "choir-node",
+            "/opt/choir-node",
+            "/srv/choir/repos",
+            "8417",
+            "/srv/choir/auth",
+            "/srv/choir/keys",
+            "/srv/choir/reviewers",
+            "/var/log/choir/node.log",
+        ])
+        .arg(&repos_path)
+        .args([
+            "/srv/choir/newcomer-audit.jsonl",
+            "/srv/choir/newcomer-adjudications.jsonl",
+            protected,
+            scope,
+            "",
+            "",
+            acl,
+            "choir",
+        ])
+        .output()
+        .expect("render private beta unit");
+    std::fs::remove_file(repos_path).ok();
+    output
+}
+
+#[test]
+fn private_beta_service_is_loopback_only_fail_closed_and_hardened() {
+    for (protected, scope, acl) in [
+        ("", "require-scope", "/srv/choir/acl"),
+        ("/srv/choir/protected-refs", "", "/srv/choir/acl"),
+        ("/srv/choir/protected-refs", "require-scope", ""),
+    ] {
+        assert!(
+            !render_private_beta(protected, scope, acl).status.success(),
+            "private beta rendered without every fail-closed policy input"
+        );
+    }
+
+    let output = render_private_beta(
+        "/srv/choir/protected-refs",
+        "require-scope",
+        "/srv/choir/acl",
+    );
+    assert!(output.status.success());
+    let unit = String::from_utf8(output.stdout).expect("UTF-8 unit");
+    for required in [
+        "--bind 127.0.0.1",
+        "--acl-file /srv/choir/acl",
+        "--require-assignment",
+        "--require-review",
+        "--require-scope",
+        "--read-only-browser",
+        "--request-log",
+        "--journal",
+        "--rate-limit-api 120",
+        "--rate-limit-git 60",
+        "--quota-push-bytes 536870912",
+        "--quota-workspaces 8",
+        "--api-body-limit 1048576",
+        "--batch-limit 256",
+        "--ready-min-free-bytes 1073741824",
+        "User=choir",
+        "Group=choir",
+        "NoNewPrivileges=true",
+        "PrivateTmp=true",
+        "ProtectSystem=strict",
+        "TasksMax=128",
+        "MemoryMax=1G",
+        "WantedBy=multi-user.target",
+    ] {
+        assert!(
+            unit.contains(required),
+            "private beta unit dropped {required}:\n{unit}"
+        );
+    }
+    assert!(
+        !unit.contains("--tls-cert"),
+        "TLS belongs at the reverse proxy"
+    );
+    assert!(
+        !unit.contains("--accounts-file"),
+        "self-service accounts stay disabled"
+    );
+    assert!(!unit.contains("--hooks-file"), "webhooks stay disabled");
+    assert!(!unit.contains("--ssh-handoff"), "SSH stays disabled");
+}
+
+#[test]
+fn private_beta_proxy_terminates_tls_and_separates_api_from_git_limits() {
+    let output = std::process::Command::new("sh")
+        .arg(repo_root().join("scripts/flip/render_beta_nginx.sh"))
+        .args([
+            "beta.example.invalid",
+            "8417",
+            "/etc/ssl/choir/fullchain.pem",
+            "/etc/ssl/choir/privkey.pem",
+            "/var/log/nginx/choir-access.log",
+        ])
+        .output()
+        .expect("render nginx config");
+    assert!(output.status.success());
+    let config = String::from_utf8(output.stdout).expect("UTF-8 nginx config");
+    for required in [
+        "server 127.0.0.1:8417",
+        "return 308 https://$host$request_uri",
+        "Strict-Transport-Security",
+        "limit_req_zone",
+        "limit_conn",
+        "client_max_body_size 1m",
+        "client_max_body_size 512m",
+        "proxy_request_buffering off",
+        "proxy_buffering off",
+        "proxy_set_header Authorization $http_authorization",
+        "client_header_timeout 10s",
+    ] {
+        assert!(
+            config.contains(required),
+            "proxy config dropped {required}:\n{config}"
+        );
+    }
+    let small = config
+        .find("client_max_body_size 1m")
+        .expect("small default limit");
+    let default_location = config
+        .rfind("location / {")
+        .expect("default proxy location");
+    assert!(
+        small < default_location,
+        "the small default limit must cover GUI/API routes"
+    );
+}
+
 /// The `ProgramArguments` array only — `StandardOutPath` and `Label` are
 /// `<string>` elements too, and counting them would compare the plist's
 /// supervision settings against the unit's argument list.
@@ -317,65 +455,72 @@ fn unit_argv(unit: &str) -> Vec<String> {
 fn both_supervisors_launch_the_node_with_the_same_arguments() {
     for protected in [None, Some("/state/protected-refs")] {
         for scope in [false, true] {
-        for tls in [None, Some(("/state/tls/fullchain.pem", "/state/tls/privkey.pem"))] {
-        for acl in [None, Some("/state/acl")] {
-            let plist = plist_argv(&render_tls(protected, scope, tls, acl));
-            let unit = unit_argv(&render_unit_tls(protected, scope, tls, acl));
+            for tls in [
+                None,
+                Some(("/state/tls/fullchain.pem", "/state/tls/privkey.pem")),
+            ] {
+                for acl in [None, Some("/state/acl")] {
+                    let plist = plist_argv(&render_tls(protected, scope, tls, acl));
+                    let unit = unit_argv(&render_unit_tls(protected, scope, tls, acl));
 
-            // Without this the whole test passes vacuously when a renderer
-            // rejects its arguments and prints usage to stderr — which is
-            // exactly how the first version of this check reported success
-            // while comparing nothing to nothing.
-            assert!(
-                plist.len() >= 10,
-                "extracted {} arguments; the renderer did not run",
-                plist.len()
-            );
-            assert!(
-                !unit.iter().any(String::is_empty),
-                "unit ExecStart carries an empty argument (a spliced-in empty \
+                    // Without this the whole test passes vacuously when a renderer
+                    // rejects its arguments and prints usage to stderr — which is
+                    // exactly how the first version of this check reported success
+                    // while comparing nothing to nothing.
+                    assert!(
+                        plist.len() >= 10,
+                        "extracted {} arguments; the renderer did not run",
+                        plist.len()
+                    );
+                    assert!(
+                        !unit.iter().any(String::is_empty),
+                        "unit ExecStart carries an empty argument (a spliced-in empty \
                  policy leaves a double space): {unit:?}"
-            );
-            // Equality alone passes when both renderers drop the flag, so
-            // its presence is pinned to the input, not to the sibling.
-            assert_eq!(
-                plist.iter().any(|arg| arg == "--require-scope"),
-                scope,
-                "--require-scope must appear exactly when the scope slot is set"
-            );
-            // The TLS pair and the bind are one decision: a public bind
-            // must carry the cert pair, loopback must carry neither.
-            assert_eq!(
-                plist.iter().any(|arg| arg == "--tls-cert"),
-                tls.is_some(),
-                "--tls-cert must appear exactly when the tls slots are set"
-            );
-            let bind = plist
-                .windows(2)
-                .find(|pair| pair[0] == "--bind")
-                .map(|pair| pair[1].clone())
-                .expect("--bind is always rendered");
-            assert_eq!(
-                bind,
-                if tls.is_some() { "0.0.0.0" } else { "127.0.0.1" },
-                "the bind must flip with the TLS pair and only with it"
-            );
-            // The gate that decides which repositories a credential can
-            // reach, pinned to its slot rather than to the sibling
-            // renderer, so both dropping it cannot read as agreement.
-            assert_eq!(
-                plist.iter().any(|arg| arg == "--acl-file"),
-                acl.is_some(),
-                "--acl-file must appear exactly when the acl slot is set"
-            );
-            assert_eq!(
-                plist, unit,
-                "launchd and systemd must start the node with identical \
+                    );
+                    // Equality alone passes when both renderers drop the flag, so
+                    // its presence is pinned to the input, not to the sibling.
+                    assert_eq!(
+                        plist.iter().any(|arg| arg == "--require-scope"),
+                        scope,
+                        "--require-scope must appear exactly when the scope slot is set"
+                    );
+                    // The TLS pair and the bind are one decision: a public bind
+                    // must carry the cert pair, loopback must carry neither.
+                    assert_eq!(
+                        plist.iter().any(|arg| arg == "--tls-cert"),
+                        tls.is_some(),
+                        "--tls-cert must appear exactly when the tls slots are set"
+                    );
+                    let bind = plist
+                        .windows(2)
+                        .find(|pair| pair[0] == "--bind")
+                        .map(|pair| pair[1].clone())
+                        .expect("--bind is always rendered");
+                    assert_eq!(
+                        bind,
+                        if tls.is_some() {
+                            "0.0.0.0"
+                        } else {
+                            "127.0.0.1"
+                        },
+                        "the bind must flip with the TLS pair and only with it"
+                    );
+                    // The gate that decides which repositories a credential can
+                    // reach, pinned to its slot rather than to the sibling
+                    // renderer, so both dropping it cannot read as agreement.
+                    assert_eq!(
+                        plist.iter().any(|arg| arg == "--acl-file"),
+                        acl.is_some(),
+                        "--acl-file must appear exactly when the acl slot is set"
+                    );
+                    assert_eq!(
+                        plist, unit,
+                        "launchd and systemd must start the node with identical \
                  arguments; a flag added to one supervisor and not the other \
                  is a node running without the gate its operator configured"
-            );
-        }
-        }
+                    );
+                }
+            }
         }
     }
 }
@@ -386,11 +531,20 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
 /// crash-loops under supervision.
 #[test]
 fn a_half_tls_pair_is_refused_by_both_renderers() {
-    for (cert, key) in [("/state/tls/fullchain.pem", ""), ("", "/state/tls/privkey.pem")] {
+    for (cert, key) in [
+        ("/state/tls/fullchain.pem", ""),
+        ("", "/state/tls/privkey.pem"),
+    ] {
         let plist = render_output("owner/repo.git\n", None, false, Some((cert, key)), None);
-        assert!(!plist.status.success(), "plist renderer accepted half a TLS pair");
+        assert!(
+            !plist.status.success(),
+            "plist renderer accepted half a TLS pair"
+        );
         let unit = render_unit_output("owner/repo.git\n", None, false, Some((cert, key)), None);
-        assert!(!unit.status.success(), "unit renderer accepted half a TLS pair");
+        assert!(
+            !unit.status.success(),
+            "unit renderer accepted half a TLS pair"
+        );
     }
 }
 
@@ -426,11 +580,15 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 
     for empty in ["", "# only a comment\n"] {
         assert!(
-            !render_output(empty, None, false, None, None).status.success(),
+            !render_output(empty, None, false, None, None)
+                .status
+                .success(),
             "the plist renderer must refuse a repos list with no entries"
         );
         assert!(
-            !render_unit_output(empty, None, false, None, None).status.success(),
+            !render_unit_output(empty, None, false, None, None)
+                .status
+                .success(),
             "the unit renderer must refuse a repos list with no entries"
         );
     }
@@ -462,8 +620,8 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 /// skip everything and read like success.
 #[test]
 fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
-    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
-        .expect("choirctl source");
+    let driver =
+        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
 
     // Both remote-mode call sites go through the one function; a stray
     // hardcoded single-repo push would silently shrink the follower.
@@ -478,13 +636,24 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
     // D21 ordering inside the remote sync branch: canonical, follower,
     // then the backup pull.
     let sync = driver.find("sync)").expect("sync branch");
-    let canonical = driver[sync..].find("push_canonical.sh").expect("canonical leg") + sync;
-    let follower = driver[canonical..].find("follower_feed").expect("follower leg") + canonical;
-    let backup = driver[follower..].find("pull_backup.sh").expect("backup leg") + follower;
+    let canonical = driver[sync..]
+        .find("push_canonical.sh")
+        .expect("canonical leg")
+        + sync;
+    let follower = driver[canonical..]
+        .find("follower_feed")
+        .expect("follower leg")
+        + canonical;
+    let backup = driver[follower..]
+        .find("pull_backup.sh")
+        .expect("backup leg")
+        + follower;
     assert!(canonical < follower && follower < backup);
 
     // The command that actually runs on the node host.
-    let def = driver.find("follower_feed()").expect("follower_feed defined");
+    let def = driver
+        .find("follower_feed()")
+        .expect("follower_feed defined");
     let body = &driver[def..];
     let start = body.find("node_ssh '").expect("one remote command") + "node_ssh '".len();
     let end = body[start..].find("'\n}").expect("remote command closes") + start;
@@ -516,7 +685,10 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
     let git = |cmd: &str| assert!(sh(cmd).status.success(), "fixture git failed: {cmd}");
     git("git init -q --bare \"$HOME/.choir/repos/agents/demo.git\"");
     let out = sh(remote);
-    assert!(out.status.success(), "an unconfigured follower must not fail the run");
+    assert!(
+        out.status.success(),
+        "an unconfigured follower must not fail the run"
+    );
     assert!(String::from_utf8_lossy(&out.stderr).contains("NO forgejo remote"));
 
     // Configured: the push happens for real, into a second bare repo.
@@ -526,10 +698,17 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
     git("git init -q --bare \"$HOME/follower.git\" \
          && git --git-dir \"$HOME/.choir/repos/agents/demo.git\" remote add forgejo \"$HOME/follower.git\"");
     let out = sh(remote);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("follower updated: agents/demo.git"));
     let shown = sh("git --git-dir \"$HOME/follower.git\" rev-parse refs/heads/main");
-    assert!(shown.status.success(), "the follower never received the ref");
+    assert!(
+        shown.status.success(),
+        "the follower never received the ref"
+    );
 
     // A configured push that fails is the one thing that fails the run.
     std::fs::write(
@@ -540,7 +719,10 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
     git("git init -q --bare \"$HOME/.choir/repos/agents/bad.git\" \
          && git --git-dir \"$HOME/.choir/repos/agents/bad.git\" remote add forgejo \"$HOME/absent.git\"");
     let out = sh(remote);
-    assert!(!out.status.success(), "a failed configured push must fail the run");
+    assert!(
+        !out.status.success(),
+        "a failed configured push must fail the run"
+    );
     assert!(String::from_utf8_lossy(&out.stderr).contains("push FAILED for agents/bad.git"));
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("follower updated: agents/demo.git"),
@@ -558,10 +740,14 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
 /// node host, where pulling from yourself backs up nothing.
 #[test]
 fn the_landing_round_opens_the_tunnel_and_the_binary_swap_survives_etxtbsy() {
-    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
-        .expect("choirctl source");
+    let driver =
+        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
     for case in ["\nreview)", "\nverdict)", "\nschedule-backup)"] {
-        assert!(driver.contains(case), "choirctl lacks the {} command", case.trim());
+        assert!(
+            driver.contains(case),
+            "choirctl lacks the {} command",
+            case.trim()
+        );
     }
     for start in [
         driver.find("\nreview)").unwrap(),
@@ -578,9 +764,8 @@ fn the_landing_round_opens_the_tunnel_and_the_binary_swap_survives_etxtbsy() {
         );
     }
 
-    let installer =
-        std::fs::read_to_string(repo_root().join("scripts/flip/install_node_linux.sh"))
-            .expect("linux installer source");
+    let installer = std::fs::read_to_string(repo_root().join("scripts/flip/install_node_linux.sh"))
+        .expect("linux installer source");
     assert!(
         installer.contains("scope-required.enabled"),
         "the linux installer must honour the scope marker like the macOS one"
@@ -643,7 +828,10 @@ fn the_linux_installer_carries_the_same_policy_wiring() {
         "scripts/flip/install_node_linux.sh",
     ] {
         let source = std::fs::read_to_string(repo_root().join(path)).expect("installer source");
-        assert!(source.contains("$STATE/acl"), "{path} never reads the ACL file");
+        assert!(
+            source.contains("$STATE/acl"),
+            "{path} never reads the ACL file"
+        );
         // Matched against the renderer call, not against `$ACL` anywhere:
         // the variable also appears in the branch that sets it, so the
         // looser check passed with the argument deleted.
@@ -665,7 +853,10 @@ fn the_linux_installer_carries_the_same_policy_wiring() {
 fn both_installers_refuse_before_stopping_a_running_node() {
     for (name, stop_verb) in [
         ("scripts/flip/install_node.sh", "launchctl bootout"),
-        ("scripts/flip/install_node_linux.sh", "systemctl --user restart"),
+        (
+            "scripts/flip/install_node_linux.sh",
+            "systemctl --user restart",
+        ),
     ] {
         let raw = std::fs::read_to_string(repo_root().join(name)).expect(name);
         // Comments mention both the guard and the stop verb, and a
@@ -810,8 +1001,8 @@ fn the_mirror_push_reuses_one_ssh_connection() {
     // success — which is how a sync once landed on the node and silently
     // never reached the mirror. `sh -n` cannot catch it: the syntax is
     // fine, the command just does not exist.
-    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
-        .expect("choirctl source");
+    let driver =
+        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
     assert!(
         driver.contains("sh \"$HERE/push_mirror.sh\""),
         "choirctl no longer runs the mirror push with sh; revisit the shell assumptions below"
@@ -900,8 +1091,8 @@ fn the_mirror_push_reuses_one_ssh_connection() {
 /// that returns the wrong verdict rather than one that is missing.
 #[test]
 fn the_mirror_receipt_is_read_not_merely_written() {
-    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl"))
-        .expect("choirctl source");
+    let driver =
+        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
 
     // Detached, and only after the canonical push returns: D21 ordering
     // survives backgrounding precisely because `set -e` stops before
@@ -985,7 +1176,14 @@ fn the_backup_is_verified_by_pulling_it_back_not_by_having_written_it() {
 
     // A restore that boots needs all five; the reviewers file is the one
     // whose absence stops the daemon outright.
-    for needed in ["reviewers", "protected-refs", "newcomer-audit.jsonl"] {
+    for needed in [
+        "reviewers",
+        "protected-refs",
+        "newcomer-audit.jsonl",
+        "review-adjudications.jsonl",
+        "acl",
+        "private-beta.manifest",
+    ] {
         assert!(
             code.contains(needed),
             "verify-backup stopped checking for {needed}; a restore can stop booting again"
@@ -1003,8 +1201,8 @@ fn the_backup_is_verified_by_pulling_it_back_not_by_having_written_it() {
         "verify-backup must compare the backup as a prefix of the live log"
     );
     assert!(
-        code.contains("seq gap"),
-        "verify-backup must localise a gap; a whole-file checksum cannot"
+        code.contains("--verify-log") && code.contains("format/sequence/parent/hash"),
+        "verify-backup must use the release verifier for format, sequence, parent, and hash checks"
     );
 
     let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl");
@@ -1075,7 +1273,15 @@ fn the_oplog_backup_carries_the_log_and_the_pin_but_never_the_key() {
         .lines()
         .find(|l| l.contains("for f in") && l.contains("reviewers"))
         .expect("the policy-file backup list");
-    for needed in ["keys", "reviewers", "protected-refs", "newcomer-audit.jsonl"] {
+    for needed in [
+        "keys",
+        "reviewers",
+        "protected-refs",
+        "newcomer-audit.jsonl",
+        "review-adjudications.jsonl",
+        "acl",
+        "private-beta.manifest",
+    ] {
         assert!(
             list.contains(needed),
             "the policy backup dropped {needed}; a restore stops booting again"
@@ -1147,8 +1353,8 @@ fn the_pulled_backup_carries_the_log_and_the_pin_but_never_the_key() {
         "the pull stopped checking the previous copy is a prefix of the new one"
     );
     assert!(
-        code.contains("seq gap"),
-        "the pull must localise a gap; a whole-file checksum cannot"
+        code.contains("--verify-log") && code.contains("format/sequence/parent/hash"),
+        "the pull must use the release verifier for format, sequence, parent, and hash checks"
     );
     // The objects leg: the op log carries ref history, and the objects
     // those refs name must land off-host too — the on-box follower is
@@ -1172,9 +1378,19 @@ fn the_pulled_backup_carries_the_log_and_the_pin_but_never_the_key() {
     // whatever lands in it, including a key copied there by accident.
     let list = code
         .lines()
-        .find(|l| l.contains("for f in") && l.contains("reviewers"))
+        .find(|l| {
+            (l.contains("for f in") || l.contains("POLICY_FILES=")) && l.contains("reviewers")
+        })
         .expect("the policy-file pull list");
-    for needed in ["keys", "reviewers", "protected-refs", "newcomer-audit.jsonl"] {
+    for needed in [
+        "keys",
+        "reviewers",
+        "protected-refs",
+        "newcomer-audit.jsonl",
+        "review-adjudications.jsonl",
+        "acl",
+        "private-beta.manifest",
+    ] {
         assert!(
             list.contains(needed),
             "the policy pull dropped {needed}; a restore stops booting again"
@@ -1265,7 +1481,10 @@ fn an_unattested_repo_is_reported_unverified_and_divergence_still_fails() {
     let (ok, said) = run(&attested, &bundled);
     assert!(ok, "a matching bundle failed: {said}");
     assert!(said.contains("verified"), "{said}");
-    assert!(!said.contains("UNVERIFIED"), "a matching bundle read as unverified: {said}");
+    assert!(
+        !said.contains("UNVERIFIED"),
+        "a matching bundle read as unverified: {said}"
+    );
 
     // Attested and different: divergence, and it must still stop the
     // run. This is the whole reason the check exists, and the failure
@@ -1279,8 +1498,14 @@ fn an_unattested_repo_is_reported_unverified_and_divergence_still_fails() {
     std::fs::write(&bundled, refs).expect("bundle fixture");
     let (ok, said) = run(&empty, &bundled);
     assert!(ok, "an unattested repo failed the run: {said}");
-    assert!(said.contains("UNVERIFIED"), "the unverified state was not announced: {said}");
-    assert!(said.contains("some/repo.git"), "the repo was not named: {said}");
+    assert!(
+        said.contains("UNVERIFIED"),
+        "the unverified state was not announced: {said}"
+    );
+    assert!(
+        said.contains("some/repo.git"),
+        "the repo was not named: {said}"
+    );
     assert!(
         said.contains("never sequenced"),
         "the reason is missing, so a reader cannot tell this from divergence: {said}"

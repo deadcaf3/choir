@@ -48,7 +48,14 @@ fn write_policy(dir: &Path, repo: &str) {
     std::fs::write(dir.join("protected-refs"), "").expect("protected-refs");
     std::fs::write(dir.join("newcomer-audit.jsonl"), "").expect("audit");
     std::fs::write(dir.join("newcomer-adjudications.jsonl"), "").expect("adjudications");
+    std::fs::write(dir.join("review-adjudications.jsonl"), "").expect("review adjudications");
     std::fs::write(dir.join("repos.list"), format!("{repo}\n")).expect("repos.list");
+    std::fs::write(dir.join("acl"), "choir * own\n").expect("acl");
+    std::fs::write(
+        dir.join("private-beta.manifest"),
+        include_str!("../../../../scripts/flip/private-beta.manifest"),
+    )
+    .expect("beta manifest");
 }
 
 /// Starts the daemon on port 0 and waits for its own serving marker,
@@ -81,9 +88,17 @@ fn boot(root: &Path, policy: &Path, auth: &Path, repo: &str) -> (Child, u16) {
         let (port, text) = (port.clone(), text.clone());
         std::thread::spawn(move || {
             use std::io::BufRead;
-            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
                 if let Some(rest) = line.split_once("choir-node serving") {
-                    if let Some(p) = rest.1.rsplit(':').next().and_then(|p| p.trim().parse().ok()) {
+                    if let Some(p) = rest
+                        .1
+                        .rsplit(':')
+                        .next()
+                        .and_then(|p| p.trim().parse().ok())
+                    {
                         *port.lock().expect("port") = Some(p);
                     }
                 }
@@ -101,7 +116,10 @@ fn boot(root: &Path, policy: &Path, auth: &Path, repo: &str) -> (Child, u16) {
         }
         if child.try_wait().expect("wait").is_some() {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            panic!("choir-node exited before serving:\n{}", text.lock().expect("text"));
+            panic!(
+                "choir-node exited before serving:\n{}",
+                text.lock().expect("text")
+            );
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -159,15 +177,21 @@ fn make_backup(work: &Path, repo: &str) -> (PathBuf, Vec<u8>) {
     let url = format!("http://choir:restoretest@127.0.0.1:{port}/{repo}");
     let clone = work.join("seed");
     assert!(
-        git(work, &["clone", "--quiet", &url, clone.to_str().expect("utf8")])
-            .status
-            .success(),
+        git(
+            work,
+            &["clone", "--quiet", &url, clone.to_str().expect("utf8")]
+        )
+        .status
+        .success(),
         "clone the live node"
     );
     std::fs::write(clone.join("f.txt"), "restored\n").expect("write");
     git(&clone, &["add", "."]);
     git(&clone, &["commit", "--quiet", "-m", "seed"]);
-    let pushed = git(&clone, &["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+    let pushed = git(
+        &clone,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/main"],
+    );
     assert!(
         pushed.status.success(),
         "push to the live node: {}",
@@ -200,7 +224,10 @@ fn make_backup(work: &Path, repo: &str) -> (PathBuf, Vec<u8>) {
         "protected-refs",
         "newcomer-audit.jsonl",
         "newcomer-adjudications.jsonl",
+        "review-adjudications.jsonl",
         "repos.list",
+        "acl",
+        "private-beta.manifest",
     ] {
         std::fs::copy(policy.join(f), backup.join("policy").join(f)).expect("policy file");
     }
@@ -235,7 +262,10 @@ fn a_backup_and_the_key_become_a_node_that_accepts_a_write() {
     std::fs::write(root.join(".choir").join("auth"), "choir:restoretest\n").expect("auth");
 
     let (code, out, err) = restore(&backup, &root);
-    assert_eq!(code, 0, "restore should succeed.\nstdout:\n{out}\nstderr:\n{err}");
+    assert_eq!(
+        code, 0,
+        "restore should succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
     assert!(out.contains("canary landed"), "{out}");
     // The D25 comparison is conditional on the backup carrying an
     // attestation, so its success line is the only evidence it ran at
@@ -280,7 +310,11 @@ fn a_backup_and_the_key_become_a_node_that_accepts_a_write() {
             String::from_utf8(bytes).expect("payload is a JSON ViewOp")
         })
         .collect();
-    assert_eq!(appended.len(), 2, "the canary and its attestation: {appended:?}");
+    assert_eq!(
+        appended.len(),
+        2,
+        "the canary and its attestation: {appended:?}"
+    );
     assert!(
         appended[0].contains("SetRef") && appended[0].contains("restore-canary-"),
         "the first appended op is the canary push: {}",
@@ -311,7 +345,10 @@ fn a_restore_missing_the_node_key_stops_and_names_the_choice() {
     let root = work.join("restored");
     let (code, out, err) = restore(&backup, &root);
 
-    assert_eq!(code, 3, "an operator decision, not a failure.\n{out}\n{err}");
+    assert_eq!(
+        code, 3,
+        "an operator decision, not a failure.\n{out}\n{err}"
+    );
     assert!(err.contains("node.fingerprint"), "{err}");
     assert!(
         err.contains("changes author"),
@@ -376,7 +413,12 @@ fn adopting_an_unbundled_repo_puts_it_back_under_the_sequencer() {
     assert!(
         git(
             &work,
-            &["init", "--bare", "--quiet", root.join(repo).to_str().expect("utf8")]
+            &[
+                "init",
+                "--bare",
+                "--quiet",
+                root.join(repo).to_str().expect("utf8")
+            ]
         )
         .status
         .success(),
@@ -389,7 +431,10 @@ fn adopting_an_unbundled_repo_puts_it_back_under_the_sequencer() {
     node.adopt_repo(repo).expect("adopt");
 
     let body = std::fs::read_to_string(&hook).expect("the hook is installed");
-    assert!(body.contains("CHOIR_API"), "and it is the sequencer hook: {body}");
+    assert!(
+        body.contains("CHOIR_API"),
+        "and it is the sequencer hook: {body}"
+    );
     let cfg = git(&root.join(repo), &["config", "--get", "http.receivepack"]);
     assert_eq!(
         String::from_utf8_lossy(&cfg.stdout).trim(),
@@ -399,9 +444,15 @@ fn adopting_an_unbundled_repo_puts_it_back_under_the_sequencer() {
 
     // Idempotent: the ordinary restart runs this over a healthy repo.
     node.adopt_repo(repo).expect("adopt again");
-    let seed_a = git(&root.join(repo), &["config", "--get", "receive.certNonceSeed"]);
+    let seed_a = git(
+        &root.join(repo),
+        &["config", "--get", "receive.certNonceSeed"],
+    );
     node.adopt_repo(repo).expect("adopt a third time");
-    let seed_b = git(&root.join(repo), &["config", "--get", "receive.certNonceSeed"]);
+    let seed_b = git(
+        &root.join(repo),
+        &["config", "--get", "receive.certNonceSeed"],
+    );
     assert_eq!(
         String::from_utf8_lossy(&seed_a.stdout),
         String::from_utf8_lossy(&seed_b.stdout),

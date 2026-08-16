@@ -138,10 +138,9 @@ impl HttpClient {
                 // `limit` and `offset` are optional everywhere they
                 // appear and `reviewer` and `from` are not, and stating
                 // that twice is how the two copies come to disagree.
-                let schema: Value = serde_json::from_str(
-                    endpoint.mcp.as_ref().expect("MCP endpoint").input_schema,
-                )
-                .unwrap_or(Value::Null);
+                let schema: Value =
+                    serde_json::from_str(endpoint.mcp.as_ref().expect("MCP endpoint").input_schema)
+                        .unwrap_or(Value::Null);
                 let required: Vec<&str> = schema["required"]
                     .as_array()
                     .map(|names| names.iter().filter_map(Value::as_str).collect())
@@ -253,7 +252,10 @@ fn add_channel_aliases(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
-    match (object.get("channel").cloned(), object.get("workspace").cloned()) {
+    match (
+        object.get("channel").cloned(),
+        object.get("workspace").cloned(),
+    ) {
         (Some(channel), None) => {
             object.insert("workspace".to_string(), channel);
         }

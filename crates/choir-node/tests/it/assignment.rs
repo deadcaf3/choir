@@ -52,13 +52,19 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
     // an unassigned review is never complete, so "ask nobody" is not a
     // way to look approved.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &request("r-none", b"a")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &request("r-none", b"a")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
     assert!(resp["assignment_error"].is_string(), "{resp}");
     let (_, view) = curl(&[&format!("{api}/view")]);
-    assert_eq!(view["reviews"]["r-none"]["reviewers"], serde_json::json!([]));
+    assert_eq!(
+        view["reviews"]["r-none"]["reviewers"],
+        serde_json::json!([])
+    );
     assert_eq!(view["reviews"]["r-none"]["complete"], false, "{view}");
     assert_eq!(view["reviews"]["r-none"]["approved"], false);
 
@@ -69,7 +75,10 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
         reviewers: vec!["carol".into()],
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &forged),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &forged),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
@@ -81,13 +90,19 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
     // With a pool, the draw excludes the requester and takes two.
     std::fs::write(&pool_file, "# eligible reviewers\nana\nbot\ncarol\ndan\n").unwrap();
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &request("r-1", b"b")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &request("r-1", b"b")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
     let drawn: Vec<String> = serde_json::from_value(resp["reviewers"].clone()).expect("reviewers");
     assert_eq!(drawn.len(), 2, "{resp}");
-    assert!(!drawn.contains(&"carol".to_string()), "requester drew themselves: {resp}");
+    assert!(
+        !drawn.contains(&"carol".to_string()),
+        "requester drew themselves: {resp}"
+    );
     for r in &drawn {
         assert!(["ana", "bot", "dan"].contains(&r.as_str()), "{resp}");
     }
@@ -109,7 +124,10 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
         reviewers: vec!["ana".into()],
     });
     let (code, _) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &forged),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &forged),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400);
@@ -118,14 +136,20 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
     // rather than assigning them to themselves.
     std::fs::write(&pool_file, "carol\n").unwrap();
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &request("r-2", b"c")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &request("r-2", b"c")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
     // Exclusion is by operator now, and an unprefixed name is its own
     // operator, so a pool of only the requester still assigns nobody.
     assert!(
-        resp["assignment_error"].as_str().unwrap().contains("nobody outside"),
+        resp["assignment_error"]
+            .as_str()
+            .unwrap()
+            .contains("nobody outside"),
         "{resp}"
     );
 
@@ -137,7 +161,9 @@ fn the_node_assigns_reviewers_and_nobody_else_can() {
     for i in 0..12 {
         let id = format!("r-var-{i}");
         let (code, resp) = curl(&[
-            "-X", "POST", "-d",
+            "-X",
+            "POST",
+            "-d",
             &submit_body(&author, "carol", &request(&id, id.as_bytes())),
             &format!("{api}/submit"),
         ]);
@@ -185,13 +211,19 @@ fn required_assignment_refuses_self_named_reviewers() {
         target_ref: None,
     });
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &self_named),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &self_named),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 400, "{resp}");
     assert!(
         resp["code"] == "assignment_required"
-            && resp["next"].as_str().unwrap().contains("empty reviewer list"),
+            && resp["next"]
+                .as_str()
+                .unwrap()
+                .contains("empty reviewer list"),
         "{resp}"
     );
     // Rejected in the policy, so nothing landed in the view.
@@ -200,11 +232,18 @@ fn required_assignment_refuses_self_named_reviewers() {
 
     // The assigned path still works.
     let (code, resp) = curl(&[
-        "-X", "POST", "-d", &submit_body(&author, "carol", &request("r-ok", b"y")),
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "carol", &request("r-ok", b"y")),
         &format!("{api}/submit"),
     ]);
     assert_eq!(code, 200, "{resp}");
-    assert_eq!(resp["reviewers"].as_array().map(Vec::len), Some(2), "{resp}");
+    assert_eq!(
+        resp["reviewers"].as_array().map(Vec::len),
+        Some(2),
+        "{resp}"
+    );
 
     node.unblock();
 }
@@ -253,7 +292,10 @@ fn protected_refs_gate_self_named_reviewers_per_ref() {
     let api = format!("http://127.0.0.1:{port}/api");
     let post = |op: &ViewOp| {
         curl(&[
-            "-X", "POST", "-d", &submit_body(&author, "carol", op),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&author, "carol", op),
             &format!("{api}/submit"),
         ])
     };
@@ -266,10 +308,7 @@ fn protected_refs_gate_self_named_reviewers_per_ref() {
         Some("demo.git:refs/heads/main"),
     ));
     assert_eq!(code, 400, "{resp}");
-    assert!(
-        resp["code"] == "protected_ref",
-        "{resp}"
-    );
+    assert!(resp["code"] == "protected_ref", "{resp}");
 
     // Trailing `*` is a prefix glob, so a whole release namespace is
     // covered by one line.
@@ -298,15 +337,26 @@ fn protected_refs_gate_self_named_reviewers_per_ref() {
 
     // The assigned path works on a protected ref, and the view carries
     // the binding so a reader can see what the review is for.
-    let (code, resp) = post(&request_bound("p-ok", &[], Some("demo.git:refs/heads/main")));
+    let (code, resp) = post(&request_bound(
+        "p-ok",
+        &[],
+        Some("demo.git:refs/heads/main"),
+    ));
     assert_eq!(code, 200, "{resp}");
-    assert_eq!(resp["reviewers"].as_array().map(Vec::len), Some(2), "{resp}");
+    assert_eq!(
+        resp["reviewers"].as_array().map(Vec::len),
+        Some(2),
+        "{resp}"
+    );
     let (_, view) = curl(&[&format!("{api}/view")]);
     assert_eq!(
         view["reviews"]["p-ok"]["target_ref"], "demo.git:refs/heads/main",
         "{view}"
     );
-    assert_eq!(view["reviews"]["p-unbound"]["target_ref"], serde_json::Value::Null);
+    assert_eq!(
+        view["reviews"]["p-unbound"]["target_ref"],
+        serde_json::Value::Null
+    );
 
     // Editing the list takes effect with no restart.
     std::fs::write(&refs_file, "demo.git:refs/heads/scratch\n").unwrap();
@@ -366,7 +416,10 @@ fn the_draw_excludes_the_requesters_whole_operator_not_just_their_name() {
     let api = format!("http://127.0.0.1:{port}/api");
     let post = |channel: &str, op: &ViewOp| {
         curl(&[
-            "-X", "POST", "-d", &submit_body(&author, channel, op),
+            "-X",
+            "POST",
+            "-d",
+            &submit_body(&author, channel, op),
             &format!("{api}/submit"),
         ])
     };
@@ -443,11 +496,7 @@ fn the_draw_excludes_operators_within_the_configured_graph_distance() {
     let pool_file = work.join("reviewers");
     let graph_file = work.join("reviewer-conflicts");
 
-    std::fs::write(
-        &pool_file,
-        "alice/sibling\nbob/one\ncarol/one\ndave/one\n",
-    )
-    .unwrap();
+    std::fs::write(&pool_file, "alice/sibling\nbob/one\ncarol/one\ndave/one\n").unwrap();
     // Undirected operator edges: bob is one hop from alice, carol two.
     std::fs::write(&graph_file, "# operator pairs\nalice bob\nbob carol\n").unwrap();
 
