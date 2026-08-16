@@ -53,6 +53,15 @@
 //! is deliberately erasable. An entry admitted on a credential now
 //! withdrawn looks exactly like one admitted on a credential still
 //! enrolled, and neither this client nor any other can tell them apart.
+//!
+//! D46 widens that split to every scheme, and it is a property given up
+//! on purpose. The channel an entry names is an opaque handle, so
+//! *verification* still needs nothing but the page and a key, while
+//! *attribution* — which person that handle was — needs the accounts
+//! store and gets no answer once the account is revoked. "These bytes
+//! are genuine" is permanent; "this was alice" is deletable. A handle
+//! this client cannot resolve is the expected state for a deleted
+//! account, not a fault in the log.
 
 use choir_hash::ContentHash;
 use choir_identity::{IdentityError, Registry};

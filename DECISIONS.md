@@ -57,6 +57,7 @@ that would reverse it are not published.
 | D43 | `Submit`: a landing carries the authorization basis that admitted it | **One-way for readers** |
 | D44 | An approval resolves to the key that was live when it was cast, not the one holding the channel now | Two-way |
 | D45 | A passkey signature carries the credential key it is checked against, instead of a delegation op | Two-way |
+| D46 | The log names an account by an opaque handle; the readable name sits in the store, where it can be deleted | Two-way |
 
 ## Reading the door column
 
