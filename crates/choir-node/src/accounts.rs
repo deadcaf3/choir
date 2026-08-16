@@ -1039,10 +1039,18 @@ pub fn validate_grant(user: &str, grant: &str) -> Result<String, String> {
 /// What it must not do is break the files and pages that render it, so
 /// control characters and newlines are refused and the length is capped.
 ///
+/// The one restriction that is not about rendering: a name may not be
+/// spelled like a handle. A page shows an unresolvable handle as itself,
+/// so a display name of `HANDLE_CHARS` hex characters renders exactly
+/// as somebody else's deleted account does, and the person it points at
+/// cannot correct the record because their name is the thing that was
+/// deleted. Refused at the door because the alternative is a rendering
+/// rule that has to know which of two identical strings it is holding.
+///
 /// # Errors
 ///
-/// Returns a message when it is empty, too long, or carries a control
-/// character.
+/// Returns a message when it is empty, too long, carries a control
+/// character, or is spelled like an account handle.
 pub fn validate_display_name(name: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > MAX_LABEL_CHARS {
@@ -1053,7 +1061,22 @@ pub fn validate_display_name(name: &str) -> Result<(), String> {
     if name.chars().any(char::is_control) {
         return Err("a display name must not contain control characters".to_string());
     }
+    if looks_like_a_handle(name) {
+        return Err(format!(
+            "a display name must not be spelled like an account handle \
+             ({HANDLE_CHARS} hexadecimal characters)"
+        ));
+    }
     Ok(())
+}
+
+/// Whether a string is spelled the way [`mint_handle`] spells one.
+///
+/// Case-insensitive, because a reader comparing a name against a handle
+/// is not comparing bytes, and `7F3AC2AB19CD` impersonates
+/// `7f3ac2ab19cd` on every surface a person actually reads.
+fn looks_like_a_handle(name: &str) -> bool {
+    name.len() == HANDLE_CHARS && name.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Checks a name the node will interpolate into an `authorized_keys`

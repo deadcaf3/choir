@@ -281,3 +281,55 @@ fn a_store_written_before_d46_still_loads() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// A display name spelled like a handle is refused at issue.
+///
+/// The page renders an unresolvable handle as itself, silently, because
+/// that is the only way a deleted account can look like nothing. So a
+/// display name of twelve hex characters renders exactly as somebody
+/// else's deleted account, and the person it impersonates cannot correct
+/// the record — their name is precisely what was deleted. The refusal
+/// belongs here rather than in the renderer, which by then is holding
+/// two identical strings with no way to tell which is which.
+#[test]
+fn a_display_name_spelled_like_a_handle_is_refused() {
+    let (store, _path, work) = store("handle-shaped");
+
+    // Upper case as well: a reader comparing a name against a handle is
+    // not comparing bytes.
+    for shaped in ["7f3ac2ab19cd", "7F3AC2AB19CD", "000000000000"] {
+        let (status, body) = store.invite(
+            "alice",
+            &json(&format!(
+                r#"{{"display_name":"{shaped}","grants":["agents/demo read"]}}"#
+            )),
+        );
+        // The consequence first: no invite exists to redeem. A status
+        // code alone is satisfied by a refusal arriving for any reason.
+        assert!(
+            store.list_json()["invites"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "a handle-shaped name was issued an invite: {body}"
+        );
+        assert_eq!(status, 400, "{shaped} was accepted: {body}");
+        assert!(
+            body.contains("handle"),
+            "the refusal does not say what is wrong with {shaped}: {body}"
+        );
+    }
+
+    // ...and the shape is the whole of the rule: eleven characters, or
+    // twelve with a non-hex one, is an ordinary name.
+    for fine in ["7f3ac2ab19c", "7f3ac2ab19cdz", "Ada Lovelace"] {
+        let (status, body) = store.invite(
+            "alice",
+            &json(&format!(
+                r#"{{"display_name":"{fine}","grants":["agents/demo read"]}}"#
+            )),
+        );
+        assert_eq!(status, 200, "{fine} was refused: {body}");
+    }
+
+    std::fs::remove_dir_all(&work).ok();
+}
