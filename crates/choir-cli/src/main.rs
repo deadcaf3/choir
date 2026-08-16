@@ -20,6 +20,7 @@
 //! choir appeal <api> <attempt-id>
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
 //! choir reviews <api> <reviewer>
+//! choir acl render <api> <acl-file>
 //! choir view <api>
 //! choir triage <api>
 //! choir state <api> <channel>
@@ -262,6 +263,99 @@ fn derived_view(
         }
     };
     serde_json::to_string_pretty(&derive(&view)).expect("derived documents are serializable")
+}
+
+/// Rewrites an ACL file's trailing comments from the node's roster (D46).
+///
+/// The decisions all live in [`choir_cli::acl::render`]; this is the IO
+/// around it. Three things it deliberately does:
+///
+/// - **Reads the roster before touching the file.** A failed fetch must
+///   leave the ACL exactly as it was, because the failure mode of the
+///   alternative is an authorization file emptied of its names by a
+///   network error.
+/// - **Writes only on a change**, so a re-run on a current file produces
+///   no churn and no new mtime for the node's hot-reload to notice.
+/// - **Prints the counts.** A file that renders no comments at all looks
+///   exactly like a file whose handles are all unnamed, and the second
+///   is the one worth knowing about.
+fn acl_render(api: &str, auth: AuthOptions<'_>, acl_file: &str) -> ! {
+    let endpoint = choir_cli::surface::endpoint("GET", "/api/accounts")
+        .expect("the accounts roster is in the endpoint table");
+    let client = match choir_cli::mcp::HttpClient::new(
+        api,
+        auth.file.map(std::path::Path::new),
+        auth.user,
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("choir: {error}");
+            std::process::exit(2);
+        }
+    };
+    let (status, body) = match client.request(endpoint, &serde_json::json!({})) {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("choir: {error}");
+            std::process::exit(1);
+        }
+    };
+    if !(200..300).contains(&status) {
+        eprintln!(
+            "choir: GET /api/accounts returned {status}: {body}\n\
+             reading the roster needs a credential with `@node auditor`."
+        );
+        std::process::exit(1);
+    }
+    let roster = match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(doc) => doc["accounts"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|account| {
+                Some((
+                    account["user"].as_str()?.to_string(),
+                    account["display_name"].as_str()?.to_string(),
+                ))
+            })
+            .collect::<choir_cli::acl::Roster>(),
+        Err(error) => {
+            eprintln!("choir: /api/accounts response is not JSON: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let path = std::path::Path::new(acl_file);
+    let before = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("choir: cannot read {acl_file}: {error}");
+            std::process::exit(1);
+        }
+    };
+    let after = choir_cli::acl::render(&before, &roster);
+    let (grants, named) = choir_cli::acl::counts(&before, &roster);
+    let wrote = after != before;
+    if wrote {
+        // Private, not the plain atomic write: the replacement file is
+        // created 0600 before any bytes reach it. An ACL file is 0600
+        // by operator convention, and a rewrite that restored it at the
+        // umask's mercy would widen an authorization file as a side
+        // effect of making it readable.
+        if let Err(error) = choir_fs::write_atomic_private(path, &after) {
+            eprintln!("choir: cannot write {acl_file}: {error}");
+            std::process::exit(1);
+        }
+    }
+    let doc = serde_json::json!({
+        "path": path.display().to_string(),
+        "wrote": wrote,
+        "grants": grants,
+        "named": named,
+        "unresolved": grants - named,
+    });
+    finish(200, &doc.to_string());
 }
 
 /// Prints the response body and exits nonzero unless the status is 2xx.
@@ -1321,6 +1415,7 @@ fn main() {
             let doc = serde_json::json!({ "path": path.display().to_string(), "wrote": wrote });
             finish(200, &doc.to_string());
         }
+        ["acl", "render", api, acl_file] => acl_render(api, auth, acl_file),
         ["triage", api] => {
             let doc = derived_view(api, auth, choir_cli::triage::triage);
             finish(200, &doc);

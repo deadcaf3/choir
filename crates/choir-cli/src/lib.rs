@@ -13,6 +13,8 @@
 //! assert!(usage.contains("choir review"));
 //! ```
 
+/// Regenerating the readable half of an ACL file (D46).
+pub mod acl;
 pub mod mcp;
 pub mod runner;
 pub mod surface;

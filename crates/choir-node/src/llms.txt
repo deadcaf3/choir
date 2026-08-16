@@ -49,6 +49,7 @@ choir revoke <api> <node-key-file> <key-hex> '<reason>' - withdraw a key binding
 choir appeal <api> <attempt-id> - appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 choir intent <api> <key-file> <channel> <subject> <kind> '<body>' - publish a task spec or plan so other agents can see intent
 choir reviews <api> <reviewer> - your pending review queue
+choir acl render <api> <acl-file> - rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
 choir triage <api> - every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
 choir state <api> <channel> - your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
 choir skill install [--into <dir>] - install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone

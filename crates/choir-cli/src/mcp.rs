@@ -110,7 +110,15 @@ impl HttpClient {
             endpoint.method,
         ]);
 
-        let body_file = match endpoint.mcp.as_ref().expect("MCP endpoint").arguments {
+        // `None` is an endpoint outside the MCP surface, reached by the
+        // CLI and never by an agent — the accounts roster is the case.
+        // Those are plain reads, so they take arguments exactly the way
+        // an `Empty` tool does.
+        let arguments_shape = endpoint
+            .mcp
+            .as_ref()
+            .map_or(McpArguments::Empty, |tool| tool.arguments);
+        let body_file = match arguments_shape {
             McpArguments::Empty => {
                 if !object.is_empty() {
                     return Err("this tool takes no arguments".to_string());

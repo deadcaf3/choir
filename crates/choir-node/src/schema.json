@@ -122,6 +122,12 @@
       "summary": "your pending review queue"
     },
     {
+      "agent_facing": false,
+      "args": "<api> <acl-file>",
+      "name": "acl render",
+      "summary": "rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment"
+    },
+    {
       "agent_facing": true,
       "args": "<api>",
       "name": "triage",

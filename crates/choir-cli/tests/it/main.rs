@@ -4,6 +4,7 @@
 //! run on parallel threads: no wall-clock assertions, process globals, or
 //! fixed ports in here.
 
+mod acl_render;
 mod claude_hooks;
 mod batch;
 mod cli;

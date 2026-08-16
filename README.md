@@ -579,6 +579,7 @@ commands:
   choir appeal <api> <attempt-id>
   choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
   choir reviews <api> <reviewer>
+  choir acl render <api> <acl-file>
   choir triage <api>
   choir state <api> <channel>
   choir skill install [--into <dir>]

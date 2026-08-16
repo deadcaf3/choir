@@ -396,6 +396,14 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "acl render",
+        args: "<api> <acl-file>",
+        summary: "rewrite an ACL file's trailing comments to name the person behind each \
+                  handle; the grants themselves are copied through unchanged, and a handle \
+                  the node can no longer name loses its comment",
+        agent_facing: false,
+    },
+    Command {
         name: "triage",
         args: "<api>",
         summary: "every review and change classified into a bucket — landed, awaiting \
@@ -632,6 +640,21 @@ pub fn mcp_endpoint(name: &str) -> Option<&'static Endpoint> {
     ENDPOINTS
         .iter()
         .find(|endpoint| endpoint.mcp.as_ref().is_some_and(|tool| tool.name == name))
+}
+
+/// Finds an HTTP endpoint by method and path.
+///
+/// Separate from [`mcp_endpoint`] because a few endpoints are
+/// deliberately outside the MCP surface — `GET /api/accounts` is the
+/// roster, which is the operator's to read and not an agent tool — and
+/// the CLI still has to reach them. Looking them up here rather than
+/// spelling a path into a command keeps the table the one description of
+/// what this node serves.
+#[must_use]
+pub fn endpoint(method: &str, path: &str) -> Option<&'static Endpoint> {
+    ENDPOINTS
+        .iter()
+        .find(|endpoint| endpoint.method == method && endpoint.path == path)
 }
 
 /// The `choir` usage block, as `--help` and a bare invocation print it.
