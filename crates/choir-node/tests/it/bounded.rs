@@ -56,6 +56,7 @@ fn served(tag: &str, acl: &str, repos: &[&str]) -> (String, ActorKey) {
 /// Lands `count` refs under `repo` as one batch, named so their sorted
 /// order is stable and readable.
 fn seed_refs(base: &str, key: &ActorKey, creds: &str, repo: &str, count: usize) {
+    const MAX_BATCH: usize = choir_node::platform::DEFAULT_BATCH_OPS;
     let ops: Vec<serde_json::Value> = (0..count)
         .map(|i| {
             let op = ViewOp::new(OpKind::SetRef {
@@ -66,14 +67,16 @@ fn seed_refs(base: &str, key: &ActorKey, creds: &str, repo: &str, count: usize) 
             serde_json::from_str(&submit_body(key, "node/test", &op)).expect("op body")
         })
         .collect();
-    let (status, body) = curl(&[
-        "-u",
-        creds,
-        "-d",
-        &serde_json::json!({ "ops": ops }).to_string(),
-        &format!("{base}/api/submit-batch"),
-    ]);
-    assert_eq!(status, 200, "seeding batch refused: {body}");
+    for chunk in ops.chunks(MAX_BATCH) {
+        let (status, body) = curl(&[
+            "-u",
+            creds,
+            "-d",
+            &serde_json::json!({ "ops": chunk }).to_string(),
+            &format!("{base}/api/submit-batch"),
+        ]);
+        assert_eq!(status, 200, "seeding batch refused: {body}");
+    }
 }
 
 /// The default is a budget, not a suggestion. A client that passes

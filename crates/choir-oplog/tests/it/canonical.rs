@@ -390,9 +390,10 @@ fn a_log_of_newline_bearing_channels_reopens_intact() {
     {
         let mut log = FileLog::open(&path).expect("open");
         let mut rng = Rng::new(SEEDS[0]);
-        for _ in 0..16 {
+        for i in 0..16 {
             let mut entry = rng.entry();
             entry.parent = head.clone();
+            entry.seq = i;
             entry.channel = format!("line\nbreak\t\"{}\"", entry.channel);
             head = Some(log.append(entry).expect("append"));
         }

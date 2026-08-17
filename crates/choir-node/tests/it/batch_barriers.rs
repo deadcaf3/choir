@@ -64,8 +64,9 @@ fn a_batch_request_shares_its_durability_barriers() {
         inner: FileLog::open(&dir.join("ops.jsonl")).expect("open"),
         syncs: syncs.clone(),
     };
-    let platform =
-        Platform::start(registry, Box::new(log), ActorKey::generate()).expect("platform starts");
+    let platform = Platform::start(registry, Box::new(log), ActorKey::generate())
+        .expect("platform starts")
+        .with_batch_limit(OPS);
 
     // One workspace advancing its own head, so every op is admissible and
     // the CAS chain is sequential.

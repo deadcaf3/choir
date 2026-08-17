@@ -139,7 +139,9 @@ fn submit_body(key: &ActorKey, workspace: &str, op: &ViewOp) -> String {
 fn platform_over(scratch: &Scratch, registry: Registry) -> Arc<Platform> {
     let log = FileLog::open(&scratch.log_path()).expect("open log");
     Arc::new(
-        Platform::start(registry, Box::new(log), ActorKey::generate()).expect("platform starts"),
+        Platform::start(registry, Box::new(log), ActorKey::generate())
+            .expect("platform starts")
+            .with_batch_limit(BATCH),
     )
 }
 
