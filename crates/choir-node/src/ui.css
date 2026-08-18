@@ -661,9 +661,9 @@ b.tab.here .count{color:var(--accent-ink)}
    to be rather than one we guessed. */
 .panes{display:flex;flex-wrap:wrap;align-items:flex-start;gap:var(--sp-6)}
 .pane{min-width:0}
-.pane-reviews{flex:2 1 var(--toc)}
-.pane-files{flex:2 1 var(--toc)}
-.pane-content{flex:5 1 var(--measure)}
+.pane-reviews{flex:3 1 var(--toc)}
+.pane-files{flex:3 1 var(--toc)}
+.pane-content{flex:6 1 var(--measure)}
 .pane>h2{display:flex;align-items:baseline;gap:var(--sp-2);
   margin:var(--sp-0) var(--sp-0) var(--sp-3)}
 .pane>h2 .mono{margin-left:auto;text-transform:none;
@@ -678,7 +678,13 @@ table.flight td{padding:var(--sp-2) var(--sp-0);
 table.flight td:first-child{white-space:nowrap;width:1%;padding-right:var(--sp-3)}
 table.flight td:last-child{white-space:nowrap;text-align:right;
   font-size:var(--fs-200)}
-table.flight .why{display:block;font-size:var(--fs-200)}
+table.flight .why{display:block;font-size:var(--fs-200);margin-top:var(--sp-1)}
+/* `.mono` sets `overflow-wrap:anywhere`, which is right for a hash in a
+   wide table and wrong here: it shattered `refs/heads/main` over three
+   lines in a pane this narrow. One line, clipped. */
+table.flight .why.mono{white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;margin-top:var(--sp-0)}
+table.flight td:first-child a{overflow-wrap:normal}
 .more{margin:var(--sp-3) var(--sp-0) var(--sp-0);font-size:var(--fs-300)}
 .pane-files td:first-child{max-width:var(--sp-0);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}

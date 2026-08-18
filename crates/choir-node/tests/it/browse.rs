@@ -2249,3 +2249,182 @@ fn the_repository_root_leads_with_the_work_in_flight() {
         "the files pane lost the listing: {after_files}"
     );
 }
+
+/// The reviews pane answers two questions a bare list never did: how far
+/// the destination has moved under each proposal, and how much of what
+/// this repository holds is already settled.
+///
+/// It also holds the pane's cache identity. The pane's content changes
+/// with no push behind it, so a validator built from the tree oid alone
+/// serves a browser the previous answer — and every assertion in a test
+/// that re-fetches without `If-None-Match` passes while it does. The
+/// conditional request at the end is the only part of this test that
+/// would have caught that.
+#[test]
+fn the_reviews_pane_counts_what_is_behind_and_what_is_settled() {
+    let work = std::env::temp_dir().join("choir-node-browse-pane-counts");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let author = ActorKey::generate();
+    // Archiving is the node's own op, so the test keeps the node's key.
+    let node_secret = ActorKey::generate().secret_bytes();
+    let mut registry = Registry::new();
+    registry
+        .register(&author.public_key_bytes())
+        .expect("register author");
+
+    let mut node = Node::bind(&work.join("repos"), 0).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/moved.git").expect("repo created");
+    node.enable_platform(
+        Platform::start(
+            registry,
+            Box::new(MemLog::new()),
+            ActorKey::from_secret_bytes(&node_secret),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let post = |key: &ActorKey, channel: &str, op: &ViewOp| {
+        let (code, resp) = crate::support::curl(&[
+            "-X",
+            "POST",
+            "-d",
+            &crate::support::submit_body_legacy(key, channel, op),
+            &format!("{base}/api/submit"),
+        ]);
+        assert_eq!(code, 200, "{resp}");
+    };
+
+    let clone = work.join("clone");
+    let url = format!("{base}/agents/moved.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    let commit = |name: &str| {
+        std::fs::write(clone.join(name), "a file\n").unwrap();
+        assert!(git(&clone, &["add", "."]).status.success());
+        assert!(git(&clone, &["commit", "-q", "-m", name]).status.success());
+        assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+            .status
+            .success());
+        String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string()
+    };
+    let tip = commit("first.txt");
+
+    let request = |id: &str, target: &str| {
+        post(
+            &author,
+            "author",
+            &ViewOp::new(OpKind::RequestReview {
+                id: id.into(),
+                target: choir_oplog::ContentHash::from_git_oid(target).expect("a git oid"),
+                reviewers: vec!["ana".into()],
+                target_ref: Some("agents/moved.git:refs/heads/main".into()),
+            }),
+        );
+    };
+    // The pane's own markup, not everything before the files pane. The
+    // whole inline stylesheet sits in that prefix, and it contains the
+    // word "behind" in a comment — so the first draft of this test
+    // failed against a page whose pane was entirely correct.
+    let pane = || {
+        let (status, _, page) = get(&format!("{base}/r/agents/moved"), &[]);
+        assert_eq!(status, 200);
+        let open = "<aside class=\"pane pane-reviews\">";
+        let start = page
+            .find(open)
+            .unwrap_or_else(|| panic!("the root page has no reviews pane: {page}"));
+        let rest = &page[start + open.len()..];
+        let end = rest
+            .find("</aside>")
+            .unwrap_or_else(|| panic!("the reviews pane is never closed: {page}"));
+        rest[..end].to_string()
+    };
+
+    request("r-tip", &tip);
+
+    // A proposal sitting on the tip is not behind anything, and the pane
+    // renders nothing rather than "0 behind": a chip on every row is a
+    // chip nobody reads.
+    let at_tip = pane();
+    assert!(
+        at_tip.contains("r-tip"),
+        "the review is not in the pane at all: {at_tip}"
+    );
+    assert!(
+        !at_tip.contains("behind"),
+        "a review on the tip is reported as behind: {at_tip}"
+    );
+
+    // Two commits land underneath it.
+    commit("second.txt");
+    commit("third.txt");
+    let moved = pane();
+    assert!(
+        moved.contains("2 behind"),
+        "the pane does not say how far the destination moved: {moved}"
+    );
+
+    // A settled review leaves the table and is counted separately. One
+    // total for both would call a quiet repository busy.
+    request("r-settled", &tip);
+    post(
+        &ActorKey::from_secret_bytes(&node_secret),
+        "node/archive",
+        &ViewOp::new(OpKind::ArchiveReview {
+            id: "r-settled".into(),
+            lapsed: true,
+        }),
+    );
+    let settled = pane();
+    assert!(
+        settled.contains("<span class=\"count\">1</span>"),
+        "the open count does not stand at one: {settled}"
+    );
+    assert!(
+        settled.contains("1 archived"),
+        "the settled review is not counted: {settled}"
+    );
+    assert!(
+        !settled.contains("/review/r-settled"),
+        "an archived review still occupies a row in the pane: {settled}"
+    );
+
+    // The validator has to move with the pane. Hold the page's own
+    // `ETag` and ask again with nothing pushed in between: a new review
+    // must still produce a fresh page, or a browser reads yesterday's
+    // answer for as long as the tree stands still.
+    let (_, headers, _) = get(&format!("{base}/r/agents/moved"), &[]);
+    let etag = headers
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("etag:"))
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, value)| value.trim().to_string())
+        .unwrap_or_else(|| panic!("the root page carries no ETag: {headers}"));
+    let (status, _, _) = get(
+        &format!("{base}/r/agents/moved"),
+        &["-H", &format!("If-None-Match: {etag}")],
+    );
+    assert_eq!(status, 304, "the ETag does not validate its own page");
+
+    request("r-fresh", &tip);
+    let (status, _, page) = get(
+        &format!("{base}/r/agents/moved"),
+        &["-H", &format!("If-None-Match: {etag}")],
+    );
+    assert_eq!(
+        status, 200,
+        "a new review left the root page's ETag unchanged, so a browser \
+         never sees it: {page}"
+    );
+    assert!(
+        page.contains("r-fresh"),
+        "the rebuilt page does not hold the new review: {page}"
+    );
+}

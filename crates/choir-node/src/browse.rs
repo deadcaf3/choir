@@ -93,6 +93,15 @@ const COMMIT_PAGE: usize = 100;
 /// than handing them page 4 of 60.
 const SEARCH_HITS: usize = 200;
 
+/// How many reviews the landing page's pane shows before it defers to
+/// the full list.
+///
+/// A cap on work as much as on height: every row costs a `git rev-list`
+/// to learn how far behind it is, and a reader who opened a repository
+/// came for the files. Ninety open reviews must not push the README
+/// below the fold, nor spawn ninety subprocesses to get it there.
+const PANE_ROWS: usize = 6;
+
 /// What a search looks through.
 ///
 /// Three scopes rather than one box that guesses, because they cost
@@ -1524,7 +1533,7 @@ fn tree(
     let file_count = rows.len();
     if path.is_empty() {
         h.push_str("<div class=\"panes\">");
-        reviews_pane(&mut h, repo, platform);
+        reviews_pane(&mut h, dir, repo, platform);
         h.push_str("<section class=\"pane pane-files\"><h2>");
         h.push_str(&plural(file_count, "entry", "entries"));
         h.push_str("<span class=\"mono muted\">");
@@ -1664,7 +1673,23 @@ fn tree(
         // not. Folding the current hour into the validator keeps a
         // cached page from insisting it is still "2 hours ago" tomorrow,
         // at the cost of one revalidation an hour.
-        etag: Some(tag(&oid, &format!("{path}@{}", now_secs() / 3600))),
+        // The root page also carries the reviews pane, and a review
+        // arrives with no push behind it: the tree oid does not move, so
+        // without the sequence here a browser holds "nothing proposes to
+        // land here" for up to an hour after something did. Only the
+        // root, because folding it into every subdirectory would
+        // invalidate the whole tree on any unrelated op.
+        etag: Some(tag(
+            &oid,
+            &format!(
+                "{path}@{}{}",
+                now_secs() / 3600,
+                match platform.filter(|_| path.is_empty()) {
+                    Some(platform) => format!("+{}", platform.view_seq()),
+                    None => String::new(),
+                }
+            ),
+        )),
         html: close(h),
     }
 }
@@ -2082,13 +2107,14 @@ fn patch(h: &mut String, output: &str, where_else: &str) {
     h.push_str("</pre>");
 }
 
-/// The repository root's first pane: what work is in flight.
-///
-/// A short list rather than the full one — the pane orients a reader,
-/// and [`reviews`] is one click away for the rest. It is deliberately
-/// the leftmost pane: on a repository several agents are writing at
-/// once, "what is happening" is the question a reader arrives with.
-fn reviews_pane(h: &mut String, repo: &str, platform: Option<&crate::platform::Platform>) {
+/// The reviews pane: what is in flight on this repository, how close
+/// each one is to landing, and how far the world moved under it.
+fn reviews_pane(
+    h: &mut String,
+    dir: &Path,
+    repo: &str,
+    platform: Option<&crate::platform::Platform>,
+) {
     h.push_str("<aside class=\"pane pane-reviews\"><h2>Reviews");
     let Some(platform) = platform else {
         // Not an error, and not this reader's to fix: a node started
@@ -2100,30 +2126,61 @@ fn reviews_pane(h: &mut String, repo: &str, platform: Option<&crate::platform::P
         );
         return;
     };
-    let rows = platform.reviews_for_repo(repo);
+    let all = platform.reviews_for_repo(repo);
+    // Open and settled are different questions, and one total answers
+    // neither: a repository with forty archived reviews and nothing in
+    // flight is quiet, and a bare "40" says the opposite.
+    let (archived, open): (Vec<_>, Vec<_>) = all
+        .iter()
+        .partition(|(_, r)| r["archived"].as_bool().unwrap_or(false));
     h.push_str("<span class=\"count\">");
-    h.push_str(&rows.len().to_string());
-    h.push_str("</span></h2>");
-    if rows.is_empty() {
+    h.push_str(&open.len().to_string());
+    h.push_str("</span>");
+    if !archived.is_empty() {
+        h.push_str("<span class=\"muted\">+ ");
+        h.push_str(&archived.len().to_string());
+        h.push_str(" archived</span>");
+    }
+    h.push_str("</h2>");
+    if open.is_empty() {
         h.push_str(
-            "<p class=\"muted\">Nothing proposes to land here yet. A review names the ref it \
-             targets, and appears in this pane from the moment it is requested.</p>",
+            "<p class=\"muted\">Nothing proposes to land here yet. A review names the ref \
+                    it targets, and appears in this pane from the moment it is requested.</p>",
         );
         h.push_str("</aside>");
         return;
     }
     h.push_str("<table class=\"flight\"><tbody>");
-    for (id, review) in &rows {
-        h.push_str("<tr><td>");
-        state_tag(h, review);
-        h.push_str("</td><td><a href=\"/r/");
+    for (id, review) in open.iter().take(PANE_ROWS) {
+        // Three stacked lines and one number, not four columns. A pane
+        // this narrow cannot hold four: measured in a browser, the
+        // chips alone claimed the first column and left the identifier
+        // wrapping mid-word ("r-" / "notes") with the refname broken
+        // over three lines under it.
+        h.push_str("<tr><td><a href=\"/r/");
         h.push_str(&esc(repo));
         h.push_str("/review/");
         h.push_str(&esc(id));
         h.push_str("\">");
         h.push_str(&esc(id));
-        h.push_str("</a><span class=\"why mono muted\">");
-        h.push_str(&esc(ref_name(review)));
+        h.push_str("</a><span class=\"why\">");
+        state_tag(h, review);
+        // How far the destination has moved since this commit was
+        // proposed. Zero renders nothing: the absence of the chip is
+        // the good news, and a "0 behind" on every row would train a
+        // reader to stop reading the column that matters.
+        if let Some(n) = behind(dir, review).filter(|n| *n > 0) {
+            h.push_str("<b class=\"tag warn\">\u{2193} ");
+            h.push_str(&n.to_string());
+            h.push_str(" behind</b>");
+        }
+        h.push_str("</span><span class=\"why mono muted\">");
+        // The destination without the repository it is in. Every row in
+        // this pane targets the repository whose page this is, so the
+        // prefix is the same eleven characters on every line, in the
+        // narrowest column on the page. The full `<repo>:<refname>` is
+        // still what the reviews list and the review page show.
+        h.push_str(&esc(onto_ref(review)));
         h.push_str("</span></td><td class=\"num muted\">");
         // Answered out of assigned, the one number that says how close
         // this is to landing. An unassigned review says so instead of
@@ -2145,7 +2202,53 @@ fn reviews_pane(h: &mut String, repo: &str, platform: Option<&crate::platform::P
     }
     h.push_str("</tbody></table><p class=\"more\"><a href=\"/r/");
     h.push_str(&esc(repo));
-    h.push_str("/reviews\">All reviews</a></p></aside>");
+    h.push_str("/reviews\">");
+    // The link names what it holds when the pane is not showing all of
+    // it, because "All reviews" beside six rows reads as "these six".
+    if open.len() > PANE_ROWS {
+        h.push_str("All ");
+        h.push_str(&all.len().to_string());
+        h.push_str(" reviews");
+    } else {
+        h.push_str("All reviews");
+    }
+    h.push_str("</a></p></aside>");
+}
+
+/// A review's destination refname, with the repository it names
+/// stripped — for surfaces that are already inside that repository.
+///
+/// Falls back to the whole string rather than to nothing: a `target_ref`
+/// that does not split is malformed, and showing it is how someone finds
+/// out.
+fn onto_ref(review: &serde_json::Value) -> &str {
+    let onto = ref_name(review);
+    onto.split_once(':').map_or(onto, |(_, refname)| refname)
+}
+
+/// How many commits the destination ref holds that the proposed commit
+/// does not — the "behind" count, asked of git rather than guessed.
+///
+/// `None` when the question does not apply or cannot be answered: a
+/// review naming no commit, no destination ref, or a ref that no longer
+/// resolves. Those are different situations, and none of them is
+/// "0 behind"; returning a number for any of them would state a
+/// relationship this node never checked.
+fn behind(dir: &Path, review: &serde_json::Value) -> Option<u64> {
+    let commit = git_oid_of(review["target"].as_str()?)?;
+    let (_, refname) = ref_name(review).split_once(':')?;
+    // A refname arrives inside a signed op, so it is not attacker-chosen
+    // in the usual sense — but it reaches a subprocess argument list, and
+    // one beginning with `-` is a git option rather than a revision.
+    if refname.is_empty() || refname.starts_with('-') {
+        return None;
+    }
+    let range = format!("{commit}..{refname}");
+    git_text(dir, &["rev-list", "--count", &range])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Every review proposing to land on this repository.
