@@ -537,6 +537,12 @@ td summary{padding:var(--sp-0);display:inline-block}
    it truncates, and everything else keeps its natural width so the
    rhythm of the rows survives a very long commit message. */
 table.listing{table-layout:auto;width:100%}
+/* The name column takes the width its longest name needs. Without this
+   the subject cell's `width:100%` squeezes it to the narrowest column
+   that can hold the text *broken*, and since a repository full of
+   `choir-actor`, `choir-bridge`, `choir-sequencer` breaks at the hyphen,
+   every entry in the directory rendered across two lines. */
+table.listing td:first-child{white-space:nowrap}
 table.listing td.subject{max-width:0;width:100%;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-300)}
 table.listing td.when{white-space:nowrap;font-size:var(--fs-300)}
@@ -544,26 +550,49 @@ table.listing td.when{white-space:nowrap;font-size:var(--fs-300)}
    Without this the size column wraps mid-value and every row it happens
    on becomes two rows tall. */
 table.listing td.num{white-space:nowrap}
-/* The README, under the file listing. It is the one block on this
-   surface holding prose the node did not author, so it is bounded like
-   a document: a reading measure, and headings that step down from the
-   page's own rather than competing with them. */
-section.readme{border:var(--border);border-radius:var(--r-md);
-  background:var(--card);padding:var(--sp-6);margin-top:var(--sp-6)}
+/* The README. It is the one block on this surface holding prose the
+   node did not author, so it is set as a document: one reading measure,
+   headings that step down from the page's own, and nothing drawn around
+   it.
+
+   It used to sit in a bordered, tinted, padded card — inside a pane,
+   inside the page. Three nested containers, and the innermost one was
+   carrying no information: its background differs from the page beneath
+   it by almost nothing, so the border was the only thing it added, and
+   what that border added was a line. Measured in a browser, the card
+   plus the rules under two headings plus a hairline under every table
+   row is what made this column read as heavy. The prose is the content;
+   the frame around it was not. */
+section.readme{margin-top:var(--sp-0)}
+/* The eyebrow keeps the accent rule, because that is how every pane on
+   this page names itself and this one should not be the exception. */
 section.readme>h2{font-size:var(--fs-300);letter-spacing:var(--tr-caps);
   text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
-  margin:var(--sp-0) var(--sp-0) var(--sp-5);
-  padding-bottom:var(--sp-3);border-bottom:var(--border-hair)}
-section.readme h1{font-size:var(--fs-800)}
-section.readme h2:not(:first-child){font-size:var(--fs-700);
+  margin:var(--sp-0) var(--sp-0) var(--sp-5)}
+/* One document title is enough. The page already says `owner/name`
+   overhead, so the README's own `h1` steps down to sit under it rather
+   than restate it louder. */
+section.readme h1{font-size:var(--fs-700)}
+/* Headings *inside* the prose are not pane headers, and they were
+   inheriting the accent bar from the global `h2` — so "Prerequisites"
+   came with the same blue rule as "Reviews", two levels of hierarchy
+   wearing one badge. Clearing `border-bottom` alone left the bar. */
+section.readme h2:not(:first-child){font-size:var(--fs-600);
   text-transform:none;letter-spacing:var(--tr-heading);color:var(--strong);
-  font-weight:var(--fw-bold);border-bottom:0}
+  font-weight:var(--fw-bold);border-bottom:0;border-left:0;
+  padding-left:var(--sp-0);margin-top:var(--sp-8)}
 section.readme h3{font-size:var(--fs-500)}
 section.readme p,section.readme li{max-width:var(--measure);
   line-height:var(--lh-copy)}
 section.readme pre{background:var(--sunken);padding:var(--sp-4);
-  border-radius:var(--r-sm);overflow-x:auto}
-section.readme table{display:block;overflow-x:auto}
+  border-radius:var(--r-sm);overflow-x:auto;max-width:var(--measure)}
+/* Tables share the prose measure instead of running the full column.
+   At full width they were wider than every paragraph around them, so
+   the right edge of the document jumped in and out down the page. And
+   they are read here, not scanned like the node's own tables, so they
+   get the roomier row. */
+section.readme table{display:block;overflow-x:auto;max-width:var(--measure)}
+section.readme td,section.readme th{padding:var(--sp-2) var(--sp-3)}
 /* Scope tabs. Links rather than a control, styled as a row of them, with
    the current one flat and unclickable so its state reads without
    colour alone carrying it. */
