@@ -21,7 +21,7 @@ Agent-first code collaboration: many agents on one repo, one total order from a 
 | Rust stable + Cargo | **yes** | Built with **1.97.1**, edition 2021. Install via [rustup](https://rustup.rs/) or Homebrew. |
 | `git` | **yes** | Smart-HTTP CGI + all integration tests. |
 | `curl` | **yes** | Only HTTP client the crates use. |
-| `openssl` | **yes** | Auth tokens, bridge RS256; tests shell out to it. |
+| `openssl` | **yes** | Auth tokens, bridge RS256; tests shell out to it. **Headers too** (`libssl-dev` on Debian/Ubuntu, `brew install openssl@3` on macOS): the node's TLS is `tiny_http`'s OpenSSL backend, so `openssl-sys` links it at build time. |
 | `ssh-keygen` | **yes** | Integration tests / signed-push setup. |
 | `mergiraf` | optional | Structured merge slot. Without it, line merge + first-class conflicts still work. Homebrew: `brew install mergiraf`. |
 | `jj` | optional | Not required to build or run choir. |
