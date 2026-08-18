@@ -3,6 +3,7 @@ name = "choir-merge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [dependencies]
 diffy = "0.4"

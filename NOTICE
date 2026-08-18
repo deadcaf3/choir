@@ -1,0 +1,38 @@
+choir
+Copyright 2026 asxeem
+
+This product includes software developed by third parties, listed below.
+Everything not listed here is original to this project.
+
+
+1. Merge-safety invariant — crates/choir-merge/src/safety.rs
+
+   The four-tree merge-safety invariant this module checks comes from
+   Oak (https://oak.space/oak/oak, `cli/src/commands/merge_safety.rs`),
+   Copyright 2026 Oak, licensed under the Apache License, Version 2.0.
+
+   The invariant was re-derived for choir's single-file model as a
+   containment claim over line multisets; no Oak source is copied. The
+   attribution is kept because the idea, and the reason it is worth
+   checking at all, are theirs.
+
+
+2. Design tokens — crates/choir-node/src/ui.css
+
+   The token block above the CHOIR COMPONENTS marker is copied verbatim
+   from the design system's `tokens.css`, minus its
+   @font-face rules. the design system is a work of the same author and is
+   included here under the same terms as the rest of this project.
+
+
+3. Mergiraf — not included
+
+   choir can call `mergiraf` as an optional external program for
+   structured merges. Mergiraf is licensed under the GNU General Public
+   License, Version 3. It is never linked into any binary here and no
+   Mergiraf source is included; it is executed as a subprocess, and the
+   platform works without it (DECISIONS.md D4).
+
+
+Licensed under either of MIT (LICENSE-MIT) or Apache-2.0
+(LICENSE-APACHE), at your option.

@@ -686,3 +686,5 @@ Rejection code table: [`ERRORS.md`](ERRORS.md).
 ## License
 
 Workspace crates: [`MIT`](LICENSE-MIT) OR [`Apache-2.0`](LICENSE-APACHE), at your option. Mergiraf (optional subprocess) is GPLv3 and is never linked, only executed.
+
+Third-party attributions are in [`NOTICE`](NOTICE); everything not listed there is original to this project.

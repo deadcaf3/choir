@@ -16,3 +16,9 @@ internal/
 # existed.
 __pycache__/
 *.pyc
+
+# Derived analysis output: a knowledge graph built from the tree, caches
+# and all. Nothing reads it back, it regenerates from source, and it is
+# megabytes of restated code. Ignored rather than trusted to stay
+# untracked, because `git add -A` does not ask.
+/graphify-out/
