@@ -783,11 +783,11 @@ fn row(h: &mut String, label: &str, value: &str) {
     h.push_str("</td></tr>");
 }
 
-/// The one next action, as the design system's note-level admonition.
+/// The one next action, as the note-level admonition.
 ///
-/// The markup is the design system's `.callout` shape — an `.ico` label
+/// The markup is the `.callout` shape — an `.ico` label
 /// column beside the prose — rather than a choir-local invention, for the
-/// same reason the tokens are vendored rather than re-picked.
+/// same reason the tokens are named once rather than re-picked.
 ///
 /// `html` is markup on purpose, because these sentences carry `<code>`
 /// around the command a reader is meant to run. **Nothing
@@ -909,11 +909,10 @@ pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &s
 /// above means it is rendered rarely, so the duplication across
 /// responses costs less than the round trip would.
 ///
-/// The sheet is the design system's tokens, vendored
-/// verbatim, plus a choir-specific component block that authors no
-/// raw values. `ui.css` carries the provenance note and the re-vendor
-/// rule; dark is the canonical theme and light follows the reader's
-/// system setting, both without a line of JavaScript.
+/// The sheet is a token block plus a component block that authors no raw
+/// values, both belonging to this repository; `ui.css` states the rule
+/// that binds them. Dark is the canonical theme and light follows the
+/// reader's system setting, both without a line of JavaScript.
 pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
 
 /// The URL D39's client half is served from, in one place because the
@@ -1254,7 +1253,7 @@ mod tests {
         );
         assert!(
             page.contains("callout-note"),
-            "the next action is not marked as the design system's note admonition"
+            "the next action is not marked as the note admonition"
         );
         assert!(
             page.contains("href=\"/r/\""),
@@ -1342,7 +1341,7 @@ mod tests {
     }
 
     /// Every token the component block references must be one the
-    /// vendored block defines.
+    /// token block defines.
     ///
     /// The raw-value rule above says what a component rule may *not*
     /// write; it says nothing about whether the token it wrote instead
@@ -1352,7 +1351,7 @@ mod tests {
     /// almost right. Four invented token names passed the raw-value
     /// lint and reached a browser before this test existed.
     #[test]
-    fn every_component_token_is_defined_by_the_vendored_block() {
+    fn every_component_token_is_defined_by_the_token_block() {
         let sheet = include_str!("ui.css");
         let (tokens, ours) = sheet
             .rsplit_once("CHOIR COMPONENTS")
@@ -1363,7 +1362,7 @@ mod tests {
                 let rest = &tokens[at + 2..];
                 let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '-')?;
                 // A definition is `--name:`; a `var(--name)` reference
-                // inside the vendored block defines nothing.
+                // inside the token block defines nothing.
                 (rest.as_bytes().get(end) == Some(&b':')).then(|| &rest[..end])
             })
             .collect();
@@ -1380,24 +1379,24 @@ mod tests {
         undefined.dedup();
         assert!(
             undefined.is_empty(),
-            "the component block references {} token(s) the vendored block never defines, so \
+            "the component block references {} token(s) the token block never defines, so \
              each of those declarations is silently dropped: {}",
             undefined.len(),
             undefined.join(", "),
         );
     }
 
-    /// The design system's one hard rule is that no colour, size,
-    /// radius, shadow or duration is authored outside its tokens. The
-    /// vendored token block is exempt by definition; everything after
-    /// the marker is ours and must reference `var(--…)` instead. A
-    /// hand-picked hex here is how a design system quietly dies.
+    /// The sheet's one hard rule is that no colour, size, radius,
+    /// shadow or duration is authored outside the token block. That
+    /// block is exempt by definition — it is where values live;
+    /// everything after the marker must reference `var(--…)` instead. A
+    /// hand-picked hex here is how a token set quietly dies.
     #[test]
     fn the_component_sheet_authors_no_raw_values() {
         let sheet = include_str!("ui.css");
-        // The last occurrence: the provenance note names the marker
-        // too, and splitting on the first one would check the vendored
-        // tokens against a rule that exists to exempt them.
+        // The last occurrence: the header comment names the marker too,
+        // and splitting on the first one would check the token block
+        // against a rule that exists to exempt it.
         let ours = sheet
             .rsplit_once("CHOIR COMPONENTS")
             .expect("the provenance marker must stay in ui.css")
@@ -1450,7 +1449,7 @@ mod tests {
     #[test]
     fn no_translucent_token_is_used_as_a_foreground_colour() {
         let sheet = include_str!("ui.css");
-        // Every token the sheet defines, read out of the vendored block
+        // Every token the sheet defines, read out of the token block
         // rather than listed by hand — a hand-written list is a second
         // copy of the palette to keep in step.
         let mut defined: Vec<(&str, &str)> = Vec::new();
@@ -1580,13 +1579,14 @@ mod tests {
         }
     }
 
-    /// The vendored half must stay recognisably the design system's,
-    /// so a future edit that "tidies" it is caught rather than merged.
+    /// The token block must keep the load-bearing names and both
+    /// themes, so a future edit that "tidies" it is caught rather than
+    /// merged.
     #[test]
     fn the_token_block_is_present_and_theme_complete() {
         let sheet = include_str!("ui.css");
         for token in ["--ground", "--accent-ink", "--ok", "--warn", "--focus-ring"] {
-            assert!(sheet.contains(token), "vendored tokens lost {token}");
+            assert!(sheet.contains(token), "the token block lost {token}");
         }
         assert!(
             sheet.contains("prefers-color-scheme:light"),

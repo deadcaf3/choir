@@ -75,9 +75,9 @@ node_ssh() {
 # The follower is fed on-box from the node's own bare repos, so it can
 # never hold a commit the canonical node has not sequenced (D21). Every
 # repo in the node host's ~/.choir/repos.list is pushed, not just the
-# canonical one: after the design-tokens import the node was the only
-# holder of that repo's git objects, and a follower that mirrors one
-# repo reads like a follower that mirrors all of them. A repo whose
+# canonical one: an imported repo can leave the node the only holder of
+# its git objects, and a follower that mirrors one repo reads like a
+# follower that mirrors all of them. A repo whose
 # bare has no `forgejo` remote is named on every run rather than
 # silently skipped — unconfigured means "no second copy yet", and that
 # should stay annoying until an operator configures it on the node

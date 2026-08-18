@@ -17,15 +17,7 @@ Everything not listed here is original to this project.
    checking at all, are theirs.
 
 
-2. Design tokens — crates/choir-node/src/ui.css
-
-   The token block above the CHOIR COMPONENTS marker is copied verbatim
-   from the design system's `tokens.css`, minus its
-   @font-face rules. the design system is a work of the same author and is
-   included here under the same terms as the rest of this project.
-
-
-3. Mergiraf — not included
+2. Mergiraf — not included
 
    choir can call `mergiraf` as an optional external program for
    structured merges. Mergiraf is licensed under the GNU General Public

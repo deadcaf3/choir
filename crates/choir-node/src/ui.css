@@ -1,22 +1,29 @@
-/* choir node browser surface — vendored the design system tokens + choir components.
+/* choir node browser surface — design tokens + choir components.
    =========================================================================
-   PROVENANCE. Everything above the CHOIR COMPONENTS marker is copied
-   verbatim from the design system's `tokens.css`, minus its
-   `@font-face` rules (we ship no font files, and the stacks fall back to
-   system faces by design). The design system's own `tool-chrome.css` sets
-   the precedent for this: a single-file page repeats the token subset it
-   needs, and that copy is kept byte-identical to the source.
+   TWO HALVES, ONE SHEET, BOTH OURS. Above the CHOIR COMPONENTS marker is
+   the token block: every colour, size, radius, shadow and duration this
+   surface is allowed to use, named once. Below it is the component block,
+   which styles this node's pages out of those tokens.
 
-   THE RULE THAT COMES WITH IT: no colour, size, radius, shadow or duration
-   is authored below. The component block uses tokens only. If a value is
-   missing, it gets added to the design system first, then re-vendored here.
-   `ui::the_component_sheet_authors_no_raw_values` enforces this in tests.
+   This file is self-contained on purpose. It was once kept in sync with a
+   separate repository's design system, which made choir's stylesheet a
+   mirror of something not present in this tree — a rule no contributor
+   here could follow. The tokens are choir's now. No font files ship, so
+   the stacks name system faces only.
+
+   THE RULE: no colour, size, radius, shadow or duration is authored below
+   the marker. The component block references `var(--…)` and nothing else.
+   A value that does not exist yet gets a token in the block above first.
+   Two tests enforce this — `the_component_sheet_authors_no_raw_values`
+   catches a raw value, and `every_component_token_is_defined_by_the_token_block`
+   catches a `var()` naming a token nobody defined, which a browser drops
+   in silence.
    ========================================================================= */
 
 :root{
   /* ---- type -------------------------------------------------------- */
-  --font-sans:"System Sans","Helvetica Neue",Helvetica,"Segoe UI",system-ui,sans-serif;
-  --font-mono:"System Mono",ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  --font-sans:"Helvetica Neue",Helvetica,"Segoe UI",system-ui,sans-serif;
+  --font-mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
 
   --fs-100:0.6875rem;  /* 11.7px — micro labels, table eyebrows */
   --fs-200:0.75rem;    /* 12.8px — kbd, pills, captions */
@@ -337,7 +344,7 @@ img,svg,canvas{max-width:100%}
 body{background:var(--ground);color:var(--ink);margin:0 auto;
   padding:var(--sp-10) var(--sp-6) var(--sp-20);max-width:var(--page-max)}
 
-/* skip link — lifted verbatim from the design system's components.css */
+/* skip link */
 .skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
   z-index:var(--z-palette);padding:var(--sp-2) var(--sp-4);
   background:var(--accent);color:var(--inverse);border-radius:var(--r-sm);
@@ -406,8 +413,8 @@ b.danger{color:var(--danger);background:var(--danger-tint);
 .empty,.note{color:var(--faint);font-size:var(--fs-200);margin:var(--sp-2) 0}
 .note{border-left:var(--border-accent);padding-left:var(--sp-3)}
 
-/* `.lede` and the admonitions, lifted verbatim from the design system's
-   components.css exactly as `.skip` above was, and used for exactly what
+/* `.lede` and the admonitions, sharing the token block's scale with the
+   rest of this sheet, and used for exactly what
    they are named for: the sentence explaining a refusal is a lede, and
    the one next action is a note-level admonition. Inventing choir-local
    equivalents was the first draft of this block and it was the wrong
@@ -450,7 +457,7 @@ summary{cursor:pointer;color:var(--muted);font-size:var(--fs-200);
   padding:var(--sp-2) 0}
 summary:hover{color:var(--accent-ink)}
 
-/* Repository browsing (D30). Code and diffs reuse the design system's
+/* Repository browsing (D30). Code and diffs reuse the token block's
    own syntax tokens rather than inventing a second palette for them. */
 /* A deep path is the ordinary case, not the exceptional one, so the
    breadcrumb wraps rather than widening the page: `anywhere` because a
