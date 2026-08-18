@@ -2150,3 +2150,102 @@ fn a_not_modified_response_carries_the_same_policy_as_the_page() {
         }
     }
 }
+
+/// The repository root answers "what is happening here" before "what is
+/// here".
+///
+/// A repository several agents are writing at once is one where the work
+/// in flight is the first thing a reader needs, so the root page leads
+/// with the reviews pane and puts the file listing beside it rather than
+/// above it. The assertion is positional on purpose: a page that merely
+/// mentions the review somewhere would satisfy a `contains` and still
+/// bury it under the files.
+#[test]
+fn the_repository_root_leads_with_the_work_in_flight() {
+    let work = std::env::temp_dir().join("choir-node-browse-root-panes");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry
+        .register(&author.public_key_bytes())
+        .expect("register author");
+
+    let mut node = Node::bind(&work.join("repos"), 0).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/one.git").expect("repo created");
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let clone = work.join("clone");
+    let url = format!("{base}/agents/one.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    std::fs::write(clone.join("only.txt"), "a file\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "first"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+    let head = String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-inflight".into(),
+        target: choir_oplog::ContentHash::from_git_oid(&head).expect("a git oid"),
+        reviewers: vec!["ana".into()],
+        target_ref: Some("agents/one.git:refs/heads/main".into()),
+    });
+    let (code, resp) = crate::support::curl(&[
+        "-X",
+        "POST",
+        "-d",
+        &crate::support::submit_body_legacy(&author, "author", &request),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    let (status, _, page) = get(&format!("{base}/r/agents/one"), &[]);
+    assert_eq!(status, 200);
+
+    // Three panes, in the order the reader needs them. Split on the
+    // markup, never on the class name: every one of these names also
+    // appears in the inline stylesheet, so a `contains("pane-files")`
+    // matches the CSS and passes on a page with no panes at all. The
+    // first draft of this test did exactly that.
+    let (before_files, after_files) = page
+        .split_once("<section class=\"pane pane-files\">")
+        .unwrap_or_else(|| panic!("the root page has no files pane: {page}"));
+    assert!(
+        before_files.contains("<aside class=\"pane pane-reviews\">"),
+        "the reviews pane does not come before the files pane: {page}"
+    );
+    assert!(
+        after_files.contains("<section class=\"pane pane-content\">"),
+        "the content pane does not come after the files pane: {page}"
+    );
+
+    // The review is *in* the first pane, not merely on the page.
+    assert!(
+        before_files.contains("r-inflight"),
+        "the work in flight is not in the leading pane: {before_files}"
+    );
+    assert!(
+        before_files.contains("/r/agents/one/review/r-inflight"),
+        "the review is named but not linked: {before_files}"
+    );
+    // And the file listing is still the files pane's job.
+    assert!(
+        after_files.contains("only.txt"),
+        "the files pane lost the listing: {after_files}"
+    );
+}

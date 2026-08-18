@@ -645,7 +645,7 @@ pub(crate) fn render(
             q,
             scope,
         } => search(&bare(root, repo), repo, rev, q, *scope, site),
-        Page::Tree { repo, rev, path } => tree(&bare(root, repo), repo, rev, path, site),
+        Page::Tree { repo, rev, path } => tree(&bare(root, repo), repo, rev, path, platform, site),
         Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, site),
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, site),
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, site),
@@ -1416,7 +1416,14 @@ fn readme_of(dir: &Path, oid: &str, listing: &str) -> Option<(String, String)> {
 }
 
 /// A directory listing.
-fn tree(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Rendered {
+fn tree(
+    dir: &Path,
+    repo: &str,
+    rev: &str,
+    path: &str,
+    platform: Option<&crate::platform::Platform>,
+    site: Option<&str>,
+) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
         // A repository that exists but resolves nothing is empty, not
@@ -1508,7 +1515,24 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Re
         h.push_str(&plural(tags.len(), "tag", "tags"));
         h.push_str("</span></span></div>");
     }
-    h.push_str("<section>");
+    // The repository root is three panes side by side: what work is in
+    // flight, what files exist, and what the README says. A repository
+    // many agents are writing at once is one where "what is happening"
+    // outranks "what is here", so the reviews pane comes first and the
+    // reader never has to go looking for it. Inside a directory there is
+    // no such question to answer, so those pages stay a single column.
+    let file_count = rows.len();
+    if path.is_empty() {
+        h.push_str("<div class=\"panes\">");
+        reviews_pane(&mut h, repo, platform);
+        h.push_str("<section class=\"pane pane-files\"><h2>");
+        h.push_str(&plural(file_count, "entry", "entries"));
+        h.push_str("<span class=\"mono muted\">");
+        h.push_str(&esc(&oid[..oid.len().min(12)]));
+        h.push_str("</span></h2>");
+    } else {
+        h.push_str("<section>");
+    }
     if rows.is_empty() {
         // Reached two ways that need different fixes: a path that names
         // nothing at this revision, and a genuinely empty directory at
@@ -1560,22 +1584,46 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Re
                 h.push_str("<span class=\"muted\">/</span>");
             }
             h.push_str(&esc(leaf));
-            h.push_str("</a></td>");
+            h.push_str("</a>");
             // Subject and age, the two columns that turn a file list into
             // a description of what is happening in the repository. A
             // path git cannot date is left blank rather than filled with
             // a guess.
-            h.push_str("<td class=\"subject muted\">");
-            if let Some((subject, _)) = touched.as_ref() {
-                h.push_str(&esc(subject));
+            //
+            // The root's files pane is one narrow column of three, and
+            // four columns in it clip to nothing — the subject rendered
+            // as `re`, and the size fell off the edge entirely. Dropping
+            // the subject would have been the easy fix and the wrong
+            // one: a listing of bare names is a directory, and saying
+            // what each path is *for* is why this column exists. So in
+            // the pane it stacks under the name instead of beside it,
+            // where it has the width to be read. The directory pages
+            // have the whole page, and keep all four columns.
+            if path.is_empty() {
+                if let Some((subject, _)) = touched.as_ref() {
+                    h.push_str("<span class=\"why muted\">");
+                    h.push_str(&esc(subject));
+                    h.push_str("</span>");
+                }
+                h.push_str("</td>");
+            } else {
+                h.push_str("</td><td class=\"subject muted\">");
+                if let Some((subject, _)) = touched.as_ref() {
+                    h.push_str(&esc(subject));
+                }
+                h.push_str("</td>");
             }
-            h.push_str("</td><td class=\"when muted\">");
+            h.push_str("<td class=\"when muted\">");
             if let Some((_, at)) = touched.as_ref() {
                 h.push_str(&esc(&ago(now, *at)));
             }
-            h.push_str("</td><td class=\"num muted\">");
-            h.push_str(&esc(&size));
-            h.push_str("</td></tr>");
+            h.push_str("</td>");
+            if !path.is_empty() {
+                h.push_str("<td class=\"num muted\">");
+                h.push_str(&esc(&size));
+                h.push_str("</td>");
+            }
+            h.push_str("</tr>");
         }
         h.push_str("</tbody></table>");
     }
@@ -1585,13 +1633,29 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Re
     // README beside a directory's files is documentation for exactly the
     // files a reader is looking at, and making them click it is making
     // them click the one file that was written to save them the trip.
+    //
+    // At the root it is the third pane rather than a section under the
+    // listing, so it sits beside the files instead of below them.
     {
+        if path.is_empty() {
+            h.push_str("<section class=\"pane pane-content\">");
+        }
         if let Some((name, body)) = readme_of(dir, &oid, &listing) {
             h.push_str("<section class=\"readme\"><h2>");
             h.push_str(&esc(&name));
             h.push_str("</h2>");
             h.push_str(&crate::readme::render(&body));
             h.push_str("</section>");
+        } else if path.is_empty() {
+            // An empty third pane reads as a broken layout. Saying what
+            // is missing, and what would fill it, does not.
+            h.push_str(
+                "<p class=\"lede\">No README at this revision. A <code>README.md</code> in \
+                 the repository root renders here.</p>",
+            );
+        }
+        if path.is_empty() {
+            h.push_str("</section></div>");
         }
     }
     Rendered {
@@ -2016,6 +2080,72 @@ fn patch(h: &mut String, output: &str, where_else: &str) {
         h.push_str("</span>");
     }
     h.push_str("</pre>");
+}
+
+/// The repository root's first pane: what work is in flight.
+///
+/// A short list rather than the full one — the pane orients a reader,
+/// and [`reviews`] is one click away for the rest. It is deliberately
+/// the leftmost pane: on a repository several agents are writing at
+/// once, "what is happening" is the question a reader arrives with.
+fn reviews_pane(h: &mut String, repo: &str, platform: Option<&crate::platform::Platform>) {
+    h.push_str("<aside class=\"pane pane-reviews\"><h2>Reviews");
+    let Some(platform) = platform else {
+        // Not an error, and not this reader's to fix: a node started
+        // without `--keys-file` has no platform at all, and the browse
+        // surface still works. Saying so beats an empty pane.
+        h.push_str(
+            "</h2><p class=\"muted\">This node runs without the platform, so it holds no \
+             reviews.</p></aside>",
+        );
+        return;
+    };
+    let rows = platform.reviews_for_repo(repo);
+    h.push_str("<span class=\"count\">");
+    h.push_str(&rows.len().to_string());
+    h.push_str("</span></h2>");
+    if rows.is_empty() {
+        h.push_str(
+            "<p class=\"muted\">Nothing proposes to land here yet. A review names the ref it \
+             targets, and appears in this pane from the moment it is requested.</p>",
+        );
+        h.push_str("</aside>");
+        return;
+    }
+    h.push_str("<table class=\"flight\"><tbody>");
+    for (id, review) in &rows {
+        h.push_str("<tr><td>");
+        state_tag(h, review);
+        h.push_str("</td><td><a href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/review/");
+        h.push_str(&esc(id));
+        h.push_str("\">");
+        h.push_str(&esc(id));
+        h.push_str("</a><span class=\"why mono muted\">");
+        h.push_str(&esc(ref_name(review)));
+        h.push_str("</span></td><td class=\"num muted\">");
+        // Answered out of assigned, the one number that says how close
+        // this is to landing. An unassigned review says so instead of
+        // rendering "0 of 0", which reads as stalled rather than new.
+        let assigned = review["reviewers"].as_array().cloned().unwrap_or_default();
+        if assigned.is_empty() {
+            h.push_str("unassigned");
+        } else {
+            let answered = assigned
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|who| review["verdicts"][who]["verdict"].as_str().is_some())
+                .count();
+            h.push_str(&answered.to_string());
+            h.push_str(" of ");
+            h.push_str(&assigned.len().to_string());
+        }
+        h.push_str("</td></tr>");
+    }
+    h.push_str("</tbody></table><p class=\"more\"><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/reviews\">All reviews</a></p></aside>");
 }
 
 /// Every review proposing to land on this repository.

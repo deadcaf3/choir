@@ -651,3 +651,38 @@ form.omni input[type="search"]::-webkit-search-cancel-button{
 .tab .count{font-variant-numeric:tabular-nums;font-size:var(--fs-200);
   color:var(--faint)}
 b.tab.here .count{color:var(--accent-ink)}
+
+/* Three panes at the repository root: what work is in flight, what
+   files exist, what the README says. Flex rather than grid, and wrapping
+   rather than a breakpoint — the component block may not author raw
+   values, and a media query is a raw length by definition. A basis plus
+   `flex-wrap` reaches the same place: the panes sit side by side while
+   they fit and stack when they do not, at whatever width that turns out
+   to be rather than one we guessed. */
+.panes{display:flex;flex-wrap:wrap;align-items:flex-start;gap:var(--sp-6)}
+.pane{min-width:0}
+.pane-reviews{flex:2 1 var(--toc)}
+.pane-files{flex:2 1 var(--toc)}
+.pane-content{flex:5 1 var(--measure)}
+.pane>h2{display:flex;align-items:baseline;gap:var(--sp-2);
+  margin:var(--sp-0) var(--sp-0) var(--sp-3)}
+.pane>h2 .mono{margin-left:auto;text-transform:none;
+  letter-spacing:var(--tr-mono)}
+.pane-content>.readme{margin-top:var(--sp-0)}
+
+/* The in-flight list. One row per review: state, what it is, how far
+   through its verdicts it is. */
+table.flight{width:100%;border-collapse:collapse}
+table.flight td{padding:var(--sp-2) var(--sp-0);
+  border-bottom:var(--border);vertical-align:top}
+table.flight td:first-child{white-space:nowrap;width:1%;padding-right:var(--sp-3)}
+table.flight td:last-child{white-space:nowrap;text-align:right;
+  font-size:var(--fs-200)}
+table.flight .why{display:block;font-size:var(--fs-200)}
+.more{margin:var(--sp-3) var(--sp-0) var(--sp-0);font-size:var(--fs-300)}
+.pane-files td:first-child{max-width:var(--sp-0);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.pane-files td.when{white-space:nowrap;text-align:right;width:1%;
+  padding-left:var(--sp-3)}
+.pane-files .why{display:block;font-size:var(--fs-200);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}

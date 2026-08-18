@@ -1341,6 +1341,52 @@ mod tests {
         }
     }
 
+    /// Every token the component block references must be one the
+    /// vendored block defines.
+    ///
+    /// The raw-value rule above says what a component rule may *not*
+    /// write; it says nothing about whether the token it wrote instead
+    /// exists. A `var(--fw-600)` that no `:root` defines is not an
+    /// error anywhere — the browser drops that one declaration and
+    /// renders the rest, so the rule half-applies and the page looks
+    /// almost right. Four invented token names passed the raw-value
+    /// lint and reached a browser before this test existed.
+    #[test]
+    fn every_component_token_is_defined_by_the_vendored_block() {
+        let sheet = include_str!("ui.css");
+        let (tokens, ours) = sheet
+            .rsplit_once("CHOIR COMPONENTS")
+            .expect("the component marker names both halves of the sheet");
+        let defined: std::collections::BTreeSet<&str> = tokens
+            .match_indices("--")
+            .filter_map(|(at, _)| {
+                let rest = &tokens[at + 2..];
+                let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '-')?;
+                // A definition is `--name:`; a `var(--name)` reference
+                // inside the vendored block defines nothing.
+                (rest.as_bytes().get(end) == Some(&b':')).then(|| &rest[..end])
+            })
+            .collect();
+        let mut undefined: Vec<&str> = ours
+            .match_indices("var(--")
+            .filter_map(|(at, _)| {
+                let rest = &ours[at + 6..];
+                let end = rest.find(')')?;
+                let name = &rest[..end];
+                (!defined.contains(name)).then_some(name)
+            })
+            .collect();
+        undefined.sort_unstable();
+        undefined.dedup();
+        assert!(
+            undefined.is_empty(),
+            "the component block references {} token(s) the vendored block never defines, so \
+             each of those declarations is silently dropped: {}",
+            undefined.len(),
+            undefined.join(", "),
+        );
+    }
+
     /// The design system's one hard rule is that no colour, size,
     /// radius, shadow or duration is authored outside its tokens. The
     /// vendored token block is exempt by definition; everything after

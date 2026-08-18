@@ -22,3 +22,9 @@ __pycache__/
 # megabytes of restated code. Ignored rather than trusted to stay
 # untracked, because `git add -A` does not ask.
 /graphify-out/
+
+# Browser-verification debris. The browse surface's contract is with a
+# browser, so checking it means driving one and reading the screenshots;
+# the snapshots and PNGs that leaves behind are evidence for one session,
+# not artifacts of the project.
+/.playwright-mcp/
