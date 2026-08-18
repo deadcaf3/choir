@@ -26,6 +26,7 @@ pub mod platform;
 mod prepare;
 pub mod provision;
 pub mod quota;
+mod readme;
 pub mod reject;
 pub mod ssh;
 mod ui;
@@ -136,6 +137,7 @@ pub struct Node {
     /// controls. The private beta disables this and keeps signed CLI
     /// submissions as the only mutation path.
     browser_writes: bool,
+    site_repo: Option<String>,
     /// Free-space floor used by the authenticated readiness endpoint.
     ready_min_free_bytes: u64,
     /// Distinguishes an intentional `unblock()` from a receive timeout.
@@ -241,6 +243,7 @@ impl Node {
             port,
             auth: std::sync::Arc::new(auth),
             platform: None,
+            site_repo: None,
             scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
             keys_watch: None,
@@ -267,6 +270,38 @@ impl Node {
     /// Removes browser mutation controls and their preparation endpoint.
     pub fn disable_browser_writes(&mut self) {
         self.browser_writes = false;
+    }
+
+    /// Presents one repository as this node's entire browser surface.
+    ///
+    /// `/` becomes that repository instead of the index, and the browser
+    /// answers for no other repository. This is what a node serving a
+    /// project's own domain wants: a reader arriving at
+    /// `git.example.com` came for that project, and an index naming
+    /// every other repository the host holds is both noise and a
+    /// disclosure.
+    ///
+    /// Presentation only. It changes no grant: git access stays the
+    /// ACL's answer, and a repository hidden here is still clonable by
+    /// whoever could clone it before.
+    /// # Errors
+    ///
+    /// Refuses a name this node could not hold, checked here rather than
+    /// at the call site: the router trusts this value against the disk,
+    /// so the grammar has to be enforced where it is stored.
+    pub fn serve_single_repository(&mut self, repo: &str) -> std::io::Result<()> {
+        let invalid = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("not a repository this node can present: {repo}"),
+            )
+        };
+        let (owner, name) = repo.split_once('/').ok_or_else(invalid)?;
+        if !provision::safe_segment(owner) || !provision::safe_segment(name) {
+            return Err(invalid());
+        }
+        self.site_repo = Some(repo.to_string());
+        Ok(())
     }
 
     /// Sets the free-space floor below which `/readyz` refuses traffic.
@@ -864,6 +899,7 @@ impl Node {
             let quotas = self.quotas;
             let api_body_limit = self.api_body_limit;
             let browser_writes = self.browser_writes;
+            let site_repo = self.site_repo.clone();
             let ready_min_free_bytes = self.ready_min_free_bytes;
             let authenticated = self.auth.is_some();
             let port = self.port;
@@ -1222,11 +1258,14 @@ impl Node {
                     access.finish(log, &user, &outcome);
                     return;
                 }
-                // The browser surface. Matched exactly so it can never
-                // shadow a repository path: git routes are
-                // `/owner/repo.git/...`, and `/` is the one URL that
-                // cannot name a repository.
-                if request.url() == "/" || request.url() == "/index.html" {
+                // The node's own telemetry. Matched exactly so it can
+                // never shadow a repository path: git routes are
+                // `/owner/repo.git/...`, and a single bare segment
+                // cannot name a repository, which always carries an
+                // owner. It used to be the front door; `/` now belongs
+                // to the repository index, because a reader arriving at
+                // a code host is looking for code.
+                if request.url() == "/status" {
                     let outcome = handle_ui(
                         platform.as_deref(),
                         &ui_cache,
@@ -1243,15 +1282,32 @@ impl Node {
                 // clone URL: this cannot shadow a repository, and the
                 // check is theirs rather than this router's ordering.
                 if let Some(page) = browse::route(request.url()) {
-                    let outcome = handle_browse(
-                        &root,
-                        &page,
-                        &user,
-                        acl.as_deref(),
-                        platform.as_deref(),
-                        browser_writes,
-                        request,
-                    );
+                    // A single-repository node narrows the page here,
+                    // before anything reads the disk: `/` becomes that
+                    // repository, and a page about another one is the
+                    // same refusal a reader without a grant receives.
+                    let page = match site_repo.as_deref() {
+                        Some(site) => browse::scope(page, site),
+                        None => Some(page),
+                    };
+                    let outcome = match page {
+                        Some(page) => handle_browse(
+                            &BrowseContext {
+                                root: &root,
+                                user: &user,
+                                acl: acl.as_deref(),
+                                platform: platform.as_deref(),
+                                browser_writes,
+                                site: site_repo.as_deref(),
+                            },
+                            &page,
+                            request,
+                        ),
+                        None => {
+                            let denied = browse::no_such_repository();
+                            respond_page(request, denied.status, denied.html, None)
+                        }
+                    };
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -1491,12 +1547,65 @@ fn respond_api_too_large(
     served(request, response, 413, bytes)
 }
 
+/// A `304`, carrying the headers a client must not keep a stale copy of.
+///
+/// **A `304` is a header update, not just "nothing changed".** RFC 9111
+/// has a cache replace its stored response's headers with the ones the
+/// `304` carries; any header the `304` omits keeps whatever value it had
+/// when the body was first stored. So a policy header left out of a
+/// `304` is not merely absent for one exchange — it is *frozen* at the
+/// version the client first saw, for as long as the entry lives.
+///
+/// This is not hypothetical. The browse pages' `ETag` is derived from a
+/// commit, so it survives a daemon upgrade; the `304` carried only the
+/// tag; and a reader whose cache held a page from before
+/// [`BROWSER_CSP`] gained `form-action 'self'` kept the old
+/// `form-action 'none'` through every reload. The search box rendered,
+/// focused, took a term, and was refused by a policy the server had
+/// already stopped sending. Only a cache-bypassing reload fixed it,
+/// which is not a thing a reader knows to do.
+///
+/// One function rather than four call sites, for the reason
+/// [`BROWSER_CSP`] is one constant: a fourth hand-assembled `304` is how
+/// one of them ends up missing a header again.
+fn not_modified(tag: &str, csp: &[u8]) -> tiny_http::Response<std::io::Empty> {
+    tiny_http::Response::empty(304)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], csp)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-cache"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        )
+}
+
 /// The policy every page on the browser surface carries.
 ///
 /// One constant rather than a copy per responder: it is the layer that
 /// holds if the escaper ever misses something, and a fifth hand-typed
 /// copy is how one of them ends up subtly weaker than the rest.
-const BROWSER_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+///
+/// **`form-action 'self'`, not `'none'`.** It was `'none'` for as long as
+/// this surface had no form, and that was the right value then. It is a
+/// one-word difference with a silent failure mode: a browser blocks the
+/// submission and reports it to the console *only*, so the search box
+/// rendered correctly, focused correctly, accepted a term, and did
+/// nothing at all on `Enter`. Nothing in the served HTML was wrong, which
+/// is why no assertion over the HTML could have caught it.
+///
+/// `'self'` is still the whole guarantee that matters here: a form on
+/// this surface can submit to this origin and to no other, so no page
+/// this node renders can be turned into a way of posting a reader's
+/// input somewhere else.
+const BROWSER_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 /// [`BROWSER_CSP`] plus permission to run [`ui::WEBAUTHN_JS`] and to
 /// `fetch` this node (D39), carried by the two pages with a ceremony on
@@ -1522,7 +1631,7 @@ const BROWSER_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form
 /// at bind, and a host without `openssl` fell back to `'unsafe-inline'`
 /// — a weaker policy than intended, reached silently, visible only in a
 /// served header. That path is gone rather than documented.
-const SCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
+const SCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
 
 /// Serves [`ui::WEBAUTHN_JS`], the only script this node has.
 ///
@@ -1547,10 +1656,7 @@ fn respond_static_script(request: tiny_http::Request) -> std::io::Result<(u16, u
         )
     });
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
-        let response = tiny_http::Response::empty(304).with_header(
-            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
-        );
-        return served(request, response, 304, 0);
+        return served(request, not_modified(tag, BROWSER_CSP), 304, 0);
     }
     let bytes = ui::WEBAUTHN_JS.len() as u64;
     let response = tiny_http::Response::from_string(ui::WEBAUTHN_JS)
@@ -1596,7 +1702,11 @@ fn is_browser_route(url: &str) -> bool {
         return false;
     }
     let path = url.split(['?', '#']).next().unwrap_or(url);
-    path == "/" || path == "/index.html" || path == "/r" || path.starts_with("/r/")
+    path == "/"
+        || path == "/index.html"
+        || path == "/status"
+        || path == "/r"
+        || path.starts_with("/r/")
 }
 
 /// Answers a browser-surface request with a page.
@@ -2174,10 +2284,7 @@ fn handle_ui(
     let (generation, roster) = platform.roster();
     let tag = ui::etag(seq, generation, &reader);
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
-        let response = tiny_http::Response::empty(304).with_header(
-            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
-        );
-        return served(request, response, 304, 0);
+        return served(request, not_modified(&tag, BROWSER_CSP), 304, 0);
     }
 
     let page = cache.page(seq, generation, &reader, &roster, || {
@@ -2221,15 +2328,34 @@ fn handle_ui(
 /// than in the renderer: a reader without `read` must be told the
 /// repository does not exist, and a page cannot say that convincingly
 /// after it has already started describing one.
-fn handle_browse(
-    root: &Path,
-    page: &browse::Page,
-    user: &str,
-    acl: Option<&acl::Acl>,
-    platform: Option<&Platform>,
+struct BrowseContext<'a> {
+    /// Where the bare repositories live.
+    root: &'a Path,
+    /// The authenticated reader, whose grants decide what renders.
+    user: &'a str,
+    /// The grant table, or `None` on a node that gates nothing.
+    acl: Option<&'a acl::Acl>,
+    /// The view, for the pages served from it rather than from disk.
+    platform: Option<&'a Platform>,
+    /// Whether the browser may offer mutation controls.
     browser_writes: bool,
+    /// The one repository this node presents, if it presents one.
+    site: Option<&'a str>,
+}
+
+fn handle_browse(
+    context: &BrowseContext,
+    page: &browse::Page,
     request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
+    let &BrowseContext {
+        root,
+        user,
+        acl,
+        platform,
+        browser_writes,
+        site,
+    } = context;
     let readable = |repo: &str| match acl {
         Some(table) => table.allows_repo(user, repo, acl::Level::Read),
         None => true,
@@ -2246,16 +2372,19 @@ fn handle_browse(
         }
     }
 
-    let rendered = browse::render(root, page, &readable, platform, user, browser_writes);
+    let rendered = browse::render(root, page, &readable, platform, user, browser_writes, site);
     // Revalidation happens after the ACL check and before the body is
     // written, so a `304` costs the reader nothing and still cannot be
     // obtained for a repository they may not read.
     if let Some(tag) = rendered.etag.as_deref() {
         if header(&request, "If-None-Match").as_deref() == Some(tag) {
-            let response = tiny_http::Response::empty(304).with_header(
-                tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
-            );
-            return served(request, response, 304, 0);
+            // The same policy the `200` would have carried: a `304`
+            // that named a weaker one would leave the client on it.
+            let csp = match page {
+                browse::Page::Review { .. } if browser_writes => SCRIPTED_PAGE_CSP,
+                _ => BROWSER_CSP,
+            };
+            return served(request, not_modified(tag, csp), 304, 0);
         }
     }
 

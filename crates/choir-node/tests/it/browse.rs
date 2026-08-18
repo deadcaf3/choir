@@ -135,7 +135,18 @@ fn served(tag: &str, acl: &str) -> (String, std::path::PathBuf, String, std::pat
         "seeding clone failed"
     );
     std::fs::create_dir_all(clone.join("src")).unwrap();
-    std::fs::write(clone.join("README.md"), "hello\nsecond line\n").unwrap();
+    // Markdown, not a plain line: the repository page renders this file,
+    // so the fixture has to carry the shapes that rendering can get
+    // wrong — a heading, a link, and a raw HTML tag that must not
+    // survive the trip to the page.
+    std::fs::write(
+        clone.join("README.md"),
+        // The script tag starts at column zero deliberately: indented, it
+        // is a code block, which markdown escapes for us and which would
+        // prove nothing about the raw-HTML rule.
+        "# hello\n\nsecond line with a [link](https://example.invalid/x).\n\n<script>alert('readme')</script>\n",
+    )
+    .unwrap();
     // Content that is markup, in a file whose name is also markup: both
     // halves reach the page, and both must arrive inert.
     std::fs::write(
@@ -146,6 +157,14 @@ fn served(tag: &str, acl: &str) -> (String, std::path::PathBuf, String, std::pat
     std::fs::write(
         clone.join("src/<img src=x onerror=alert(1)>.txt"),
         "named like markup\n",
+    )
+    .unwrap();
+    // A README below the root. The repository page and the directory
+    // page both render one, and only a fixture that has both can tell
+    // the two apart.
+    std::fs::write(
+        clone.join("src/README.md"),
+        "## about src\n\nwhat lives in this directory.\n",
     )
     .unwrap();
     std::fs::write(clone.join("binary.dat"), [0u8, 1, 2, 3, 0, 9]).unwrap();
@@ -924,8 +943,10 @@ fn a_denied_repository_says_what_to_do_without_confirming_it_exists() {
         real.contains("read grant"),
         "the page never says what is missing: {real}"
     );
+    // `/` is the repository index; `/r/` still resolves to it, but the
+    // link a refused reader is handed is the front door.
     assert!(
-        real.contains("href=\"/r/\""),
+        real.contains("href=\"/\""),
         "a refused reader is given nowhere to go: {real}"
     );
     assert!(real.contains("next"), "no next action: {real}");
@@ -1219,4 +1240,913 @@ fn a_review_page_names_the_person_behind_a_handle() {
     );
 
     std::fs::remove_dir_all(&work).ok();
+}
+
+/// The front door of a repository whose `HEAD` points at a branch that
+/// does not exist.
+///
+/// `git init --bare` takes `HEAD` from the *host's* `init.defaultBranch`,
+/// and a push lands on the branch the *client* named. When those disagree
+/// the symref dangles, and `/r/owner/repo` — which opens at `HEAD` —
+/// rendered "empty" for a repository holding every commit it was ever
+/// sent. The bug was live on the dogfood node for every repository it
+/// served, and no test bound `HEAD` to anything, so this is the binding.
+#[test]
+fn a_repository_opens_even_when_head_points_at_no_branch() {
+    let (base, work, _oid, _acl) = served("head-dangles", "");
+    let bare = work.join("repos").join("agents").join("one.git");
+
+    // The state a mismatched default branch leaves behind, written
+    // directly so the test does not depend on this machine's git config.
+    std::fs::write(bare.join("HEAD"), "ref: refs/heads/trunk\n").expect("HEAD rewritten");
+    assert!(
+        !git(&bare, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .status
+            .success(),
+        "the fixture must leave HEAD unresolvable, or it proves nothing"
+    );
+
+    let (status, _headers, page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        !page.contains("No commits yet"),
+        "the front door still reports an empty repository: {page}"
+    );
+    assert!(
+        page.contains("README.md") && page.contains("src"),
+        "the front door does not list the tree that was pushed: {page}"
+    );
+
+    // A repository with no branches at all is still empty, and must stay
+    // that way: the fallback is for a dangling symref, not a way to make
+    // every empty repository look populated.
+    let fresh = work.join("repos").join("agents").join("two.git");
+    assert!(
+        git(&work, &["init", "--bare", "-q", fresh.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let (status, _headers, page) = get(&format!("{base}/r/agents/two"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains("No commits yet"),
+        "a genuinely empty repository stopped saying so: {page}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// The repository front door describes the repository, not just its
+/// filenames: which revision, how much history, what else to switch to,
+/// and for every entry the commit that last touched it.
+///
+/// The columns are the point. A listing of bare names is a directory;
+/// a listing that says what each path is *for* and when it last moved is
+/// what a reader came to a code host to see.
+#[test]
+fn the_file_list_carries_the_last_commit_for_every_entry() {
+    let (base, work, _oid, _acl) = served("listing-columns", "");
+
+    let (status, _headers, page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{page}");
+
+    // The orientation bar.
+    assert!(
+        page.contains("1 commit<") || page.contains("1 commit</a>"),
+        "the commit count is missing or pluralised wrongly: {page}"
+    );
+    assert!(
+        page.contains("1 branch<"),
+        "the branch count is missing or pluralised wrongly: {page}"
+    );
+    assert!(page.contains("0 tags"), "the tag count is missing: {page}");
+    assert!(
+        page.contains("class=\"picker\""),
+        "there is no way to switch revision: {page}"
+    );
+    assert!(
+        page.contains("/r/agents/one/tree/main\">main</a>"),
+        "the picker does not link the branch it found: {page}"
+    );
+
+    // The columns, on the rows themselves.
+    // The whole `<tr>`, not the text after the first match: the name
+    // appears in the href before it appears as the label, so slicing on
+    // the name lands inside the attribute and asserts on nothing.
+    let row = page
+        .split("<tr>")
+        .find(|row| row.contains("README.md"))
+        .expect("no README.md row on the page");
+    assert!(
+        row.contains("seed the tree"),
+        "the row does not name the commit that last touched it: {row}"
+    );
+    assert!(
+        row.contains("ago") || row.contains("just now"),
+        "the row does not say when it last moved: {row}"
+    );
+
+    // Inside a directory the breadcrumb answers "where am I", so the bar
+    // is not repeated — it would push the listing below the fold for no
+    // new information.
+    let (status, _headers, inner) = get(
+        &format!("{base}/r/agents/one/tree/main/src"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200, "{inner}");
+    assert!(
+        !inner.contains("class=\"repobar\""),
+        "the orientation bar was repeated inside a directory: {inner}"
+    );
+    assert!(
+        inner.contains("seed the tree"),
+        "the columns stop working below the root: {inner}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// The README is on the repository page, rendered, and inert.
+///
+/// Served rather than unit-tested because the policy in `readme` is only
+/// half the property: the other half is that the page actually reaches
+/// for the file, at the root only, and that what it embeds survives the
+/// page's own escaping unchanged.
+#[test]
+fn the_readme_renders_on_the_repository_page_and_carries_no_markup() {
+    let (base, work, _oid, _acl) = served("readme-render", "");
+
+    let (status, _headers, page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{page}");
+
+    let readme = page
+        .split("<section class=\"readme\">")
+        .nth(1)
+        .and_then(|rest| rest.split("</section>").next())
+        .expect("no README section on the repository page");
+
+    // Rendered, not dumped: the fixture's `# hello` is a heading here.
+    assert!(
+        readme.contains("<h1>hello</h1>"),
+        "the README was not rendered as markdown: {readme}"
+    );
+    assert!(
+        readme.contains("href=\"https://example.invalid/x\""),
+        "an ordinary link did not survive: {readme}"
+    );
+    // The fixture's raw `<script>` tag must not be on the page in any
+    // form that a browser would run.
+    assert!(
+        !readme.contains("<script"),
+        "raw HTML from a README reached the page: {readme}"
+    );
+    assert!(
+        !page.contains("alert('readme')"),
+        "the script body reached the page: {page}"
+    );
+
+    // Every level, not just the root: `src/README.md` documents exactly
+    // the files a reader is looking at when they are in `src`.
+    let (_, _, inner) = get(
+        &format!("{base}/r/agents/one/tree/main/src"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        inner.contains("class=\"readme\""),
+        "a directory with a README rendered none: {inner}"
+    );
+    assert!(
+        inner.contains("what lives in this directory"),
+        "the directory rendered the wrong README: {inner}"
+    );
+    assert!(
+        !inner.contains("<h1>hello</h1>"),
+        "the directory hoisted the repository root's README: {inner}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// A node serving one project's own domain presents that repository and
+/// nothing else.
+///
+/// Both halves are the property. Presenting the repository at `/` is the
+/// feature; refusing every other repository with the same words a denied
+/// reader gets is what stops the front door from becoming a directory of
+/// everything else the host happens to hold.
+#[test]
+fn a_single_repository_node_presents_it_and_withholds_the_rest() {
+    let work = std::env::temp_dir().join("choir-node-browse-site-repo");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node =
+        Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/one.git").expect("repo created");
+    node.create_repo("other/secret.git").expect("repo created");
+    node.serve_single_repository("agents/one")
+        .expect("a repository this node holds");
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Seed the presented repository so its page has something to show.
+    let clone = work.join("clone");
+    let url = format!("http://alice:a@127.0.0.1:{port}/agents/one.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    std::fs::write(clone.join("README.md"), "# the project\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "first"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+
+    // The front door is the repository, not a list.
+    let (status, _headers, front) = get(&format!("{base}/"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{front}");
+    assert!(
+        front.contains("README.md") && front.contains("the project"),
+        "the front door is not the repository: {front}"
+    );
+    assert!(
+        !front.contains(">repositories</h1>"),
+        "the front door is still the index: {front}"
+    );
+    // Nothing offers a way back to a list that does not exist here.
+    assert!(
+        !front.contains("all repositories"),
+        "the page links to an index this node does not present: {front}"
+    );
+
+    // Its own sub-pages keep working, or the mode is unusable.
+    let (status, _, _) = get(
+        &format!("{base}/r/agents/one/commits/main"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200, "the presented repository lost its own pages");
+
+    // Every other repository is refused, in the words a denied reader
+    // gets — never in words that confirm it exists.
+    // `/r/` is the index's old address. In this mode it resolves to the
+    // presented repository rather than 404-ing: there is no index to
+    // show, and a reader following an old link is better served by the
+    // one repository this node has than by an error. What matters is
+    // that no index renders and no other repository is named.
+    let (status, _headers, list) = get(&format!("{base}/r/"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{list}");
+    assert!(
+        !list.contains(">repositories</h1>") && !list.contains("other/secret"),
+        "the old index address still lists repositories: {list}"
+    );
+
+    for path in ["/r/other/secret", "/r/other/secret/commits/main"] {
+        let (status, _headers, page) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        assert_eq!(status, 404, "{path} was not refused: {page}");
+        assert!(
+            !page.contains("other/secret"),
+            "{path} confirmed the repository exists: {page}"
+        );
+    }
+
+    // The refusal is presentation, not authorization: the repository the
+    // browser will not describe is still clonable by a reader who holds
+    // the grant. A mode that quietly revoked access would be a very
+    // different change from the one this flag claims to make.
+    let hidden = format!("http://alice:a@127.0.0.1:{port}/other/secret.git");
+    let out = git(&work, &["ls-remote", &hidden]);
+    assert!(
+        out.status.success(),
+        "presenting one repository took git access to another: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// The three scopes answer three different questions against the same
+/// tree, and each one finds what only it can find.
+///
+/// One test rather than three because the property that matters is the
+/// *difference* between them: a search box that returned the same rows
+/// whichever tab was picked would pass three separate tests.
+#[test]
+fn each_search_scope_finds_what_only_it_can_find() {
+    let (base, _work, _oid, _) = served("search-scopes", "");
+    let at = |q: &str, scope: &str| {
+        get(
+            &format!("{base}/r/agents/one/search/main?q={q}&in={scope}"),
+            &["-u", "alice:a"],
+        )
+    };
+
+    // A name search finds the file by its path and does not report the
+    // lines inside it.
+    let (status, _, files) = at("lib", "files");
+    assert_eq!(status, 200, "the file search was refused: {files}");
+    assert!(
+        files.contains("src/lib.rs"),
+        "a file search missed a matching path: {files}"
+    );
+    assert!(
+        files.contains("<mark>lib</mark>"),
+        "the matched span is not marked: {files}"
+    );
+
+    // A content search finds a string that appears in no file name.
+    let (status, _, code) = at("fn+main", "code");
+    assert_eq!(status, 200, "the content search was refused: {code}");
+    assert!(
+        code.contains("src/lib.rs"),
+        "a content search missed the file holding the term: {code}"
+    );
+    // `+` is a space in a query string, so this proves the term arrived
+    // as two words rather than one — the whole point of encoding it.
+    assert!(
+        code.contains("<mark>fn main</mark>"),
+        "a multi-word term did not survive the URL: {code}"
+    );
+    // The same term as a *name* search finds nothing: no file is called
+    // `fn main`. That is what makes the scopes distinguishable.
+    let (_, _, none) = at("fn+main", "files");
+    assert!(
+        none.contains("No file name matches"),
+        "a name search answered a content question: {none}"
+    );
+
+    // A message search finds the commit subject, which is in no file at
+    // all.
+    let (status, _, commits) = at("seed", "commits");
+    assert_eq!(status, 200, "the commit search was refused: {commits}");
+    assert!(
+        commits.contains("<mark>seed</mark>"),
+        "a commit search missed the subject it was given: {commits}"
+    );
+    let (_, _, none) = at("seed", "files");
+    assert!(
+        none.contains("No file name matches"),
+        "a commit subject matched a file name: {none}"
+    );
+}
+
+/// A search result is repository content, so it goes through the same
+/// escaper every other page does — including the part of it the
+/// highlighter writes.
+///
+/// This is the case a highlighter gets wrong: marking a span means
+/// writing tags into text, and doing that after escaping means computing
+/// offsets in the escaped string. The fixture holds `<script>` inside a
+/// file *and* a term that matches next to it, so a highlighter that
+/// escapes the wrong half is caught here rather than in a browser.
+#[test]
+fn a_search_hit_cannot_put_markup_on_the_page() {
+    let (base, _work, _oid, _) = served("search-escape", "");
+
+    let (status, _, page) = get(
+        &format!("{base}/r/agents/one/search/main?q=alert&in=code"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("<mark>alert</mark>"),
+        "the term was not found or not marked: {page}"
+    );
+    // The fixture line is `// <script>alert('x')</script>`. The mark is
+    // ours; the script tag is the repository's and must arrive as text.
+    assert!(
+        !page.contains("<script>alert"),
+        "a file's markup survived into the search page: {page}"
+    );
+    assert!(
+        page.contains("&lt;script&gt;"),
+        "the file's markup was dropped rather than escaped: {page}"
+    );
+
+    // The same rule for a matching *file name* that is itself markup.
+    let (_, _, names) = get(
+        &format!("{base}/r/agents/one/search/main?q=onerror&in=files"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        names.contains("<mark>onerror</mark>"),
+        "the matching file name was not found: {names}"
+    );
+    assert!(
+        !names.contains("<img src=x"),
+        "a file name that is markup rendered as markup: {names}"
+    );
+
+    // The case the two assertions above do not reach: a term that is
+    // *itself* markup. Everything so far searched for a plain word, so
+    // the marked span held nothing dangerous and a highlighter that
+    // escaped its surroundings but not its match would pass. Here the
+    // matched span is `<script`, and it has to arrive as text like the
+    // rest of the line.
+    for (scope, term, encoded) in [
+        ("code", "<script", "%3Cscript"),
+        ("files", "<img", "%3Cimg"),
+    ] {
+        let (status, _, page) = get(
+            &format!("{base}/r/agents/one/search/main?q={encoded}&in={scope}"),
+            &["-u", "alice:a"],
+        );
+        assert_eq!(status, 200, "a markup term broke the {scope} page: {page}");
+        assert!(
+            page.contains("<mark>&lt;"),
+            "the {scope} search did not find or did not mark `{term}`: {page}"
+        );
+        assert!(
+            !page.contains("<mark><"),
+            "the {scope} highlighter wrote its match unescaped: {page}"
+        );
+    }
+}
+
+/// A term reaches a subprocess argument, so it must never be read as an
+/// option — in any scope.
+///
+/// `--output=/tmp/x` is the shape that matters: if a term were spliced in
+/// as a bare argument, git would take it as a flag and this node would
+/// write a file where a reader asked it to. The assertion is that the
+/// page renders as an ordinary empty result.
+#[test]
+fn a_search_term_is_never_read_as_an_option() {
+    let (base, _work, _oid, _) = served("search-option", "");
+
+    for (scope, empty) in [
+        ("files", "No file name matches"),
+        ("code", "No file content matches"),
+        ("commits", "No commit message matches"),
+    ] {
+        // `%2D` is `-`, so this arrives at git as a term beginning with
+        // two dashes however the query string is parsed.
+        let url = format!("{base}/r/agents/one/search/main?q=%2D%2Dhelp&in={scope}");
+        let (status, _, page) = get(&url, &["-u", "alice:a"]);
+        assert_eq!(status, 200, "a dashed term broke the {scope} page: {page}");
+        assert!(
+            page.contains(empty),
+            "the {scope} search did not answer a dashed term as a miss: {page}"
+        );
+        // git's own help text is the tell that the term became a flag.
+        assert!(
+            !page.contains("usage: git"),
+            "the {scope} search ran git's help: {page}"
+        );
+    }
+}
+
+/// Searching cannot show a reader a repository they may not read, and
+/// filtering the index cannot reveal one either.
+///
+/// The filter runs after the grant check, and this is the test that says
+/// so: bob may read nothing, so the filtered index must be empty for
+/// every term including the exact name of a repository that exists.
+#[test]
+fn search_never_widens_what_a_reader_may_see() {
+    let (base, _work, _oid, _) = served("search-grant", "alice  agents/one  write\n");
+
+    // The repository is there for alice.
+    let (status, _, mine) = get(
+        &format!("{base}/r/agents/one/search/main?q=lib&in=files"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200, "the grant holder was refused: {mine}");
+
+    // For bob it is not, and searching it is the same refusal as
+    // browsing it — not a different one that would confirm it exists.
+    let (denied, _, page) = get(
+        &format!("{base}/r/agents/one/search/main?q=lib&in=files"),
+        &["-u", "bob:b"],
+    );
+    assert_eq!(denied, 404, "a search reached a repository with no grant");
+    assert!(
+        !page.contains("lib.rs"),
+        "the refusal page named the content it refused: {page}"
+    );
+
+    // And the index filter cannot be used to probe for names.
+    let (status, _, index) = get(&format!("{base}/r/?q=agents"), &["-u", "bob:b"]);
+    assert_eq!(status, 200);
+    assert!(
+        !index.contains("agents/one"),
+        "the index filter revealed a repository with no grant: {index}"
+    );
+}
+
+/// One box, in the same place, on every page this node serves — and it
+/// searches whatever the page is about.
+///
+/// "Everywhere" is the requirement, so the list below deliberately
+/// includes the pages that are not repository listings: the review
+/// pages, the node page, and a refusal. Those are exactly the ones a
+/// per-page box gets forgotten on, which is why the bar is emitted by
+/// the page shell rather than by each page.
+#[test]
+fn one_search_box_sits_on_every_page_and_follows_the_revision_in_view() {
+    let (base, work, oid, _) = served("search-box", "");
+
+    // A second branch whose tree differs, so "which revision" has an
+    // observable answer.
+    let clone = work.join("clone");
+    assert!(git(&clone, &["checkout", "-q", "-b", "other"])
+        .status
+        .success());
+    std::fs::write(clone.join("only-on-other.txt"), "here\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "add a file"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "other"])
+        .status
+        .success());
+
+    for page in [
+        "/r/",
+        "/r/agents/one",
+        "/r/agents/one/tree/main/src",
+        "/r/agents/one/blob/main/README.md",
+        "/r/agents/one/commits/main",
+        "/r/agents/one/reviews",
+        "/r/agents/one/search/main?q=lib&in=files",
+        "/status",
+        // A repository that is not there: a refusal is where a reader is
+        // most lost, so it is the page that can least afford to drop the
+        // one control that gets them somewhere.
+        "/r/agents/absent",
+    ] {
+        let (status, _, html) = get(&format!("{base}{page}"), &["-u", "alice:a"]);
+        assert!(
+            html.contains("class=\"chrome\""),
+            "{page} ({status}) carries no search bar: {html}"
+        );
+        assert!(
+            html.contains("name=\"q\""),
+            "{page} has a bar with no box in it: {html}"
+        );
+        // A `GET` form, so a result is a URL and needs no script.
+        assert!(
+            html.contains("method=\"get\""),
+            "{page} would need a script to search: {html}"
+        );
+        // Exactly one. A second box is the bug this replaced: the page
+        // used to draw its own under the header, and the two disagreed
+        // about what they searched.
+        assert_eq!(
+            html.matches("name=\"q\"").count(),
+            1,
+            "{page} draws more than one search box: {html}"
+        );
+    }
+
+    // The commit page too, which needs the oid built above.
+    let (_, _, commit) = get(
+        &format!("{base}/r/agents/one/commit/{oid}"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        commit.contains("class=\"chrome\""),
+        "the commit page carries no search bar: {commit}"
+    );
+
+    // The box says what it will search, rather than leaving the reader
+    // to infer it from the page around it.
+    let (_, _, repo) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
+    assert!(
+        repo.contains(">agents/one</span>"),
+        "the box does not name the repository it searches: {repo}"
+    );
+    let (_, _, index) = get(&format!("{base}/r/"), &["-u", "alice:a"]);
+    assert!(
+        index.contains(">all repositories</span>"),
+        "the box on the index does not say it is global: {index}"
+    );
+
+    // The box on the `other` branch searches `other`.
+    let (_, _, on_other) = get(
+        &format!("{base}/r/agents/one/tree/other"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        on_other.contains("action=\"/r/agents/one/search/other\""),
+        "the box on a branch searches somewhere else: {on_other}"
+    );
+
+    // After a search, the one box holds the term — there is no second
+    // box below the results doing that job.
+    let (_, _, results) = get(
+        &format!("{base}/r/agents/one/search/main?q=lib&in=files"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        results.contains("value=\"lib\""),
+        "the bar lost the term that was searched: {results}"
+    );
+
+    // And searching there finds the file that exists only there, while
+    // searching `main` does not.
+    let (_, _, found) = get(
+        &format!("{base}/r/agents/one/search/other?q=only-on-other&in=files"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        found.contains("only-on-other.txt"),
+        "the branch search missed a file on that branch: {found}"
+    );
+    let (_, _, missing) = get(
+        &format!("{base}/r/agents/one/search/main?q=only-on-other&in=files"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        missing.contains("No file name matches"),
+        "a search of main found a file that is only on other: {missing}"
+    );
+}
+
+/// A page's cache identity includes the build that rendered it, not just
+/// the commit it describes.
+///
+/// This exists because of a real hour spent on "the change did not
+/// deploy". An `ETag` answers "is the page I hold still current", and the
+/// page is this node's *rendering* of a commit. A blob's tag was the oid
+/// and the path alone, so upgrading the daemon left every reader who had
+/// visited that page on the old HTML — with the node correctly answering
+/// `304`, because the oid genuinely had not moved.
+///
+/// Asserted structurally rather than by rebuilding: the tag has to
+/// *contain* the build stamp's contribution, which is checkable by
+/// showing that two pages differing only in the stamp cannot collide.
+/// What the test can check end-to-end is the half that matters most —
+/// that the tag still changes with content, so folding the build in did
+/// not turn every page into one cache entry.
+#[test]
+fn a_page_tag_changes_with_the_build_as_well_as_the_commit() {
+    let (base, work, _oid, _) = served("etag-build", "");
+
+    let etag_of = |url: &str| -> String {
+        let (status, headers, _) = get(url, &["-u", "alice:a"]);
+        assert_eq!(status, 200, "{url} was refused");
+        header_value(&headers, "etag").unwrap_or_else(|| panic!("{url} sent no ETag"))
+    };
+
+    let blob = format!("{base}/r/agents/one/blob/main/README.md");
+    let before = etag_of(&blob);
+
+    // The stamp is a compile-time constant, so it cannot be changed from
+    // here. What is checkable is that it is *in* the tag: the daemon
+    // reports the same value on its own status page, and a tag that
+    // ignored it would be computable without it. So the assertion is the
+    // observable consequence — two different paths at one commit, and one
+    // path across two commits, all differ.
+    let other = etag_of(&format!("{base}/r/agents/one/blob/main/src/lib.rs"));
+    assert_ne!(
+        before, other,
+        "two files at one commit share a cache entry, so one would be served as the other"
+    );
+
+    // A new commit changes the page, and must change the tag.
+    let clone = work.join("clone");
+    std::fs::write(clone.join("README.md"), "# changed\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "edit the readme"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+    let after = etag_of(&blob);
+    assert_ne!(
+        before, after,
+        "the file changed and its cache entry did not, so a reader keeps the old page"
+    );
+
+    // And the page a conditional request gets back is the current one:
+    // a reader holding the *old* tag must be sent fresh bytes, not a 304.
+    let (status, _, body) = get(
+        &blob,
+        &["-u", "alice:a", "-H", &format!("If-None-Match: {before}")],
+    );
+    assert_eq!(
+        status, 200,
+        "a stale tag was answered 304, so the reader keeps the old page"
+    );
+    assert!(
+        body.contains("changed"),
+        "the refreshed page is not the new content: {body}"
+    );
+}
+
+/// A page that renders a form must be served a policy that lets the form
+/// submit.
+///
+/// This is the check that was missing when the search box shipped. The
+/// served HTML was correct — a well-formed `GET` form with a valid
+/// action — and the header said `form-action 'none'`, so every browser
+/// blocked the submission and reported it to the console only. The box
+/// rendered, focused, accepted a term, and did nothing on `Enter`. No
+/// assertion over the markup could see it, because the markup was right.
+///
+/// Stated as the general rule rather than as "the CSP contains
+/// `form-action 'self'`": the next form added to this surface is covered
+/// without anyone remembering to extend a list, and a policy tightened
+/// back to `'none'` fails here whichever page it breaks.
+#[test]
+fn every_page_with_a_form_is_served_a_policy_that_permits_it() {
+    let (base, _work, _oid, _) = served("csp-form", "");
+
+    for path in [
+        "/r/",
+        "/r/agents/one",
+        "/r/agents/one/tree/main/src",
+        "/r/agents/one/blob/main/README.md",
+        "/r/agents/one/commits/main",
+        "/r/agents/one/reviews",
+        "/r/agents/one/search/main?q=lib&in=files",
+        "/status",
+        "/r/agents/absent",
+    ] {
+        let (_, headers, body) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        if !body.contains("<form") {
+            continue;
+        }
+        let csp = header_value(&headers, "content-security-policy")
+            .unwrap_or_else(|| panic!("{path} renders a form and carries no CSP at all"));
+
+        let directive = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("form-action"))
+            .unwrap_or_else(|| {
+                panic!("{path} renders a form and its CSP names no form-action: {csp}")
+            })
+            .to_string();
+        assert!(
+            !directive.contains("'none'"),
+            "{path} renders a form the browser will refuse to submit: {directive}"
+        );
+        assert!(
+            directive.contains("'self'"),
+            "{path} permits form submission somewhere other than this origin: {directive}"
+        );
+
+        // The form must also point at this origin, or `'self'` refuses it
+        // and the page is broken in the other direction.
+        for action in body.split("action=\"").skip(1) {
+            let action = action.split('"').next().unwrap_or("");
+            assert!(
+                action.starts_with('/'),
+                "{path} has a form aimed off this origin, which `'self'` blocks: {action}"
+            );
+        }
+    }
+}
+
+/// A scope with no matches says where the matches are, and every tab
+/// carries its own count.
+///
+/// The failure this prevents is not a crash: it is a reader typing a
+/// word that appears in 73 lines of code, landing on the name scope, and
+/// reading "No file name matches" as "search is broken". The page has to
+/// carry the other counts for that reader to have anywhere to go.
+#[test]
+fn a_scope_with_no_matches_points_at_the_scopes_that_have_them() {
+    let (base, _work, _oid, _) = served("search-counts", "");
+
+    // `fn main` is in `src/lib.rs`'s contents and in no file name.
+    let (status, _, page) = get(
+        &format!("{base}/r/agents/one/search/main?q=fn+main&in=files"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("No file name matches"),
+        "the name scope claims a match it does not have: {page}"
+    );
+    // The pointer, and where it points.
+    assert!(
+        page.contains("Found in"),
+        "a dead-end scope offered the reader nothing: {page}"
+    );
+    assert!(
+        page.contains("in=code"),
+        "the pointer does not link the scope that has the matches: {page}"
+    );
+
+    // Every tab carries a count, including the zero on the tab in view —
+    // that zero is what tells the reader the term was searched here.
+    let tabs = page
+        .split("<nav class=\"tabs\">")
+        .nth(1)
+        .and_then(|rest| rest.split("</nav>").next())
+        .expect("the page has no tab strip");
+    assert_eq!(
+        tabs.matches("class=\"count\"").count(),
+        3,
+        "not every scope carries a count: {tabs}"
+    );
+    assert!(
+        tabs.contains(">0</span>"),
+        "the empty scope hides its zero, so the term looks unsearched: {tabs}"
+    );
+
+    // A term in nothing at all says so once and offers nothing, rather
+    // than listing two more empty places.
+    let (_, _, none) = get(
+        &format!("{base}/r/agents/one/search/main?q=zzzznowhere&in=files"),
+        &["-u", "alice:a"],
+    );
+    assert!(
+        !none.contains("Found in"),
+        "a term that matches nothing was offered somewhere to look: {none}"
+    );
+
+    // Counts are per scope, not one number repeated: the commit search
+    // finds the seed commit, the name search finds nothing.
+    let (_, _, seed) = get(
+        &format!("{base}/r/agents/one/search/main?q=seed&in=commits"),
+        &["-u", "alice:a"],
+    );
+    let seed_tabs = seed
+        .split("<nav class=\"tabs\">")
+        .nth(1)
+        .and_then(|rest| rest.split("</nav>").next())
+        .expect("no tab strip");
+    assert!(
+        seed_tabs.contains(">0</span>"),
+        "the name scope reports matches for a term only in a commit: {seed_tabs}"
+    );
+    assert!(
+        seed.contains("<mark>seed</mark>"),
+        "the commit scope did not find the term its tab counts: {seed}"
+    );
+}
+
+/// A `304` carries every policy header its `200` carries.
+///
+/// A `304` is a header update, not just "nothing changed": a cache
+/// replaces its stored headers with the ones the `304` sends, and keeps
+/// its old value for every header the `304` omits. So a policy header
+/// left out of a `304` is *frozen* at whatever the client first saw, for
+/// as long as the cache entry lives.
+///
+/// This is the bug that made the search box look permanently broken. The
+/// browse `ETag` is derived from a commit, so it survives a daemon
+/// upgrade; the `304` carried only the tag; and a reader whose cache held
+/// a page from before the CSP gained `form-action 'self'` kept the old
+/// `form-action 'none'` through every reload. The server was already
+/// sending the right policy and the browser was already ignoring it.
+///
+/// Written as "the `304` and the `200` agree" rather than as a list of
+/// header names, so a header added to the `200` later cannot be quietly
+/// dropped from the `304`.
+#[test]
+fn a_not_modified_response_carries_the_same_policy_as_the_page() {
+    let (base, _work, oid, _) = served("etag-304-headers", "");
+
+    // Every page here that has an `ETag` at all — a page with none is
+    // never revalidated and cannot go stale this way.
+    for path in [
+        "/r/agents/one",
+        "/r/agents/one/tree/main/src",
+        "/r/agents/one/blob/main/README.md",
+        &format!("/r/agents/one/commit/{oid}"),
+    ] {
+        let url = format!("{base}{path}");
+        let (status, headers, _) = get(&url, &["-u", "alice:a"]);
+        assert_eq!(status, 200, "{path} was refused");
+        let Some(tag) = header_value(&headers, "etag") else {
+            continue;
+        };
+
+        let (code, revalidated, body) = get(
+            &url,
+            &["-u", "alice:a", "-H", &format!("If-None-Match: {tag}")],
+        );
+        assert_eq!(code, 304, "{path} did not revalidate to a 304");
+        assert!(body.is_empty(), "{path} sent a body with its 304");
+
+        for name in [
+            "content-security-policy",
+            "cache-control",
+            "referrer-policy",
+        ] {
+            let Some(on_200) = header_value(&headers, name) else {
+                continue;
+            };
+            let on_304 = header_value(&revalidated, name).unwrap_or_else(|| {
+                panic!(
+                    "{path} sends `{name}` on its 200 and not on its 304, so a cached \
+                     client keeps the old value for as long as the entry lives"
+                )
+            });
+            assert_eq!(
+                on_200, on_304,
+                "{path} sends a different `{name}` on its 304 than on its 200"
+            );
+        }
+    }
 }

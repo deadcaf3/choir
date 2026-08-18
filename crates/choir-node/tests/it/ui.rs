@@ -97,7 +97,10 @@ fn the_page_is_behind_the_same_auth_wall_as_everything_else() {
 /// state is unchanged — the "never lags" claim, as an assertion.
 #[test]
 fn an_unchanged_node_answers_a_repeat_visit_with_no_body() {
-    let (url, _) = served_node();
+    let (base, _) = served_node();
+    // Node telemetry moved to `/status` when `/` became the repository
+    // index; this module is about that page, not the front door.
+    let url = format!("{base}status");
 
     let (status, headers, _) = get(&url, &["-u", "u:t"]);
     assert_eq!(status, 200);
@@ -113,7 +116,8 @@ fn an_unchanged_node_answers_a_repeat_visit_with_no_body() {
 /// updates but keeps its `ETag` strands every browser holding it.
 #[test]
 fn a_new_op_changes_both_the_page_and_its_etag() {
-    let (url, node_key) = served_node();
+    let (base, node_key) = served_node();
+    let url = format!("{base}status");
 
     let (_, headers, before) = get(&url, &["-u", "u:t"]);
     let tag_before = header_value(&headers, "ETag").expect("etag");
@@ -128,7 +132,7 @@ fn a_new_op_changes_both_the_page_and_its_etag() {
         prev: None,
     });
     let body = submit_body(&node_key, "node/test", &op);
-    let submit = format!("{}api/submit", url);
+    let submit = format!("{base}api/submit");
     let (status, response) = crate::support::curl(&["-u", "u:t", "-d", &body, &submit]);
     assert_eq!(
         status, 200,
@@ -199,7 +203,7 @@ fn a_node_with_no_platform_explains_itself_rather_than_looking_broken() {
     let port = node.port();
     std::thread::spawn(move || node.serve_forever());
 
-    let (status, headers, body) = get(&format!("http://127.0.0.1:{port}/"), &["-u", "u:t"]);
+    let (status, headers, body) = get(&format!("http://127.0.0.1:{port}/status"), &["-u", "u:t"]);
     assert_eq!(status, 503);
     assert_eq!(
         header_value(&headers, "Content-Type").as_deref(),

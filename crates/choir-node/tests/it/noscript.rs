@@ -203,11 +203,13 @@ fn every_page_renders_its_content_with_scripting_disabled() {
     // (path, what a human came to this page to read)
     let pages: Vec<(String, Vec<&str>)> = vec![
         (
-            "/".to_string(),
+            "/status".to_string(),
             // Node state: the sequence, the ref the push created, the
             // section headings, and the health figures.
             vec!["seq", "refs/heads/main", "Refs", "Reviews", "Health"],
         ),
+        // The front door and its older address both reach the index.
+        ("/".to_string(), vec!["agents/one"]),
         ("/r/".to_string(), vec!["agents/one"]),
         (
             "/r/agents/one".to_string(),

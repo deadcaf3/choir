@@ -280,6 +280,11 @@ fn render(json: &str, seq: u64, roster: &Roster) -> String {
     h.push_str(STYLE);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
+    // The same fixed bar the browse pages carry. This page is about the
+    // node rather than a repository, so its box filters the repository
+    // list — which is the only thing a reader on this page could be
+    // looking for that is not already on it.
+    crate::browse::chrome(&mut h, crate::browse::Bar::index());
 
     header(&mut h, &v, seq);
     refs_section(&mut h, &v);
@@ -327,7 +332,7 @@ fn header(h: &mut String, v: &serde_json::Value, seq: u64) {
     // The way out. `/r/` links back here and this did not link there, so
     // a reader who opened the node's front door could see everything it
     // *knows* and never find the code — which is the thing they came for.
-    h.push_str("<span class=\"pill\"><a href=\"/r/\">repositories</a></span>");
+    h.push_str("<span class=\"pill\"><a href=\"/\">repositories</a></span>");
     h.push_str("</div></header><main id=\"main\">");
 }
 
@@ -858,6 +863,11 @@ pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &s
     h.push_str(STYLE);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
+    // Even here. A refusal is where a reader is most lost, and the box
+    // is scoped to the repository list, which is already filtered to
+    // this reader's grants — so it can restate nothing the refusal
+    // itself withheld.
+    crate::browse::chrome(&mut h, crate::browse::Bar::index());
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(headline));
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\">");

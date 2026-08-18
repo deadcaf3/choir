@@ -86,11 +86,91 @@ const MAX_DIFF_LINES: usize = 2_000;
 /// How many commits one history page shows.
 const COMMIT_PAGE: usize = 100;
 
+/// How many search hits one page shows.
+///
+/// A cap rather than paging because a search that returns 200 rows is a
+/// search that needs narrowing, and telling the reader that is more use
+/// than handing them page 4 of 60.
+const SEARCH_HITS: usize = 200;
+
+/// What a search looks through.
+///
+/// Three scopes rather than one box that guesses, because they cost
+/// different amounts and answer different questions: a name search reads
+/// one tree listing, a content search reads every blob in the tree, and a
+/// message search reads history and no tree at all. A reader who wants
+/// one should not pay for the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// File and directory names in the tree at this revision.
+    Files,
+    /// File contents at this revision.
+    Code,
+    /// Commit messages reachable from this revision.
+    Commits,
+}
+
+impl Scope {
+    /// The `in=` value that names this scope in a URL.
+    fn slug(self) -> &'static str {
+        match self {
+            Scope::Files => "files",
+            Scope::Code => "code",
+            Scope::Commits => "commits",
+        }
+    }
+
+    /// What one match in this scope is called, for a sentence that
+    /// counts them. `label` is the tab's plural heading and reads wrong
+    /// after a number: "1 file names".
+    fn singular(self) -> &'static str {
+        match self {
+            Scope::Files => "file name",
+            Scope::Code => "line of code",
+            Scope::Commits => "commit message",
+        }
+    }
+
+    /// The plural of [`Scope::singular`], which is not always the tab's
+    /// label: a tab says "file contents", a sentence says "3 lines of
+    /// code".
+    fn plural_noun(self) -> &'static str {
+        match self {
+            Scope::Files => "file names",
+            Scope::Code => "lines of code",
+            Scope::Commits => "commit messages",
+        }
+    }
+
+    /// What the tab for this scope is labelled.
+    fn label(self) -> &'static str {
+        match self {
+            Scope::Files => "file names",
+            Scope::Code => "file contents",
+            Scope::Commits => "commit messages",
+        }
+    }
+
+    /// Parses an `in=` value. Anything unrecognised is a name search:
+    /// the cheapest scope is the safe answer to a URL we cannot read.
+    fn parse(raw: Option<&str>) -> Scope {
+        match raw {
+            Some("code") => Scope::Code,
+            Some("commits") => Scope::Commits,
+            _ => Scope::Files,
+        }
+    }
+
+    /// Every scope, in the order the tabs present them.
+    const ALL: [Scope; 3] = [Scope::Files, Scope::Code, Scope::Commits];
+}
+
 /// One browse request, after parsing and validation.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Page {
-    /// The repository index: everything the reader may see.
-    Index,
+    /// The repository index: everything the reader may see, narrowed to
+    /// the rows matching `q` when it is not empty.
+    Index { q: String },
     /// A directory listing at `rev`, rooted at `path` (empty for the
     /// repository root).
     Tree {
@@ -113,6 +193,13 @@ pub(crate) enum Page {
     /// One review: what it proposes, who was asked, what they said, and
     /// the diff between the proposal and where it would land.
     Review { repo: String, id: String },
+    /// A search of one repository at `rev`, in one [`Scope`].
+    Search {
+        repo: String,
+        rev: String,
+        q: String,
+        scope: Scope,
+    },
 }
 
 impl Page {
@@ -121,13 +208,14 @@ impl Page {
     /// filtered per reader instead of gated.
     pub(crate) fn repo(&self) -> Option<&str> {
         match self {
-            Page::Index => None,
+            Page::Index { .. } => None,
             Page::Tree { repo, .. }
             | Page::Blob { repo, .. }
             | Page::Commits { repo, .. }
             | Page::Commit { repo, .. }
             | Page::Reviews { repo }
-            | Page::Review { repo, .. } => Some(repo),
+            | Page::Review { repo, .. }
+            | Page::Search { repo, .. } => Some(repo),
         }
     }
 }
@@ -146,10 +234,21 @@ pub(crate) fn route(url: &str) -> Option<Page> {
     if crate::repo_from_path(path).is_some() {
         return None;
     }
+    // The front door. A reader who types the bare host name is looking
+    // for the repositories, not for the node's own telemetry, which now
+    // lives at `/status`. `/r/` keeps working because links to it are
+    // already in the wild.
+    if path.is_empty() || path == "/" || path == "/index.html" {
+        return Some(Page::Index {
+            q: param(url, "q").unwrap_or_default(),
+        });
+    }
     let rest = path.strip_prefix("/r")?;
     let rest = rest.strip_prefix('/').unwrap_or(rest);
     if rest.is_empty() {
-        return Some(Page::Index);
+        return Some(Page::Index {
+            q: param(url, "q").unwrap_or_default(),
+        });
     }
 
     let mut segments = rest.split('/');
@@ -219,8 +318,44 @@ pub(crate) fn route(url: &str) -> Option<Page> {
             repo,
             oid: safe_oid(&rev_or_oid)?,
         }),
+        // The terms live in the query string, not the path: a search is
+        // not a location, and a term containing `/` would otherwise have
+        // to be smuggled through a path segment that refuses it.
+        "search" if path.is_empty() => Some(Page::Search {
+            repo,
+            rev: safe_rev(&rev_or_oid)?,
+            q: param(url, "q").unwrap_or_default(),
+            scope: Scope::parse(param(url, "in").as_deref()),
+        }),
         _ => None,
     }
+}
+
+/// One query-string parameter, percent-decoded, or `None` when absent.
+///
+/// Hand-rolled for the same reason [`decode`] is: the grammar is two
+/// rules. `+` is a space here and *only* here — it is a literal plus in a
+/// path, and conflating the two is how a search for `a+b` becomes a
+/// search for `a b`.
+///
+/// A parameter that decodes to nothing usable is `None` rather than an
+/// error, because a malformed query is a reader who edited a URL, and the
+/// honest answer is the unfiltered page rather than a refusal.
+fn param(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    let query = query.split('#').next().unwrap_or(query);
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name != key {
+            return None;
+        }
+        // `decode` refuses control characters and invalid UTF-8, which is
+        // exactly the rule wanted here: these terms reach a subprocess
+        // argument and a rendered page.
+        let value = decode(&value.replace('+', "%20"))?;
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 /// Percent-decodes one path segment, refusing anything that decodes to a
@@ -378,7 +513,28 @@ fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// The commit oid a page is really about, which is its cache identity.
+///
+/// `HEAD` gets one retry that no other revision gets. `Node::create_repo`
+/// runs `git init --bare`, which points `HEAD` at whatever the *host's*
+/// `init.defaultBranch` says, while a push lands on the branch the client
+/// chose. When those disagree — a host defaulting to `master` and a client
+/// pushing `main` is the common case — `HEAD` is a symref to a branch that
+/// was never created, and `/r/owner/repo`, the front door of a repository
+/// full of commits, renders as empty. So a dangling `HEAD` resolves
+/// through a real branch instead of reporting nothing.
 fn resolve(dir: &Path, rev: &str) -> Result<String, String> {
+    match rev_parse(dir, rev) {
+        Ok(oid) => Ok(oid),
+        Err(why) if rev == "HEAD" => match default_branch(dir) {
+            Some(branch) => rev_parse(dir, &branch),
+            None => Err(why),
+        },
+        Err(why) => Err(why),
+    }
+}
+
+/// One `git rev-parse`, with an empty answer treated as a failure.
+fn rev_parse(dir: &Path, rev: &str) -> Result<String, String> {
     let out = git_text(
         dir,
         &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
@@ -388,6 +544,32 @@ fn resolve(dir: &Path, rev: &str) -> Result<String, String> {
         return Err("no such revision".to_string());
     }
     Ok(oid)
+}
+
+/// The branch a repository opens at when `HEAD` does not resolve.
+///
+/// `main` and `master` are preferred in that order because they are what
+/// a dangling `HEAD` is usually pointing *at*; anything else falls back to
+/// the first branch by name, so a repository with only `trunk` still opens.
+/// `None` means the repository genuinely has no branches, which is the one
+/// case where "empty" is the true answer.
+fn default_branch(dir: &Path) -> Option<String> {
+    let text = git_text(
+        dir,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+    )
+    .ok()?;
+    let names: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    for preferred in ["main", "master"] {
+        if names.contains(&preferred) {
+            return Some(preferred.to_string());
+        }
+    }
+    names.first().map(|name| (*name).to_string())
 }
 
 /// A rendered page: its HTML, and the identity a client revalidates on.
@@ -405,6 +587,32 @@ pub(crate) struct Rendered {
 /// `readable` decides which repositories the index lists; content pages
 /// are gated by the caller before this runs, because a denial has to be
 /// a `404` from the router rather than a rendered apology.
+/// Narrows a page to the one repository this node presents as its site.
+///
+/// A node serving `git.example.com` for one project has no use for an
+/// index: the front door *is* the repository, and a list naming every
+/// other repository the host happens to hold is both noise and a
+/// disclosure. So `/` becomes that repository's tree, and any page about
+/// a different repository is `None` — which the caller answers with the
+/// same refusal a reader without a grant gets, because "this node does
+/// not present that" and "you may not read that" must stay
+/// indistinguishable from outside.
+///
+/// This is presentation only. It narrows no grant and widens none: git
+/// access is the ACL's answer, and a repository hidden from the browser
+/// is still clonable by whoever could clone it before.
+pub(crate) fn scope(page: Page, site: &str) -> Option<Page> {
+    match page.repo() {
+        None => Some(Page::Tree {
+            repo: site.to_string(),
+            rev: "HEAD".into(),
+            path: String::new(),
+        }),
+        Some(repo) if repo == site => Some(page),
+        Some(_) => None,
+    }
+}
+
 pub(crate) fn render(
     root: &Path,
     page: &Page,
@@ -412,6 +620,7 @@ pub(crate) fn render(
     platform: Option<&crate::platform::Platform>,
     user: &str,
     browser_writes: bool,
+    site: Option<&str>,
 ) -> Rendered {
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
@@ -429,15 +638,27 @@ pub(crate) fn render(
         }
     }
     match page {
-        Page::Index => index(root, readable, platform),
-        Page::Tree { repo, rev, path } => tree(&bare(root, repo), repo, rev, path),
-        Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path),
-        Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev),
-        Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid),
-        Page::Reviews { repo } => reviews(repo, platform),
-        Page::Review { repo, id } => {
-            review(&bare(root, repo), repo, id, platform, user, browser_writes)
-        }
+        Page::Index { q } => index(root, readable, platform, q),
+        Page::Search {
+            repo,
+            rev,
+            q,
+            scope,
+        } => search(&bare(root, repo), repo, rev, q, *scope, site),
+        Page::Tree { repo, rev, path } => tree(&bare(root, repo), repo, rev, path, site),
+        Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, site),
+        Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, site),
+        Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, site),
+        Page::Reviews { repo } => reviews(repo, platform, site),
+        Page::Review { repo, id } => review(
+            &bare(root, repo),
+            repo,
+            id,
+            platform,
+            user,
+            browser_writes,
+            site,
+        ),
     }
 }
 
@@ -456,6 +677,7 @@ fn index(
     root: &Path,
     readable: &dyn Fn(&str) -> bool,
     platform: Option<&crate::platform::Platform>,
+    q: &str,
 ) -> Rendered {
     let mut repos: Vec<String> = Vec::new();
     if let Ok(owners) = std::fs::read_dir(root) {
@@ -481,15 +703,35 @@ fn index(
         }
     }
     repos.sort();
+    // The filter runs after the grant check, never before it: a reader
+    // must never be able to learn that a repository exists by searching
+    // for it. `shown` is a subset of what this reader could already list.
+    let needle = q.to_lowercase();
+    let shown: Vec<&String> = repos
+        .iter()
+        .filter(|repo| needle.is_empty() || repo.to_lowercase().contains(&needle))
+        .collect();
 
-    let mut h = shell("repositories");
+    let mut h = shell("repositories", Bar::filtered(q));
     h.push_str("<header class=\"top\"><h1>repositories</h1><div class=\"sub\">");
     h.push_str("<span class=\"pill\">");
     h.push_str(&repos.len().to_string());
     h.push_str(" readable</span>");
-    h.push_str("<span class=\"pill\"><a href=\"/\">node state</a></span>");
-    h.push_str("</div></header><main id=\"main\"><section>");
-    if repos.is_empty() {
+    if !needle.is_empty() {
+        h.push_str("<span class=\"pill\">");
+        h.push_str(&shown.len().to_string());
+        h.push_str(" matching</span>");
+    }
+    h.push_str("<span class=\"pill\"><a href=\"/status\">node state</a></span>");
+    h.push_str("</div>");
+    h.push_str("</header><main id=\"main\"><section>");
+    if !repos.is_empty() && shown.is_empty() {
+        h.push_str("<p class=\"empty\">No repository you can read matches <b>");
+        h.push_str(&esc(q));
+        h.push_str("</b>. <a href=\"/r/\">Clear the filter</a> to see all ");
+        h.push_str(&repos.len().to_string());
+        h.push_str(".</p>");
+    } else if repos.is_empty() {
         // Deliberately not "this node holds N repositories, you may read
         // none": the count is node-wide state, and a reader with no grant
         // is exactly who must not learn it. So the page names both causes
@@ -510,7 +752,7 @@ fn index(
         );
     } else {
         h.push_str("<table><tbody>");
-        for repo in &repos {
+        for repo in &shown {
             h.push_str("<tr><td><a href=\"/r/");
             h.push_str(&esc(repo));
             h.push_str("\">");
@@ -549,8 +791,632 @@ fn index(
     }
 }
 
+/// Percent-encodes a string for use inside a query-string value.
+///
+/// Stricter than [`url_path`] on purpose: everything outside an
+/// unreserved set is encoded, so no term can end a value early or start
+/// a parameter of its own however it is spelled.
+fn url_query(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// One repository, searched.
+///
+/// Every scope runs against a resolved commit oid rather than the ref
+/// name it came from, so the three tabs of one search always describe the
+/// same tree even if a push lands between two clicks.
+fn search(
+    dir: &Path,
+    repo: &str,
+    rev: &str,
+    q: &str,
+    scope: Scope,
+    site: Option<&str>,
+) -> Rendered {
+    let oid = match resolve(dir, rev) {
+        Ok(oid) => oid,
+        Err(why) => return missing(repo, rev, &why),
+    };
+    let named = if rev == "HEAD" {
+        default_branch(dir).unwrap_or_else(|| rev.to_string())
+    } else {
+        rev.to_string()
+    };
+    let rev = named.as_str();
+
+    let mut h = shell(
+        &format!("{repo}: search"),
+        Bar::searched(repo, rev, q, site),
+    );
+    repo_header(&mut h, repo, rev, &oid, "", "search");
+    h.push_str("<section>");
+    // All three scopes run, not just the one asked for, because the tabs
+    // carry counts. Without them a reader who lands on the scope with no
+    // hits sees "no match" and concludes the search is broken — which is
+    // exactly what happened on the first real query typed into this box:
+    // `latency` matched no *file name* and 178 lines of code, and the
+    // page said only the first half.
+    //
+    // It costs two extra git invocations per search. That is the price of
+    // the page never being a dead end, and it is paid on a page a reader
+    // reaches deliberately.
+    let hits = if q.is_empty() {
+        Hits::default()
+    } else {
+        Hits::find(dir, &oid, q)
+    };
+
+    h.push_str("<nav class=\"tabs\">");
+    for one in Scope::ALL {
+        let count = hits.count(one);
+        if one == scope {
+            h.push_str("<b class=\"tab here\">");
+            h.push_str(one.label());
+            tab_count(&mut h, count, q);
+            h.push_str("</b>");
+        } else {
+            h.push_str("<a class=\"tab\" href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/search/");
+            h.push_str(&esc(&url_path(rev)));
+            h.push_str("?q=");
+            h.push_str(&url_query(q));
+            h.push_str("&amp;in=");
+            h.push_str(one.slug());
+            h.push_str("\">");
+            h.push_str(one.label());
+            tab_count(&mut h, count, q);
+            h.push_str("</a>");
+        }
+    }
+    h.push_str("</nav>");
+
+    if q.is_empty() {
+        h.push_str(
+            "<p class=\"lede\">Type a term above. <b>File names</b> matches anywhere in a \
+             path, <b>file contents</b> searches every file in this revision, and <b>commit \
+             messages</b> searches the history reachable from it. All three are literal \
+             substrings, never patterns — a term containing <code>*</code> or <code>.</code> \
+             matches those characters.</p>",
+        );
+        h.push_str("</section>");
+        return Rendered {
+            status: 200,
+            etag: None,
+            html: close(h),
+        };
+    }
+
+    match scope {
+        Scope::Files => search_files(&mut h, repo, rev, q, &hits),
+        Scope::Code => search_code(&mut h, repo, rev, q, &hits),
+        Scope::Commits => search_commits(&mut h, repo, q, &hits),
+    }
+    // The dead end, closed. A scope with nothing in it points at the
+    // scopes that do rather than leaving the reader to guess that the
+    // other tabs are worth a click.
+    if hits.count(scope) == 0 {
+        elsewhere(&mut h, repo, rev, q, scope, &hits);
+    }
+    h.push_str("</section>");
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
+}
+
+/// Every scope's matches for one term, at one revision.
+///
+/// All three are found together so the tabs can carry counts. Owned
+/// rather than borrowed from git's output because the three outputs have
+/// different lifetimes and the page outlives all of them.
+#[derive(Default)]
+struct Hits {
+    /// Matching paths.
+    files: Vec<String>,
+    /// Matching lines, as `(path, line number, line)`.
+    code: Vec<(String, String, String)>,
+    /// Matching commits, as `(oid, author, unix time, subject, body)`.
+    commits: Vec<(String, String, String, String, String)>,
+}
+
+impl Hits {
+    /// Runs all three searches against one resolved commit.
+    fn find(dir: &Path, oid: &str, q: &str) -> Hits {
+        Hits {
+            files: find_files(dir, oid, q),
+            code: find_code(dir, oid, q),
+            commits: find_commits(dir, oid, q),
+        }
+    }
+
+    /// How many matches one scope holds.
+    fn count(&self, scope: Scope) -> usize {
+        match scope {
+            Scope::Files => self.files.len(),
+            Scope::Code => self.code.len(),
+            Scope::Commits => self.commits.len(),
+        }
+    }
+}
+
+/// File-name search: one tree listing, filtered here.
+///
+/// Filtered in this process rather than by `git ls-files --glob` because
+/// a reader typing `config` means a substring, and turning that into a
+/// glob would either miss `src/config.rs` or require them to know to type
+/// `*config*`.
+fn find_files(dir: &Path, oid: &str, q: &str) -> Vec<String> {
+    let Ok(listing) = git_text(dir, &["ls-tree", "-r", "--name-only", oid]) else {
+        return Vec::new();
+    };
+    let needle = q.to_lowercase();
+    listing
+        .lines()
+        .filter(|path| path.to_lowercase().contains(&needle))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Content search, delegated to `git grep` against one tree.
+fn find_code(dir: &Path, oid: &str, q: &str) -> Vec<(String, String, String)> {
+    // `-e` is what makes a term beginning with `-` a term rather than an
+    // option, `-F` makes it a literal rather than a pattern, and `-I`
+    // keeps binary files from being reported as one-line matches.
+    //
+    // `git grep` exits 1 for "no matches", which `git` reports as a
+    // failure. That is a result, not an error, and treating it as empty
+    // output keeps a clean miss from rendering as a broken page.
+    let text = git_text(
+        dir,
+        &[
+            "grep",
+            "--no-color",
+            "-n",
+            "-I",
+            "-i",
+            "-F",
+            "--max-count=10",
+            "-e",
+            q,
+            oid,
+        ],
+    )
+    .unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            // `<oid>:<path>:<line>:<text>` — the oid prefix is ours, so
+            // it is stripped by length rather than by splitting, which a
+            // path containing a colon would break.
+            let rest = line.strip_prefix(oid)?.strip_prefix(':')?;
+            let (path, rest) = rest.split_once(':')?;
+            let (number, body) = rest.split_once(':')?;
+            Some((path.to_string(), number.to_string(), body.to_string()))
+        })
+        .collect()
+}
+
+/// Commit-message search, delegated to `git log --grep`.
+fn find_commits(dir: &Path, oid: &str, q: &str) -> Vec<(String, String, String, String, String)> {
+    // The term is embedded after `--grep=`, so it cannot be read as an
+    // option however it is spelled; `-F` keeps it a literal.
+    let grep = format!("--grep={q}");
+    let limit = format!("--max-count={}", SEARCH_HITS + 1);
+    // NUL-terminated records, because the body is part of the match and
+    // a body spans lines. Splitting the output on newlines would turn
+    // one commit into several malformed rows.
+    let text = git_text(
+        dir,
+        &[
+            "log",
+            "-F",
+            "-i",
+            &grep,
+            &limit,
+            "--format=%H%x09%an%x09%at%x09%s%x09%b%x00",
+            oid,
+        ],
+    )
+    .unwrap_or_default();
+    text.split('\0')
+        .map(str::trim_start)
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let mut f = record.splitn(5, '\t');
+            Some((
+                f.next()?.to_string(),
+                f.next()?.to_string(),
+                f.next()?.to_string(),
+                f.next()?.to_string(),
+                f.next()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// The count beside a tab's label.
+///
+/// Nothing at all before a term is typed: a row of zeros on an empty
+/// search says only that nothing has been searched yet.
+fn tab_count(h: &mut String, count: usize, q: &str) {
+    if q.is_empty() {
+        return;
+    }
+    h.push_str(" <span class=\"count\">");
+    h.push_str(&thousands(count as u64));
+    h.push_str("</span>");
+}
+
+/// Says how many hits are shown when the cap cut the list short.
+fn capped(h: &mut String, more: bool, what: &str) {
+    // `what` is already `"9 files"` — `plural` carries the count, and
+    // writing it again here is how the page said "9 9 files".
+    h.push_str("<p class=\"note\">");
+    h.push_str(what);
+    if more {
+        h.push_str(", and the list stopped there. Narrow the term to see the rest");
+    }
+    h.push_str(".</p>");
+}
+
+/// Nothing matched, said once for every scope.
+fn nothing(h: &mut String, q: &str, what: &str) {
+    h.push_str("<p class=\"empty\">No ");
+    h.push_str(what);
+    h.push_str(" matches <b>");
+    h.push_str(&esc(q));
+    h.push_str("</b> at this revision.</p>");
+}
+
+/// Where the matches are, when they are not here.
+///
+/// The counts are already on the tabs; this is the sentence that makes a
+/// reader look at them. A search that found nothing anywhere says so
+/// once, rather than listing two more places that are also empty.
+fn elsewhere(h: &mut String, repo: &str, rev: &str, q: &str, scope: Scope, hits: &Hits) {
+    let others: Vec<Scope> = Scope::ALL
+        .into_iter()
+        .filter(|one| *one != scope && hits.count(*one) > 0)
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    h.push_str("<p class=\"note\">Found in ");
+    for (n, one) in others.iter().enumerate() {
+        if n > 0 {
+            h.push_str(" and ");
+        }
+        h.push_str("<a href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/search/");
+        h.push_str(&esc(&url_path(rev)));
+        h.push_str("?q=");
+        h.push_str(&url_query(q));
+        h.push_str("&amp;in=");
+        h.push_str(one.slug());
+        h.push_str("\">");
+        h.push_str(&plural(hits.count(*one), one.singular(), one.plural_noun()));
+        h.push_str("</a>");
+    }
+    h.push_str(" instead.</p>");
+}
+
+/// Renders the file-name hits.
+fn search_files(h: &mut String, repo: &str, rev: &str, q: &str, hits: &Hits) {
+    if hits.files.is_empty() {
+        nothing(h, q, "file name");
+        return;
+    }
+    let more = hits.files.len() > SEARCH_HITS;
+    let shown = &hits.files[..hits.files.len().min(SEARCH_HITS)];
+    capped(h, more, &plural(shown.len(), "file", "files"));
+    h.push_str("<table class=\"listing\"><tbody>");
+    for path in shown {
+        h.push_str("<tr><td><a class=\"mono\" href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/blob/");
+        h.push_str(&esc(&url_path(rev)));
+        h.push('/');
+        h.push_str(&esc(&url_path(path)));
+        h.push_str("\">");
+        // The matched span is marked so the eye lands on why the row is
+        // here, which on a path like `src/config/mod.rs` is not obvious.
+        highlight(h, path, q);
+        h.push_str("</a></td></tr>");
+    }
+    h.push_str("</tbody></table>");
+}
+
+/// Renders the content hits.
+fn search_code(h: &mut String, repo: &str, rev: &str, q: &str, hits: &Hits) {
+    if hits.code.is_empty() {
+        nothing(h, q, "file content");
+        return;
+    }
+    let more = hits.code.len() > SEARCH_HITS;
+    let shown = &hits.code[..hits.code.len().min(SEARCH_HITS)];
+    capped(h, more, &plural(shown.len(), "line", "lines"));
+    h.push_str("<table class=\"listing hits\"><tbody>");
+    for (path, number, body) in shown {
+        h.push_str("<tr><td class=\"mono muted\"><a href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/blob/");
+        h.push_str(&esc(&url_path(rev)));
+        h.push('/');
+        h.push_str(&esc(&url_path(path)));
+        h.push_str("\">");
+        h.push_str(&esc(path));
+        h.push_str("</a>:");
+        h.push_str(&esc(number));
+        h.push_str("</td><td><code>");
+        // Long minified lines would otherwise push the table off screen.
+        let body = body.trim_end();
+        let clipped: String = body.chars().take(200).collect();
+        highlight(h, &clipped, q);
+        if clipped.len() < body.len() {
+            h.push('…');
+        }
+        h.push_str("</code></td></tr>");
+    }
+    h.push_str("</tbody></table>");
+}
+
+/// Renders the commit-message hits.
+fn search_commits(h: &mut String, repo: &str, q: &str, hits: &Hits) {
+    if hits.commits.is_empty() {
+        nothing(h, q, "commit message");
+        return;
+    }
+    let more = hits.commits.len() > SEARCH_HITS;
+    let shown = &hits.commits[..hits.commits.len().min(SEARCH_HITS)];
+    capped(h, more, &plural(shown.len(), "commit", "commits"));
+    let now = now_secs();
+    let needle = q.to_lowercase();
+    h.push_str("<table class=\"listing\"><tbody>");
+    for (commit, author, when, subject, body) in shown {
+        h.push_str("<tr><td class=\"subject\"><a href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/commit/");
+        h.push_str(&esc(commit));
+        h.push_str("\">");
+        highlight(h, subject, q);
+        // git matched the whole message, so a row whose subject holds no
+        // mark looks like a false positive until the line that did match
+        // is shown. Without this the list reads as broken on any project
+        // that writes commit bodies.
+        if !subject.to_lowercase().contains(&needle) {
+            if let Some(line) = body
+                .lines()
+                .find(|line| line.to_lowercase().contains(&needle))
+            {
+                h.push_str("<span class=\"why\">");
+                let clipped: String = line.trim().chars().take(160).collect();
+                highlight(h, &clipped, q);
+                h.push_str("</span>");
+            }
+        }
+        h.push_str("</a></td><td class=\"mono muted\">");
+        h.push_str(&esc(&short_oid(commit)));
+        h.push_str("</td><td class=\"muted\">");
+        h.push_str(&esc(author));
+        h.push_str("</td><td class=\"when muted\">");
+        h.push_str(&esc(&ago(now, when.parse().unwrap_or(now))));
+        h.push_str("</td></tr>");
+    }
+    h.push_str("</tbody></table>");
+}
+
+/// Writes `text`, escaped, with every case-insensitive occurrence of
+/// `needle` wrapped in `<mark>`.
+///
+/// The escaping happens per fragment rather than once over the whole
+/// string, because inserting tags into already-escaped text means
+/// computing offsets in the escaped string — and getting that wrong is
+/// how a highlighter becomes an injection. Here nothing unescaped is
+/// ever written.
+fn highlight(h: &mut String, text: &str, needle: &str) {
+    if needle.is_empty() {
+        h.push_str(&esc(text));
+        return;
+    }
+    let hay = text.to_lowercase();
+    let pin = needle.to_lowercase();
+    // Lowercasing can change a string's length (`İ` is one char and two
+    // lowercased), which would make offsets from `hay` wrong for `text`.
+    // When that happens the marks are dropped rather than misplaced.
+    if hay.len() != text.len() {
+        h.push_str(&esc(text));
+        return;
+    }
+    let mut at = 0;
+    while let Some(found) = hay[at..].find(&pin) {
+        let start = at + found;
+        let end = start + pin.len();
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            break;
+        }
+        h.push_str(&esc(&text[at..start]));
+        h.push_str("<mark>");
+        h.push_str(&esc(&text[start..end]));
+        h.push_str("</mark>");
+        at = end;
+    }
+    h.push_str(&esc(&text[at..]));
+}
+
+/// Every branch and every tag, short names, in git's own order.
+///
+/// Two lists rather than one because they answer different questions: a
+/// branch is where work is happening, a tag is a release. Presenting them
+/// in one flat list is how a reader ends up browsing `v0.1.0` believing
+/// it is current.
+fn branches_and_tags(dir: &Path) -> (Vec<String>, Vec<String>) {
+    let read = |pattern: &str| -> Vec<String> {
+        git_text(dir, &["for-each-ref", "--format=%(refname:short)", pattern])
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    (read("refs/heads/"), read("refs/tags/"))
+}
+
+/// The commit a path was last changed by: its subject and its timestamp.
+///
+/// One `git log -1` per listed entry. That is a subprocess per row, which
+/// is the cost of being right about renames and merges without
+/// reimplementing git's history simplification here. A directory listing
+/// is tens of rows, not thousands, and the alternative — one walk with a
+/// commit budget — silently leaves blank cells on exactly the old, stable
+/// files a reader is most likely to be looking for.
+fn last_touch(dir: &Path, oid: &str, path: &str) -> Option<(String, i64)> {
+    // `--diff-merges=first-parent` is what makes a file whose only recent
+    // change arrived through a merge show that merge instead of nothing.
+    // It needs git 2.31; an older git rejects the flag outright, and a
+    // blank column is a worse answer than a slightly less accurate one,
+    // so the plain walk is the fallback rather than the failure.
+    let text = git_text(
+        dir,
+        &[
+            "log",
+            "-1",
+            "--format=%at%x00%s",
+            "--diff-merges=first-parent",
+            oid,
+            "--",
+            path,
+        ],
+    )
+    .or_else(|_| git_text(dir, &["log", "-1", "--format=%at%x00%s", oid, "--", path]))
+    .ok()?;
+    let line = text.lines().next()?;
+    let (at, subject) = line.split_once('\0')?;
+    Some((subject.to_string(), at.trim().parse().ok()?))
+}
+
+/// Seconds since the epoch, or `0` if the clock is before it.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// A timestamp as a reader thinks about it: "yesterday", not an epoch.
+///
+/// Coarse on purpose. The exact instant is on the commit page, and a
+/// listing that says `2 days ago` for everything older than a week is
+/// less readable than one that says `last month`.
+fn ago(now: i64, then: i64) -> String {
+    let seconds = now.saturating_sub(then);
+    if seconds < 0 {
+        // A commit dated in the future is a clock problem somewhere, not
+        // something to render as "in -3 days".
+        return "just now".to_string();
+    }
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    match (minutes, hours, days) {
+        (0..=1, _, _) => "just now".to_string(),
+        (m, 0, _) => format!("{m} minutes ago"),
+        (_, 1, _) => "an hour ago".to_string(),
+        (_, h, 0) => format!("{h} hours ago"),
+        (_, _, 1) => "yesterday".to_string(),
+        (_, _, d) if d < 30 => format!("{d} days ago"),
+        // `1 months ago` and `1 years ago` are what a bare `n / 30`
+        // prints for five weeks and thirteen months, and both read as a
+        // bug in the page rather than an age.
+        (_, _, d) if d < 60 => "last month".to_string(),
+        (_, _, d) if d < 365 => format!("{} months ago", d / 30),
+        (_, _, d) if d < 730 => "last year".to_string(),
+        (_, _, d) => format!("{} years ago", d / 365),
+    }
+}
+
+/// The revision picker: every branch and tag, one click each.
+///
+/// A `<details>` rather than a `<select>` because this surface runs no
+/// script, and a `<select>` without one is a control that changes nothing
+/// when a reader uses it.
+fn ref_picker(h: &mut String, repo: &str, rev: &str, branches: &[String], tags: &[String]) {
+    h.push_str("<details class=\"picker\"><summary>");
+    h.push_str(&esc(rev));
+    h.push_str("</summary>");
+    for (label, names) in [("Branches", branches), ("Tags", tags)] {
+        if names.is_empty() {
+            continue;
+        }
+        h.push_str("<h3>");
+        h.push_str(label);
+        h.push_str("</h3><ul>");
+        for name in names {
+            h.push_str("<li><a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/tree/");
+            h.push_str(&esc(&url_path(name)));
+            h.push_str("\">");
+            h.push_str(&esc(name));
+            h.push_str("</a></li>");
+        }
+        h.push_str("</ul>");
+    }
+    h.push_str("</details>");
+}
+
+/// The repository's README at this revision: its filename and its text.
+///
+/// The name is taken from the listing that was already fetched rather
+/// than probed for, so a repository without one costs no extra `git`
+/// call, and the file that renders is provably one of the files the
+/// reader can see listed above it.
+fn readme_of(dir: &Path, oid: &str, listing: &str) -> Option<(String, String)> {
+    // `ls-tree` prints paths from the repository root, so inside a
+    // directory the candidates are `src/README.md`, not `README.md`. The
+    // match is on the leaf; the path is what `cat-file` needs.
+    let present: Vec<(&str, &str)> = listing
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(_, path)| path))
+        .map(|path| (path.rsplit('/').next().unwrap_or(path), path))
+        .collect();
+    let (_, path) = crate::readme::NAMES.iter().find_map(|candidate| {
+        present
+            .iter()
+            .find(|(leaf, _)| leaf == candidate)
+            .map(|(leaf, path)| (*leaf, *path))
+    })?;
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let spec = format!("{oid}:{path}");
+    let size: u64 = git_text(dir, &["cat-file", "-s", &spec])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    // A README past the blob ceiling is not rendered at all: it is
+    // reachable through the listing like any other file, and a truncated
+    // one would be a document that silently stops mid-sentence.
+    if size > MAX_BLOB_BYTES {
+        return None;
+    }
+    let body = git_text(dir, &["cat-file", "blob", &spec]).ok()?;
+    Some((name.to_string(), body))
+}
+
 /// A directory listing.
-fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
+fn tree(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
         // A repository that exists but resolves nothing is empty, not
@@ -560,6 +1426,17 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
         Err(_) if dir.is_dir() && rev == "HEAD" => return empty(repo),
         Err(why) => return missing(repo, rev, &why),
     };
+    // `HEAD` is how the front door is *addressed*, not what a reader
+    // wants to be told they are looking at, and it is not a link anyone
+    // can usefully share. Every link this page emits therefore names the
+    // branch, so a reader who copies one gets a URL that keeps meaning
+    // the same thing.
+    let named = if rev == "HEAD" {
+        default_branch(dir).unwrap_or_else(|| rev.to_string())
+    } else {
+        rev.to_string()
+    };
+    let rev = named.as_str();
     // The trailing slash is what makes `ls-tree` list a directory's
     // children rather than the directory entry itself.
     let spec = if path.is_empty() {
@@ -597,11 +1474,40 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
     // every file browser has used for thirty years.
     rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
-    let mut h = shell(&format!(
-        "{repo}: {}",
-        if path.is_empty() { "/" } else { path }
-    ));
+    let mut h = shell(
+        &format!("{repo}: {}", if path.is_empty() { "/" } else { path }),
+        Bar::repo(repo, rev, site),
+    );
     repo_header(&mut h, repo, rev, &oid, path, "tree");
+    // The bar a reader uses to orient: which revision they are on, how
+    // much history is under it, and what else they could switch to. Only
+    // at the repository root — inside a directory it is the breadcrumb
+    // that answers "where am I", and repeating the picker there just
+    // pushes the listing further down the page.
+    if path.is_empty() {
+        let (branches, tags) = branches_and_tags(dir);
+        let commits = git_text(dir, &["rev-list", "--count", &oid])
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok());
+        h.push_str("<div class=\"repobar\">");
+        ref_picker(&mut h, repo, rev, &branches, &tags);
+        h.push_str("<span class=\"counts\">");
+        if let Some(count) = commits {
+            h.push_str("<a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/commits/");
+            h.push_str(&esc(rev));
+            h.push_str("\">");
+            h.push_str(&thousands(count));
+            h.push_str(if count == 1 { " commit" } else { " commits" });
+            h.push_str("</a>");
+        }
+        h.push_str("<span class=\"muted\">");
+        h.push_str(&plural(branches.len(), "branch", "branches"));
+        h.push_str("</span><span class=\"muted\">");
+        h.push_str(&plural(tags.len(), "tag", "tags"));
+        h.push_str("</span></span></div>");
+    }
     h.push_str("<section>");
     if rows.is_empty() {
         // Reached two ways that need different fixes: a path that names
@@ -630,8 +1536,10 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
             );
         }
     } else {
-        h.push_str("<table><tbody>");
+        let now = now_secs();
+        h.push_str("<table class=\"listing\"><tbody>");
         for (is_dir, name, size) in rows {
+            let touched = last_touch(dir, &oid, &name);
             // `ls-tree` prints the full path from the root; the link
             // needs that, the listing wants only the last segment.
             let leaf = name.rsplit('/').next().unwrap_or(&name);
@@ -652,22 +1560,53 @@ fn tree(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
                 h.push_str("<span class=\"muted\">/</span>");
             }
             h.push_str(&esc(leaf));
-            h.push_str("</a></td><td class=\"num muted\">");
+            h.push_str("</a></td>");
+            // Subject and age, the two columns that turn a file list into
+            // a description of what is happening in the repository. A
+            // path git cannot date is left blank rather than filled with
+            // a guess.
+            h.push_str("<td class=\"subject muted\">");
+            if let Some((subject, _)) = touched.as_ref() {
+                h.push_str(&esc(subject));
+            }
+            h.push_str("</td><td class=\"when muted\">");
+            if let Some((_, at)) = touched.as_ref() {
+                h.push_str(&esc(&ago(now, *at)));
+            }
+            h.push_str("</td><td class=\"num muted\">");
             h.push_str(&esc(&size));
             h.push_str("</td></tr>");
         }
         h.push_str("</tbody></table>");
     }
     h.push_str("</section>");
+    // The README, under the listing, the way every code host has put it
+    // since the convention started. At every level, not just the root: a
+    // README beside a directory's files is documentation for exactly the
+    // files a reader is looking at, and making them click it is making
+    // them click the one file that was written to save them the trip.
+    {
+        if let Some((name, body)) = readme_of(dir, &oid, &listing) {
+            h.push_str("<section class=\"readme\"><h2>");
+            h.push_str(&esc(&name));
+            h.push_str("</h2>");
+            h.push_str(&crate::readme::render(&body));
+            h.push_str("</section>");
+        }
+    }
     Rendered {
         status: 200,
-        etag: Some(tag(&oid, path)),
+        // The listing now renders ages, which move while the commit does
+        // not. Folding the current hour into the validator keeps a
+        // cached page from insisting it is still "2 hours ago" tomorrow,
+        // at the cost of one revalidation an hour.
+        etag: Some(tag(&oid, &format!("{path}@{}", now_secs() / 3600))),
         html: close(h),
     }
 }
 
 /// One file.
-fn blob(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
+fn blob(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
         Err(why) => return missing(repo, rev, &why),
@@ -678,7 +1617,7 @@ fn blob(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
         Err(why) => return missing(repo, rev, &why),
     };
 
-    let mut h = shell(&format!("{repo}: {path}"));
+    let mut h = shell(&format!("{repo}: {path}"), Bar::repo(repo, rev, site));
     repo_header(&mut h, repo, rev, &oid, path, "blob");
     h.push_str("<section>");
     if size > MAX_BLOB_BYTES {
@@ -736,7 +1675,7 @@ fn blob(dir: &Path, repo: &str, rev: &str, path: &str) -> Rendered {
 }
 
 /// Recent history.
-fn commits(dir: &Path, repo: &str, rev: &str) -> Rendered {
+fn commits(dir: &Path, repo: &str, rev: &str, site: Option<&str>) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
         Err(why) => return missing(repo, rev, &why),
@@ -762,7 +1701,7 @@ fn commits(dir: &Path, repo: &str, rev: &str) -> Rendered {
     let rows: Vec<&str> = log.lines().collect();
     let truncated = rows.len() > COMMIT_PAGE;
 
-    let mut h = shell(&format!("{repo}: commits"));
+    let mut h = shell(&format!("{repo}: commits"), Bar::repo(repo, rev, site));
     repo_header(&mut h, repo, rev, &oid, "", "commits");
     h.push_str("<section><table><thead><tr><th>commit</th><th>subject</th>");
     h.push_str("<th>author</th><th>when</th></tr></thead><tbody>");
@@ -804,7 +1743,7 @@ fn commits(dir: &Path, repo: &str, rev: &str) -> Rendered {
 }
 
 /// One commit, with its diff.
-fn commit(dir: &Path, repo: &str, oid: &str) -> Rendered {
+fn commit(dir: &Path, repo: &str, oid: &str, site: Option<&str>) -> Rendered {
     let format = "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b";
     let header = match git_text(dir, &["show", "--no-patch", format, oid]) {
         Ok(text) => text,
@@ -816,7 +1755,10 @@ fn commit(dir: &Path, repo: &str, oid: &str) -> Rendered {
     let when = fields.next().unwrap_or("").to_string();
     let subject = fields.next().unwrap_or("").to_string();
 
-    let mut h = shell(&format!("{repo}: {}", &id[..id.len().min(12)]));
+    let mut h = shell(
+        &format!("{repo}: {}", &id[..id.len().min(12)]),
+        Bar::repo(repo, oid, site),
+    );
     repo_header(&mut h, repo, &id, &id, "", "commit");
     h.push_str("<section><h2>");
     h.push_str(&esc(&subject));
@@ -1077,7 +2019,11 @@ fn patch(h: &mut String, output: &str, where_else: &str) {
 }
 
 /// Every review proposing to land on this repository.
-fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered {
+fn reviews(
+    repo: &str,
+    platform: Option<&crate::platform::Platform>,
+    site: Option<&str>,
+) -> Rendered {
     let Some(platform) = platform else {
         return unavailable(repo);
     };
@@ -1088,7 +2034,7 @@ fn reviews(repo: &str, platform: Option<&crate::platform::Platform>) -> Rendered
     // cache identity to fold the store generation into.
     let (_, roster) = platform.roster();
 
-    let mut h = shell(&format!("{repo}: reviews"));
+    let mut h = shell(&format!("{repo}: reviews"), Bar::repo(repo, "HEAD", site));
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
@@ -1174,6 +2120,7 @@ fn review(
     platform: Option<&crate::platform::Platform>,
     user: &str,
     browser_writes: bool,
+    site: Option<&str>,
 ) -> Rendered {
     let Some(platform) = platform else {
         return unavailable(repo);
@@ -1187,7 +2134,10 @@ fn review(
     // said what, so it resolves them the same way the D28 page does.
     let (_, roster) = platform.roster();
 
-    let mut h = shell(&format!("{repo}: review {id}"));
+    let mut h = shell(
+        &format!("{repo}: review {id}"),
+        Bar::repo(repo, "HEAD", site),
+    );
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
@@ -1583,7 +2533,10 @@ pub(crate) fn no_such_repository() -> Rendered {
                        can read, and following a link from it always works. If what you \
                        wanted is missing, ask the operator for a read grant by name.",
             },
-            &[("/r/", "repositories you can read"), ("/", "node state")],
+            &[
+                ("/", "repositories you can read"),
+                ("/status", "node state"),
+            ],
         ),
     }
 }
@@ -1594,7 +2547,9 @@ pub(crate) fn no_such_repository() -> Rendered {
 /// asked for, and the only thing missing is a push. Saying so beats
 /// reporting git's "Needed a single revision", which reads like a fault.
 fn empty(repo: &str) -> Rendered {
-    let mut h = shell(&format!("{repo}: empty"));
+    // A repository with no commits has nothing to search, so the box
+    // falls back to the list rather than offering an empty tree.
+    let mut h = shell(&format!("{repo}: empty"), Bar::index());
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(repo));
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\">empty</span>");
@@ -1683,7 +2638,7 @@ fn no_such_review(repo: &str, id: &str) -> Rendered {
 
 /// Document head and opening tags, shared with the D28 page so the two
 /// surfaces cannot drift into looking like different products.
-fn shell(title: &str) -> String {
+fn shell(title: &str, bar: Bar<'_>) -> String {
     let mut h = String::with_capacity(8 * 1024);
     h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
@@ -1693,7 +2648,130 @@ fn shell(title: &str) -> String {
     h.push_str(crate::ui::STYLE);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
+    chrome(&mut h, bar);
     h
+}
+
+/// What the one fixed search box searches, on the page it is drawn on.
+///
+/// Carried into [`shell`] rather than drawn per page, because "the same
+/// box in the same place on every page" is the whole property: a box
+/// that four pages remember to render is a box the fifth page forgets.
+#[derive(Clone, Copy)]
+pub(crate) struct Bar<'a> {
+    /// The repository the box searches and the revision it searches at,
+    /// or `None` on a page that is not about one repository — where it
+    /// filters the repository list instead.
+    pub(crate) scope: Option<(&'a str, &'a str)>,
+    /// The term already searched, so the one box shows it rather than a
+    /// second box below the results doing that job. Empty everywhere
+    /// except the results pages themselves.
+    pub(crate) q: &'a str,
+    /// Whether this node presents a single repository as its whole site.
+    /// Such a node has no repository list, so the box never offers to
+    /// search one and the brand goes to the repository instead.
+    pub(crate) site: bool,
+}
+
+impl<'a> Bar<'a> {
+    /// The bar for a page about no particular repository.
+    pub(crate) fn index() -> Bar<'a> {
+        Bar {
+            scope: None,
+            q: "",
+            site: false,
+        }
+    }
+
+    /// The bar on the repository index, showing the filter in force.
+    fn filtered(q: &'a str) -> Bar<'a> {
+        Bar {
+            scope: None,
+            q,
+            site: false,
+        }
+    }
+
+    /// The bar on a repository search, showing the term in force.
+    fn searched(repo: &'a str, rev: &'a str, q: &'a str, site: Option<&str>) -> Bar<'a> {
+        Bar {
+            scope: Some((repo, rev)),
+            q,
+            site: site.is_some(),
+        }
+    }
+
+    /// The bar for a page about one repository at one revision.
+    fn repo(repo: &'a str, rev: &'a str, site: Option<&str>) -> Bar<'a> {
+        Bar {
+            scope: Some((repo, rev)),
+            q: "",
+            site: site.is_some(),
+        }
+    }
+}
+
+/// The fixed bar every page carries: where you are, and one box.
+///
+/// It is `position:sticky` rather than a per-page block because the
+/// request was for a box that is always in the same place — which is a
+/// claim about the *viewport*, not about the document. Everything in it
+/// is a link or a form control, so it costs no script.
+pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
+    h.push_str("<div class=\"chrome\"><div class=\"chrome-in\">");
+
+    // Home. On a single-repository node that is the repository itself,
+    // because there is no list to go back to.
+    h.push_str("<a class=\"brand\" href=\"");
+    h.push_str(if bar.site { "/" } else { "/r/" });
+    h.push_str("\">");
+    match (bar.site, bar.scope) {
+        (true, Some((repo, _))) => h.push_str(&esc(repo)),
+        _ => h.push_str("choir"),
+    }
+    h.push_str("</a>");
+
+    // The box, scoped to whatever this page is about. The scope is shown
+    // *inside* the box rather than implied by the page around it: a
+    // reader typing into a box that is sometimes global and sometimes
+    // not has to be told which one this is, every time.
+    let (action, scope_label, placeholder) = match bar.scope {
+        Some((repo, rev)) => (
+            format!("/r/{repo}/search/{}", url_path(rev)),
+            repo.to_string(),
+            "files, code and commits",
+        ),
+        None => ("/r/".to_string(), "all repositories".into(), "repositories"),
+    };
+    h.push_str("<form class=\"omni\" method=\"get\" action=\"");
+    h.push_str(&esc(&action));
+    h.push_str("\" role=\"search\"><span class=\"scope\">");
+    h.push_str(&esc(&scope_label));
+    h.push_str(
+        "</span><input type=\"search\" name=\"q\" autocomplete=\"off\" \
+                 aria-label=\"Search ",
+    );
+    h.push_str(&esc(&scope_label));
+    h.push_str("\" placeholder=\"Search ");
+    h.push_str(placeholder);
+    h.push_str("\" value=\"");
+    h.push_str(&esc(bar.q));
+    h.push_str("\">");
+    // The tree search needs a scope; the repository filter does not, and
+    // a stray `in=` on that URL would be noise a reader has to read.
+    if bar.scope.is_some() {
+        h.push_str("<input type=\"hidden\" name=\"in\" value=\"files\">");
+    }
+    h.push_str("</form>");
+
+    // The way out of a repository, which is the one navigation a reader
+    // cannot perform from the page body once they are deep in a tree.
+    h.push_str("<nav class=\"chrome-nav\">");
+    if bar.scope.is_some() && !bar.site {
+        h.push_str("<a href=\"/r/\">repositories</a>");
+    }
+    h.push_str("<a href=\"/status\">node</a>");
+    h.push_str("</nav></div></div>");
 }
 
 /// Repository name, revision, and the breadcrumb back up the tree.
@@ -1718,7 +2796,8 @@ fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, her
     h.push_str("<span class=\"pill\"><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("/reviews\">reviews</a></span>");
-    h.push_str("<span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
+    // No "all repositories" pill: the fixed bar carries that link on
+    // every page, and two links to one list in one header is noise.
     // The path a reader clones, which nothing on this surface showed. It
     // is also the other half of the node's two names for one repository:
     // this page is `/r/<repo>` and the clone is `/<repo>.git`, and a
@@ -1784,8 +2863,36 @@ fn close(mut h: String) -> String {
 /// Weak, and scoped by what the page is about as well as the commit, so
 /// two pages of the same tree never share a tag.
 fn tag(oid: &str, what: &str) -> String {
+    tag_for(crate::BUILD_COMMIT, oid, what)
+}
+
+/// The same, with the build stamp passed in.
+///
+/// Split out only so a test can vary the stamp. It cannot be varied any
+/// other way — [`crate::BUILD_COMMIT`] is a compile-time constant, so an
+/// end-to-end test would need two builds of this binary to observe the
+/// property, and would silently pass on one.
+fn tag_for(build: &str, oid: &str, what: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in what.as_bytes() {
+    // The build is part of the cache identity, not just the content. An
+    // `ETag` answers "is the page I hold still current", and the page is
+    // this node's *rendering* of the commit — so a node that renders it
+    // differently is serving a different page even though the oid has not
+    // moved. Without this, upgrading the daemon leaves every reader who
+    // has already visited a blob page on the old HTML for as long as
+    // their cache keeps it, because a blob's tag is otherwise the oid and
+    // path alone and both are still correct. Not hypothetical: it is how
+    // a UI change ships to nobody and reads as the change never landing.
+    //
+    // The separator matters. Without it the stamp and the path are one
+    // byte string, so build `ab` + path `c` and build `a` + path `bc`
+    // hash alike — and a rebuild could land on a colliding tag.
+    for byte in build
+        .as_bytes()
+        .iter()
+        .chain(b"\x1f")
+        .chain(what.as_bytes())
+    {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -1806,6 +2913,24 @@ fn human(bytes: &str) -> String {
     format!("{:.1} MiB", n as f64 / (1024.0 * 1024.0))
 }
 
+/// A count with thousands separators, so `1298` reads as `1,298`.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `1 branch`, `8 branches` — the count and the right noun for it.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1819,6 +2944,42 @@ mod tests {
     /// that used to reach it is now refused earlier — so this is the only
     /// place the scrub can still be made to fail, and every future caller
     /// inherits it.
+    /// Two builds rendering one commit must not share a cache entry.
+    ///
+    /// The end-to-end test beside this one cannot see this: the stamp is
+    /// a compile-time constant, so observing it vary would take two
+    /// builds of this binary. A mutation removing the stamp from the tag
+    /// entirely passed that test and fails this one.
+    #[test]
+    fn the_build_is_part_of_a_page_tag() {
+        let (oid, path) = ("deadbeef", "src/lib.rs");
+        assert_ne!(
+            tag_for("build-one", oid, path),
+            tag_for("build-two", oid, path),
+            "two builds of this node share a cache entry for one file, so a reader \
+             who visited before an upgrade keeps the old page until their cache expires"
+        );
+        // Content still has to move the tag, or the line above could be
+        // satisfied by a tag that is the build stamp and nothing else.
+        assert_ne!(
+            tag_for("build-one", oid, "src/lib.rs"),
+            tag_for("build-one", oid, "src/main.rs"),
+            "two files share a cache entry"
+        );
+        assert_ne!(
+            tag_for("build-one", "aaa", path),
+            tag_for("build-one", "bbb", path),
+            "two commits share a cache entry"
+        );
+        // The separator, stated as the collision it prevents: without
+        // one, `ab` + `c` and `a` + `bc` are the same byte string.
+        assert_ne!(
+            tag_for("ab", oid, "c"),
+            tag_for("a", oid, "bc"),
+            "the stamp and the path run together, so a rebuild can collide"
+        );
+    }
+
     #[test]
     fn a_git_failure_never_quotes_the_directory_it_was_handed() {
         let dir = std::env::temp_dir().join("choir-browse-absent-on-purpose/nowhere.git");
@@ -1862,8 +3023,8 @@ mod tests {
 
     #[test]
     fn the_documented_shapes_parse() {
-        assert_eq!(route("/r"), Some(Page::Index));
-        assert_eq!(route("/r/"), Some(Page::Index));
+        assert_eq!(route("/r"), Some(Page::Index { q: String::new() }));
+        assert_eq!(route("/r/"), Some(Page::Index { q: String::new() }));
         assert_eq!(
             route("/r/o/p/tree/main/src/lib"),
             Some(Page::Tree {

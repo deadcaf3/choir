@@ -495,7 +495,7 @@ fn the_view_and_the_page_show_only_the_repositories_a_reader_holds() {
 
     // The page is rendered from the same filtered payload, so the name
     // must not survive in the HTML either.
-    let (status, _, page) = page_get(&format!("{base}/"), &["-u", "alice:a"]);
+    let (status, _, page) = page_get(&format!("{base}/status"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "the page was refused");
     assert!(
         page.contains("agents/one"),
@@ -520,7 +520,7 @@ fn the_view_and_the_page_show_only_the_repositories_a_reader_holds() {
         !refs.keys().any(|k| k.starts_with("agents/one.git:")),
         "the removed grant still served its repository: {refs:?}"
     );
-    let (_, _, page) = page_get(&format!("{base}/"), &["-u", "alice:a"]);
+    let (_, _, page) = page_get(&format!("{base}/status"), &["-u", "alice:a"]);
     assert!(
         page.contains("agents/two") && !page.contains("agents/one"),
         "the cached page outlived the grant that built it"
@@ -540,7 +540,7 @@ fn a_conditional_request_is_answered_per_reader() {
     seed(&work, &base, "alice:a", "agents/one.git");
 
     let tag_of = |creds: &str| -> String {
-        let (status, headers, _) = page_get(&format!("{base}/"), &["-u", creds]);
+        let (status, headers, _) = page_get(&format!("{base}/status"), &["-u", creds]);
         assert_eq!(status, 200, "the page was refused for {creds}");
         headers
             .lines()
@@ -562,14 +562,14 @@ fn a_conditional_request_is_answered_per_reader() {
 
     // The reader's own tag still short-circuits.
     let (status, _, _) = page_get(
-        &format!("{base}/"),
+        &format!("{base}/status"),
         &["-u", "alice:a", "-H", &format!("If-None-Match: {alice}")],
     );
     assert_eq!(status, 304, "a reader's own ETag did not produce a 304");
 
     // Somebody else's tag must not.
     let (status, _, _) = page_get(
-        &format!("{base}/"),
+        &format!("{base}/status"),
         &["-u", "alice:a", "-H", &format!("If-None-Match: {carol}")],
     );
     assert_eq!(status, 200, "another reader's ETag produced a 304");

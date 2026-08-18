@@ -13,7 +13,7 @@
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--quota-push-bytes n] [--quota-workspaces n]
 //! [--api-body-limit bytes] [--batch-limit operations] [--ready-min-free-bytes bytes]
-//! [--read-only-browser]
+//! [--read-only-browser] [--site-repo owner/name]
 //! [--bind addr] [--ssh-handoff path]
 //! [--accounts-file path [--ssh-authorized-keys path [--ssh-shim path]]]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
@@ -220,6 +220,7 @@ fn main() -> std::io::Result<()> {
         "--api-body-limit",
         "--batch-limit",
         "--ready-min-free-bytes",
+        "--site-repo",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -366,6 +367,14 @@ fn main() -> std::io::Result<()> {
     if rest.iter().any(|arg| arg == "--read-only-browser") {
         node.disable_browser_writes();
         eprintln!("browser: read-only; mutations require the signed CLI");
+    }
+    // One repository as the whole browser surface, for a node serving a
+    // project's own domain. Validated against the same grammar a repo
+    // path takes, because an unchecked value here would be a name the
+    // router looks up on disk.
+    if let Some(site) = flag_value("--site-repo") {
+        node.serve_single_repository(site)?;
+        eprintln!("site: this node presents {site} and no repository index");
     }
     // One writer per state dir, process-enforced: a second daemon on the
     // same root would append to the same ops.jsonl and fork the chain.

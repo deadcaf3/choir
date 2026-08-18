@@ -501,3 +501,153 @@ pre.diff .del mark{background:var(--danger-line)}
    above carries. */
 td details{margin:var(--sp-0)}
 td summary{padding:var(--sp-0);display:inline-block}
+/* The bar above a repository's file list: which revision is shown, and
+   how much is under it. `flex-wrap` rather than a grid because the
+   counts are the part that should drop to a second line on a narrow
+   screen, and a grid would drop the picker with them. */
+.repobar{display:flex;align-items:baseline;flex-wrap:wrap;
+  gap:var(--sp-3);margin:var(--sp-4) var(--sp-0) var(--sp-3)}
+.repobar .counts{display:flex;flex-wrap:wrap;gap:var(--sp-4);
+  font-size:var(--fs-300);color:var(--faint)}
+/* The revision picker. A `<details>`, because this surface runs no
+   script and a `<select>` without script is a control that changes
+   nothing when a reader uses it. The open panel is positioned static,
+   not absolute: an overlay that cannot be dismissed by a click handler
+   is a trap on a page with no handlers. */
+.picker{margin:var(--sp-0)}
+.picker>summary{display:inline-block;cursor:pointer;
+  padding:var(--sp-1) var(--sp-3);border:var(--border);
+  border-radius:var(--r-sm);background:var(--raise);
+  font-family:var(--font-mono);font-size:var(--fs-300);color:var(--strong)}
+.picker>summary:hover{border-color:var(--line-strong)}
+.picker h3{font-size:var(--fs-100);letter-spacing:var(--tr-caps);
+  text-transform:uppercase;color:var(--faint);
+  margin:var(--sp-3) var(--sp-0) var(--sp-1)}
+.picker ul{list-style:none;padding:var(--sp-0);margin:var(--sp-0);
+  display:flex;flex-wrap:wrap;gap:var(--sp-1) var(--sp-3)}
+.picker li a{font-family:var(--font-mono);font-size:var(--fs-300)}
+/* The file listing's two new columns. The subject is the flexible one:
+   it truncates, and everything else keeps its natural width so the
+   rhythm of the rows survives a very long commit message. */
+table.listing{table-layout:auto;width:100%}
+table.listing td.subject{max-width:0;width:100%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-300)}
+table.listing td.when{white-space:nowrap;font-size:var(--fs-300)}
+/* `3.2 KiB` is one token to a reader and two words to a line-breaker.
+   Without this the size column wraps mid-value and every row it happens
+   on becomes two rows tall. */
+table.listing td.num{white-space:nowrap}
+/* The README, under the file listing. It is the one block on this
+   surface holding prose the node did not author, so it is bounded like
+   a document: a reading measure, and headings that step down from the
+   page's own rather than competing with them. */
+section.readme{border:var(--border);border-radius:var(--r-md);
+  background:var(--card);padding:var(--sp-6);margin-top:var(--sp-6)}
+section.readme>h2{font-size:var(--fs-300);letter-spacing:var(--tr-caps);
+  text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
+  margin:var(--sp-0) var(--sp-0) var(--sp-5);
+  padding-bottom:var(--sp-3);border-bottom:var(--border-hair)}
+section.readme h1{font-size:var(--fs-800)}
+section.readme h2:not(:first-child){font-size:var(--fs-700);
+  text-transform:none;letter-spacing:var(--tr-heading);color:var(--strong);
+  font-weight:var(--fw-bold);border-bottom:0}
+section.readme h3{font-size:var(--fs-500)}
+section.readme p,section.readme li{max-width:var(--measure);
+  line-height:var(--lh-copy)}
+section.readme pre{background:var(--sunken);padding:var(--sp-4);
+  border-radius:var(--r-sm);overflow-x:auto}
+section.readme table{display:block;overflow-x:auto}
+/* Scope tabs. Links rather than a control, styled as a row of them, with
+   the current one flat and unclickable so its state reads without
+   colour alone carrying it. */
+nav.tabs{display:flex;flex-wrap:wrap;gap:var(--sp-2);
+  margin:var(--sp-5) var(--sp-0) var(--sp-5);
+  border-bottom:var(--border-hair);padding-bottom:var(--sp-2)}
+.tab{font-size:var(--fs-300);padding:var(--sp-2) var(--sp-3);
+  border-radius:var(--r-sm);text-decoration:none;color:var(--muted)}
+a.tab:hover{color:var(--accent-ink);background:var(--accent-tint)}
+b.tab.here{color:var(--strong);background:var(--raise);
+  border:var(--border);font-weight:var(--fw-medium)}
+/* The matched span inside a result. The browser default is a yellow
+   wash that ignores both themes, so it is repainted from the palette. */
+mark{background:var(--accent-tint);color:var(--accent-ink);
+  border-radius:var(--r-sm);padding:0 var(--sp-1)}
+/* A content hit is a location and a line. The location column takes only
+   the width it needs; the code takes the rest and is clipped, not
+   scrolled — `overflow-x:auto` here gave every row its own scrollbar and
+   parked long lines at their right-hand end, which is how a hit whose
+   match is at column 4 rendered as a row of unrelated code. */
+table.hits{width:100%}
+/* `width:1%` with `nowrap` is the shrink-to-content idiom: the column
+   asks for almost nothing and `nowrap` makes the browser give it exactly
+   what the path needs. The code cell then takes the rest, and `max-width:0`
+   is what lets `text-overflow` see a box to overflow. */
+table.hits td:first-child{white-space:nowrap;font-size:var(--fs-200);
+  vertical-align:baseline;width:1%}
+table.hits td:last-child{width:99%;max-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+table.hits code{font-size:var(--fs-300)}
+/* Why a commit is in a search result when its subject does not say so:
+   the matching line from the message body, under the subject and quieter
+   than it. It inherits the subject cell's single-line ellipsis, which is
+   what keeps a long body line from widening the table. */
+.subject .why{display:block;color:var(--muted);font-size:var(--fs-200);
+  margin-top:var(--sp-1)}
+
+/* ------------------------------------------------------------------
+   THE FIXED BAR
+   One box, same place, every page. `sticky` rather than `fixed` so it
+   participates in layout and needs no compensating offset on `body`;
+   full-bleed via negative margins that cancel the body padding, so the
+   rule under it runs edge to edge the way a chrome element should.
+   ------------------------------------------------------------------ */
+.chrome{position:sticky;top:var(--sp-0);z-index:var(--z-header);
+  background:var(--surface);border-bottom:var(--border);
+  margin:calc(-1 * var(--sp-10)) calc(-1 * var(--sp-6)) var(--sp-8);
+  padding:var(--sp-3) var(--sp-6)}
+/* The inner rail shares the page's own max width so the box lines up
+   with the content under it rather than floating over its own grid. */
+/* Wraps rather than breaking at a width. There is no media query here
+   on purpose: this sheet authors no raw lengths, and a breakpoint is a
+   raw length by definition. The flex basis below does the same work —
+   the box asks for a reading measure, and wraps to its own line on any
+   viewport that cannot give it one. */
+.chrome-in{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-4);
+  max-width:var(--page-max);margin:var(--sp-0) auto}
+.brand{font-weight:var(--fw-bold);letter-spacing:var(--tr-heading);
+  color:var(--strong);text-decoration:none;white-space:nowrap;
+  font-size:var(--fs-400)}
+.brand:hover{color:var(--accent-ink)}
+
+/* The box. The scope sits inside the field's own border so the two read
+   as one control: what will be searched, then where you type it. */
+form.omni{display:flex;align-items:stretch;flex:1 1 var(--measure);
+  min-width:0;background:var(--raise);border:var(--border);
+  border-radius:var(--r-md);overflow:hidden;
+  transition:border-color var(--dur-1),box-shadow var(--dur-1)}
+form.omni:focus-within{border-color:var(--accent-line);
+  box-shadow:var(--accent-glow)}
+form.omni .scope{display:flex;align-items:center;white-space:nowrap;
+  font-size:var(--fs-200);color:var(--muted);background:var(--card);
+  border-right:var(--border);padding:var(--sp-2) var(--sp-3)}
+form.omni input[type="search"]{flex:1 1 var(--measure);min-width:0;
+  font:inherit;font-size:var(--fs-300);color:var(--ink);
+  background:transparent;border:0;padding:var(--sp-2) var(--sp-3);
+  appearance:none}
+form.omni input[type="search"]::placeholder{color:var(--faint)}
+/* The focus ring belongs to the whole control, drawn by `:focus-within`
+   above — a second ring on the bare field would double it. */
+form.omni input[type="search"]:focus{outline:0}
+form.omni input[type="search"]::-webkit-search-cancel-button{
+  appearance:none}
+
+.chrome-nav{display:flex;gap:var(--sp-4);white-space:nowrap;
+  font-size:var(--fs-300)}
+.chrome-nav a{color:var(--muted);text-decoration:none}
+.chrome-nav a:hover{color:var(--accent-ink)}
+/* The hit count beside a tab label. Tabular figures so the three counts
+   sit on a common baseline grid and the row does not shift as they
+   change width. */
+.tab .count{font-variant-numeric:tabular-nums;font-size:var(--fs-200);
+  color:var(--faint)}
+b.tab.here .count{color:var(--accent-ink)}
