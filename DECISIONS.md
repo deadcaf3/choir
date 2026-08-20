@@ -67,6 +67,7 @@ that would reverse it are not published.
 | D53 | A push to `refs/for/<branch>/<topic>` opens a review through the existing pre-receive path and really creates the ref, rather than synthesizing one through a proc-receive hook | Two-way |
 | D54 | The software keeps the singular name `choir` even where the registered domain is plural: a choir is already many voices under one score, which is the unit the model has | Two-way |
 | D55 | Answering a review is a read-level act: a verdict, a comment and a viewing receipt authorize at `read` on the repository under review, because admission already binds each of them to the channel that signed it | Two-way |
+| D56 | The browser surface picks its palette from a cookie the node reads server-side, rendering `data-theme` into the page, rather than from a script: the read surface still runs none, and "follow the system" stays a real third state | Two-way |
 
 ## Reading the door column
 

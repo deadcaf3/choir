@@ -1109,6 +1109,7 @@ impl Node {
                                            person and would want to know.",
                                 },
                                 &[],
+                                reader_chrome(&request),
                             );
                             respond_page(request, 429, html, Some(retry_after))
                         } else {
@@ -1151,6 +1152,7 @@ impl Node {
                                        later.",
                             },
                             &[],
+                            reader_chrome(&request),
                         );
                         respond_page(request, 403, html, None)
                     } else {
@@ -1209,12 +1211,21 @@ impl Node {
                                 next: "Use the signed CLI for mutations; the operator may enable browser writes after the WebAuthn launch gate is complete.",
                             },
                             &[],
+                            reader_chrome(&request),
                         );
                         let outcome = respond_page(request, 403, html, None);
                         access.finish(log, &user, &outcome);
                         return;
                     }
-                    let page = account_page::render(accounts.as_deref(), &user);
+                    let page = account_page::render(
+                        accounts.as_deref(),
+                        &user,
+                        browse::Chrome {
+                            site: None,
+                            theme: chosen_theme(&request),
+                            here: "/account",
+                        },
+                    );
                     let bytes = page.html.len() as u64;
                     // The same headers every other browser surface
                     // carries, which this page was missing entirely: it
@@ -1317,7 +1328,27 @@ impl Node {
                 // owner. It used to be the front door; `/` now belongs
                 // to the repository index, because a reader arriving at
                 // a code host is looking for code.
-                if request.url() == "/status" {
+                //
+                // The *path* is what is matched exactly, not the URL.
+                // Comparing the whole URL made this the one page on the
+                // node that a query string turned into a 404, so a
+                // shared link carrying any `?…` — a cache-buster, a
+                // tracking parameter a mail client appended — answered
+                // "nothing is served at that address" about an address
+                // that is served.
+                // Setting the palette. A `GET` that mutates nothing but
+                // one display cookie, so it is a link rather than a
+                // form: the read surface runs no script, and a form
+                // would put a `POST` and a button in a bar that is
+                // otherwise navigation.
+                if request.url().split(['?', '#']).next().unwrap_or("") == "/theme" {
+                    let url = request.url().to_string();
+                    let set = browse::param(&url, "set").unwrap_or_default();
+                    let outcome = respond_theme(request, &set, &return_to(&url));
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                if request.url().split(['?', '#']).next().unwrap_or("") == "/status" {
                     let outcome = handle_ui(
                         platform.as_deref(),
                         &ui_cache,
@@ -1358,7 +1389,7 @@ impl Node {
                             request,
                         ),
                         None => {
-                            let denied = browse::no_such_repository();
+                            let denied = browse::no_such_repository(reader_chrome(&request));
                             respond_page(request, denied.status, denied.html, None)
                         }
                     };
@@ -1416,6 +1447,7 @@ impl Node {
                                    A clone URL is different — it ends in .git.",
                         },
                         &[("/", "node state"), ("/r/", "repositories")],
+                        reader_chrome(&request),
                     );
                     let outcome = respond_page(request, 404, html, None);
                     access.finish(log, &user, &outcome);
@@ -1739,6 +1771,120 @@ fn respond_static_script(request: tiny_http::Request) -> std::io::Result<(u16, u
     served(request, response, 200, bytes)
 }
 
+/// The chrome facts for one request: the palette this reader chose and
+/// the address they are on.
+///
+/// One helper rather than two lines at every refusal, because a refusal
+/// rendered without it is a page that flips to the system palette at the
+/// worst moment — the reader has just hit a wall, and the page changing
+/// colour reads as a second thing going wrong.
+fn reader_chrome(request: &tiny_http::Request) -> browse::Chrome<'static> {
+    browse::Chrome {
+        site: None,
+        theme: chosen_theme(request),
+        // Deliberately not the failing address: these pages are
+        // refusals, and a palette link that returns the reader to the
+        // page that just refused them is a link back into a wall. The
+        // empty string is the front door.
+        here: "",
+    }
+}
+
+/// The theme this reader has chosen, or `None` for "follow the system".
+///
+/// The stylesheet has carried `:root[data-theme="light"]` and its dark
+/// twin since it was written, and nothing ever set the attribute, so the
+/// manual override was decoration: a reader whose system said light read
+/// a light page and had no way to say otherwise.
+///
+/// A cookie rather than a query parameter, because a preference that
+/// only holds for the link you clicked is not a preference. It carries
+/// no identity, is not a credential, and is never trusted for anything
+/// but which palette to paint — which is why the parser accepts exactly
+/// two spellings and treats everything else, including a value some
+/// other software set, as absent.
+fn chosen_theme(request: &tiny_http::Request) -> Option<&'static str> {
+    let jar = header(request, "cookie")?;
+    jar.split(';').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name.trim() != "theme" {
+            return None;
+        }
+        match value.trim() {
+            "dark" => Some("dark"),
+            "light" => Some("light"),
+            _ => None,
+        }
+    })
+}
+
+/// Where `/theme` may send a reader back to.
+///
+/// One leading slash and nothing that leaves this origin. `//evil.test`
+/// is the case worth naming: a browser reads a protocol-relative URL as
+/// another host, so a redirector that checks only "starts with `/`" is
+/// an open redirect. A backslash is refused for the same reason — some
+/// clients normalize it to a slash before resolving.
+///
+/// Anything that fails lands on the front door rather than being
+/// reported: this is a preference control, and a reader who arrives at
+/// the repository list with their theme changed has lost nothing.
+/// The `to=` parameter of a `/theme` request, decoded and vetted.
+///
+/// Read here rather than through [`browse::param`], which refuses any
+/// value that decodes to contain a `/` — right for a path *segment*,
+/// which is all it was ever asked for, and wrong for a whole path.
+/// Reusing it silently sent every reader to the front door instead of
+/// back to the page they were on: the exact shape of the D52 change-id
+/// bug, where a segment grammar was applied to something that is not a
+/// segment.
+///
+/// Everything that fails lands on the front door via
+/// [`safe_return_to`], including a value that is not UTF-8 at all.
+fn return_to(url: &str) -> String {
+    let Some((_, query)) = url.split_once('?') else {
+        return "/".to_string();
+    };
+    let raw = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("to="))
+        .unwrap_or("");
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let Some(hex) = raw
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            else {
+                return "/".to_string();
+            };
+            out.push(hex);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    match String::from_utf8(out) {
+        Ok(path) => safe_return_to(&path),
+        Err(_) => "/".to_string(),
+    }
+}
+
+fn safe_return_to(to: &str) -> String {
+    let ok = to.starts_with('/')
+        && !to.starts_with("//")
+        && !to.contains('\\')
+        && !to.chars().any(char::is_control);
+    if ok {
+        to.to_string()
+    } else {
+        "/".to_string()
+    }
+}
+
 /// Whether this URL is one a person is reading in a browser.
 ///
 /// The browser surface is the node page, its alias, and everything under
@@ -1759,6 +1905,7 @@ fn is_browser_route(url: &str) -> bool {
     path == "/"
         || path == "/index.html"
         || path == "/status"
+        || path == "/theme"
         || path == "/r"
         || path.starts_with("/r/")
 }
@@ -1792,6 +1939,13 @@ fn respond_page(
         .with_header(
             tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
                 .expect("static header"),
+        )
+        // The palette is chosen by a cookie, so two readers of the same
+        // address can be owed two different documents. `private` already
+        // keeps a shared cache out; this says *why* the body varies, for
+        // anything that stores it anyway.
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Vary"[..], &b"Cookie"[..]).expect("static header"),
         );
     if let Some(secs) = retry_after {
         response.add_header(
@@ -1800,6 +1954,56 @@ fn respond_page(
         );
     }
     served(request, response, status, bytes)
+}
+
+/// Sets or clears the theme cookie and sends the reader back where they
+/// were.
+///
+/// `303`, not `302`: it is the status that says "the result of this is
+/// at another address, fetch it with `GET`", which is exactly true here
+/// and leaves no room for a client to repeat the request as something
+/// else.
+///
+/// The cookie is `SameSite=Lax` and `HttpOnly`. Lax because a theme
+/// chosen from a link on this node is the only way it is ever set, and
+/// `HttpOnly` because nothing on this surface runs script — a cookie
+/// script cannot read is one less thing for a future page to leak.
+/// `Secure` is deliberately absent: this node is reachable on loopback
+/// over plain HTTP by design, and a `Secure` cookie there is a control
+/// that silently does nothing.
+fn respond_theme(
+    request: tiny_http::Request,
+    set: &str,
+    back: &str,
+) -> std::io::Result<(u16, u64)> {
+    // Clearing is `Max-Age=0`, which is how a cookie is deleted; any
+    // spelling other than the two real ones clears rather than errors,
+    // so a hand-typed `/theme?set=nonsense` returns the reader to the
+    // system default instead of to a refusal page.
+    let cookie = match set {
+        "dark" | "light" => {
+            format!("theme={set}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly")
+        }
+        _ => "theme=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly".to_string(),
+    };
+    let response = tiny_http::Response::empty(303)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Location"[..], back.as_bytes())
+                .expect("location header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Set-Cookie"[..], cookie.as_bytes())
+                .expect("set-cookie header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    served(request, response, 303, 0)
 }
 
 /// Answers a git request the ACL refused. Plain text, because that is
@@ -2320,6 +2524,7 @@ fn handle_ui(
                            API on.",
                 },
                 &[("/r/", "repositories")],
+                reader_chrome(&request),
             );
             return respond_page(request, 503, html, None);
         }
@@ -2336,12 +2541,17 @@ fn handle_ui(
     // reader is handed resolved names against exactly the store state
     // its `ETag` claims (D46).
     let (generation, roster) = platform.roster();
-    let tag = ui::etag(seq, generation, &reader);
+    let chrome = browse::Chrome {
+        site: None,
+        theme: chosen_theme(&request),
+        here: "/status",
+    };
+    let tag = ui::etag(seq, generation, &reader, chrome.theme);
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
         return served(request, not_modified(&tag, BROWSER_CSP), 304, 0);
     }
 
-    let page = cache.page(seq, generation, &reader, &roster, || {
+    let page = cache.page(seq, generation, &reader, &roster, chrome, || {
         let body = platform.handle_api("GET", "/api/view", &[]).1;
         match acl {
             Some(table) => acl::filter_response(table, user, "/api/view", &body),
@@ -2431,7 +2641,7 @@ fn handle_browse(
             // renderer. Two constructions that agree today are a
             // coincidence with a test on it; one construction is the
             // property.
-            let denied = browse::no_such_repository();
+            let denied = browse::no_such_repository(reader_chrome(&request));
             return respond_page(request, denied.status, denied.html, None);
         }
     }
@@ -2451,6 +2661,8 @@ fn handle_browse(
             browser_writes,
             site,
             origin: origin.as_deref(),
+            theme: chosen_theme(&request),
+            here: request.url().split(['?', '#']).next().unwrap_or("/"),
             self_service,
         },
     );

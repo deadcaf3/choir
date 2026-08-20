@@ -350,7 +350,7 @@ pub(crate) fn route(url: &str) -> Option<Page> {
 /// A parameter that decodes to nothing usable is `None` rather than an
 /// error, because a malformed query is a reader who edited a URL, and the
 /// honest answer is the unfiltered page rather than a refusal.
-fn param(url: &str, key: &str) -> Option<String> {
+pub(crate) fn param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
     let query = query.split('#').next().unwrap_or(query);
     query.split('&').find_map(|pair| {
@@ -709,6 +709,11 @@ pub(crate) struct Viewer<'a> {
     /// The scheme-and-host this reader reached the node on, so a page
     /// that prints a command can print one they can paste.
     pub(crate) origin: Option<&'a str>,
+    /// The palette this reader chose, or `None` for the system's.
+    pub(crate) theme: Option<&'a str>,
+    /// The address this reader is on, so a palette link returns them to
+    /// it rather than to the front door.
+    pub(crate) here: &'a str,
     /// Whether this node issues invites at all.
     pub(crate) self_service: bool,
 }
@@ -726,7 +731,10 @@ pub(crate) fn render(
         site,
         origin,
         self_service,
+        theme,
+        here,
     } = viewer;
+    let chrome = Chrome { site, theme, here };
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
     // is handed git's own words — which name the absolute path git was
@@ -739,25 +747,25 @@ pub(crate) fn render(
     // and 404-ing the list would hide a review that genuinely exists.
     if let Some(repo) = page.repo() {
         if !matches!(page, Page::Reviews { .. }) && !bare(root, repo).is_dir() {
-            return no_such_repository();
+            return no_such_repository(chrome);
         }
     }
     match page {
-        Page::Index { q } => index(root, readable, platform, q),
+        Page::Index { q } => index(root, readable, platform, q, chrome),
         Page::Search {
             repo,
             rev,
             q,
             scope,
-        } => search(&bare(root, repo), repo, rev, q, *scope, site, origin),
+        } => search(&bare(root, repo), repo, rev, q, *scope, chrome, origin),
         Page::Tree { repo, rev, path } => {
-            tree(&bare(root, repo), repo, rev, path, platform, site, origin)
+            tree(&bare(root, repo), repo, rev, path, platform, chrome, origin)
         }
-        Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, site, origin),
-        Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, site, origin),
-        Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, site, origin),
-        Page::Contribute { repo } => contribute(root, repo, site, origin, self_service),
-        Page::Reviews { repo } => reviews(repo, platform, site),
+        Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, chrome, origin),
+        Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, chrome, origin),
+        Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, chrome, origin),
+        Page::Contribute { repo } => contribute(root, repo, chrome, origin, self_service),
+        Page::Reviews { repo } => reviews(repo, platform, chrome),
         Page::Review { repo, id } => review(
             &bare(root, repo),
             repo,
@@ -765,7 +773,7 @@ pub(crate) fn render(
             platform,
             user,
             browser_writes,
-            site,
+            chrome,
         ),
     }
 }
@@ -786,6 +794,7 @@ fn index(
     readable: &dyn Fn(&str) -> bool,
     platform: Option<&crate::platform::Platform>,
     q: &str,
+    chrome: Chrome<'_>,
 ) -> Rendered {
     let mut repos: Vec<String> = Vec::new();
     if let Ok(owners) = std::fs::read_dir(root) {
@@ -820,7 +829,7 @@ fn index(
         .filter(|repo| needle.is_empty() || repo.to_lowercase().contains(&needle))
         .collect();
 
-    let mut h = shell("repositories", Bar::filtered(q));
+    let mut h = shell("repositories", Bar::filtered(q, chrome));
     h.push_str("<header class=\"top\"><h1>repositories</h1><div class=\"sub\">");
     h.push_str("<span class=\"pill\">");
     h.push_str(&repos.len().to_string());
@@ -859,7 +868,7 @@ fn index(
              for a <code>read</code> grant on the repository you were pointed at.",
         );
     } else {
-        h.push_str("<table><tbody>");
+        h.push_str("<table class=\"repos\"><tbody>");
         for repo in &shown {
             h.push_str("<tr><td><a href=\"/r/");
             h.push_str(&esc(repo));
@@ -928,12 +937,12 @@ fn search(
     rev: &str,
     q: &str,
     scope: Scope,
-    site: Option<&str>,
+    chrome: Chrome<'_>,
     origin: Option<&str>,
 ) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
-        Err(why) => return missing(repo, rev, &why),
+        Err(why) => return missing(repo, rev, &why, chrome),
     };
     let named = if rev == "HEAD" {
         default_branch(dir).unwrap_or_else(|| rev.to_string())
@@ -944,7 +953,7 @@ fn search(
 
     let mut h = shell(
         &format!("{repo}: search"),
-        Bar::searched(repo, rev, q, site),
+        Bar::searched(repo, rev, q, chrome),
     );
     repo_header(&mut h, repo, rev, &oid, "", "search", origin);
     h.push_str("<section>");
@@ -1531,7 +1540,7 @@ fn tree(
     rev: &str,
     path: &str,
     platform: Option<&crate::platform::Platform>,
-    site: Option<&str>,
+    chrome: Chrome<'_>,
     origin: Option<&str>,
 ) -> Rendered {
     let oid = match resolve(dir, rev) {
@@ -1540,8 +1549,8 @@ fn tree(
         // missing — and it is the first thing an operator browses after
         // creating one, so answering `404` there says the create failed
         // when it did not.
-        Err(_) if dir.is_dir() && rev == "HEAD" => return empty(repo),
-        Err(why) => return missing(repo, rev, &why),
+        Err(_) if dir.is_dir() && rev == "HEAD" => return empty(repo, chrome),
+        Err(why) => return missing(repo, rev, &why, chrome),
     };
     // `HEAD` is how the front door is *addressed*, not what a reader
     // wants to be told they are looking at, and it is not a link anyone
@@ -1568,7 +1577,7 @@ fn tree(
     };
     let listing = match listing {
         Ok(text) => text,
-        Err(why) => return missing(repo, rev, &why),
+        Err(why) => return missing(repo, rev, &why, chrome),
     };
 
     let mut rows: Vec<(bool, String, String)> = Vec::new();
@@ -1593,7 +1602,7 @@ fn tree(
 
     let mut h = shell(
         &format!("{repo}: {}", if path.is_empty() { "/" } else { path }),
-        Bar::repo(repo, rev, site),
+        Bar::repo(repo, rev, chrome),
     );
     repo_header(&mut h, repo, rev, &oid, path, "tree", origin);
     // The bar a reader uses to orient: which revision they are on, how
@@ -1801,20 +1810,20 @@ fn blob(
     repo: &str,
     rev: &str,
     path: &str,
-    site: Option<&str>,
+    chrome: Chrome<'_>,
     origin: Option<&str>,
 ) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
-        Err(why) => return missing(repo, rev, &why),
+        Err(why) => return missing(repo, rev, &why, chrome),
     };
     let spec = format!("{oid}:{path}");
     let size: u64 = match git_text(dir, &["cat-file", "-s", &spec]) {
         Ok(text) => text.trim().parse().unwrap_or(0),
-        Err(why) => return missing(repo, rev, &why),
+        Err(why) => return missing(repo, rev, &why, chrome),
     };
 
-    let mut h = shell(&format!("{repo}: {path}"), Bar::repo(repo, rev, site));
+    let mut h = shell(&format!("{repo}: {path}"), Bar::repo(repo, rev, chrome));
     repo_header(&mut h, repo, rev, &oid, path, "blob", origin);
     h.push_str("<section>");
     if size > MAX_BLOB_BYTES {
@@ -1876,12 +1885,12 @@ fn commits(
     dir: &Path,
     repo: &str,
     rev: &str,
-    site: Option<&str>,
+    chrome: Chrome<'_>,
     origin: Option<&str>,
 ) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
-        Err(why) => return missing(repo, rev, &why),
+        Err(why) => return missing(repo, rev, &why, chrome),
     };
     // Unit separators rather than spaces: a subject can contain
     // anything, including whatever delimiter looked safe.
@@ -1899,12 +1908,12 @@ fn commits(
         ],
     ) {
         Ok(text) => text,
-        Err(why) => return missing(repo, rev, &why),
+        Err(why) => return missing(repo, rev, &why, chrome),
     };
     let rows: Vec<&str> = log.lines().collect();
     let truncated = rows.len() > COMMIT_PAGE;
 
-    let mut h = shell(&format!("{repo}: commits"), Bar::repo(repo, rev, site));
+    let mut h = shell(&format!("{repo}: commits"), Bar::repo(repo, rev, chrome));
     repo_header(&mut h, repo, rev, &oid, "", "commits", origin);
     h.push_str("<section><table><thead><tr><th>commit</th><th>subject</th>");
     h.push_str("<th>author</th><th>when</th></tr></thead><tbody>");
@@ -1946,11 +1955,11 @@ fn commits(
 }
 
 /// One commit, with its diff.
-fn commit(dir: &Path, repo: &str, oid: &str, site: Option<&str>, origin: Option<&str>) -> Rendered {
+fn commit(dir: &Path, repo: &str, oid: &str, chrome: Chrome<'_>, origin: Option<&str>) -> Rendered {
     let format = "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b";
     let header = match git_text(dir, &["show", "--no-patch", format, oid]) {
         Ok(text) => text,
-        Err(why) => return missing(repo, oid, &why),
+        Err(why) => return missing(repo, oid, &why, chrome),
     };
     let mut fields = header.split('\u{1f}');
     let id = fields.next().unwrap_or(oid).trim().to_string();
@@ -1960,7 +1969,7 @@ fn commit(dir: &Path, repo: &str, oid: &str, site: Option<&str>, origin: Option<
 
     let mut h = shell(
         &format!("{repo}: {}", &id[..id.len().min(12)]),
-        Bar::repo(repo, oid, site),
+        Bar::repo(repo, oid, chrome),
     );
     repo_header(&mut h, repo, &id, &id, "", "commit", origin);
     h.push_str("<section><h2>");
@@ -2387,13 +2396,13 @@ const CONTRIBUTE_STEPS: &str = include_str!("contribute.html");
 fn contribute(
     root: &Path,
     repo: &str,
-    site: Option<&str>,
+    chrome: Chrome<'_>,
     origin: Option<&str>,
     self_service: bool,
 ) -> Rendered {
     let mut h = shell(
         &format!("{repo}: how to contribute"),
-        Bar::repo(repo, "HEAD", site),
+        Bar::repo(repo, "HEAD", chrome),
     );
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
@@ -2513,10 +2522,10 @@ fn node_url(origin: Option<&str>) -> String {
 fn reviews(
     repo: &str,
     platform: Option<&crate::platform::Platform>,
-    site: Option<&str>,
+    chrome: Chrome<'_>,
 ) -> Rendered {
     let Some(platform) = platform else {
-        return unavailable(repo);
+        return unavailable(repo, chrome);
     };
     let rows = platform.reviews_for_repo(repo);
     // Reviewer seats are channels, and a channel is an opaque handle
@@ -2525,7 +2534,7 @@ fn reviews(
     // cache identity to fold the store generation into.
     let (_, roster) = platform.roster();
 
-    let mut h = shell(&format!("{repo}: reviews"), Bar::repo(repo, "HEAD", site));
+    let mut h = shell(&format!("{repo}: reviews"), Bar::repo(repo, "HEAD", chrome));
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
@@ -2613,13 +2622,13 @@ fn review(
     platform: Option<&crate::platform::Platform>,
     user: &str,
     browser_writes: bool,
-    site: Option<&str>,
+    chrome: Chrome<'_>,
 ) -> Rendered {
     let Some(platform) = platform else {
-        return unavailable(repo);
+        return unavailable(repo, chrome);
     };
     let Some(state) = platform.review_json(id) else {
-        return no_such_review(repo, id);
+        return no_such_review(repo, id, chrome);
     };
     let commit_oid = git_oid_of(state["target"].as_str().unwrap_or("")).unwrap_or_default();
     // Reviewer seats and comment authors are channels, and a channel is
@@ -2629,7 +2638,7 @@ fn review(
 
     let mut h = shell(
         &format!("{repo}: review {id}"),
-        Bar::repo(repo, "HEAD", site),
+        Bar::repo(repo, "HEAD", chrome),
     );
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
@@ -2652,7 +2661,7 @@ fn review(
 
     // The relationship: what lands where, which is the thing reviews
     // have always carried and never shown in one place.
-    h.push_str("<section><h2>Proposal</h2><table><tbody>");
+    h.push_str("<section><h2>Proposal</h2><table class=\"kv\"><tbody>");
     // The id whole, because it is what a reviewer pastes into `choir
     // verdict` and what `view.changes` is keyed by. Shortening it here
     // would be an identity change wearing a display change's clothes.
@@ -2901,8 +2910,8 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
 ///
 /// Discussion is deliberately wider than judgement: a verdict is an
 /// authorization and belongs to the people asked for one, while a comment
-/// is a statement and belongs to anyone the ACL already lets write to
-/// this repository. The node makes that call at `/api/submit`; the page
+/// is a statement and belongs to anyone the ACL already lets read this
+/// repository (D55). The node makes that call at `/api/submit`; the page
 /// offering the box to a reader who is then refused would be worse than
 /// either, so it is shown only to a caller with a name — never to `anon`.
 ///
@@ -2982,7 +2991,7 @@ fn state_tag(h: &mut String, review: &serde_json::Value) {
 }
 
 /// The page for a review request on a node with no platform enabled.
-fn unavailable(repo: &str) -> Rendered {
+fn unavailable(repo: &str, chrome: Chrome<'_>) -> Rendered {
     Rendered {
         status: 503,
         etag: None,
@@ -3002,6 +3011,7 @@ fn unavailable(repo: &str) -> Rendered {
                 (&format!("/r/{repo}"), "this repository"),
                 ("/r/", "all repositories"),
             ],
+            chrome,
         ),
     }
 }
@@ -3018,7 +3028,16 @@ fn unavailable(repo: &str) -> Rendered {
 /// The alternative — letting a missing repository fall through to the
 /// pages that read it — is how git's own "not a git repository:
 /// '/srv/…'" ended up on a `404` a stranger could ask for.
-pub(crate) fn no_such_repository() -> Rendered {
+pub(crate) fn no_such_repository(chrome: Chrome<'_>) -> Rendered {
+    // The reader's address is dropped here, and dropping it is the
+    // property rather than a tidy-up. This page is rendered both for a
+    // repository that does not exist and for one the reader may not
+    // read, and the two must be byte-identical or a reader learns which
+    // names exist by diffing them. The palette links carry a `to=` with
+    // the address on it, so a page that kept the address would differ
+    // between the two paths — which is exactly how the integration test
+    // caught this the first time it was written the other way.
+    let chrome = Chrome { here: "", ..chrome };
     Rendered {
         status: 404,
         etag: None,
@@ -3040,6 +3059,7 @@ pub(crate) fn no_such_repository() -> Rendered {
                 ("/", "repositories you can read"),
                 ("/status", "node state"),
             ],
+            chrome,
         ),
     }
 }
@@ -3049,10 +3069,10 @@ pub(crate) fn no_such_repository() -> Rendered {
 /// Deliberately a `200`: the repository is exactly what the operator
 /// asked for, and the only thing missing is a push. Saying so beats
 /// reporting git's "Needed a single revision", which reads like a fault.
-fn empty(repo: &str) -> Rendered {
+fn empty(repo: &str, chrome: Chrome<'_>) -> Rendered {
     // A repository with no commits has nothing to search, so the box
     // falls back to the list rather than offering an empty tree.
-    let mut h = shell(&format!("{repo}: empty"), Bar::index());
+    let mut h = shell(&format!("{repo}: empty"), Bar::index(chrome));
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(repo));
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\">empty</span>");
@@ -3086,7 +3106,7 @@ fn empty(repo: &str) -> Rendered {
 /// hold the grant, so confirming it leaks nothing, and it separates "you
 /// typed the branch wrong" from "you are not allowed here" — two states
 /// that otherwise look identical and have opposite fixes.
-fn missing(repo: &str, rev: &str, why: &str) -> Rendered {
+fn missing(repo: &str, rev: &str, why: &str, chrome: Chrome<'_>) -> Rendered {
     Rendered {
         status: 404,
         etag: None,
@@ -3106,6 +3126,7 @@ fn missing(repo: &str, rev: &str, why: &str) -> Rendered {
                 (&format!("/r/{repo}"), "this repository"),
                 ("/r/", "all repositories"),
             ],
+            chrome,
         ),
     }
 }
@@ -3115,7 +3136,7 @@ fn missing(repo: &str, rev: &str, why: &str) -> Rendered {
 /// Separate from [`missing`] because a review id is not a revision: the
 /// fix is a different command, and telling somebody to check their branch
 /// names when they mistyped a review id wastes the trip.
-fn no_such_review(repo: &str, id: &str) -> Rendered {
+fn no_such_review(repo: &str, id: &str, chrome: Chrome<'_>) -> Rendered {
     Rendered {
         status: 404,
         etag: None,
@@ -3135,6 +3156,7 @@ fn no_such_review(repo: &str, id: &str) -> Rendered {
                 (&format!("/r/{repo}/reviews"), "this repository's reviews"),
                 (&format!("/r/{repo}"), "this repository"),
             ],
+            chrome,
         ),
     }
 }
@@ -3143,7 +3165,9 @@ fn no_such_review(repo: &str, id: &str) -> Rendered {
 /// surfaces cannot drift into looking like different products.
 fn shell(title: &str, bar: Bar<'_>) -> String {
     let mut h = String::with_capacity(8 * 1024);
-    h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    h.push_str("<!doctype html><html lang=\"en\"");
+    theme_attribute(&mut h, bar.theme);
+    h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>");
     h.push_str(&esc(title));
@@ -3160,6 +3184,24 @@ fn shell(title: &str, bar: Bar<'_>) -> String {
 /// Carried into [`shell`] rather than drawn per page, because "the same
 /// box in the same place on every page" is the whole property: a box
 /// that four pages remember to render is a box the fifth page forgets.
+/// The three facts the fixed bar needs that are not about the page:
+/// whether this node is one repository, which palette this reader
+/// chose, and where they are so a palette link can bring them back.
+///
+/// Grouped for the reason [`Viewer`] is: they were arriving one at a
+/// time as another parameter on ten signatures that pass them straight
+/// through to [`Bar`], and the tenth would have been the one somebody
+/// forgot on one page.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Chrome<'a> {
+    /// The one repository this node presents, if it presents one.
+    pub(crate) site: Option<&'a str>,
+    /// The palette this reader chose, or `None` for the system's.
+    pub(crate) theme: Option<&'a str>,
+    /// The address the palette links return to.
+    pub(crate) here: &'a str,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Bar<'a> {
     /// The repository the box searches and the revision it searches at,
@@ -3174,42 +3216,57 @@ pub(crate) struct Bar<'a> {
     /// Such a node has no repository list, so the box never offers to
     /// search one and the brand goes to the repository instead.
     pub(crate) site: bool,
+    /// The palette this reader chose, or `None` for the system's.
+    pub(crate) theme: Option<&'a str>,
+    /// The address the theme links return to, so choosing a palette
+    /// leaves the reader on the page they were reading rather than at
+    /// the front door. Empty means "the front door", which is what a
+    /// page rendered outside a request has.
+    pub(crate) here: &'a str,
 }
 
 impl<'a> Bar<'a> {
     /// The bar for a page about no particular repository.
-    pub(crate) fn index() -> Bar<'a> {
+    pub(crate) fn index(chrome: Chrome<'a>) -> Bar<'a> {
         Bar {
             scope: None,
             q: "",
             site: false,
+            theme: chrome.theme,
+            here: chrome.here,
         }
     }
 
     /// The bar on the repository index, showing the filter in force.
-    fn filtered(q: &'a str) -> Bar<'a> {
+    fn filtered(q: &'a str, chrome: Chrome<'a>) -> Bar<'a> {
         Bar {
             scope: None,
             q,
             site: false,
+            theme: chrome.theme,
+            here: chrome.here,
         }
     }
 
     /// The bar on a repository search, showing the term in force.
-    fn searched(repo: &'a str, rev: &'a str, q: &'a str, site: Option<&str>) -> Bar<'a> {
+    fn searched(repo: &'a str, rev: &'a str, q: &'a str, chrome: Chrome<'a>) -> Bar<'a> {
         Bar {
             scope: Some((repo, rev)),
             q,
-            site: site.is_some(),
+            site: chrome.site.is_some(),
+            theme: chrome.theme,
+            here: chrome.here,
         }
     }
 
     /// The bar for a page about one repository at one revision.
-    fn repo(repo: &'a str, rev: &'a str, site: Option<&str>) -> Bar<'a> {
+    fn repo(repo: &'a str, rev: &'a str, chrome: Chrome<'a>) -> Bar<'a> {
         Bar {
             scope: Some((repo, rev)),
             q: "",
-            site: site.is_some(),
+            site: chrome.site.is_some(),
+            theme: chrome.theme,
+            here: chrome.here,
         }
     }
 }
@@ -3274,7 +3331,77 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
         h.push_str("<a href=\"/r/\">repositories</a>");
     }
     h.push_str("<a href=\"/status\">node</a>");
+    theme_control(h, bar);
     h.push_str("</nav></div></div>");
+}
+
+/// Writes ` data-theme="…"` when the reader has chosen one.
+///
+/// Nothing at all when they have not, which is what leaves
+/// `prefers-color-scheme` in charge: the stylesheet's dark rules are
+/// written as `:root:not([data-theme="dark"])` under that query, so an
+/// absent attribute and a correct attribute are two different states and
+/// only the absent one follows the system.
+pub(crate) fn theme_attribute(h: &mut String, theme: Option<&str>) {
+    if let Some(theme) = theme {
+        h.push_str(" data-theme=\"");
+        h.push_str(&esc(theme));
+        h.push('"');
+    }
+}
+
+/// The palette control: three states, the current one not a link.
+///
+/// Written as links rather than as a form or a toggle for the reason
+/// the whole surface is: this page runs no script, a form here would be
+/// a `POST` and a button in a row of navigation, and a two-state toggle
+/// cannot express "follow the system", which is the default and has to
+/// stay reachable.
+///
+/// The current state renders as `<b>` and is not clickable, so it reads
+/// as the state it is without colour being the only thing saying so —
+/// the same rule, and the same markup, as the search scope tabs.
+fn theme_control(h: &mut String, bar: Bar<'_>) {
+    let here = if bar.here.is_empty() { "/" } else { bar.here };
+    h.push_str("<span class=\"themes\" role=\"group\" aria-label=\"Colour theme\">");
+    for (value, label) in [("auto", "auto"), ("dark", "dark"), ("light", "light")] {
+        let current = match bar.theme {
+            Some(chosen) => chosen == value,
+            None => value == "auto",
+        };
+        if current {
+            h.push_str("<b class=\"theme here\" aria-current=\"true\">");
+            h.push_str(label);
+            h.push_str("</b>");
+            continue;
+        }
+        h.push_str("<a class=\"theme\" href=\"/theme?set=");
+        h.push_str(value);
+        h.push_str("&amp;to=");
+        h.push_str(&esc(&url_query_value(here)));
+        h.push_str("\">");
+        h.push_str(label);
+        h.push_str("</a>");
+    }
+    h.push_str("</span>");
+}
+
+/// Percent-encodes a path so it survives being a query parameter.
+///
+/// `&`, `#` and `?` are the ones that matter: a repository or ref
+/// carrying any of them would otherwise end the `to=` value early and
+/// send the reader somewhere they did not ask to go.
+fn url_query_value(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Repository name, revision, and the breadcrumb back up the tree.
@@ -3329,7 +3456,7 @@ fn repo_header(
     // reader, proxy and all. A request carrying no `Host` — which
     // HTTP/1.1 forbids, so this is the malformed case — keeps the
     // relative path, which is still true.
-    h.push_str("<span class=\"pill mono\">clone ");
+    h.push_str("<span class=\"pill mono clone\">clone ");
     match origin {
         Some(origin) => h.push_str(&esc(&format!("{origin}/{repo}.git"))),
         None => h.push_str(&esc(&format!("/{repo}.git"))),

@@ -98,6 +98,7 @@
 
   /* ---- layout ------------------------------------------------------ */
   --measure:46rem;      /* docs prose column */
+  --search:21rem;       /* the one search box: a field, not a banner */
   --article:48rem;      /* legacy alias, same intent */
   --side:17.5rem;       /* docs sidebar */
   --toc:14rem;
@@ -355,9 +356,11 @@ body{background:var(--ground);color:var(--ink);margin:0 auto;
    around them shrinks. The h1 drops a step (fs-800 → fs-700) and the
    header/section rhythm drops a step (sp-8 → sp-6) — a page is a tool's
    readout, not a landing page, and nothing here earns display type. */
-header.top{border-bottom:var(--border);padding-bottom:var(--sp-4);
-  margin-bottom:var(--sp-6)}
-h1{font-size:var(--fs-700);line-height:var(--lh-tight);letter-spacing:var(--tr-heading);
+/* The page title sits on the ground, above the panels, and needs no rule
+   under it: the first panel's own edge is that line, and drawing both
+   put two horizontals within a few pixels of each other. */
+header.top{padding-bottom:var(--sp-0);margin-bottom:var(--sp-6)}
+h1{font-size:var(--fs-800);line-height:var(--lh-tight);letter-spacing:var(--tr-heading);
   color:var(--strong);margin:0;font-weight:var(--fw-bold);overflow-wrap:break-word}
 h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps);
   color:var(--faint);margin:var(--sp-10) 0 var(--sp-3);font-weight:var(--fw-medium);
@@ -371,17 +374,75 @@ h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps
   font-family:var(--font-mono)}
 .pill.on{color:var(--accent-ink);border-color:var(--accent-line);
   background:var(--accent-tint)}
+/* Two kinds of pill share one class because they share one shape: a
+   fact the page is stating, and a place the reader can go. Only the
+   second is a link, so the link is what tells them apart — no second
+   class to remember at thirty call sites. The hover rule is written
+   with `:has()` on purpose: where it is not understood the pill simply
+   does not light up, which is the state it was in before. */
+.pill a{color:var(--accent-ink);text-decoration:none}
+.pill:has(a){border-color:var(--line-strong)}
+.pill:has(a):hover{border-color:var(--accent-line);background:var(--accent-tint)}
+/* The clone URL is the one pill on the surface that exists to be taken
+   rather than read, so it is set into the page like a field and selects
+   whole on a single click. */
+.pill.clone{background:var(--sunken);color:var(--ink);
+  -webkit-user-select:all;user-select:all}
 
+/* ------------------------------------------------------------------
+   PANELS
+   Every page here is a readout, and a readout's parts are instruments:
+   each says one thing and is bounded so the eye can tell where it stops.
+   Before this the sections were bare — hairline tables floating on the
+   ground with an eyebrow above them — and on a page holding two rows
+   that reads as an unfinished page rather than a quiet one. The card
+   surface, its border and the one-pixel shadow already existed in the
+   token block; the component block simply never asked for them.
+
+   `main>section` catches every ordinary page. The repository root is
+   the exception: its parts are `.pane` inside `div.panes`, so they are
+   named here too rather than restyled separately.
+   ------------------------------------------------------------------ */
+main>section,.pane{background:var(--card);border:var(--border);
+  border-radius:var(--r-lg);box-shadow:var(--shadow-1),var(--shadow-inset);
+  padding:var(--sp-5) var(--sp-6);margin-bottom:var(--sp-5)}
 section{margin-bottom:var(--sp-6)}
+/* A section head inside a panel is a band across it, not a floating
+   label: negative side margins carry the hairline to both edges, and
+   the accent tick lands exactly on the card's own border, which is why
+   the padding is a full gutter rather than the `--sp-3` the bare
+   eyebrow uses. */
+main>section>h2,.pane>h2{display:flex;align-items:baseline;gap:var(--sp-2);
+  margin:var(--sp-8) calc(-1 * var(--sp-6)) var(--sp-4);
+  padding:var(--sp-0) var(--sp-6) var(--sp-3);
+  border-bottom:var(--border-hair)}
+main>section>h2:first-child,.pane>h2:first-child{margin-top:var(--sp-0)}
+/* The count, and anything else the head carries, sits at the far end. */
+main>section>h2 .count,main>section>h2 .mono,
+.pane>h2 .count~*,.pane>h2 .mono{margin-left:auto;text-transform:none;
+  letter-spacing:var(--tr-mono)}
+/* A panel whose whole content is "there is nothing here" gets room to
+   say so; otherwise the sentence hugs the top edge and the card reads
+   as clipped rather than empty. */
+main>section>p.lede:first-child,main>section>p.empty:first-child{
+  margin-top:var(--sp-3);margin-bottom:var(--sp-5)}
 /* `lh-snug` and sp-1 vertical padding: a table is scanned, not read, and
    the tighter grid is what lets a screenful answer the reader's question
    without a scroll. Prose outside tables keeps `lh-copy` from the reset. */
 table{width:100%;border-collapse:collapse;font-size:var(--fs-300);
   line-height:var(--lh-snug)}
-td,th{text-align:left;padding:var(--sp-1) var(--sp-3);
+td,th{text-align:left;padding:var(--sp-2) var(--sp-3);
   border-bottom:var(--border-hair);vertical-align:top;overflow-wrap:break-word}
+/* The first cell of a row carries the row's identity, so it starts at
+   the panel's text edge rather than one gutter in from it. */
+tr>td:first-child,tr>th:first-child{padding-left:var(--sp-0)}
+tr>td:last-child,tr>th:last-child{padding-right:var(--sp-0)}
 thead th{font-size:var(--fs-100);text-transform:uppercase;
-  letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium)}
+  letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium);
+  border-bottom:var(--border)}
+/* The last row's rule would sit a few pixels above the panel's own
+   border and read as a mistake. */
+tbody tr:last-child>td{border-bottom:0}
 tbody tr:hover{background:var(--raise)}
 tr.group th{background:var(--surface);color:var(--muted);
   font-family:var(--font-mono);font-size:var(--fs-200);text-transform:none;
@@ -395,14 +456,37 @@ tr.open td{border-left:var(--bw-2) solid var(--accent)}
    name shrink to a phone instead of pushing the page sideways. Prose
    cells keep `break-word` above, which wraps at spaces and never chops a
    word that had somewhere to go. */
+/* A two-column table is a list of facts, not a grid: the label column
+   takes the width of its longest label and no more, so the value sits
+   beside what names it instead of across a hand's width of nothing.
+   `width:1%` with `nowrap` is the shrink-to-content idiom used for the
+   same reason in `table.hits`. */
+table.kv td:first-child{width:1%;white-space:nowrap;color:var(--muted);
+  padding-right:var(--sp-8)}
+/* The front door's list of repositories. Everywhere else a table is
+   dense because it is scanned; this one holds the reason the reader
+   came, often three or four rows of it, so the name is set at reading
+   size and the row is given the height to match. */
+table.repos td{padding-top:var(--sp-3);padding-bottom:var(--sp-3)}
+table.repos td:first-child a{font-size:var(--fs-500);
+  font-weight:var(--fw-medium)}
 .mono,.id{font-family:var(--font-mono);font-size:var(--fs-300);
   overflow-wrap:anywhere}
 .num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
 .muted{color:var(--faint)}
-b.tag{font-size:var(--fs-100);font-weight:var(--fw-medium);
+b.tag{display:inline-flex;align-items:center;gap:var(--sp-2);
+  font-size:var(--fs-100);font-weight:var(--fw-medium);
   text-transform:uppercase;letter-spacing:var(--tr-caps);
   border-radius:var(--r-sm);padding:var(--sp-0) var(--sp-2);
   border:var(--bw-1) solid transparent}
+/* The state, said twice: a word and a dot in the same colour, so a
+   reader scanning a column of them lands on the shape before reading
+   any of it. Drawn out of a border rather than a box because this
+   sheet may not author a length, and a zero-content box with a
+   `--bw-rule` border and a pill radius is a dot of exactly that
+   radius. */
+b.tag::before{content:"";display:inline-block;border-radius:var(--r-pill);
+  border:var(--bw-rule) solid currentColor}
 b.ok{color:var(--ok);background:var(--ok-tint);border-color:var(--ok-line)}
 b.warn{color:var(--warn);background:var(--warn-tint);border-color:var(--warn-line)}
 b.pending{color:var(--accent-ink);background:var(--accent-tint);
@@ -593,6 +677,52 @@ section.readme pre{background:var(--sunken);padding:var(--sp-4);
    get the roomier row. */
 section.readme table{display:block;overflow-x:auto;max-width:var(--measure)}
 section.readme td,section.readme th{padding:var(--sp-2) var(--sp-3)}
+/* ------------------------------------------------------------------
+   THE CONTRIBUTE PAGE
+   Three numbered steps and the commands that make them up. The markup
+   carried these class names from the day the page shipped and nothing
+   in this sheet answered them, so the one page written for somebody who
+   has never used this node rendered as a bare `<ol>` — the least
+   finished surface on the node, in front of the newest reader.
+   ------------------------------------------------------------------ */
+ol.steps{list-style:none;padding:var(--sp-0);margin:var(--sp-5) var(--sp-0);
+  display:grid;gap:var(--sp-4)}
+ol.steps>li{background:var(--surface);border:var(--border);
+  border-radius:var(--r-md);padding:var(--sp-4) var(--sp-5)}
+ol.steps h3{display:flex;align-items:center;gap:var(--sp-3);
+  font-size:var(--fs-500);color:var(--strong);letter-spacing:var(--tr-heading);
+  margin:var(--sp-0) var(--sp-0) var(--sp-2)}
+ol.steps h3 code{font-family:var(--font-mono);font-size:var(--fs-400);
+  color:var(--accent-ink)}
+ol.steps p{margin:var(--sp-0) var(--sp-0) var(--sp-3);color:var(--muted);
+  font-size:var(--fs-400);line-height:var(--lh-normal);max-width:var(--measure)}
+/* The usage line under each command is a reference, not prose: it is
+   read once, by somebody who needs a flag the example does not show,
+   so it is set smaller than the command it annotates rather than
+   larger, which is what it inherited from the paragraph rule above. */
+ol.steps p.mono{font-size:var(--fs-200);color:var(--faint);
+  max-width:none;line-height:var(--lh-normal)}
+ol.steps p:last-child{margin-bottom:var(--sp-0)}
+/* The step number. Round, quiet, and the same shape as the state dots,
+   because both answer "where am I in a sequence". */
+.step{display:inline-grid;place-items:center;flex:none;
+  padding:var(--sp-0) var(--sp-2);border-radius:var(--r-pill);
+  border:var(--border-accent);background:var(--accent-tint);
+  color:var(--accent-ink);font-family:var(--font-mono);
+  font-size:var(--fs-200);font-weight:var(--fw-medium)}
+/* A command written to be copied. Same well as `pre.code`, tighter,
+   and never wrapped: a broken command line is a broken command. */
+pre.cmd{background:var(--sunken);border:var(--border);border-radius:var(--r-md);
+  padding:var(--sp-3) var(--sp-4);margin:var(--sp-0) var(--sp-0) var(--sp-3);
+  overflow-x:auto;font-family:var(--font-mono);font-size:var(--fs-300);
+  line-height:var(--lh-code);color:var(--syn-string)}
+
+/* The diffstat table above a patch. One row per file, and the counts
+   are the point, so the name column gives the rest of the row away. */
+table.stat{margin:var(--sp-3) var(--sp-0)}
+table.stat td:first-child{width:1%;white-space:nowrap}
+table.stat td.num{white-space:nowrap}
+
 /* Scope tabs. Links rather than a control, styled as a row of them, with
    the current one flat and unclickable so its state reads without
    colour alone carrying it. */
@@ -650,14 +780,22 @@ table.hits code{font-size:var(--fs-300)}
    viewport that cannot give it one. */
 .chrome-in{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-4);
   max-width:var(--page-max);margin:var(--sp-0) auto}
-.brand{font-weight:var(--fw-bold);letter-spacing:var(--tr-heading);
+.brand{display:inline-flex;align-items:center;gap:var(--sp-2);
+  font-weight:var(--fw-bold);letter-spacing:var(--tr-heading);
   color:var(--strong);text-decoration:none;white-space:nowrap;
   font-size:var(--fs-400)}
+/* A mark, drawn rather than fetched: `default-src 'none'` means an
+   image would be blocked and a font file would be a file to ship. A
+   rotated zero-content box with an accent border is a diamond, and it
+   costs one rule. */
+.brand::before{content:"";display:inline-block;border-radius:var(--r-xs);
+  border:var(--bw-rule) solid var(--accent);transform:rotate(45deg)}
 .brand:hover{color:var(--accent-ink)}
+.brand:hover::before{border-color:var(--accent-hover)}
 
 /* The box. The scope sits inside the field's own border so the two read
    as one control: what will be searched, then where you type it. */
-form.omni{display:flex;align-items:stretch;flex:1 1 var(--measure);
+form.omni{display:flex;align-items:stretch;flex:1 1 var(--search);
   min-width:0;background:var(--raise);border:var(--border);
   border-radius:var(--r-md);overflow:hidden;
   transition:border-color var(--dur-1),box-shadow var(--dur-1)}
@@ -666,7 +804,7 @@ form.omni:focus-within{border-color:var(--accent-line);
 form.omni .scope{display:flex;align-items:center;white-space:nowrap;
   font-size:var(--fs-200);color:var(--muted);background:var(--card);
   border-right:var(--border);padding:var(--sp-2) var(--sp-3)}
-form.omni input[type="search"]{flex:1 1 var(--measure);min-width:0;
+form.omni input[type="search"]{flex:1 1 var(--search);min-width:0;
   font:inherit;font-size:var(--fs-300);color:var(--ink);
   background:transparent;border:0;padding:var(--sp-2) var(--sp-3);
   appearance:none}
@@ -677,10 +815,26 @@ form.omni input[type="search"]:focus{outline:0}
 form.omni input[type="search"]::-webkit-search-cancel-button{
   appearance:none}
 
-.chrome-nav{display:flex;gap:var(--sp-4);white-space:nowrap;
-  font-size:var(--fs-300)}
+.chrome-nav{display:flex;align-items:center;gap:var(--sp-4);
+  white-space:nowrap;font-size:var(--fs-300)}
 .chrome-nav a{color:var(--muted);text-decoration:none}
 .chrome-nav a:hover{color:var(--accent-ink)}
+
+/* The palette control. Three states rather than a toggle, because the
+   default is "follow the system" and a two-state switch cannot say so:
+   a reader who has never chosen would be shown a lie about what they
+   chose. The current one is a `<b>`, not a link, so it reads as the
+   state it is without colour being the only thing that says so — the
+   same markup, and the same reason, as the search scope tabs. */
+.themes{display:inline-flex;align-items:stretch;
+  border:var(--border);border-radius:var(--r-pill);overflow:hidden;
+  background:var(--card);font-size:var(--fs-200);
+  font-family:var(--font-mono)}
+.theme{padding:var(--sp-1) var(--sp-3);color:var(--muted);
+  text-decoration:none;transition:background var(--dur-1)}
+a.theme:hover{color:var(--accent-ink);background:var(--accent-tint)}
+b.theme.here{color:var(--accent-ink);background:var(--accent-tint);
+  font-weight:var(--fw-medium)}
 /* The hit count beside a tab label. Tabular figures so the three counts
    sit on a common baseline grid and the row does not shift as they
    change width. */
@@ -695,15 +849,17 @@ b.tab.here .count{color:var(--accent-ink)}
    `flex-wrap` reaches the same place: the panes sit side by side while
    they fit and stack when they do not, at whatever width that turns out
    to be rather than one we guessed. */
-.panes{display:flex;flex-wrap:wrap;align-items:flex-start;gap:var(--sp-6)}
-.pane{min-width:0}
-.pane-reviews{flex:3 1 var(--toc)}
-.pane-files{flex:3 1 var(--toc)}
-.pane-content{flex:6 1 var(--measure)}
-.pane>h2{display:flex;align-items:baseline;gap:var(--sp-2);
-  margin:var(--sp-0) var(--sp-0) var(--sp-3)}
-.pane>h2 .mono{margin-left:auto;text-transform:none;
-  letter-spacing:var(--tr-mono)}
+/* `stretch`, not `flex-start`: three cards of three different heights
+   in one row read as three unrelated things, and the shortest one
+   reads as clipped. Equal height is what makes them a row of panels.
+   The basis is `--side` rather than `--toc` because a review's change
+   id is the widest thing either narrow pane holds, and at a sidebar's
+   width it survives to its fingerprint instead of ending at `demo…`. */
+.panes{display:flex;flex-wrap:wrap;align-items:stretch;gap:var(--sp-5)}
+.pane{min-width:0;display:flex;flex-direction:column}
+.pane-reviews{flex:4 1 var(--side)}
+.pane-files{flex:4 1 var(--side)}
+.pane-content{flex:7 1 var(--measure)}
 .pane-content>.readme{margin-top:var(--sp-0)}
 
 /* The in-flight list. One row per review: state, what it is, how far
@@ -734,3 +890,50 @@ table.flight td:first-child a{overflow-wrap:normal}
   padding-left:var(--sp-3)}
 .pane-files .why{display:block;font-size:var(--fs-200);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
+
+/* The comment box on a review page. A `rows` attribute sizes its height
+   and nothing sizes its width, so the browser's default `cols` left a
+   two-word field on a page where every other block runs to the measure —
+   the one control on this surface that looked unfinished. Capped at the
+   measure rather than filling the page, because a comment is prose and
+   prose has a reading width.
+
+   Written as the bare element rather than an id selector, because the
+   raw-value rule reads a hash anywhere below the marker as a hex
+   colour — comment lines included, since it only strips a comment that
+   opens on the same line. The comment box is the only textarea this
+   node serves, so the bare element is the same set either way. */
+textarea{display:block;width:100%;max-width:var(--measure);
+  font:inherit;font-size:var(--fs-400);color:var(--ink);
+  background:var(--raise);border:var(--border);border-radius:var(--r-md);
+  padding:var(--sp-2) var(--sp-3);resize:vertical}
+textarea::placeholder{color:var(--faint)}
+textarea:focus-visible{border-color:var(--accent-line);
+  box-shadow:var(--accent-glow);outline:0}
+
+/* The three buttons this node serves — post a comment, cast a verdict,
+   add a passkey — were the last system-drawn controls on a surface that
+   draws everything else itself. One element rule rather than three
+   class rules, because they are one thing: the control that spends a
+   signature. */
+button{font:inherit;font-size:var(--fs-300);color:var(--ink);
+  background:var(--card);border:var(--border);border-radius:var(--r-md);
+  padding:var(--sp-2) var(--sp-3);cursor:pointer;
+  transition:border-color var(--dur-1),box-shadow var(--dur-1)}
+button:hover{background:var(--raise);border-color:var(--accent-line)}
+button:focus-visible{border-color:var(--accent-line);
+  box-shadow:var(--accent-glow);outline:0}
+button:disabled{color:var(--faint);cursor:default}
+/* The verdict pair. They are the only two controls on this surface that
+   mean opposite things, and a reader about to spend a signature should
+   be able to tell which one is under the cursor without reading it. The
+   text colours are the solid signal tokens, never the washes behind
+   them. */
+button.verdict{font-weight:var(--fw-medium)}
+button.verdict.ok{color:var(--ok);border-color:var(--ok-line);
+  background:var(--ok-tint)}
+button.verdict.danger{color:var(--danger);border-color:var(--danger-line);
+  background:var(--danger-tint)}
+button.verdict.ok:hover{border-color:var(--ok);background:var(--ok-tint)}
+button.verdict.danger:hover{border-color:var(--danger);
+  background:var(--danger-tint)}

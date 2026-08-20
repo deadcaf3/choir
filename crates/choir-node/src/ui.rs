@@ -145,6 +145,7 @@ impl UiCache {
         generation: u64,
         reader: &str,
         roster: &Roster,
+        chrome: crate::browse::Chrome<'_>,
         build_json: F,
     ) -> Arc<String>
     where
@@ -156,11 +157,17 @@ impl UiCache {
             pages.clear();
             *cached_at = (seq, generation);
         }
-        if let Some(page) = pages.get(reader) {
+        // The palette is part of what a cached page *is*, so it is part
+        // of the key. Keyed on the reader alone, the first visitor's
+        // choice would be served to the next one — the page is byte-for
+        // -byte different, and the difference is the whole document's
+        // colour.
+        let key = format!("{reader}\u{1f}{}", chrome.theme.unwrap_or("auto"));
+        if let Some(page) = pages.get(&key) {
             return Arc::clone(page);
         }
-        let page = Arc::new(render(&build_json(), seq, roster));
-        pages.insert(reader.to_string(), Arc::clone(&page));
+        let page = Arc::new(render(&build_json(), seq, roster, chrome));
+        pages.insert(key, Arc::clone(&page));
         page
     }
 }
@@ -178,19 +185,41 @@ impl UiCache {
 ///
 /// `generation` joins it for the reason [`UiCache::page`] gives: a name
 /// deleted from the accounts store changes the page without changing the
-/// sequence, and a browser holding the previous copy has to be told. It
-/// is omitted when zero, which is every node with no accounts store, so
-/// those tags stay the bare sequence numbers they have always been too.
-pub(crate) fn etag(seq: u64, generation: u64, reader: &str) -> String {
+/// sequence, and a browser holding the previous copy has to be told.
+///
+/// So does the build stamp, for the reason [`crate::browse`]'s own tag
+/// gives at length: this page is *this daemon's rendering* of a
+/// sequence, so a daemon that renders it differently is serving a
+/// different page even though the sequence has not moved. Without the
+/// stamp, a node whose log is quiet — which is most nodes most of the
+/// time — answers `304` to every reader who visited before the upgrade,
+/// and a change to this surface ships to nobody. That was not
+/// hypothetical: it is how a restyled page kept rendering as the old
+/// one until a cache-bypassing reload, which is not a thing a reader
+/// knows to do.
+///
+/// The tags are therefore no longer bare sequence numbers on an
+/// ACL-less node. What survives from that shape is the part that was
+/// load-bearing: the reader key is still hashed rather than appended,
+/// so an `ETag` never carries a username back to whatever logs it.
+pub(crate) fn etag(seq: u64, generation: u64, reader: &str, theme: Option<&str>) -> String {
     let state = if generation == 0 {
         seq.to_string()
     } else {
         format!("{seq}.{generation}")
     };
+    // The palette joins the build for the same reason the build joined
+    // the sequence: it changes the document, so a tag that ignores it
+    // hands a reader who just switched their own cached page back.
+    let build = short_digest(&format!(
+        "{}\u{1f}{}",
+        crate::BUILD_COMMIT,
+        theme.unwrap_or("auto")
+    ));
     if reader.is_empty() {
-        return format!("W/\"{state}\"");
+        return format!("W/\"{state}-{build}\"");
     }
-    format!("W/\"{state}-{}\"", short_digest(reader))
+    format!("W/\"{state}-{build}-{}\"", short_digest(reader))
 }
 
 /// A short, stable, non-reversing tag for a reader key.
@@ -270,11 +299,13 @@ fn split_ref(full: &str) -> (&str, &str) {
 /// `seq` is displayed rather than derived from `json` so the number on
 /// the page is the same number in the `ETag`; a reader comparing two
 /// nodes is comparing the thing the cache keyed on.
-fn render(json: &str, seq: u64, roster: &Roster) -> String {
+fn render(json: &str, seq: u64, roster: &Roster, chrome: crate::browse::Chrome<'_>) -> String {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
     let mut h = String::with_capacity(16 * 1024);
 
-    h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    h.push_str("<!doctype html><html lang=\"en\"");
+    crate::browse::theme_attribute(&mut h, chrome.theme);
+    h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir</title>");
     h.push_str(STYLE);
@@ -284,7 +315,7 @@ fn render(json: &str, seq: u64, roster: &Roster) -> String {
     // node rather than a repository, so its box filters the repository
     // list — which is the only thing a reader on this page could be
     // looking for that is not already on it.
-    crate::browse::chrome(&mut h, crate::browse::Bar::index());
+    crate::browse::chrome(&mut h, crate::browse::Bar::index(chrome));
 
     header(&mut h, &v, seq);
     refs_section(&mut h, &v);
@@ -604,7 +635,7 @@ fn attestation_section(h: &mut String, v: &serde_json::Value) {
     h.push_str("<section><h2>Attestation</h2>");
     match v.get("snapshot") {
         Some(snap) if !snap.is_null() => {
-            h.push_str("<table><tbody><tr><td>at seq</td><td class=\"mono\">");
+            h.push_str("<table class=\"kv\"><tbody><tr><td>at seq</td><td class=\"mono\">");
             h.push_str(
                 &snap
                     .get("at_seq")
@@ -682,7 +713,7 @@ fn workspaces_section(h: &mut String, v: &serde_json::Value, roster: &Roster) {
 /// the_shape_the_api_actually_sends` is the guard against that
 /// returning.
 fn health_section(h: &mut String, v: &serde_json::Value) {
-    h.push_str("<section><h2>Health</h2><table><tbody>");
+    h.push_str("<section><h2>Health</h2><table class=\"kv\"><tbody>");
 
     if let Some(lag) = v.get("sequencer_lag").filter(|l| !l.is_null()) {
         let gate = lag.get("gate_us").and_then(serde_json::Value::as_u64);
@@ -853,9 +884,17 @@ pub(crate) struct Refusal<'a> {
 /// pair because the honest destinations differ: a reader refused a
 /// repository should be sent to the list of ones they can read, and a
 /// reader refused the node page should not be sent to the node page.
-pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &str)]) -> String {
+pub(crate) fn refusal(
+    headline: &str,
+    status: u16,
+    r: &Refusal,
+    nav: &[(&str, &str)],
+    chrome: crate::browse::Chrome<'_>,
+) -> String {
     let mut h = String::with_capacity(4 * 1024);
-    h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    h.push_str("<!doctype html><html lang=\"en\"");
+    crate::browse::theme_attribute(&mut h, chrome.theme);
+    h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir: ");
     h.push_str(&esc(headline));
@@ -867,7 +906,7 @@ pub(crate) fn refusal(headline: &str, status: u16, r: &Refusal, nav: &[(&str, &s
     // is scoped to the repository list, which is already filtered to
     // this reader's grants — so it can restate nothing the refusal
     // itself withheld.
-    crate::browse::chrome(&mut h, crate::browse::Bar::index());
+    crate::browse::chrome(&mut h, crate::browse::Bar::index(chrome));
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(headline));
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\">");
@@ -971,7 +1010,7 @@ mod tests {
             "refs": {"o/r.git:refs/heads/<img src=x onerror=alert(1)>": "11-deadbeefdeadbeef"}
         })
         .to_string();
-        let page = render(&json, 7, &Roster::new());
+        let page = render(&json, 7, &Roster::new(), crate::browse::Chrome::default());
         assert!(!page.contains("<img src=x"), "raw markup reached the page");
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));
     }
@@ -994,7 +1033,7 @@ mod tests {
             }
         })
         .to_string();
-        let page = render(&json, 7, &Roster::new());
+        let page = render(&json, 7, &Roster::new(), crate::browse::Chrome::default());
         for name in ["agents/one", "r/project"] {
             assert!(
                 page.contains(&format!("<a href=\"/r/{name}\">{name}</a>")),
@@ -1034,7 +1073,7 @@ mod tests {
             }
         })
         .to_string();
-        let page = render(&json, 1, &Roster::new());
+        let page = render(&json, 1, &Roster::new(), crate::browse::Chrome::default());
         assert!(
             page.contains("refs/heads/main <b class=\"tag pending\">1 pending</b>"),
             "the open review is not on its ref's row: {page}"
@@ -1058,6 +1097,7 @@ mod tests {
             &serde_json::json!({"concentration": {"tripwire_status": "indeterminate"}}).to_string(),
             1,
             &Roster::new(),
+            crate::browse::Chrome::default(),
         );
         assert!(
             waiting.contains("indeterminate"),
@@ -1078,6 +1118,7 @@ mod tests {
             &serde_json::json!({"concentration": {"tripwire_status": "not_observed"}}).to_string(),
             1,
             &Roster::new(),
+            crate::browse::Chrome::default(),
         );
         assert!(
             !settled.contains("neither a pass nor a breach"),
@@ -1091,7 +1132,7 @@ mod tests {
     #[test]
     fn unparseable_or_empty_state_still_renders() {
         for json in ["not json at all", "null", "{}", r#"{"refs":42}"#] {
-            let page = render(json, 0, &Roster::new());
+            let page = render(json, 0, &Roster::new(), crate::browse::Chrome::default());
             assert!(page.starts_with("<!doctype html>"), "no page for {json}");
             assert!(page.contains("</html>"), "truncated page for {json}");
         }
@@ -1114,7 +1155,12 @@ mod tests {
     /// the rule for that, and this stays the rule for the read surface.
     #[test]
     fn the_page_references_no_external_resource() {
-        let page = render(r#"{"refs":{}}"#, 1, &Roster::new());
+        let page = render(
+            r#"{"refs":{}}"#,
+            1,
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+        );
         for probe in ["http://", "https://", "//cdn", "@import"] {
             assert!(!page.contains(probe), "page reaches out via {probe}");
         }
@@ -1215,7 +1261,9 @@ mod tests {
             "build": {"commit": "日日日日日日日日日日日日日日"},
         })
         .to_string();
-        assert!(render(&json, 1, &Roster::new()).ends_with("</html>"));
+        assert!(
+            render(&json, 1, &Roster::new(), crate::browse::Chrome::default()).ends_with("</html>")
+        );
     }
 
     /// A refusal has to carry four things, because that is what the JSON
@@ -1236,6 +1284,7 @@ mod tests {
                 next: "Open the repository list and follow a link from it.",
             },
             &[("/r/", "repositories you can read")],
+            crate::browse::Chrome::default(),
         );
         assert!(page.starts_with("<!doctype html>") && page.ends_with("</html>"));
         assert!(page.contains("404"), "the status is not on the page");
@@ -1282,6 +1331,7 @@ mod tests {
                 next: "<script>alert('x')</script>",
             },
             &[("\" onmouseover=alert(1) x=\"", "<i>label")],
+            crate::browse::Chrome::default(),
         );
         for raw in [
             "<h1>headline",
@@ -1334,6 +1384,7 @@ mod tests {
                 next: "n",
             },
             &[("/r/", "repositories")],
+            crate::browse::Chrome::default(),
         );
         for probe in ["http://", "https://", "//cdn", "<script", "@import"] {
             assert!(!page.contains(probe), "a refusal reaches out via {probe}");
@@ -1625,7 +1676,7 @@ mod tests {
             "snapshot": {"at_seq": 344, "id": "1e-151d4b26d084280e", "prev_snapshot": null},
         })
         .to_string();
-        let page = render(&json, 344, &Roster::new());
+        let page = render(&json, 344, &Roster::new(), crate::browse::Chrome::default());
 
         assert!(page.contains("8.4 ms"), "durable p99 never resolved");
         assert!(page.contains("0.5 ms"), "decision p99 never resolved");
@@ -1701,7 +1752,7 @@ mod tests {
 
         let mut roster = Roster::new();
         roster.insert("7f3ac2ab19cd".to_string(), "Alice Ng".to_string());
-        let named = render(&json, 1, &roster);
+        let named = render(&json, 1, &roster, crate::browse::Chrome::default());
         assert!(
             named.contains("Alice Ng"),
             "a named handle rendered as a handle: {named}"
@@ -1709,7 +1760,7 @@ mod tests {
 
         // Revocation deletes the row the name lived in; the handle
         // survives, because the log kept it and cannot be edited.
-        let forgotten = render(&json, 1, &Roster::new());
+        let forgotten = render(&json, 1, &Roster::new(), crate::browse::Chrome::default());
         assert!(
             !forgotten.contains("Alice Ng"),
             "the deleted name is still on the page: {forgotten}"
@@ -1726,10 +1777,22 @@ mod tests {
     #[test]
     fn a_cache_hit_does_not_rebuild_the_page() {
         let cache = UiCache::new();
-        let first = cache.page(3, 0, "", &Roster::new(), || r#"{"refs":{}}"#.to_string());
-        let second = cache.page(3, 0, "", &Roster::new(), || {
-            panic!("rebuilt an unchanged page")
-        });
+        let first = cache.page(
+            3,
+            0,
+            "",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{}}"#.to_string(),
+        );
+        let second = cache.page(
+            3,
+            0,
+            "",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || panic!("rebuilt an unchanged page"),
+        );
         assert!(Arc::ptr_eq(&first, &second), "same seq served a new page");
     }
 
@@ -1748,19 +1811,28 @@ mod tests {
         roster.insert("7f3ac2ab19cd".to_string(), "Alice Ng".to_string());
 
         let cache = UiCache::new();
-        let named = cache.page(3, 9, "", &roster, || json.clone());
+        let named = cache.page(3, 9, "", &roster, crate::browse::Chrome::default(), || {
+            json.clone()
+        });
         assert!(named.contains("Alice Ng"), "{named}");
 
         // Same sequence, later store: the name is gone from the store
         // and must be gone from the page.
-        let forgotten = cache.page(3, 10, "", &Roster::new(), || json.clone());
+        let forgotten = cache.page(
+            3,
+            10,
+            "",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || json.clone(),
+        );
         assert!(
             !forgotten.contains("Alice Ng"),
             "a deleted name survived in the cache at an unchanged sequence: {forgotten}"
         );
         assert_ne!(
-            etag(3, 9, ""),
-            etag(3, 10, ""),
+            etag(3, 9, "", None),
+            etag(3, 10, "", None),
             "the ETag did not move, so a browser keeps the page with the name on it"
         );
     }
@@ -1770,15 +1842,25 @@ mod tests {
     #[test]
     fn a_new_sequence_rebuilds_and_shows_the_new_state() {
         let cache = UiCache::new();
-        let before = cache.page(1, 0, "", &Roster::new(), || {
-            r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string()
-        });
-        let after = cache.page(2, 0, "", &Roster::new(), || {
-            r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string()
-        });
+        let before = cache.page(
+            1,
+            0,
+            "",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{"o/r.git:refs/heads/main":"11-aaa"}}"#.to_string(),
+        );
+        let after = cache.page(
+            2,
+            0,
+            "",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{"o/r.git:refs/heads/main":"11-bbb"}}"#.to_string(),
+        );
         assert!(before.contains("11-aaa"));
         assert!(after.contains("11-bbb"));
-        assert_ne!(etag(1, 0, ""), etag(2, 0, ""));
+        assert_ne!(etag(1, 0, "", None), etag(2, 0, "", None));
     }
 
     /// Two readers at one sequence are two pages, and each is reused.
@@ -1787,27 +1869,42 @@ mod tests {
     #[test]
     fn readers_seeing_different_things_get_different_pages() {
         let cache = UiCache::new();
-        let alice = cache.page(4, 0, "alice", &Roster::new(), || {
-            r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string()
-        });
-        let bob = cache.page(4, 0, "bob", &Roster::new(), || {
-            r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string()
-        });
+        let alice = cache.page(
+            4,
+            0,
+            "alice",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{"o/a.git:refs/heads/m":"11-a"}}"#.to_string(),
+        );
+        let bob = cache.page(
+            4,
+            0,
+            "bob",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{"o/b.git:refs/heads/m":"11-b"}}"#.to_string(),
+        );
         // On the repository name rather than the `.git` key it is stored
         // under: this test is about one reader never seeing the other's
         // page, and the negative half is stricter for the shorter string.
         assert!(alice.contains("o/a") && !alice.contains("o/b"));
         assert!(bob.contains("o/b") && !bob.contains("o/a"));
-        let again = cache.page(4, 0, "alice", &Roster::new(), || {
-            panic!("rebuilt a cached reader's page")
-        });
+        let again = cache.page(
+            4,
+            0,
+            "alice",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || panic!("rebuilt a cached reader's page"),
+        );
         assert!(
             Arc::ptr_eq(&alice, &again),
             "the reader's own page was dropped"
         );
         assert_ne!(
-            etag(4, 0, "alice"),
-            etag(4, 0, "bob"),
+            etag(4, 0, "alice", None),
+            etag(4, 0, "bob", None),
             "one ETag for two pages"
         );
     }
@@ -1818,29 +1915,61 @@ mod tests {
     #[test]
     fn advancing_the_sequence_clears_every_readers_page() {
         let cache = UiCache::new();
-        let stale = cache.page(5, 0, "alice", &Roster::new(), || {
-            r#"{"refs":{}}"#.to_string()
-        });
-        let _ = cache.page(6, 0, "bob", &Roster::new(), || r#"{"refs":{}}"#.to_string());
-        let fresh = cache.page(6, 0, "alice", &Roster::new(), || {
-            r#"{"refs":{}}"#.to_string()
-        });
+        let stale = cache.page(
+            5,
+            0,
+            "alice",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{}}"#.to_string(),
+        );
+        let _ = cache.page(
+            6,
+            0,
+            "bob",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{}}"#.to_string(),
+        );
+        let fresh = cache.page(
+            6,
+            0,
+            "alice",
+            &Roster::new(),
+            crate::browse::Chrome::default(),
+            || r#"{"refs":{}}"#.to_string(),
+        );
         assert!(
             !Arc::ptr_eq(&stale, &fresh),
             "a page from an older sequence survived"
         );
     }
 
-    /// An ACL-less node's tags must stay what they were, and no tag may
-    /// carry a username to whatever logs it.
+    /// No tag may carry a username to whatever logs it, and a tag must
+    /// move when the daemon's rendering does.
+    ///
+    /// The first half is why the reader key is hashed. The second is
+    /// why the build stamp is in there at all: the sequence alone says
+    /// "the log has not moved", which is not the same claim as "the
+    /// page you hold is the page I would send".
     #[test]
-    fn the_etag_hides_the_reader_and_is_unchanged_without_an_acl() {
-        assert_eq!(etag(7, 0, ""), "W/\"7\"");
-        let tagged = etag(7, 0, "alice\u{1f}*=r");
+    fn the_etag_hides_the_reader_and_moves_with_the_build() {
+        let anonymous = etag(7, 0, "", None);
+        assert!(anonymous.starts_with("W/\"7-"), "{anonymous}");
+        // The build and the palette are hashed together, so the tag
+        // moves when either does and neither is readable off it.
+        assert_ne!(
+            anonymous,
+            etag(7, 0, "", Some("dark")),
+            "two palettes of one sequence share a tag, so a reader who \
+             switches is handed their old page back"
+        );
+        assert_ne!(etag(7, 0, "", Some("dark")), etag(7, 0, "", Some("light")));
+        let tagged = etag(7, 0, "alice\u{1f}*=r", None);
         assert!(
             !tagged.contains("alice"),
             "the ETag carried the username: {tagged}"
         );
-        assert_ne!(tagged, etag(7, 0, "bob\u{1f}*=r"));
+        assert_ne!(tagged, etag(7, 0, "bob\u{1f}*=r", None));
     }
 }

@@ -847,7 +847,27 @@ fn every_link_a_listing_renders_can_be_followed() {
             continue;
         }
         seen.push(path.clone());
-        let (status, _, page) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        let (status, headers, page) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        // A `303` is alive, not dead: the palette links in the bar set a
+        // cookie and send the reader back, so "answers" means "answers",
+        // not "answers 200". What must still hold is that it sends them
+        // somewhere on this node — a redirector that can be pointed off
+        // the origin is the bug this arm exists to refuse.
+        if status == 303 {
+            let to = headers
+                .lines()
+                .find_map(|l| {
+                    l.split_once(':')
+                        .filter(|(k, _)| k.eq_ignore_ascii_case("location"))
+                })
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default();
+            assert!(
+                to.starts_with('/') && !to.starts_with("//"),
+                "a redirect the page rendered leaves this origin: {path} -> {to}"
+            );
+            continue;
+        }
         assert_eq!(status, 200, "a link the page rendered is dead: {path}");
         for href in hrefs(&page) {
             if href.contains("/tree/") {
@@ -899,7 +919,12 @@ fn a_deep_path_keeps_every_step_of_its_breadcrumb_reachable() {
     );
     let mut climbed = 0usize;
     for href in hrefs(&page) {
-        if href.contains("/tree/main/deep") {
+        // A breadcrumb step is a browse address, so it *starts* with the
+        // prefix rather than merely containing it. Matching on
+        // `contains` swept in the palette links too, whose `to=` carries
+        // this very path as a query value — and those answer `303`, not
+        // `200`, because they set a cookie and send the reader back.
+        if href.starts_with("/r/") && href.contains("/tree/main/deep") {
             let (status, _, _) = get(&format!("{base}{href}"), &["-u", "alice:a"]);
             assert_eq!(status, 200, "a breadcrumb step is dead: {href}");
             climbed += 1;

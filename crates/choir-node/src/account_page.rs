@@ -52,9 +52,15 @@ fn esc(text: &str) -> String {
 /// `store` is `None` on a node without `--accounts-file`, which is not an
 /// error: it is a node where nobody has an account, and the page says
 /// that rather than 404ing on a path that exists.
-pub(crate) fn render(store: Option<&Accounts>, user: &str) -> Page {
+pub(crate) fn render(
+    store: Option<&Accounts>,
+    user: &str,
+    chrome: crate::browse::Chrome<'_>,
+) -> Page {
     let mut h = String::with_capacity(4 * 1024);
-    h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    h.push_str("<!doctype html><html lang=\"en\"");
+    crate::browse::theme_attribute(&mut h, chrome.theme);
+    h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir: your account</title>");
     h.push_str(crate::ui::STYLE);
@@ -165,7 +171,7 @@ mod tests {
     /// error page.
     #[test]
     fn the_page_distinguishes_no_store_from_no_account() {
-        let page = super::render(None, "alice");
+        let page = super::render(None, "alice", crate::browse::Chrome::default());
         assert_eq!(page.status, 200);
         assert!(page.html.contains("does not run account self-service"));
         assert!(!page.html.contains("<script"), "no store, no ceremony");

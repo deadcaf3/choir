@@ -353,3 +353,193 @@ fn concurrent_readers_all_get_a_whole_page() {
         r.join().expect("a reader thread panicked");
     }
 }
+
+/// A query string does not un-serve the node state page.
+///
+/// The dispatcher matched `request.url()` against `"/status"` whole, so
+/// this one page — alone on the surface — answered 404 to any address
+/// carrying a `?`: a cache-buster, a tracking parameter a mail client
+/// appended to a shared link, anything. Every other route splits the
+/// query off first, including this file's own `is_browser_path` helper,
+/// which is what made the outlier hard to see.
+///
+/// The refusal was also a convincing one. It says "nothing is served at
+/// that address" and prints the address, which is exactly the page a
+/// reader gets for a genuine typo, so the report would have arrived as
+/// "your link is broken" rather than as a routing bug.
+#[test]
+fn the_node_state_page_survives_a_query_string() {
+    let (base, _key) = served_node();
+    let plain = format!("{base}status");
+    let (status, _, body) = get(&plain, &["-u", "u:t"]);
+    assert_eq!(status, 200, "the bare address stopped working");
+    assert!(body.contains("Refs"), "not the state page: {body}");
+
+    for query in ["?v=2", "?utm_source=mail", "?a=1&b=2"] {
+        let (status, _, body) = get(&format!("{plain}{query}"), &["-u", "u:t"]);
+        assert_eq!(status, 200, "`/status{query}` was refused");
+        assert!(
+            body.contains("Refs"),
+            "`/status{query}` served something other than the state page: {body}"
+        );
+    }
+}
+
+/// The palette a reader chooses is theirs, and choosing it cannot be
+/// turned into a way of sending them somewhere else.
+///
+/// The stylesheet has carried `:root[data-theme="light"]` and its dark
+/// twin since it was written and nothing ever set the attribute, so the
+/// override was decoration: a reader whose system said light read a
+/// light page and had no way to say otherwise.
+///
+/// The `to=` parameter is the part that needs the test. A redirector
+/// that checks only "starts with a slash" is an open redirect, because
+/// a browser reads `//evil.test` as another host — so the refusals are
+/// asserted by name rather than trusted to a reading of the code.
+#[test]
+fn a_reader_can_choose_a_palette_and_cannot_be_redirected_off_the_node() {
+    let (base, _key) = served_node();
+    let set = |query: &str| {
+        let out = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "-i",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code} %{redirect_url}",
+            ])
+            .args(["-u", "u:t"])
+            .arg(format!("{base}theme{query}"))
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // Setting one sends the reader back to the page they were reading.
+    let answer = set("?set=dark&to=/status");
+    assert!(answer.starts_with("303 "), "not a redirect: {answer}");
+    assert!(answer.ends_with("/status"), "wrong destination: {answer}");
+
+    // ...and the page then renders in it, which is the whole point.
+    let (status, _, body) = get(
+        &format!("{base}status"),
+        &["-u", "u:t", "-H", "Cookie: theme=dark"],
+    );
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(r#"<html lang="en" data-theme="dark""#),
+        "the page ignored the cookie: {body}"
+    );
+    let (_, _, light) = get(
+        &format!("{base}status"),
+        &["-u", "u:t", "-H", "Cookie: theme=light"],
+    );
+    assert!(light.contains(r#"data-theme="light""#), "{light}");
+
+    // No cookie is not a third palette: it is the absence of the
+    // attribute, which is what leaves `prefers-color-scheme` in charge.
+    // Asserted on the opening tag, not on the document: the stylesheet
+    // names `data-theme` in its own rules, so a document-wide `contains`
+    // is true on every page and would pass whatever the tag said.
+    let (_, _, plain) = get(&format!("{base}status"), &["-u", "u:t"]);
+    assert!(
+        plain.contains(r#"<html lang="en">"#),
+        "a reader who chose nothing was given a palette anyway: {}",
+        &plain[..plain.len().min(120)]
+    );
+
+    // A value this node did not write is not a palette either. The
+    // cookie is never trusted for anything but which colours to paint,
+    // and this is what keeps it from reaching the attribute unchecked.
+    let (_, _, forged) = get(
+        &format!("{base}status"),
+        &[
+            "-u",
+            "u:t",
+            "-H",
+            r#"Cookie: theme="><script>alert(1)</script>"#,
+        ],
+    );
+    assert!(!forged.contains("<script>alert"), "{forged}");
+    assert!(
+        forged.contains(r#"<html lang="en">"#),
+        "a cookie this node never wrote reached the attribute: {}",
+        &forged[..forged.len().min(120)]
+    );
+
+    // The open-redirect cases, each by name.
+    for hostile in [
+        "//evil.test/",
+        "https://evil.test/",
+        "/\\evil.test",
+        "evil.test",
+    ] {
+        let answer = set(&format!("?set=dark&to={hostile}"));
+        assert!(
+            answer.starts_with("303 "),
+            "{hostile} was not answered at all: {answer}"
+        );
+        assert!(
+            !answer.contains("evil.test"),
+            "`to={hostile}` sent the reader off this node: {answer}"
+        );
+    }
+
+    // Clearing is a real state, not a missing one: it is how a reader
+    // goes back to following their system.
+    let answer = set("?set=auto&to=/status");
+    assert!(answer.starts_with("303 "), "{answer}");
+    let (_, headers, _) = get(&format!("{base}theme?set=auto&to=/status"), &["-u", "u:t"]);
+    assert!(
+        headers.contains("Max-Age=0"),
+        "auto did not clear the cookie: {headers}"
+    );
+}
+
+/// Two readers holding two palettes are not served each other's page.
+///
+/// The state page is memoized per reader and revalidated with an
+/// `ETag`; both were keyed on things that do not include the palette,
+/// so the first visitor's colours would have been handed to the next
+/// one and a reader who switched would have been handed their own old
+/// page back by their browser.
+#[test]
+fn the_palette_is_part_of_a_page_s_cache_identity() {
+    let (base, _key) = served_node();
+    let tag = |cookie: &str| {
+        let (_, headers, _) = get(
+            &format!("{base}status"),
+            &["-u", "u:t", "-H", &format!("Cookie: theme={cookie}")],
+        );
+        header_value(&headers, "ETag").expect("the state page carries an ETag")
+    };
+    let dark = tag("dark");
+    let light = tag("light");
+    assert_ne!(dark, light, "two palettes of one page share a cache entry");
+
+    // And the body follows the tag rather than the other way around.
+    let (_, _, dark_body) = get(
+        &format!("{base}status"),
+        &["-u", "u:t", "-H", "Cookie: theme=dark"],
+    );
+    assert!(dark_body.contains(r#"data-theme="dark""#), "{dark_body}");
+
+    // A conditional request with the wrong palette's tag is not a hit.
+    let (status, _, _) = get(
+        &format!("{base}status"),
+        &[
+            "-u",
+            "u:t",
+            "-H",
+            "Cookie: theme=light",
+            "-H",
+            &format!("If-None-Match: {dark}"),
+        ],
+    );
+    assert_eq!(
+        status, 200,
+        "a light reader was answered 304 for a dark page"
+    );
+}
