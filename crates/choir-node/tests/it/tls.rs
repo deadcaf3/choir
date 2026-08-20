@@ -115,6 +115,37 @@ fn git_and_api_work_over_https() {
     let view: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(view["refs"]["agents/demo.git:refs/heads/main"].is_string());
 
+    // The palette cookie is marked `Secure` here and is not on the
+    // loopback node, because the flag follows the scheme actually being
+    // served (D56). Hardcoding it either way fails silently in one
+    // direction: always-on and a plain-HTTP browser drops the cookie so
+    // the palette never sticks, with nothing in the response saying so;
+    // never-on and a TLS deployment hands a browser a cookie it will
+    // send in clear the first time anything reaches the node without
+    // TLS. Asserted over a real https listener rather than reasoned
+    // about, because "the node knows its own scheme" is the whole claim.
+    let out = std::process::Command::new("curl")
+        .args([
+            "-ski",
+            "-o",
+            "/dev/null",
+            "-D",
+            "-",
+            &format!("https://127.0.0.1:{port}/theme?set=dark&to=/"),
+        ])
+        .output()
+        .expect("curl runs");
+    let headers = String::from_utf8_lossy(&out.stdout);
+    let cookie = headers
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+        .unwrap_or_else(|| panic!("no cookie was set over https: {headers}"));
+    assert!(
+        cookie.contains("Secure"),
+        "a cookie set over tls is not marked Secure: {cookie}"
+    );
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+
     node.unblock();
     std::fs::remove_dir_all(&work).ok();
 }

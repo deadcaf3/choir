@@ -543,3 +543,26 @@ fn the_palette_is_part_of_a_page_s_cache_identity() {
         "a light reader was answered 304 for a dark page"
     );
 }
+
+/// ...and the same cookie over plain HTTP is *not* marked `Secure`.
+///
+/// The other half of the D56 flag, asserted separately because it is
+/// the half that fails silently: a `Secure` cookie on a plain-HTTP node
+/// is dropped by the browser, so the palette control would render, be
+/// clickable, answer `303` — and never once stick. Nothing in the
+/// response would say why.
+#[test]
+fn a_plain_http_node_does_not_mark_the_palette_cookie_secure() {
+    let (base, _key) = served_node();
+    let (_, headers, _) = get(&format!("{base}theme?set=dark&to=/"), &["-u", "u:t"]);
+    let cookie = headers
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+        .unwrap_or_else(|| panic!("no cookie was set: {headers}"));
+    assert!(
+        !cookie.contains("Secure"),
+        "a plain-http node set a cookie the browser will drop: {cookie}"
+    );
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+}

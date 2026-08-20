@@ -1344,7 +1344,7 @@ impl Node {
                 if request.url().split(['?', '#']).next().unwrap_or("") == "/theme" {
                     let url = request.url().to_string();
                     let set = browse::param(&url, "set").unwrap_or_default();
-                    let outcome = respond_theme(request, &set, &return_to(&url));
+                    let outcome = respond_theme(request, &set, &return_to(&url), scheme);
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -1968,23 +1968,30 @@ fn respond_page(
 /// chosen from a link on this node is the only way it is ever set, and
 /// `HttpOnly` because nothing on this surface runs script — a cookie
 /// script cannot read is one less thing for a future page to leak.
-/// `Secure` is deliberately absent: this node is reachable on loopback
-/// over plain HTTP by design, and a `Secure` cookie there is a control
-/// that silently does nothing.
+/// `Secure` follows the scheme this node is actually serving rather
+/// than being hardcoded either way. Always-on would be a control that
+/// silently does nothing on the loopback node this is developed
+/// against: the browser drops the cookie, the palette never sticks, and
+/// nothing in the response says why. Never-on would leave a real
+/// deployment setting a cookie over TLS that a browser then sends in
+/// clear if anything ever reaches it over plain HTTP. The node knows
+/// which one it is, so it says.
 fn respond_theme(
     request: tiny_http::Request,
     set: &str,
     back: &str,
+    scheme: &str,
 ) -> std::io::Result<(u16, u64)> {
     // Clearing is `Max-Age=0`, which is how a cookie is deleted; any
     // spelling other than the two real ones clears rather than errors,
     // so a hand-typed `/theme?set=nonsense` returns the reader to the
     // system default instead of to a refusal page.
+    let secure = if scheme == "https" { "; Secure" } else { "" };
     let cookie = match set {
         "dark" | "light" => {
-            format!("theme={set}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly")
+            format!("theme={set}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly{secure}")
         }
-        _ => "theme=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly".to_string(),
+        _ => format!("theme=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly{secure}"),
     };
     let response = tiny_http::Response::empty(303)
         .with_header(
