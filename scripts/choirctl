@@ -390,6 +390,30 @@ url)
   echo "$(api_base)/${2:-choir/choir.git}" | sed "s|://|://$(auth_user):$(auth_pass)@|"
   ;;
 
+invite)
+  # D57. Prints the join link and nothing else, because the link is the
+  # whole artefact: it gets pasted into a chat window, and anything else
+  # printed beside it invites pasting that too. The `id:secret` pair the
+  # API also returns is for `curl -u`; it is not what a person receives.
+  [ $# -ge 3 ] || { echo "usage: choirctl invite <name> <owner/repo> [read|write]" >&2; exit 2; }
+  tunnel_up
+  level=${4:-write}
+  repo="$2"
+  target="$3"
+  # `.git` is how the ACL spells a repository, and leaving it off is the
+  # mistake that mints an invite granting nothing. Added here rather than
+  # refused, since there is one right answer.
+  case "$target" in *.git) ;; *) target="$target.git" ;; esac
+  curl -sS -u "$(auth_user):$(auth_pass)" -X POST \
+    -d "{\"user\":\"$repo\",\"grants\":[\"$target $level\"]}" \
+    "$(api_base)/api/accounts/invite" \
+  | python3 -c 'import sys,json
+answer = json.load(sys.stdin)
+if "join_url" not in answer:
+    sys.exit("choirctl invite: " + answer.get("error", str(answer)))
+print(answer["join_url"])'
+  ;;
+
 *)
   cat <<USAGE
 sh scripts/choirctl <command>
@@ -404,6 +428,8 @@ sh scripts/choirctl <command>
   push [repo]      push this repo to the node only (--all and --tags)
   mirror           push to the private Forgejo follower only
   url [repo]       clone/push URL including credentials
+
+  invite <name> <owner/repo> [read|write]        mint a link to paste
 
   review <id> <oid> [repo:ref]                   open a landing review
   verdict <reviewer> <id> <verdict> [note]       cast a reviewer verdict

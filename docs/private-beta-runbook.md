@@ -168,3 +168,38 @@ following:
 Only after those receipts are reviewed may the firewall allow invited beta
 users and production DNS be published. Authentication does not replace this
 launch hold.
+
+## Inviting somebody (D57)
+
+Mint an invite as the operator. The username and the grants are frozen
+here, by you, and nothing the recipient does can change either:
+
+```sh
+curl -u <operator> -X POST \
+  -d '{"user":"<their-name>","grants":["<owner>/<repo>.git write"]}' \
+  https://<host>/api/accounts/invite
+```
+
+The response carries `join_url`. **That is the whole thing you send** —
+paste it into the chat and nothing else. It opens a page that shows them
+what they are accepting, and one button that creates the account and
+shows a password once.
+
+Four properties worth knowing, because they change how you handle a link:
+
+- **A preview is harmless.** Chat clients fetch the link to build a card;
+  fetching never spends it. Only the button does.
+- **Single use, and 24 hours by default.** Pass `expires_in_secs` to
+  shorten it. A link that has sat in a channel for a day is already dead.
+- **It is a bearer credential.** Anyone who can read the channel can
+  redeem it. That is bounded — they get the name and the grants you
+  chose, and `POST /api/accounts/revoke` removes the account and any
+  outstanding invite together — but treat the channel as the boundary.
+- **Never `@node`.** The store refuses to issue node scope, so an invite
+  cannot mint an auditor or a rate-limit exemption. Node-wide authority
+  stays in the ACL file where you edit it by hand (D36).
+
+The invite id appears in the request log as the `user` for a redemption
+attempt, which is deliberate: it attributes the attempt without naming
+the account it would create. The secret never appears, because it travels
+in a query string and the log records only paths.

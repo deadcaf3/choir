@@ -69,14 +69,23 @@ fn served_node() -> (String, ActorKey) {
     (format!("http://127.0.0.1:{port}/"), node_key)
 }
 
-/// The page is not a hole in the auth wall. This is the property the
-/// public deployment rests on: the anonymous internet gets nothing,
-/// and "nothing" has to include the human-readable surface.
+/// The state page is not a hole in the auth wall.
+///
+/// This used to assert that the *bare address* refuses an anonymous
+/// reader. D57 opened exactly one door there on purpose — a stranger
+/// pointed at the node gets a landing page instead of a password box —
+/// so the assertion moved to the page this module is actually about
+/// rather than being deleted along with the property it protected.
+///
+/// What is still true, and is what the public deployment rests on: every
+/// page that says anything about *this* node refuses. The landing page
+/// carries no node state, which `join.rs` asserts separately, and the
+/// full list of anonymous routes is pinned there too.
 #[test]
 fn the_page_is_behind_the_same_auth_wall_as_everything_else() {
     let (url, _) = served_node();
 
-    let (status, headers, body) = get(&url, &[]);
+    let (status, headers, body) = get(&format!("{url}status"), &[]);
     assert_eq!(
         status, 401,
         "the browser surface served an anonymous reader"
@@ -87,7 +96,15 @@ fn the_page_is_behind_the_same_auth_wall_as_everything_else() {
         "no challenge header, so a browser would never prompt"
     );
 
-    let (status, _, body) = get(&url, &["-u", "u:t"]);
+    // A credential that is presented and wrong is refused at the bare
+    // address too, so the one public page is not reachable by getting a
+    // password wrong — a reader who mistyped needs the browser to ask
+    // again, not a page explaining what choir is.
+    let (status, headers, _) = get(&url, &["-u", "u:wrong"]);
+    assert_eq!(status, 401, "a wrong password was answered with a page");
+    assert!(header_value(&headers, "WWW-Authenticate").is_some());
+
+    let (status, _, body) = get(&format!("{url}status"), &["-u", "u:t"]);
     assert_eq!(status, 200);
     assert!(body.starts_with("<!doctype html>"), "not an HTML page");
 }

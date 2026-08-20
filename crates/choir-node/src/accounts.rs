@@ -207,6 +207,27 @@ struct Invite {
     issued_at: u64,
 }
 
+/// What an invite promises its holder, read by the join page (D57).
+///
+/// A copy rather than a borrow: the store's lock is released before the
+/// page is rendered, and rendering must not be able to hold it.
+///
+/// Deliberately not the whole stored invite: `secret_hash` has no business
+/// leaving the store, and `issued_at` says nothing a holder needs.
+pub struct InviteSummary {
+    /// The account name redemption will create. Chosen by the issuer at
+    /// minting, never by the holder.
+    pub user: String,
+    /// Readable name the account will carry (D46), when the issuer set one.
+    pub display_name: Option<String>,
+    /// The grants that account will be issued, as `<repo> <level>`.
+    pub grants: Vec<String>,
+    /// Unix seconds after which the invite stops working.
+    pub expires_at: u64,
+    /// Who minted it, so the holder can see whether they know that name.
+    pub issued_by: String,
+}
+
 /// The whole store, as held in memory.
 #[derive(Debug, Default, Clone)]
 struct State {
@@ -990,6 +1011,35 @@ impl Accounts {
             .expect("accounts read lock")
             .accounts
             .contains_key(user)
+    }
+
+    /// What an invite promises, for the page that shows a holder what
+    /// they are about to accept (D57).
+    ///
+    /// **Only ever call this for an invite whose secret has already
+    /// authenticated.** Nothing here checks possession, so a caller that
+    /// reaches it with an id alone has built an oracle: `Some` versus
+    /// `None` would tell an anonymous stranger which invite ids exist and
+    /// which accounts are pending on this node. The one caller is the join
+    /// page, which gets the id from a successful
+    /// [`Accounts::authenticate`] and never from the request.
+    ///
+    /// Expiry is re-checked rather than assumed, so this cannot be the
+    /// place a stale invite is presented as a live one.
+    #[must_use]
+    pub fn invite_summary(&self, invite_id: &str) -> Option<InviteSummary> {
+        let state = self.state.read().expect("accounts read lock");
+        let invite = state.invites.get(invite_id)?;
+        if invite.expires_at <= now_secs() {
+            return None;
+        }
+        Some(InviteSummary {
+            user: invite.user.clone(),
+            display_name: invite.display_name.clone(),
+            grants: invite.grants.clone(),
+            expires_at: invite.expires_at,
+            issued_by: invite.issued_by.clone(),
+        })
     }
 
     /// What to call `user` in something a person reads (D46).

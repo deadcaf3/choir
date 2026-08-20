@@ -935,6 +935,16 @@ button:hover{background:var(--raise);border-color:var(--accent-line)}
 button:focus-visible{border-color:var(--accent-line);
   box-shadow:var(--accent-glow);outline:0}
 button:disabled{color:var(--faint);cursor:default}
+/* The one decisive control on a page that has exactly one: accepting an
+   invite. Every other button here sits among siblings, so a quiet card
+   button is right for them; this one is the only thing on its page a
+   reader is meant to press, and a control that looks optional on a page
+   with no alternative reads as though something is missing. Solid accent
+   text, never a wash, so it stays legible in both palettes. */
+button.go{color:var(--accent-ink);background:var(--accent-tint);
+  border-color:var(--accent-line);font-weight:var(--fw-medium)}
+button.go:hover{border-color:var(--accent);background:var(--accent-tint)}
+
 /* The verdict pair. They are the only two controls on this surface that
    mean opposite things, and a reader about to spend a signature should
    be able to tell which one is under the cursor without reading it. The

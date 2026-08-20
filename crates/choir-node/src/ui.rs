@@ -952,6 +952,25 @@ pub(crate) fn refusal(
 /// values, both belonging to this repository; `ui.css` states the rule
 /// that binds them. Dark is the canonical theme and light follows the
 /// reader's system setting, both without a line of JavaScript.
+/// The social-preview card, served at [`CARD_PATH`].
+///
+/// The only binary this node ships. It exists because a link pasted into
+/// a chat window is rendered by that client into a card, and a card with
+/// no image is a grey rectangle beside the one thing a newcomer has been
+/// asked to trust.
+///
+/// It is generic on purpose and carries no text beyond the wordmark: the
+/// preview is fetched and rendered by a third party's servers and shown
+/// to everyone in the channel, so the repository, the inviter and the
+/// username stay in the page body where only the holder of the link
+/// sees them.
+pub(crate) const CARD: &[u8] = include_bytes!("card.png");
+
+/// Where [`CARD`] is served. Named once because the route, the
+/// `og:image` tag and the test that proves it is reachable must agree,
+/// and three spellings of a path is how one of them goes stale.
+pub(crate) const CARD_PATH: &str = "/static/card.png";
+
 pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
 
 /// The URL D39's client half is served from, in one place because the

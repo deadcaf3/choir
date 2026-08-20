@@ -21,6 +21,7 @@ pub mod acl;
 mod bound;
 mod browse;
 pub mod hooks;
+mod join_page;
 pub mod limits;
 pub mod platform;
 mod prepare;
@@ -121,6 +122,16 @@ pub struct Node {
     /// Self-service credentials (D36). `None` = no `--accounts-file`, so
     /// the only credentials are the ones the operator wrote by hand.
     accounts: Option<std::sync::Arc<accounts::Accounts>>,
+    /// Admission control for the pre-auth routes (D57).
+    ///
+    /// Always present, unlike [`Node::rate`]: those routes answer before
+    /// any credential is checked, so "no ceiling was configured" is not
+    /// an option there the way it is for an authenticated caller.
+    public_rate: std::sync::Arc<limits::PublicLimiter>,
+    /// Whether this node hands out ssh access, which decides whether the
+    /// join page offers a key field. Offering one on a node with no ssh
+    /// surface collects a key nothing will ever use.
+    ssh_enabled: bool,
     /// The file table and the store's grants, merged, cached against the
     /// generations of both. Rebuilt when either moves, so authorization
     /// does not rebuild a table per request.
@@ -252,6 +263,13 @@ impl Node {
             request_log: None,
             rate: None,
             accounts: None,
+            // Chosen to be generous for the one page a person opens once
+            // and restrictive for anything doing it in a loop: a reader
+            // fetches the join page, submits it, and lands on the
+            // welcome page, which is three. The node-wide ceiling is the
+            // one that matters under a flood from many addresses.
+            public_rate: std::sync::Arc::new(limits::PublicLimiter::new(30, 600)),
+            ssh_enabled: false,
             acl_merged: std::sync::RwLock::new(None),
             quotas: quota::Quotas::default(),
             api_body_limit: std::num::NonZeroU64::new(DEFAULT_API_BODY_BYTES)
@@ -499,6 +517,7 @@ impl Node {
         // Every operator credential's name, so self-service can never
         // issue an account that shadows one.
         let reserved = table.keys().cloned().collect();
+        self.ssh_enabled = keys_out.is_some();
         let mut store = accounts::Accounts::open(path, keys_out, reserved)?;
         if let Some(actor_keys) = actor_keys {
             store = store.binding_actor_keys_into(actor_keys);
@@ -956,6 +975,8 @@ impl Node {
             let authenticated = self.auth.is_some();
             let port = self.port;
             let scheme = self.scheme;
+            let public_rate = std::sync::Arc::clone(&self.public_rate);
+            let ssh_enabled = self.ssh_enabled;
             std::thread::spawn(move || {
                 // D33. Started before anything else the thread does, so
                 // the recorded duration is the node's whole cost. The
@@ -981,6 +1002,65 @@ impl Node {
                     // "anon" and not a name: no credential was
                     // evaluated on this path, and the request log must
                     // say what happened rather than what was sent.
+                    access.finish(log, "anon", &outcome);
+                    return;
+                }
+                // D57's front door, also ahead of authentication, and for
+                // a plainer reason than D39's: the people these pages are
+                // for do not have a credential yet. That is the whole
+                // point of them.
+                //
+                // Everything the auth gate would have done downstream has
+                // to be done here instead, because a request that returns
+                // from this block never reaches it. In order: admission
+                // control, which is *not* the authenticated limiter (see
+                // `PublicLimiter` — a map keyed on an anonymous caller's
+                // address is the attack, not the defence); a bounded read
+                // of any body; and `access.finish` on every exit, since
+                // each branch logs itself.
+                let public_path = request
+                    .url()
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let method = request.method().as_str();
+                let public = matches!(
+                    (method, public_path.as_str()),
+                    ("GET" | "POST", "/join")
+                ) || (method == "GET" && public_path == ui::CARD_PATH)
+                    // The landing page replaces the challenge only for a
+                    // request that presented nothing. A credential that
+                    // was presented and is wrong still gets the `401`,
+                    // because a reader who mistyped their password needs
+                    // the browser to ask again rather than a page telling
+                    // them what choir is.
+                    || (method == "GET"
+                        && matches!(public_path.as_str(), "/" | "/index.html")
+                        && authenticated
+                        && header(&request, "authorization").is_none());
+                if public {
+                    if let Some(retry) = public_rate.check(&limits::peer_key(&request)) {
+                        let outcome = respond_public_busy(request, retry);
+                        access.finish(log, "anon", &outcome);
+                        return;
+                    }
+                    let outcome = if public_path == ui::CARD_PATH {
+                        respond_card(request)
+                    } else {
+                        respond_join(
+                            request,
+                            accounts.as_deref(),
+                            &public_path,
+                            ssh_enabled,
+                            scheme,
+                        )
+                    };
+                    // "anon", like the script constant above: no
+                    // credential was evaluated, and the record must say
+                    // what happened rather than what was presented. The
+                    // invite id is deliberately not logged either — it is
+                    // half of a live credential.
                     access.finish(log, "anon", &outcome);
                     return;
                 }
@@ -1270,6 +1350,7 @@ impl Node {
                         invite.as_deref(),
                         acl.as_deref(),
                         api_body_limit,
+                        scheme,
                         request,
                     );
                     access.finish(log, &user, &outcome);
@@ -1956,6 +2037,141 @@ fn respond_page(
     served(request, response, status, bytes)
 }
 
+/// Serves the social-preview card (D57).
+///
+/// Immutable and cached for a year: the bytes are compiled into the
+/// binary, so the only way they change is a new binary, and a chat client
+/// that has to refetch a card it already holds is spending a stranger's
+/// request budget on a picture.
+fn respond_card(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
+    let bytes = ui::CARD.len() as u64;
+    let response = tiny_http::Response::from_data(ui::CARD)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Cache-Control"[..],
+                &b"public, max-age=31536000, immutable"[..],
+            )
+            .expect("static header"),
+        );
+    served(request, response, 200, bytes)
+}
+
+/// The most a pre-auth request body may be (D57).
+///
+/// Two hex credentials and an ssh public key, with room to spare. It is
+/// not [`Node::api_body_limit`] because that ceiling is for authenticated
+/// callers doing real work, and this one is reached by anybody at all: a
+/// megabyte a stranger can spend without a credential is a megabyte they
+/// can spend in a loop.
+const JOIN_BODY_BYTES: u64 = 8 * 1024;
+
+/// Answers a pre-auth request that the public limiter refused.
+///
+/// Plain text rather than a page. A caller hitting this is a loop, not a
+/// reader, and rendering the whole stylesheet to tell them so would spend
+/// exactly the resource the limiter is protecting.
+fn respond_public_busy(request: tiny_http::Request, retry: u64) -> std::io::Result<(u16, u64)> {
+    let body = "too many requests\n";
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(429)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Retry-After"[..], retry.to_string().as_bytes())
+                .expect("a number is a valid header value"),
+        );
+    served(request, response, 429, body.len() as u64)
+}
+
+/// Serves the public front door: the landing page and the invite link.
+///
+/// Headers differ from [`respond_page`] in one deliberate way:
+/// `Cache-Control: no-store` rather than `private, no-cache`. A request
+/// here carries a live credential in its URL and an answer may carry a
+/// freshly minted one in its body, and neither belongs in a cache that
+/// something else can read — including the browser's own disk cache on a
+/// shared machine.
+fn respond_join(
+    mut request: tiny_http::Request,
+    store: Option<&accounts::Accounts>,
+    path: &str,
+    ssh: bool,
+    scheme: &'static str,
+) -> std::io::Result<(u16, u64)> {
+    let theme = chosen_theme(&request);
+    let chrome = browse::Chrome {
+        site: None,
+        theme,
+        // Empty: these pages carry no navigation bar, so there is no
+        // palette link that would need somewhere to return to — and an
+        // address that did carry one would be carrying the invite secret
+        // into an `href`.
+        here: "",
+    };
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let url = request.url().to_string();
+    let page = if path == "/join" {
+        if request.method().as_str() == "POST" {
+            match quota::read_bounded(
+                request.as_reader(),
+                std::num::NonZeroU64::new(JOIN_BODY_BYTES),
+            ) {
+                Ok(quota::Body::Complete(bytes)) => {
+                    let body = String::from_utf8_lossy(&bytes).into_owned();
+                    join_page::post(store, &body, origin.as_deref(), chrome)
+                }
+                // An over-long body is not told apart from a bad one: the
+                // page a stranger sees is the same either way, and the
+                // distinction is only useful to somebody probing.
+                _ => join_page::not_valid(403, theme),
+            }
+        } else {
+            join_page::get(
+                store,
+                join_page::param(&url, "i").as_deref(),
+                join_page::param(&url, "k").as_deref(),
+                ssh,
+                chrome,
+                origin.as_deref(),
+                join_page::now_unix_secs(),
+            )
+        }
+    } else {
+        join_page::landing(theme)
+    };
+    let bytes = page.html.len() as u64;
+    let mut response = tiny_http::Response::from_string(page.html)
+        .with_status_code(page.status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    // An invite link that reaches a search index is an invite spent by a
+    // crawler. The header carries where a `<meta>` tag cannot: on the
+    // redirect-free fetch a crawler actually makes.
+    if path == "/join" {
+        response = response.with_header(
+            tiny_http::Header::from_bytes(&b"X-Robots-Tag"[..], &b"noindex, nofollow"[..])
+                .expect("static header"),
+        );
+    }
+    served(request, response, page.status, bytes)
+}
+
 /// Sets or clears the theme cookie and sends the reader back where they
 /// were.
 ///
@@ -2194,12 +2410,45 @@ const MAX_COMMENT_CHARS: usize = 4096;
 /// things are checked here instead, because neither is a grant: that the
 /// node has a store at all, and that redemption is being performed by the
 /// invite it names rather than by somebody who merely holds a credential.
+/// Adds the one-click join link to a freshly minted invite (D57).
+///
+/// The operator's own reason for this: the store answers with an
+/// `id:secret` pair shaped for `curl -u`, which is right for a script and
+/// is not something anybody pastes into a chat window. The link is the
+/// artefact that actually gets sent to a person, so the endpoint that
+/// mints the invite is the place to build it.
+///
+/// A node that was reached without a `Host` header gets no link rather
+/// than a guessed one, on the same reasoning as `browse::node_url`: an
+/// operator who pastes a wrong address has a mystery, and one who finds
+/// no link goes and looks.
+///
+/// Anything that is not a successful mint passes straight through: an
+/// error body has no invite in it to link to.
+fn with_join_url(answer: (u16, String), origin: Option<&str>) -> (u16, String) {
+    let (status, body) = answer;
+    if status != 200 {
+        return (status, body);
+    }
+    let (Some(origin), Ok(mut parsed)) = (origin, serde_json::from_str::<serde_json::Value>(&body))
+    else {
+        return (status, body);
+    };
+    let Some((id, secret)) = parsed["invite"].as_str().and_then(|p| p.split_once(':')) else {
+        return (status, body);
+    };
+    let url = format!("{origin}/join?i={id}&k={secret}");
+    parsed["join_url"] = serde_json::Value::String(url);
+    (status, parsed.to_string())
+}
+
 fn handle_accounts(
     store: Option<&accounts::Accounts>,
     user: &str,
     invite: Option<&str>,
     acl: Option<&acl::Acl>,
     body_limit: std::num::NonZeroU64,
+    scheme: &'static str,
     mut request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
     let req_body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
@@ -2210,6 +2459,10 @@ fn handle_accounts(
     };
     let method = request.method().as_str().to_string();
     let path = request.url().split('?').next().unwrap_or("").to_string();
+    // The address this operator actually reached the node on. The store
+    // cannot know it — it has never seen a request — so the link is
+    // assembled here, where the `Host` header is.
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
     let (status, body) = match (store, acl) {
         (None, _) => (
             503,
@@ -2237,7 +2490,9 @@ fn handle_accounts(
                 };
                 match (json, method.as_str(), path.as_str()) {
                     (None, _, _) => (400, r#"{"error":"body must be JSON"}"#.to_string()),
-                    (Some(json), "POST", "/api/accounts/invite") => store.invite(user, &json),
+                    (Some(json), "POST", "/api/accounts/invite") => {
+                        with_join_url(store.invite(user, &json), origin.as_deref())
+                    }
                     (Some(json), "POST", "/api/accounts/redeem") => match invite {
                         Some(id) => store.redeem(id, &json),
                         None => (

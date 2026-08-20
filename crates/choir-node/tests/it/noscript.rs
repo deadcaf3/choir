@@ -270,6 +270,14 @@ fn every_page_renders_its_content_with_scripting_disabled() {
             "/account".to_string(),
             vec!["account self-service", "auth file"],
         ),
+        // D57's front door. It carries the only `<form method="post">` on
+        // this surface — every other write path here is script-driven —
+        // so it is the page where "works with scripting off" is a claim
+        // about the feature rather than about the prose. This node runs
+        // no `--accounts-file`, so what it must still say is that it
+        // takes no invites, which sends the reader to the operator
+        // instead of leaving them on a blank page.
+        ("/join".to_string(), vec!["does not accept invites", "next"]),
     ];
 
     for (path, wanted) in pages {

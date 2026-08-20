@@ -68,6 +68,7 @@ that would reverse it are not published.
 | D54 | The software keeps the singular name `choir` even where the registered domain is plural: a choir is already many voices under one score, which is the unit the model has | Two-way |
 | D55 | Answering a review is a read-level act: a verdict, a comment and a viewing receipt authorize at `read` on the repository under review, because admission already binds each of them to the channel that signed it | Two-way |
 | D56 | The browser surface picks its palette from a cookie the node reads server-side, rendering `data-theme` into the page, rather than from a script: the read surface still runs none, and "follow the system" stays a real third state | Two-way |
+| D57 | The node has a public front door: a landing page at `/` for a request carrying no credential, and `GET /join?i=<id>&k=<secret>` rendering an invite that only a `POST` redeems. The link is a bearer credential, bounded by a username and grants the issuer freezes at minting; `GET` never consumes, so a chat client's preview cannot spend it; every failure renders one byte-identical page, so the node is not a directory of pending accounts; the secret rides in the query string, which the request log drops. The route and its two parameter names are the one-way part, because links outlive the channels they were pasted into | One-way for readers |
 
 ## Reading the door column
 
