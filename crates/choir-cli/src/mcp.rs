@@ -218,7 +218,7 @@ impl HttpClient {
             // at a dead port three times was measured, not imagined.
             return Err(
                 "curl could not reach the choir node (if the node is remote, \
-                 the tunnel may have expired: run `sh scripts/choirctl status` \
+                 the tunnel may have expired: run `./choirctl status` \
                  and retry)"
                     .to_string(),
             );

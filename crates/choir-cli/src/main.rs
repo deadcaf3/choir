@@ -1720,9 +1720,93 @@ fn current_change_revision(
     }
 }
 
+/// The node URL configured for this directory, if any.
+///
+/// Walks up from the working directory looking for `.choir/config`, the
+/// way git finds a repository. A *file* rather than an environment
+/// variable on purpose: this workspace takes configuration from flags
+/// and files, and the handful of environment reads that exist are
+/// deliberately not configuration.
+///
+/// Walking up rather than reading one fixed path means a checkout can
+/// name the node it belongs to, which is the same thing a git remote
+/// does and needs no explaining to anybody who has used one.
+fn configured_node() -> Option<String> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(dir.join(".choir/config")) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    if key.trim() == "node" {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            return Some(value.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Fills in the node URL for a command that takes one and was not given
+/// one.
+///
+/// Every command whose spec begins with `<api>` takes it as its first
+/// argument, and an api is always a URL, so "the first argument is not a
+/// URL" is an unambiguous test rather than a guess. The set of such
+/// commands is read from the surface table rather than listed here,
+/// because a second list is a second thing to forget.
+///
+/// An explicit URL always wins: this only ever fills a gap.
+fn with_configured_node(args: &[String]) -> Vec<String> {
+    let Some(name) = args.first() else {
+        return args.to_vec();
+    };
+    let takes_api = choir_cli::surface::COMMANDS
+        .iter()
+        .any(|c| c.name == name && c.args.starts_with("<api>"));
+    if !takes_api {
+        return args.to_vec();
+    }
+    let given = args.get(1).map(String::as_str).unwrap_or("");
+    if given.starts_with("http://") || given.starts_with("https://") {
+        return args.to_vec();
+    }
+    let Some(node) = configured_node() else {
+        return args.to_vec();
+    };
+    let mut filled = Vec::with_capacity(args.len() + 1);
+    filled.push(args[0].clone());
+    filled.push(node);
+    filled.extend(args[1..].iter().cloned());
+    filled
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `choir <command> --help` before anything else parses: a reader
+    // asking what a command takes must not have to satisfy its argument
+    // rules to be told.
+    if args.len() >= 2 && args[1] == "--help" {
+        if let Some(help) = choir_cli::surface::command_help(&args[0]) {
+            print!("{help}");
+            std::process::exit(0);
+        }
+    }
+    if args.first().map(String::as_str) == Some("--help") {
+        print!("{}", choir_cli::surface::usage());
+        std::process::exit(0);
+    }
     let (auth, args) = parse_auth(&args);
+    let args = with_configured_node(args);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         // With a name, prints the line that *binds* this key to one

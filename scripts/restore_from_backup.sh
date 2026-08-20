@@ -7,7 +7,7 @@
 # restored is a hypothesis, and the only thing that settles it is a
 # running daemon appending to the log it was handed.
 #
-#   sh scripts/choirctl restore-from-backup <backup-dir> <target-root>
+#   ./choirctl restore-from-backup <backup-dir> <target-root>
 #
 # Exits: 0 restored and proven, 1 a check failed, 2 usage,
 #        3 an operator decision is required (secrets, see the runbook).
@@ -32,7 +32,7 @@ fail() { echo "restore: $1" >&2; exit 1; }
 decide() { echo "restore: $1" >&2; exit 3; }
 
 [ -n "$SRC" ] && [ -n "$ROOT" ] || {
-  echo "usage: sh scripts/choirctl restore-from-backup <backup-dir> <target-root>" >&2
+  echo "usage: ./choirctl restore-from-backup <backup-dir> <target-root>" >&2
   echo "  <backup-dir>   a directory written by pull_backup.sh" >&2
   echo "  <target-root>  the repo root to build; must not already hold a log" >&2
   exit 2

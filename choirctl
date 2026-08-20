@@ -18,7 +18,7 @@ auth_pass() { head -1 "$STATE/auth" | cut -d: -f2-; }
 # verdict passthroughs refuse rather than guess when it is missing: a
 # wrong path found via PATH could be a stale binary signing real ops.
 choir_bin() {
-  local bin="$HERE/../target/release/choir"
+  local bin="$HERE/target/release/choir"
   [ -x "$bin" ] || { echo "choirctl: no CLI at $bin — build it: cargo build --release -p choir-cli" >&2; exit 1; }
   echo "$bin"
 }
@@ -143,7 +143,7 @@ install)
     echo "    sh ~/choir-build/scripts/flip/install_node_linux.sh $PORT <repo> ~/bin ~/choir-build/target/release" >&2
     exit 1
   fi
-  sh "$HERE/flip/install_node.sh" "$PORT" "${2:-choir/choir.git}"
+  sh "$HERE/scripts/flip/install_node.sh" "$PORT" "${2:-choir/choir.git}"
   ;;
 
 status)
@@ -153,7 +153,7 @@ status)
   elif launchctl print "gui/$(id -u)/$LABEL" > /dev/null 2>&1; then
     echo "agent:  loaded ($LABEL)"
   else
-    echo "agent:  not loaded — run: sh scripts/choirctl install"
+    echo "agent:  not loaded — run: ./choirctl install"
     exit 1
   fi
   # Which binary is actually serving, not merely whether something is.
@@ -175,12 +175,12 @@ status)
   # running process" actually asks. A stamp of `unknown` means the binary
   # was built without one, not that the commit is unknowable.
   built=$(printf '%s' "$view" | python3 -c 'import json,sys; b=json.load(sys.stdin).get("build",{}); print(b.get("commit","unknown"), b.get("source","?"), "dirty" if b.get("dirty") else "clean")' 2>/dev/null || echo "unknown ? ?")
-  head_now=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
+  head_now=$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)
   build_commit=${built%% *}
   build_tail=${built#* }
   echo "build:  $build_commit (stamp ${build_tail%% *}, tree ${built##* })"
   if [ "$build_commit" = unknown ]; then
-    echo "build:  UNSTAMPED — rebuild with sh scripts/choirctl install to make this checkable"
+    echo "build:  UNSTAMPED — rebuild with ./choirctl install to make this checkable"
   elif [ "$build_commit" != "$head_now" ]; then
     echo "build:  STALE — serving $(printf '%.12s' "$build_commit"), checkout is $(printf '%.12s' "$head_now")"
   fi
@@ -210,7 +210,7 @@ if lag["log_write_failures"]:
     if [ -f "$HOME/choir-oplog/ops.jsonl" ]; then
       echo "backup: $(wc -l < "$HOME/choir-oplog/ops.jsonl" | tr -d ' ') ops pulled, last $(date -r "$HOME/choir-oplog/ops.jsonl" '+%F %H:%M')"
     else
-      echo "backup: NEVER PULLED — run: sh scripts/choirctl pull-backup"
+      echo "backup: NEVER PULLED — run: ./choirctl pull-backup"
     fi
   else
     mirror_line
@@ -218,7 +218,7 @@ if lag["log_write_failures"]:
     # a commit behind if it was started before the last commit landed.
     if [ -f "$RECEIPT" ]; then
       mirrored=$(awk 'NR==1{print $3}' "$RECEIPT")
-      head=$(git -C "$HERE/.." rev-parse HEAD 2>/dev/null || echo unknown)
+      head=$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)
       [ "$mirrored" = "$head" ] || echo "mirror: BEHIND — mirrored $mirrored, HEAD is $head"
     fi
   fi
@@ -233,7 +233,7 @@ stop)
   fi
   launchctl bootout "gui/$(id -u)/$LABEL"
   echo "stopped $LABEL — but it returns at next login"
-  echo "to end it for good: sh scripts/choirctl uninstall"
+  echo "to end it for good: ./choirctl uninstall"
   ;;
 
 uninstall)
@@ -253,7 +253,7 @@ uninstall)
 push)
   # Local repo -> the choir node, as the canonical remote (--all + --tags).
   remote_node && tunnel_up
-  sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
+  sh "$HERE/scripts/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
   ;;
 
 mirror)
@@ -287,7 +287,7 @@ verdict)
   [ $# -ge 4 ] || { echo "usage: choirctl verdict <reviewer> <id> <approve|request-changes> [note]" >&2; exit 2; }
   remote_node && tunnel_up
   # No array for the optional note: this script is documented to run as
-  # `sh scripts/choirctl`, and macOS sh is bash 3.2, where expanding an
+  # `./choirctl`, and macOS sh is bash 3.2, where expanding an
   # empty array under `set -u` dies with `note[@]: unbound variable` —
   # which killed both verdict seats of a real landing round.
   if [ $# -ge 5 ]; then
@@ -321,7 +321,7 @@ sync)
     # tunnel), follower second (on-box, node repo -> Forgejo), then the
     # offsite copy of the log — which is now this machine, pulling.
     tunnel_up
-    sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
+    sh "$HERE/scripts/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
     # A follower failure is reported but does not block the backup pull:
     # the log copy matters more than the ref mirror, and the failure is
     # already loud on this run's own output.
@@ -332,7 +332,7 @@ sync)
   # The post-flip order, in one command: canonical first, follower
   # second. `set -e` stops here if the canonical push fails, so the
   # mirror can never get ahead of the node (D21 single-canonical).
-  sh "$HERE/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
+  sh "$HERE/scripts/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
 
   # Whatever the previous run did, before starting another one over it.
   mirror_line
@@ -342,9 +342,9 @@ sync)
   # a failed canonical push never gets here, so the mirror still cannot
   # get ahead of the node (D21 single-canonical). What backgrounding
   # changes is only who waits, and nothing waits on a follower.
-  printf 'started %s %s\n' "$(date +%s)" "$(git -C "$HERE/.." rev-parse HEAD)" > "$RECEIPT"
+  printf 'started %s %s\n' "$(date +%s)" "$(git -C "$HERE" rev-parse HEAD)" > "$RECEIPT"
   nohup sh "$HERE/push_mirror.sh" >> "$RECEIPT" 2>&1 &
-  echo "mirror: running in background -> $RECEIPT (see: sh scripts/choirctl status)"
+  echo "mirror: running in background -> $RECEIPT (see: ./choirctl status)"
   ;;
 
 verify-backup)
@@ -372,7 +372,7 @@ pull-backup)
 schedule-backup)
   # Load a LaunchAgent that runs pull-backup on an interval (default
   # hourly), so the offsite copy stops depending on manual syncs.
-  sh "$HERE/flip/install_pull_timer.sh" "${2:-}"
+  sh "$HERE/scripts/flip/install_pull_timer.sh" "${2:-}"
   ;;
 
 logs)
@@ -416,7 +416,7 @@ print(answer["join_url"])'
 
 *)
   cat <<USAGE
-sh scripts/choirctl <command>
+./choirctl <command>
 
   install [repo]   build + mint secrets + load the supervised daemon
   status           is it running, is auth on, what does the view say

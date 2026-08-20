@@ -81,7 +81,30 @@ pub struct Command {
     pub summary: &'static str,
     /// Whether an agent is expected to reach for this routinely.
     pub agent_facing: bool,
+    /// Which section of `--help` this belongs under.
+    ///
+    /// Help used to be one flat list of every command in the order they
+    /// were added, which is the order they were *written* rather than any
+    /// order they are read in. Thirty-two lines like that is a wall, and
+    /// the reader's actual question — "what do I run to get a change
+    /// reviewed" — was answered nowhere on the page.
+    ///
+    /// A field rather than a lookup table beside the list, so a new
+    /// command cannot be added without deciding where it belongs; the
+    /// compiler asks.
+    pub group: &'static str,
 }
+
+/// The help sections, in reading order: what you do first, then the loop
+/// you live in, then the things you reach for when something is wrong.
+pub const GROUPS: &[&str] = &[
+    "getting started",
+    "changing code",
+    "review",
+    "checks",
+    "reading the node",
+    "operating a node",
+];
 
 /// One HTTP endpoint on the node.
 pub struct Endpoint {
@@ -273,6 +296,7 @@ pub const COMMANDS: &[Command] = &[
         summary: "mint a key and print the line the operator registers; \
                   pass your channel name to print the bound form",
         agent_facing: true,
+        group: "getting started",
     },
     Command {
         name: "git-credential",
@@ -281,6 +305,7 @@ pub const COMMANDS: &[Command] = &[
                   remote URL; configure once with `git config credential.helper \
                   '\''!choir git-credential <auth-file>'\''`",
         agent_facing: false,
+        group: "getting started",
     },
     Command {
         name: "join",
@@ -289,6 +314,7 @@ pub const COMMANDS: &[Command] = &[
                   writes the issued token to an auth file at 0600, and on a node started \
                   with --invite-binds-keys the key is registered by the redemption itself",
         agent_facing: true,
+        group: "getting started",
     },
     Command {
         name: "workspace",
@@ -296,12 +322,14 @@ pub const COMMANDS: &[Command] = &[
         summary: "provision a CoW workspace; advanced flags owner-sign an exact base and stable change, \
                   and each --path owner-signs a subtree this change declares it works within",
         agent_facing: true,
+        group: "changing code",
     },
     Command {
         name: "checkpoint",
         args: "<api> <key-file> <channel> <change-id> <workspace-id> <git-oid>",
         summary: "publish an immutable change revision after committing and pushing its Git object",
         agent_facing: true,
+        group: "changing code",
     },
     Command {
         name: "propose",
@@ -311,12 +339,14 @@ pub const COMMANDS: &[Command] = &[
                   come from the git remote, and the branch name is the change identity, so \
                   re-running after an amend updates the same proposal",
         agent_facing: true,
+        group: "changing code",
     },
     Command {
         name: "workspace-archive",
         args: "<api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>",
         summary: "owner-sign and recoverably archive a bound workspace; exact retries are idempotent",
         agent_facing: true,
+        group: "changing code",
     },
     Command {
         name: "runner",
@@ -324,18 +354,21 @@ pub const COMMANDS: &[Command] = &[
         summary: "drive one workspace lifecycle step for an orchestrator; \
                   a JSON request on stdin, a JSON result on stdout",
         agent_facing: false,
+        group: "operating a node",
     },
     Command {
         name: "submit",
         args: "<api> <key-file> <channel> '<op-json>'",
         summary: "sign and submit one raw operation",
         agent_facing: false,
+        group: "changing code",
     },
     Command {
         name: "schema",
         args: "<api>",
         summary: "print this node's machine-readable API description and its live capabilities",
         agent_facing: true,
+        group: "reading the node",
     },
     Command {
         name: "log",
@@ -343,6 +376,7 @@ pub const COMMANDS: &[Command] = &[
         summary: "read log entries from a cursor; --verify checks continuity, recomputes every \
                   hash, and verifies the signatures whose keys you hold — SYNC.md as a flag",
         agent_facing: true,
+        group: "reading the node",
     },
     Command {
         name: "batch",
@@ -350,18 +384,21 @@ pub const COMMANDS: &[Command] = &[
         summary: "sign and submit many operations as one batch — the primary path for agent \
                   workloads; one op per line, `-` reads stdin, one result line per op in order",
         agent_facing: true,
+        group: "changing code",
     },
     Command {
         name: "review",
         args: "<api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...",
         summary: "request review on a commit; name no reviewers and the node draws them",
         agent_facing: true,
+        group: "review",
     },
     Command {
         name: "verdict",
         args: "<api> <key-file> <reviewer> <id> approve|request-changes [note]",
         summary: "answer a review you were assigned",
         agent_facing: true,
+        group: "review",
     },
     Command {
         name: "comment",
@@ -369,6 +406,7 @@ pub const COMMANDS: &[Command] = &[
         summary: "say something on a review; append-only and permanent, \
                   and the comment id is your retry identity",
         agent_facing: true,
+        group: "review",
     },
     Command {
         name: "viewed",
@@ -377,12 +415,14 @@ pub const COMMANDS: &[Command] = &[
                   \"reviewed and ignored\" from \"nobody looked\"; first \
                   read only, resubmitting is refused",
         agent_facing: true,
+        group: "review",
     },
     Command {
         name: "slash",
         args: "<api> <node-key-file> <id> <reviewer> '<reason>'",
         summary: "invalidate one reviewer's approval; operator-only and never moves a ref",
         agent_facing: false,
+        group: "review",
     },
     Command {
         name: "abandon",
@@ -390,30 +430,35 @@ pub const COMMANDS: &[Command] = &[
         summary: "archive a stale incomplete review as lapsed, settling it unapproved; \
                   operator-only and never moves a ref",
         agent_facing: false,
+        group: "review",
     },
     Command {
         name: "bind",
         args: "<api> <node-key-file> <operator> <key-hex> [channel]",
         summary: "record in the log that a key belongs to an operator; operator-only and never moves a ref",
         agent_facing: false,
+        group: "operating a node",
     },
     Command {
         name: "revoke",
         args: "<api> <node-key-file> <key-hex> '<reason>'",
         summary: "withdraw a key binding; terminal, and the attribution row survives",
         agent_facing: false,
+        group: "operating a node",
     },
     Command {
         name: "appeal",
         args: "<api> <attempt-id>",
         summary: "appeal a rejected newcomer attempt for operator adjudication; never grants privilege",
         agent_facing: true,
+        group: "reading the node",
     },
     Command {
         name: "intent",
         args: "<api> <key-file> <channel> <subject> <kind> '<body>'",
         summary: "publish a task spec or plan so other agents can see intent",
         agent_facing: true,
+        group: "changing code",
     },
     Command {
         name: "check",
@@ -421,6 +466,7 @@ pub const COMMANDS: &[Command] = &[
         summary: "report one automated check's outcome on a commit; any runner or a person \
                   can report by signing, and the node never runs the check",
         agent_facing: true,
+        group: "checks",
     },
     Command {
         name: "checks",
@@ -428,12 +474,14 @@ pub const COMMANDS: &[Command] = &[
         summary: "every check reported on a commit, and one verdict; exits 0 passed, \
                   1 failed or unreported, 3 still running",
         agent_facing: true,
+        group: "checks",
     },
     Command {
         name: "reviews",
         args: "<api> <reviewer>",
         summary: "your pending review queue",
         agent_facing: true,
+        group: "review",
     },
     Command {
         name: "acl render",
@@ -442,6 +490,7 @@ pub const COMMANDS: &[Command] = &[
                   handle; the grants themselves are copied through unchanged, and a handle \
                   the node can no longer name loses its comment",
         agent_facing: false,
+        group: "operating a node",
     },
     Command {
         name: "triage",
@@ -450,6 +499,7 @@ pub const COMMANDS: &[Command] = &[
                   verdicts, changes requested, approved awaiting landing — ranked \
                   most-actionable-first, capped, with truncation marked in-band",
         agent_facing: true,
+        group: "reading the node",
     },
     Command {
         name: "funnel",
@@ -458,6 +508,7 @@ pub const COMMANDS: &[Command] = &[
                   drop between two stages; counts what this credential may read, and reports \
                   the first-contact stage as null rather than inventing a zero",
         agent_facing: false,
+        group: "reading the node",
     },
     Command {
         name: "state",
@@ -465,6 +516,7 @@ pub const COMMANDS: &[Command] = &[
         summary: "your bounded next-actions document: verdicts you owe, what your changes \
                   need, what you are waiting on, each with a command and its risk",
         agent_facing: true,
+        group: "changing code",
     },
     Command {
         name: "skill",
@@ -473,12 +525,14 @@ pub const COMMANDS: &[Command] = &[
                   this binary's own surface table so it can never document another version; \
                   re-run after upgrading and unchanged files are left alone",
         agent_facing: true,
+        group: "getting started",
     },
     Command {
         name: "view",
         args: "<api> [--limit <n>] [--offset <n>]",
         summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest",
         agent_facing: true,
+        group: "reading the node",
     },
     Command {
         name: "repair",
@@ -489,6 +543,7 @@ pub const COMMANDS: &[Command] = &[
                   cutting, and damage anywhere but the tail is refused rather than \
                   patched over",
         agent_facing: false,
+        group: "operating a node",
     },
 ];
 
@@ -705,18 +760,94 @@ pub fn endpoint(method: &str, path: &str) -> Option<&'static Endpoint> {
         .find(|endpoint| endpoint.method == method && endpoint.path == path)
 }
 
-/// The `choir` usage block, as `--help` and a bare invocation print it.
+/// The `choir` usage block, as a bare invocation prints it.
+///
+/// Names and one-line summaries only, grouped. The full argument spec of
+/// a command is a line of its own and there are thirty-two of them; put
+/// them all here and the reader scans a wall of `<api> <key-file>` for
+/// the one word they came for. `choir <command> --help` prints the spec
+/// for one command, which is the question anybody actually has.
 #[must_use]
 pub fn usage() -> String {
-    let mut out = format!("usage:\n  choir {AUTH_OPTIONS} <command> ...\n\ncommands:\n");
-    for c in COMMANDS {
-        out.push_str(&format!("  choir {} {}\n", c.name, c.args));
+    let width = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let mut out = String::from("usage:\n  choir <command> [args]\n");
+    out.push_str(&format!("  choir {AUTH_OPTIONS} <command> [args]\n"));
+    out.push_str("  choir <command> --help\n");
+    for group in GROUPS {
+        out.push_str(&format!("\n{group}\n"));
+        for c in COMMANDS.iter().filter(|c| &c.group == group) {
+            // First clause only. A summary here earns one line, and the
+            // clauses after the first are the caveats -- which belong on
+            // the command's own help, next to the argument they qualify.
+            let short = first_clause(c.summary, 58);
+            out.push_str(&format!("  {:width$}  {}\n", c.name, short));
+        }
     }
+    out.push_str(
+        "\nMost commands take the node's URL as their first argument. Put it in \n\
+         `.choir/config` as `node = <url>`, in this directory or any parent, and \n\
+         it is filled in when you leave it out.\n",
+    );
     out.push_str(
         "\nExit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), \
          2 usage error.\n",
     );
     out
+}
+
+/// A summary's opening clause, cut to `max` on a word boundary.
+///
+/// The index has one line per command and the summaries are written as
+/// several clauses, so an uncut one wraps and the list stops being a
+/// list. What is cut is always available: `choir <command> --help`
+/// prints the whole thing.
+fn first_clause(summary: &str, max: usize) -> String {
+    let clause = summary.split(';').next().unwrap_or(summary).trim();
+    if clause.chars().count() <= max {
+        return clause.to_string();
+    }
+    let mut cut = String::new();
+    for word in clause.split_whitespace() {
+        // +1 for the space, +1 for the ellipsis that will follow.
+        if cut.chars().count() + word.chars().count() + 2 > max {
+            break;
+        }
+        if !cut.is_empty() {
+            cut.push(' ');
+        }
+        cut.push_str(word);
+    }
+    // Trailing punctuation before an ellipsis reads as a typo.
+    while cut.ends_with(',') || cut.ends_with('—') || cut.ends_with('-') {
+        cut.pop();
+        cut = cut.trim_end().to_string();
+    }
+    format!("{cut}…")
+}
+
+/// The help for one command: its full spec and its whole summary.
+#[must_use]
+pub fn command_help(name: &str) -> Option<String> {
+    let c = COMMANDS.iter().find(|c| c.name == name)?;
+    let mut out = format!("  choir {} {}\n\n", c.name, c.args);
+    // The summary's clauses, one per line. They are written as one
+    // sentence of several clauses, and read far better as a short list
+    // than as a paragraph wrapped by the terminal.
+    for (n, clause) in c.summary.split(';').enumerate() {
+        let clause = clause.trim();
+        if n == 0 {
+            out.push_str(&format!("  {clause}\n"));
+        } else {
+            out.push_str(&format!("    - {clause}\n"));
+        }
+    }
+    if c.args.starts_with("<api>") {
+        out.push_str(
+            "\n  <api> may be omitted when `.choir/config` names a node, here or in\n  \
+             any parent directory.\n",
+        );
+    }
+    Some(out)
 }
 
 /// The README's endpoint table.
@@ -733,10 +864,43 @@ pub fn api_table() -> String {
 #[must_use]
 pub fn readme_surface() -> String {
     format!(
-        "#### HTTP endpoints\n\n{}\n#### The `choir` CLI\n\n```text\n{}```\n",
+        "#### HTTP endpoints\n\n{}\n#### The `choir` CLI\n\n{}",
         api_table(),
-        usage()
+        cli_reference()
     )
+}
+
+/// The README's command reference: every command, its full argument
+/// spec, and what it is for.
+///
+/// Not [`usage`]. Help is an index — the reader is at a prompt and wants
+/// the name of the thing, and thirty-two full argument specs is what
+/// they have to read past to find it. A README is the opposite
+/// situation: the reader is already looking the command up, and the
+/// specs are the reason they came. Rendering both from the same table
+/// keeps them from disagreeing without pretending they answer the same
+/// question.
+#[must_use]
+pub fn cli_reference() -> String {
+    let mut out = String::new();
+    for group in GROUPS {
+        out.push_str(&format!("**{group}**\n\n"));
+        for c in COMMANDS.iter().filter(|c| &c.group == group) {
+            out.push_str(&format!(
+                "- `choir {} {}`  \n  {}\n",
+                c.name, c.args, c.summary
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str(
+        "Most commands take the node's URL first. Put `node = <url>` in `.choir/config`, \
+         in the working directory or any parent, and it is filled in when omitted. \
+         `choir <command> --help` prints one command's spec.\n\n\
+         Exit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), \
+         2 usage error.\n",
+    );
+    out
 }
 
 /// The command list the agent templates carry, as a markdown bullet list.

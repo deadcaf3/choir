@@ -10,7 +10,9 @@
 //! ```
 //! let usage = choir_cli::surface::usage();
 //! assert!(usage.starts_with("usage:\n"));
-//! assert!(usage.contains("choir review"));
+//! // Grouped: a section heading, and the command names under it.
+//! assert!(usage.contains("\nreview\n"));
+//! assert!(usage.contains("verdict"));
 //! ```
 
 /// Regenerating the readable half of an ACL file (D46).

@@ -72,7 +72,7 @@ targets = [
     "aarch64-unknown-linux-gnu",
 ]
 # The gate is the gate. Release packaging runs after it rather than
-# beside it, so nothing is ever published that `scripts/gate full`
+# beside it, so nothing is ever published that `./gate`
 # refused.
 publish-jobs = []
 install-path = "CARGO_HOME"

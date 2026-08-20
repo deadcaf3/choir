@@ -50,7 +50,7 @@
 
 **OS / filesystem**
 
-- **macOS (APFS):** supported. Fast CoW workspaces via `clonefile` / `cp -Rc`. Dogfood installer uses **launchd** (`scripts/choirctl`).
+- **macOS (APFS):** supported. Fast CoW workspaces via `clonefile` / `cp -Rc`. Dogfood installer uses **launchd** (`./choirctl`).
 - **Linux:** supported. Prefer a **btrfs** volume for workspace snapshots (Phase-0 gate used btrfs). Without CoW, provisioning still works but is slower.
 - **Non-loopback bind** requires TLS (`--tls-cert` + `--tls-key`). Plain HTTP is loopback-only by design.
 
@@ -103,11 +103,11 @@ The daemon serves **git smart-HTTP** and the **platform API** on one port (defau
 ### Option A: macOS dogfood (supervised)
 
 ```bash
-sh scripts/choirctl install              # build, mint ~/.choir secrets, load launchd
-sh scripts/choirctl status
-sh scripts/choirctl url                  # clone/push URL with credentials
-sh scripts/choirctl logs
-# sh scripts/choirctl stop | uninstall   # stop keeps data under ~/.choir
+./choirctl install              # build, mint ~/.choir secrets, load launchd
+./choirctl status
+./choirctl url                  # clone/push URL with credentials
+./choirctl logs
+# ./choirctl stop | uninstall   # stop keeps data under ~/.choir
 ```
 
 Override port with `CHOIR_PORT`. Full flip procedure: `scripts/flip/RUNBOOK.md`.
@@ -496,7 +496,7 @@ A review page shows what commit lands on what ref, who was asked and what each s
 
 ```bash
 # after choirctl install:
-git clone "$(sh scripts/choirctl url owner/repo.git)"
+git clone "$(./choirctl url owner/repo.git)"
 # or manually:
 # git clone http://choir:<token>@127.0.0.1:8417/owner/demo.git
 
@@ -573,46 +573,91 @@ Before deploying it, three limits:
 
 #### The `choir` CLI
 
-```text
-usage:
-  choir [--auth-file <path>] [--auth-user <name>] <command> ...
+**getting started**
 
-commands:
-  choir key <key-file> [name]
-  choir git-credential <auth-file> [--auth-user <name>] get|store|erase
-  choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]
-  choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...
-  choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
-  choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...
-  choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
-  choir runner <config-file>
-  choir submit <api> <key-file> <channel> '<op-json>'
-  choir schema <api>
-  choir log <api> [--from <n>] [--verify] [--keys <file>]
-  choir batch <api> <key-file> <channel> <ops-file>
-  choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
-  choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]
-  choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'
-  choir viewed <api> <key-file> <viewer> <review-id>
-  choir slash <api> <node-key-file> <id> <reviewer> '<reason>'
-  choir abandon <api> <node-key-file> <id>
-  choir bind <api> <node-key-file> <operator> <key-hex> [channel]
-  choir revoke <api> <node-key-file> <key-hex> '<reason>'
-  choir appeal <api> <attempt-id>
-  choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
-  choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]
-  choir checks <api> <git-oid>
-  choir reviews <api> <reviewer>
-  choir acl render <api> <acl-file>
-  choir triage <api>
-  choir funnel <api>
-  choir state <api> <channel>
-  choir skill install [--into <dir>]
-  choir view <api> [--limit <n>] [--offset <n>]
-  choir repair <log-file> --verify | --truncate-tail
+- `choir key <key-file> [name]`  
+  mint a key and print the line the operator registers; pass your channel name to print the bound form
+- `choir git-credential <auth-file> [--auth-user <name>] get|store|erase`  
+  git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
+- `choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]`  
+  redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
+- `choir skill install [--into <dir>]`  
+  install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
+
+**changing code**
+
+- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...`  
+  provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
+- `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>`  
+  publish an immutable change revision after committing and pushing its Git object
+- `choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...`  
+  propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal
+- `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>`  
+  owner-sign and recoverably archive a bound workspace; exact retries are idempotent
+- `choir submit <api> <key-file> <channel> '<op-json>'`  
+  sign and submit one raw operation
+- `choir batch <api> <key-file> <channel> <ops-file>`  
+  sign and submit many operations as one batch — the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op in order
+- `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'`  
+  publish a task spec or plan so other agents can see intent
+- `choir state <api> <channel>`  
+  your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
+
+**review**
+
+- `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...`  
+  request review on a commit; name no reviewers and the node draws them
+- `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]`  
+  answer a review you were assigned
+- `choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'`  
+  say something on a review; append-only and permanent, and the comment id is your retry identity
+- `choir viewed <api> <key-file> <viewer> <review-id>`  
+  record that you read a review, so its author can tell "reviewed and ignored" from "nobody looked"; first read only, resubmitting is refused
+- `choir slash <api> <node-key-file> <id> <reviewer> '<reason>'`  
+  invalidate one reviewer's approval; operator-only and never moves a ref
+- `choir abandon <api> <node-key-file> <id>`  
+  archive a stale incomplete review as lapsed, settling it unapproved; operator-only and never moves a ref
+- `choir reviews <api> <reviewer>`  
+  your pending review queue
+
+**checks**
+
+- `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]`  
+  report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
+- `choir checks <api> <git-oid>`  
+  every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+
+**reading the node**
+
+- `choir schema <api>`  
+  print this node's machine-readable API description and its live capabilities
+- `choir log <api> [--from <n>] [--verify] [--keys <file>]`  
+  read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag
+- `choir appeal <api> <attempt-id>`  
+  appeal a rejected newcomer attempt for operator adjudication; never grants privilege
+- `choir triage <api>`  
+  every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
+- `choir funnel <api>`  
+  the contribution funnel from admission to first verdict, and the steepest drop between two stages; counts what this credential may read, and reports the first-contact stage as null rather than inventing a zero
+- `choir view <api> [--limit <n>] [--offset <n>]`  
+  the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest
+
+**operating a node**
+
+- `choir runner <config-file>`  
+  drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout
+- `choir bind <api> <node-key-file> <operator> <key-hex> [channel]`  
+  record in the log that a key belongs to an operator; operator-only and never moves a ref
+- `choir revoke <api> <node-key-file> <key-hex> '<reason>'`  
+  withdraw a key binding; terminal, and the attribution row survives
+- `choir acl render <api> <acl-file>`  
+  rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
+- `choir repair <log-file> --verify | --truncate-tail`  
+  inspect a stopped node's op log, or repair a tail that was still being written; `--verify` walks the hash chain and changes nothing, `--truncate-tail` quarantines the partial record to a sidecar before cutting, and damage anywhere but the tail is refused rather than patched over
+
+Most commands take the node's URL first. Put `node = <url>` in `.choir/config`, in the working directory or any parent, and it is filled in when omitted. `choir <command> --help` prints one command's spec.
 
 Exit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), 2 usage error.
-```
 <!-- /generated -->
 
 Live surface on a running node: `GET /llms.txt`. Sync verification: `SYNC.md` / `GET /sync.md`.
@@ -723,7 +768,7 @@ Rejection code table: [`ERRORS.md`](ERRORS.md).
 | [`ERRORS.md`](ERRORS.md) | Rejection codes and repair hints |
 | [`SYNC.md`](SYNC.md) | Log catch-up + hash/signature verification |
 | [`templates/`](templates/README.md) | Drop-in agent harness snippets |
-| [`scripts/choirctl`](scripts/choirctl) | Dogfood node operator entrypoint |
+| [`choirctl`](choirctl) | Dogfood node operator entrypoint |
 | [`scripts/flip/RUNBOOK.md`](scripts/flip/RUNBOOK.md) | Supervised install + protected-ref gates |
 | [`docs/runbook-restore.md`](docs/runbook-restore.md) | Rebuilding a node from a backup, and the secrets a backup never holds |
 | [`DECISIONS.md`](DECISIONS.md) | Decision register: what was decided, and which choices are one-way |

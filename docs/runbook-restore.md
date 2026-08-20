@@ -5,7 +5,7 @@ working node. This turns the first into the second, and refuses to say it
 worked until the restored node has accepted a write.
 
 ```bash
-sh scripts/choirctl restore-from-backup ~/choir-oplog /srv/choir-repos
+./choirctl restore-from-backup ~/choir-oplog /srv/choir-repos
 ```
 
 Expect it to stop the first time. It stops on the things a backup cannot
@@ -162,6 +162,6 @@ the first thing that goes wrong after a restore is usually the backup
 that was never re-armed:
 
 ```bash
-sh scripts/choirctl pull-backup
-sh scripts/choirctl verify-backup
+./choirctl pull-backup
+./choirctl verify-backup
 ```

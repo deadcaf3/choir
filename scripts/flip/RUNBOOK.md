@@ -1,6 +1,6 @@
 # Canonical-node flip runbook
 
-Nothing below needs memorizing: `sh scripts/choirctl` with no arguments
+Nothing below needs memorizing: `./choirctl` with no arguments
 lists every command. The long forms are kept here so the procedure is
 auditable, but `choirctl install`, `choirctl status`, `choirctl sync`,
 and `choirctl logs` are the usual operator path.
@@ -127,7 +127,7 @@ git rev-parse HEAD     # must equal the oid under refs/heads/main
 
    The oid in the view carries codec byte `11` (git oid) — a bare
    BLAKE3 digest there means something bypassed the git path.
-4. Repoint the follower: from here on use `sh scripts/choirctl sync`,
+4. Repoint the follower: from here on use `./choirctl sync`,
    which pushes to the node first and the Forgejo mirror second, and
    stops before the mirror if the canonical push failed — so the
    follower can never get ahead of the node. `push` and `mirror` remain
@@ -140,8 +140,8 @@ The flip is reversible and cheap: the Forgejo mirror still holds every
 ref, and the bundle cron holds a daily copy.
 
 ```sh
-sh scripts/choirctl stop         # unload it for this boot only
-sh scripts/choirctl uninstall    # unload it and remove the LaunchAgent
+./choirctl stop         # unload it for this boot only
+./choirctl uninstall    # unload it and remove the LaunchAgent
 ```
 
 `stop` alone is not permanent: the plist stays in `~/Library/LaunchAgents`,
@@ -179,7 +179,7 @@ instead of quietly eroding them while the error sits in `cron.err`.
 
 Stopping is safe; losing the disk was not. The bundle cron copies refs
 and objects, and `ops.jsonl` is neither — it is not a git object, so no
-bundle has ever contained it. `sh scripts/choirctl sync` now copies it
+bundle has ever contained it. `./choirctl sync` now copies it
 to `~/choir-oplog/ops.jsonl` on the mirror VM and refuses the run if the
 far checksum disagrees, so a truncated copy fails loudly instead of
 sitting there looking like a backup.

@@ -15,7 +15,7 @@
 # stays on the node that owns it, and a bearer token in a backup is a
 # credential-distribution channel, not an availability measure.
 #
-# Run as `sh scripts/choirctl pull-backup`. Exits nonzero on any failure
+# Run as `./choirctl pull-backup`. Exits nonzero on any failure
 # so it can be wired to a schedule later.
 set -eu
 

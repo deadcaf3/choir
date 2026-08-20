@@ -16,7 +16,7 @@
 #      and stronger than equality, which would fail on every op
 #      appended since the last sync
 #
-# Run as `sh scripts/choirctl verify-backup`. Exits nonzero on any
+# Run as `./choirctl verify-backup`. Exits nonzero on any
 # failure so it can be wired to a schedule later.
 set -eu
 

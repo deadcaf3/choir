@@ -620,8 +620,7 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 /// skip everything and read like success.
 #[test]
 fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
-    let driver =
-        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl source");
 
     // Both remote-mode call sites go through the one function; a stray
     // hardcoded single-repo push would silently shrink the follower.
@@ -740,8 +739,7 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
 /// node host, where pulling from yourself backs up nothing.
 #[test]
 fn the_landing_round_opens_the_tunnel_and_the_binary_swap_survives_etxtbsy() {
-    let driver =
-        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl source");
     for case in ["\nreview)", "\nverdict)", "\nschedule-backup)"] {
         assert!(
             driver.contains(case),
@@ -1001,8 +999,7 @@ fn the_mirror_push_reuses_one_ssh_connection() {
     // success — which is how a sync once landed on the node and silently
     // never reached the mirror. `sh -n` cannot catch it: the syntax is
     // fine, the command just does not exist.
-    let driver =
-        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl source");
     assert!(
         driver.contains("sh \"$HERE/push_mirror.sh\""),
         "choirctl no longer runs the mirror push with sh; revisit the shell assumptions below"
@@ -1091,8 +1088,7 @@ fn the_mirror_push_reuses_one_ssh_connection() {
 /// that returns the wrong verdict rather than one that is missing.
 #[test]
 fn the_mirror_receipt_is_read_not_merely_written() {
-    let driver =
-        std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl source");
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl source");
 
     // Detached, and only after the canonical push returns: D21 ordering
     // survives backgrounding precisely because `set -e` stops before
@@ -1205,7 +1201,7 @@ fn the_backup_is_verified_by_pulling_it_back_not_by_having_written_it() {
         "verify-backup must use the release verifier for format, sequence, parent, and hash checks"
     );
 
-    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl");
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl");
     assert!(
         driver.contains("verify-backup)") && driver.contains("verify_backup.sh"),
         "choirctl must expose verify-backup, or nothing ever runs it"
@@ -1409,7 +1405,7 @@ fn the_pulled_backup_carries_the_log_and_the_pin_but_never_the_key() {
         "the pull lost its direction guard; run on the node host it clobbers the backup"
     );
 
-    let driver = std::fs::read_to_string(repo_root().join("scripts/choirctl")).expect("choirctl");
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl");
     assert!(
         driver.contains("pull-backup)") && driver.contains("pull_backup.sh"),
         "choirctl must expose pull-backup, or nothing ever runs it"

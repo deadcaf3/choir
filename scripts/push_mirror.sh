@@ -22,7 +22,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # backup direction is pull_backup.sh.
 if [ -f "$HOME/.choir/node-remote" ]; then
   echo "mirror: ~/.choir/node-remote exists — this machine no longer hosts the node." >&2
-  echo "        use: sh scripts/choirctl sync   (follower + backup, new topology)" >&2
+  echo "        use: ./choirctl sync   (follower + backup, new topology)" >&2
   exit 1
 fi
 

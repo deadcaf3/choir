@@ -1,5 +1,6 @@
 [package]
 name = "choir-cli"
+default-run = "choir"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
