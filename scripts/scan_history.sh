@@ -34,6 +34,27 @@ git cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype)' \
 total=$(wc -l < "$WORK/blobs" | tr -d ' ')
 echo "scanning $total blobs for $# string(s)"
 
+# One pass for every needle at once, before the per-needle loop below.
+# That loop spawns `git cat-file` once per blob *per needle* -- about 26 s
+# for a 1,900-blob history -- so N needles cost N times a clean run, which
+# is how a gate step gets turned off. `grep -f` costs the same for ten
+# needles as for one, and when nothing matches, which is every run where
+# the guard is doing its job, the loop below never runs at all.
+printf '%s\n' "$@" > "$WORK/needles"
+matched=0
+while read -r o; do
+  if git cat-file blob "$o" 2>/dev/null | grep -qiFf "$WORK/needles"; then
+    matched=1
+    break
+  fi
+done < "$WORK/blobs"
+if [ "$matched" -eq 0 ]; then
+  for needle in "$@"; do
+    echo "  '$needle': clean (0 blobs)"
+  done
+  exit 0
+fi
+
 status=0
 for needle in "$@"; do
   : > "$WORK/hits"

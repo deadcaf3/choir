@@ -37,7 +37,15 @@ fn gate_propagates_every_injected_stage_failure() {
         String::from_utf8_lossy(&clean.stderr)
     );
 
-    for stage in ["format", "tests", "clippy", "rustdoc", "spike", "freshness"] {
+    for stage in [
+        "format",
+        "tests",
+        "clippy",
+        "rustdoc",
+        "spike",
+        "freshness",
+        "scan",
+    ] {
         let failed = run(Some(stage));
         assert!(
             !failed.status.success(),

@@ -91,6 +91,36 @@ full_tests() {
   [ "$a" -eq 0 ] && [ "$b" -eq 0 ] && [ "$c" -eq 0 ] && [ "$d" -eq 0 ]
 }
 
+# The object-database scan, wired here because a check that only runs
+# when someone remembers it is the failure this project keeps repeating.
+# The needles are the strings that must not be in any reachable blob --
+# a removed hosted repository's name, and anything else whose return
+# would be a privacy regression rather than a bug.
+#
+# They live in an untracked file for the obvious reason: a tracked gate
+# that names the removed string reintroduces it, and the next run of this
+# very scan would fail on the gate itself.
+#
+# Absent file = skipped, and the gate says so. A fresh clone has no
+# `internal/`, and so does CI, which means **this guard runs locally
+# only**. An *empty* file is a failure rather than a skip, the same way
+# an empty ACL and an absent one mean opposite things: someone emptied
+# the guard, which is not the same as never having had one.
+NEEDLES=internal/scan-needles
+
+scan_needles() {
+  set --
+  while IFS= read -r line; do
+    case "$line" in '' | \#*) continue ;; esac
+    set -- "$@" "$line"
+  done < "$NEEDLES"
+  if [ $# -eq 0 ]; then
+    echo "$NEEDLES exists but names no strings; a guard with nothing to guard is a failure"
+    return 1
+  fi
+  sh scripts/scan_history.sh "$@"
+}
+
 MARK="$LOG/start"
 : >"$MARK"
 
@@ -129,11 +159,24 @@ CLIPPY_EXIT=$?
 run_check rustdoc "$LOG/doc.log" env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps
 DOC_EXIT=$?
 
+if [ "${1:-full}" = "fast" ]; then
+  echo "history scan: skipped by the fast lane (~26 s)" >"$LOG/scan.log"
+  SCAN_EXIT=0
+elif [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || [ -f "$NEEDLES" ]; then
+  run_check scan "$LOG/scan.log" scan_needles
+  SCAN_EXIT=$?
+else
+  echo "no $NEEDLES: the object-database scan is skipped" >"$LOG/scan.log"
+  SCAN_EXIT=0
+fi
+
 freshness_check "$LOG/freshness.log"
 FRESHNESS_EXIT=$?
 
 echo "FORMAT_EXIT=$FORMAT_EXIT  TEST_EXIT=$TEST_EXIT  CLIPPY_EXIT=$CLIPPY_EXIT"
 echo "DOC_EXIT=$DOC_EXIT  SPIKE_EXIT=$SPIKE_EXIT  FRESHNESS_EXIT=$FRESHNESS_EXIT"
+echo "SCAN_EXIT=$SCAN_EXIT"
+sed -n '1,12p' "$LOG/scan.log"
 awk '/^test result:/ {
   for (i = 1; i <= NF; i++) {
     if ($i == "passed;")  p += $(i-1);
@@ -155,7 +198,8 @@ sed -n '1,30p' "$LOG/freshness.log"
 
 if [ "$FORMAT_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ] \
   || [ "$CLIPPY_EXIT" -ne 0 ] || [ "$DOC_EXIT" -ne 0 ] \
-  || [ "$SPIKE_EXIT" -ne 0 ] || [ "$FRESHNESS_EXIT" -ne 0 ]; then
+  || [ "$SPIKE_EXIT" -ne 0 ] || [ "$FRESHNESS_EXIT" -ne 0 ] \
+  || [ "$SCAN_EXIT" -ne 0 ]; then
   exit 1
 fi
 exit 0
