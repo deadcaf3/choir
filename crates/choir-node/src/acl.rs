@@ -514,24 +514,74 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
     }
 }
 
-/// Scopes a `/api/submit` body must be authorized against.
+/// The grant strength an op needs over the scopes [`op_scopes`] names.
+///
+/// Write for everything that moves a ref or changes a review's shape,
+/// and read for the three ops that only report what their own signer
+/// thinks: a verdict, a comment, and a viewing receipt (D55).
+///
+/// Those three are exactly the ops admission binds to the signing
+/// channel — a claimed attribution other than the channel is
+/// `reviewer_mismatch` — and the fold refuses a verdict from anybody
+/// the review does not list. Read is therefore the whole authority they
+/// need, and requiring write would mean handing push rights to every
+/// reviewer drawn onto a repository, which is the opposite of what
+/// asking for a review is for.
+///
+/// Exhaustive on purpose, like [`op_scopes`]: a new [`OpKind`] variant
+/// will not compile until somebody says which side of this line it
+/// falls on, and the safe answer is write.
+#[must_use]
+pub fn op_level(kind: &OpKind) -> Level {
+    match kind {
+        OpKind::PostVerdict { .. } | OpKind::PostComment { .. } | OpKind::ViewedReview { .. } => {
+            Level::Read
+        }
+        OpKind::SetRef { .. }
+        | OpKind::DeleteRef { .. }
+        | OpKind::Submit { .. }
+        | OpKind::SetWorkspaceHead { .. }
+        | OpKind::DeleteWorkspace { .. }
+        | OpKind::CreateChange { .. }
+        | OpKind::CheckpointChange { .. }
+        | OpKind::ArchiveChange { .. }
+        | OpKind::RequestReview { .. }
+        | OpKind::RecordCheck { .. }
+        | OpKind::ArchiveReview { .. }
+        | OpKind::SlashApproval { .. }
+        | OpKind::AssignReviewers { .. }
+        | OpKind::RecordProvenance { .. }
+        | OpKind::BindKey { .. }
+        | OpKind::RevokeKey { .. }
+        | OpKind::RecordRefSnapshot { .. } => Level::Write,
+    }
+}
+
+/// Scopes a `/api/submit` body must be authorized against, each with the
+/// level that op needs over it.
 ///
 /// A body that cannot be decoded far enough to name a repository falls
-/// to [`Scope::Node`] rather than being waved through, so a caller
-/// without a node-wide grant gets a denial and one with it gets the
-/// handler's own `400`.
+/// to [`Scope::Node`] at [`Level::Write`] rather than being waved
+/// through, so a caller without a node-wide grant gets a denial and one
+/// with it gets the handler's own `400`.
 fn submission_scopes(
     body: &serde_json::Value,
     review_repo: &impl Fn(&str) -> Option<String>,
-) -> Vec<Scope> {
+) -> Vec<(Scope, Level)> {
     let decoded = body
         .get("payload_hex")
         .and_then(serde_json::Value::as_str)
         .and_then(crate::platform::hex_decode)
         .and_then(|bytes| ViewOp::from_payload(&bytes).ok());
     match decoded {
-        Some(op) => op_scopes(&op.kind, review_repo),
-        None => vec![Scope::Node],
+        Some(op) => {
+            let level = op_level(&op.kind);
+            op_scopes(&op.kind, review_repo)
+                .into_iter()
+                .map(|scope| (scope, level))
+                .collect()
+        }
+        None => vec![(Scope::Node, Level::Write)],
     }
 }
 
@@ -579,10 +629,7 @@ pub fn api_denial(
             }
         }
         ("POST", "/api/submit") => match json() {
-            Some(value) => submission_scopes(&value, &review_repo)
-                .into_iter()
-                .map(|scope| (scope, Level::Write))
-                .collect(),
+            Some(value) => submission_scopes(&value, &review_repo),
             None => vec![(Scope::Node, Level::Write)],
         },
         ("POST", "/api/submit-batch") => {
@@ -593,21 +640,18 @@ pub fn api_denial(
                 .and_then(serde_json::Value::as_array);
             match entries {
                 Some(entries) => {
-                    let mut scopes: Vec<Scope> = Vec::new();
+                    let mut scopes: Vec<(Scope, Level)> = Vec::new();
                     for entry in entries {
-                        for scope in submission_scopes(entry, &review_repo) {
-                            if !scopes.contains(&scope) {
-                                scopes.push(scope);
+                        for required in submission_scopes(entry, &review_repo) {
+                            if !scopes.contains(&required) {
+                                scopes.push(required);
                             }
                         }
                     }
                     if scopes.is_empty() {
-                        scopes.push(Scope::Node);
+                        scopes.push((Scope::Node, Level::Write));
                     }
                     scopes
-                        .into_iter()
-                        .map(|scope| (scope, Level::Write))
-                        .collect()
                 }
                 None => vec![(Scope::Node, Level::Write)],
             }

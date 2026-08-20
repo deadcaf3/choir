@@ -749,11 +749,13 @@ pub(crate) fn render(
             rev,
             q,
             scope,
-        } => search(&bare(root, repo), repo, rev, q, *scope, site),
-        Page::Tree { repo, rev, path } => tree(&bare(root, repo), repo, rev, path, platform, site),
-        Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, site),
-        Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, site),
-        Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, site),
+        } => search(&bare(root, repo), repo, rev, q, *scope, site, origin),
+        Page::Tree { repo, rev, path } => {
+            tree(&bare(root, repo), repo, rev, path, platform, site, origin)
+        }
+        Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, site, origin),
+        Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, site, origin),
+        Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, site, origin),
         Page::Contribute { repo } => contribute(root, repo, site, origin, self_service),
         Page::Reviews { repo } => reviews(repo, platform, site),
         Page::Review { repo, id } => review(
@@ -927,6 +929,7 @@ fn search(
     q: &str,
     scope: Scope,
     site: Option<&str>,
+    origin: Option<&str>,
 ) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
@@ -943,7 +946,7 @@ fn search(
         &format!("{repo}: search"),
         Bar::searched(repo, rev, q, site),
     );
-    repo_header(&mut h, repo, rev, &oid, "", "search");
+    repo_header(&mut h, repo, rev, &oid, "", "search", origin);
     h.push_str("<section>");
     // All three scopes run, not just the one asked for, because the tabs
     // carry counts. Without them a reader who lands on the scope with no
@@ -1529,6 +1532,7 @@ fn tree(
     path: &str,
     platform: Option<&crate::platform::Platform>,
     site: Option<&str>,
+    origin: Option<&str>,
 ) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
@@ -1591,7 +1595,7 @@ fn tree(
         &format!("{repo}: {}", if path.is_empty() { "/" } else { path }),
         Bar::repo(repo, rev, site),
     );
-    repo_header(&mut h, repo, rev, &oid, path, "tree");
+    repo_header(&mut h, repo, rev, &oid, path, "tree", origin);
     // The bar a reader uses to orient: which revision they are on, how
     // much history is under it, and what else they could switch to. Only
     // at the repository root — inside a directory it is the breadcrumb
@@ -1792,7 +1796,14 @@ fn tree(
 }
 
 /// One file.
-fn blob(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Rendered {
+fn blob(
+    dir: &Path,
+    repo: &str,
+    rev: &str,
+    path: &str,
+    site: Option<&str>,
+    origin: Option<&str>,
+) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
         Err(why) => return missing(repo, rev, &why),
@@ -1804,7 +1815,7 @@ fn blob(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Re
     };
 
     let mut h = shell(&format!("{repo}: {path}"), Bar::repo(repo, rev, site));
-    repo_header(&mut h, repo, rev, &oid, path, "blob");
+    repo_header(&mut h, repo, rev, &oid, path, "blob", origin);
     h.push_str("<section>");
     if size > MAX_BLOB_BYTES {
         h.push_str("<p class=\"note\">");
@@ -1861,7 +1872,13 @@ fn blob(dir: &Path, repo: &str, rev: &str, path: &str, site: Option<&str>) -> Re
 }
 
 /// Recent history.
-fn commits(dir: &Path, repo: &str, rev: &str, site: Option<&str>) -> Rendered {
+fn commits(
+    dir: &Path,
+    repo: &str,
+    rev: &str,
+    site: Option<&str>,
+    origin: Option<&str>,
+) -> Rendered {
     let oid = match resolve(dir, rev) {
         Ok(oid) => oid,
         Err(why) => return missing(repo, rev, &why),
@@ -1888,7 +1905,7 @@ fn commits(dir: &Path, repo: &str, rev: &str, site: Option<&str>) -> Rendered {
     let truncated = rows.len() > COMMIT_PAGE;
 
     let mut h = shell(&format!("{repo}: commits"), Bar::repo(repo, rev, site));
-    repo_header(&mut h, repo, rev, &oid, "", "commits");
+    repo_header(&mut h, repo, rev, &oid, "", "commits", origin);
     h.push_str("<section><table><thead><tr><th>commit</th><th>subject</th>");
     h.push_str("<th>author</th><th>when</th></tr></thead><tbody>");
     for line in rows.iter().take(COMMIT_PAGE) {
@@ -1929,7 +1946,7 @@ fn commits(dir: &Path, repo: &str, rev: &str, site: Option<&str>) -> Rendered {
 }
 
 /// One commit, with its diff.
-fn commit(dir: &Path, repo: &str, oid: &str, site: Option<&str>) -> Rendered {
+fn commit(dir: &Path, repo: &str, oid: &str, site: Option<&str>, origin: Option<&str>) -> Rendered {
     let format = "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b";
     let header = match git_text(dir, &["show", "--no-patch", format, oid]) {
         Ok(text) => text,
@@ -1945,7 +1962,7 @@ fn commit(dir: &Path, repo: &str, oid: &str, site: Option<&str>) -> Rendered {
         &format!("{repo}: {}", &id[..id.len().min(12)]),
         Bar::repo(repo, oid, site),
     );
-    repo_header(&mut h, repo, &id, &id, "", "commit");
+    repo_header(&mut h, repo, &id, &id, "", "commit", origin);
     h.push_str("<section><h2>");
     h.push_str(&esc(&subject));
     h.push_str("</h2><p class=\"muted\">");
@@ -3261,7 +3278,15 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
 }
 
 /// Repository name, revision, and the breadcrumb back up the tree.
-fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, here: &str) {
+fn repo_header(
+    h: &mut String,
+    repo: &str,
+    rev: &str,
+    oid: &str,
+    path: &str,
+    here: &str,
+    origin: Option<&str>,
+) {
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
@@ -3295,12 +3320,21 @@ fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, her
     // this page is `/r/<repo>` and the clone is `/<repo>.git`, and a
     // reader who only ever saw one of them had to guess the other.
     //
-    // Relative, with no scheme or host: whatever origin the reader is
-    // already on is the right one, and it is the only one this process
-    // can state without being told what proxy sits in front of it.
-    h.push_str("<span class=\"pill mono\">clone /");
-    h.push_str(&esc(repo));
-    h.push_str(".git</span>");
+    // Written out whole whenever the request carried a `Host`, because
+    // the string a reader needs is the argument to `git clone`, and a
+    // relative path is only half of it. It is the reader's own origin
+    // rather than a configured name — the same rule, and the same
+    // reason, as the address the contribute page prints into its
+    // commands: it is the one address known to reach this node for this
+    // reader, proxy and all. A request carrying no `Host` — which
+    // HTTP/1.1 forbids, so this is the malformed case — keeps the
+    // relative path, which is still true.
+    h.push_str("<span class=\"pill mono\">clone ");
+    match origin {
+        Some(origin) => h.push_str(&esc(&format!("{origin}/{repo}.git"))),
+        None => h.push_str(&esc(&format!("/{repo}.git"))),
+    }
+    h.push_str("</span>");
     h.push_str("</div>");
     if !path.is_empty() {
         h.push_str("<nav class=\"crumbs\"><a href=\"/r/");

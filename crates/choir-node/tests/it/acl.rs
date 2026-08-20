@@ -647,3 +647,111 @@ fn every_section_the_view_serves_is_classified() {
         "acl::SECTIONS classifies sections the view does not serve: {missing:?}"
     );
 }
+
+/// Answering a review is a read-level act (D55).
+///
+/// A reviewer is drawn onto somebody else's change, and the whole point
+/// of drawing them is that they are not the person with push rights. So
+/// a verdict, a comment and a viewing receipt authorize against the
+/// repository under review at `read`, while everything that moves a ref
+/// still needs `write` — and the attribution binding at admission is
+/// what makes that safe: those three ops are refused unless the name
+/// they claim is the channel that signed them.
+///
+/// Before this, every `/api/submit` op needed `write`, so a node that
+/// asked an outsider to review had to hand them push access first.
+#[test]
+fn a_drawn_reviewer_answers_with_read_and_still_cannot_push() {
+    let (base, key, _work, _) = served(
+        "reviewer-read",
+        "alice  agents/one  write\n\
+         bob    agents/one  read\n",
+        &["agents/one.git"],
+    );
+    let url = format!("{base}/api/submit");
+
+    // Alice, who may push, asks bob to look at a commit on her ref.
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-read".into(),
+        target: choir_oplog::ContentHash::blake3(b"a change bob did not write"),
+        reviewers: vec!["bob/reviewer".into()],
+        target_ref: Some("agents/one.git:refs/heads/topic".into()),
+    });
+    let (status, body) = curl(&[
+        "-u",
+        "alice:a",
+        "-d",
+        &submit_body(&key, "alice/agent", &request),
+        &url,
+    ]);
+    assert_eq!(status, 200, "the request for review was refused: {body}");
+
+    // Bob holds read and nothing else. He can say what he thinks.
+    //
+    // Every submission here signs with the one key `served` registered:
+    // what is under test is the grant behind the HTTP credential, and a
+    // second registered key would only restate the identity layer that
+    // `key_names` already covers.
+    let comment = ViewOp::new(OpKind::PostComment {
+        id: "r-read".into(),
+        comment: "c1".into(),
+        author: "bob/reviewer".into(),
+        body: "the greeting reads well".into(),
+    });
+    let (status, body) = curl(&[
+        "-u",
+        "bob:b",
+        "-d",
+        &submit_body(&key, "bob/reviewer", &comment),
+        &url,
+    ]);
+    assert_eq!(status, 200, "a read grant could not comment: {body}");
+
+    let verdict = ViewOp::new(OpKind::PostVerdict {
+        id: "r-read".into(),
+        reviewer: "bob/reviewer".into(),
+        verdict: choir_view::Verdict::Approve,
+        note: "approved".into(),
+    });
+    let (status, body) = curl(&[
+        "-u",
+        "bob:b",
+        "-d",
+        &submit_body(&key, "bob/reviewer", &verdict),
+        &url,
+    ]);
+    assert_eq!(status, 200, "a read grant could not answer: {body}");
+
+    // ...and that is the whole of what read bought him. The same
+    // credential moving the ref he just approved is still refused.
+    let push = ViewOp::new(OpKind::SetRef {
+        name: "agents/one.git:refs/heads/topic".into(),
+        commit: choir_oplog::ContentHash::blake3(b"bob's own commit"),
+        prev: None,
+    });
+    let (status, _) = curl(&[
+        "-u",
+        "bob:b",
+        "-d",
+        &submit_body(&key, "bob/reviewer", &push),
+        &url,
+    ]);
+    assert_eq!(status, 403, "a read grant moved a ref");
+
+    // Nor is read on one repository a licence to review on the node: a
+    // credential with no row at all is told the repository is not there.
+    let intrude = ViewOp::new(OpKind::PostComment {
+        id: "r-read".into(),
+        comment: "c2".into(),
+        author: "dave/agent".into(),
+        body: "hello".into(),
+    });
+    let (status, _) = curl(&[
+        "-u",
+        "dave:d",
+        "-d",
+        &submit_body(&key, "dave/agent", &intrude),
+        &url,
+    ]);
+    assert_eq!(status, 404, "an ungranted credential reached a review");
+}

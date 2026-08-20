@@ -79,7 +79,10 @@ repository ownership needed for recovery. Test a denied repository as well as
 an allowed one from the public hostname.
 
 Register every signed-operation key in `keys`. The reviewer pool must contain
-at least two eligible operators with registered keys. Name every protected ref
+at least two eligible operators with registered keys. A reviewer needs no more
+than `read` on the repository under review (D55): verdicts, comments and
+viewing receipts authorize at that level, so do not grant `write` merely to
+draw somebody into a review. Name every protected ref
 in `protected-refs`. The private-beta service always enables required
 assignment, required review, and required scope. A missing or malformed policy
 must stop rendering or startup rather than relax a gate.

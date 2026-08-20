@@ -1009,9 +1009,18 @@ fn a_repository_page_shows_the_path_you_clone_it_from() {
             panic!("a reader on the repository page cannot find out how to clone it: {page}")
         });
 
-    let host = base.trim_start_matches("http://");
+    // The whole URL, not the path half of one: the pill is written to
+    // be pasted after `git clone`, and it names the origin this reader
+    // actually arrived on rather than any address this process was
+    // configured with.
+    assert!(
+        printed.starts_with(&format!("{base}/")),
+        "the clone pill does not name the origin the reader is on: {printed}"
+    );
     let dest = work.join("cloned-from-the-page");
-    let url = format!("http://alice:a@{host}{printed}");
+    // The credential goes in after the scheme now, rather than in front
+    // of a path.
+    let url = printed.replacen("http://", "http://alice:a@", 1);
     let out = git(&work, &["clone", "-q", &url, dest.to_str().unwrap()]);
     assert!(
         out.status.success(),
