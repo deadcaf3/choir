@@ -8,19 +8,67 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pinned in one place. The toolchain is pinned because a gate that
+  # passes on whatever rustc happened to ship today is not a gate, and
+  # cargo-audit is pinned because it is the thing deciding what counts
+  # as a vulnerability.
+  RUST_VERSION: 1.97.1
+  CARGO_AUDIT_VERSION: 0.22.2
+  # The gate is not a terminal here, but Actions renders colour, so it
+  # prints a readable run rather than a wall of grey.
+  FORCE_COLOR: 1
+
 jobs:
-  private-beta-gate:
+  gate:
+    name: release gate
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned Rust
+
+      - name: Pin the toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
-          rustup override set 1.97.1
-      - name: Install pinned security audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Repository release gate
-        run: sh scripts/gate full
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal --component rustfmt --component clippy
+          rustup override set "$RUST_VERSION"
+
+      # Every run used to compile the whole workspace, four times over,
+      # from nothing. Keyed on the lockfile so a dependency change gets a
+      # cold build and nothing else does; `restore-keys` still gives a
+      # partial hit when the lockfile moves, which is the common case.
+      #
+      # actions/cache rather than a third-party cache action on purpose:
+      # this step runs with the repository checked out and a token in the
+      # environment, and it is not the place to widen the set of people
+      # who can change what runs here.
+      - name: Cache the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-
+
+      # cargo-audit was compiled from source on every single run. It
+      # changes only when the pin above does.
+      - name: Cache cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-audit
+        run: |
+          command -v cargo-audit >/dev/null \
+            || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+
+      - name: Release gate
+        run: ./gate
+
       - name: RustSec audit
         run: cargo audit

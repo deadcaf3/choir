@@ -1,7 +1,7 @@
 //! The release gate must return the status of every stage it claims to gate.
 
 fn gate() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/gate")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../gate")
 }
 
 fn run(injected: Option<&str>) -> std::process::Output {

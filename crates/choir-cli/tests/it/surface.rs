@@ -93,7 +93,7 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
         .and_then(|(_, rest)| rest.split_once("\n```").map(|(gate, _)| gate))
         .expect("README.md has a Full release gate shell block");
     assert!(
-        gate.lines().any(|line| line == "sh scripts/gate full"),
+        gate.lines().any(|line| line == "./gate"),
         "README.md must point at the fail-closed gate rather than duplicate a partial command list"
     );
 }

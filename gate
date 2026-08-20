@@ -1,0 +1,285 @@
+#!/bin/sh
+# The release gate, in two lanes.
+#
+#   ./gate        every release check (before a commit or an artifact)
+#   ./gate fast   the edit loop: skips the measurement binaries
+#
+# The fast lane is **not a substitute for the full one**, and the rule it
+# depends on is that the full lane runs before every commit. This
+# project's recurring failure is a check that quietly stops checking, and
+# "the slow tests are opt-in now" is how that starts.
+#
+# It fails closed: any stage failing exits nonzero, and the exit code of
+# every command is read directly rather than through a pipe, because
+# `cargo test | tail` reports tail's status and hides the verdict.
+set -u
+cd "$(dirname "$0")" || exit 1
+
+LANE=${1:-full}
+LOG=${TMPDIR:-/tmp}/choir-gate
+mkdir -p "$LOG"
+
+# ---------------------------------------------------------------- style
+# Colour only when a person is watching. CI captures this output to a
+# file and a log full of escape sequences is harder to read, not easier.
+ESC=$(printf '\033')
+# Two different questions. Colour: does the reader's display render it —
+# GitHub Actions does, and it is not a terminal. Live rewriting: can a
+# line be redrawn in place, which needs a real terminal or the `\r`
+# becomes literal noise in a captured log.
+COLOR=0
+LIVE=0
+if [ -z "${NO_COLOR:-}" ]; then
+  { [ -t 1 ] || [ -n "${FORCE_COLOR:-}" ]; } && COLOR=1
+  [ -t 1 ] && LIVE=1
+fi
+if [ "$COLOR" = 1 ]; then
+  G="$ESC[32m" R="$ESC[31m" Y="$ESC[33m" D="$ESC[2m" B="$ESC[1m" Z="$ESC[0m"
+else
+  G= R= Y= D= B= Z=
+fi
+
+secs() {
+  if [ "$1" -lt 60 ]; then printf '%ss' "$1"
+  else printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)); fi
+}
+
+# A stage begins: on a terminal, show it running so a three-minute gate
+# is visibly working rather than apparently hung.
+begin() {
+  STAGE=$1
+  T0=$(date +%s)
+  [ "$LIVE" = 1 ] && printf '  %s·%s %-10s %s…%s' "$D" "$Z" "$STAGE" "$D" "$Z"
+}
+
+# A stage ends. $1 is its exit status, $2 a short note for the line.
+end() {
+  _el=$(($(date +%s) - T0))
+  [ "$LIVE" = 1 ] && printf '\r%s[K' "$ESC"
+  if [ "$1" -eq 0 ]; then
+    printf '  %s✓%s %-10s %s%-18s%s %s%s%s\n' \
+      "$G" "$Z" "$STAGE" "$Z" "$2" "$Z" "$D" "$(secs $_el)" "$Z"
+  else
+    printf '  %s✗%s %-10s %s%-18s%s %s%s%s\n' \
+      "$R" "$Z" "$STAGE" "$R" "$2" "$Z" "$D" "$(secs $_el)" "$Z"
+    FAILED="$FAILED $STAGE"
+  fi
+}
+
+# ------------------------------------------------------------- fixtures
+# Test-only fault injection for `crates/choir-cli/tests/it/gate.rs`. Test
+# mode never runs Cargo; it substitutes success for every stage except
+# the named one, so the test proves status propagation without
+# recursively invoking this entire gate from inside `cargo test`.
+# $1 names the log and the display line; $2 is the key the injection
+# fixture matches, which lets the four test sub-stages share one key
+# while reporting themselves separately.
+run() {
+  _logfile=$LOG/$1.log _stage=$2
+  shift 2
+  if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
+    if [ "${CHOIR_GATE_INJECT_FAILURE:-}" = "$_stage" ]; then
+      echo "injected $_stage failure" >"$_logfile"
+      return 97
+    fi
+    : >"$_logfile"
+    return 0
+  fi
+  "$@" >"$_logfile" 2>&1
+}
+
+# The measurement binaries, skipped by the fast lane: throughput ~36 s,
+# alloc_budget ~13 s, retention_cost ~7 s.
+#
+# `budget` is deliberately **not** here despite being the same kind of
+# test. It used to be 158 s -- half the entire gate -- and is now under a
+# second, because its iteration count learned the difference between a
+# debug and a release build. A test that cheap costs nothing to keep in,
+# and every test kept in is one the fast lane does not have to be trusted
+# about.
+SLOW="alloc_budget retention_cost throughput"
+
+fast_targets() {
+  for f in crates/choir-node/tests/*.rs; do
+    name=$(basename "$f" .rs)
+    case " $SLOW " in *" $name "*) continue ;; esac
+    printf ' --test %s' "$name"
+  done
+  printf ' --test it'   # the merged harness, crates/choir-node/tests/it/
+}
+
+# Doctests are their own invocation because cargo refuses `--doc`
+# alongside any other target selector. The measurement targets are their
+# own because they state release-profile ceilings: running them under the
+# debug allocator makes the number meaningless and can fail a healthy
+# release.
+#
+# Four invocations, shown as four stages rather than one. They used to be
+# a single `tests` line that sat silent for six minutes, which is the
+# "apparently hung" problem this gate's own progress display exists to
+# solve — and when it failed, it named the whole six minutes rather than
+# the twenty seconds that actually broke.
+t_workspace() { cargo test --workspace --no-fail-fast --exclude choir-node; }
+# shellcheck disable=SC2046
+t_node()      { cargo test -p choir-node --no-fail-fast --lib --bins $(fast_targets); }
+# shellcheck disable=SC2046
+t_node_fast() { cargo test -p choir-node --no-fail-fast --lib $(fast_targets); }
+t_doc()       { cargo test -p choir-node --doc; }
+t_measure()   {
+  cargo test -p choir-node --release --no-fail-fast \
+    --test alloc_budget --test retention_cost --test throughput
+}
+
+# The object-database scan. The needles are the strings that must not be
+# in any reachable blob -- a removed hosted repository's name, and
+# anything else whose return would be a privacy regression rather than a
+# bug. They live in an untracked file for the obvious reason: a tracked
+# gate that names the removed string reintroduces it, and the next run of
+# this very scan would fail on the gate itself.
+#
+# Absent file = skipped, and the gate says so. A fresh clone has no
+# `internal/`, and so does CI, which means **this guard runs locally
+# only**. An *empty* file is a failure rather than a skip, the same way
+# an empty ACL and an absent one mean opposite things: someone emptied
+# the guard, which is not the same as never having had one.
+NEEDLES=internal/scan-needles
+
+scan_needles() {
+  set --
+  while IFS= read -r line; do
+    case "$line" in '' | \#*) continue ;; esac
+    set -- "$@" "$line"
+  done < "$NEEDLES"
+  if [ $# -eq 0 ]; then
+    echo "$NEEDLES exists but names no strings; a guard with nothing to guard is a failure"
+    return 1
+  fi
+  sh scripts/scan_history.sh "$@"
+}
+
+# ----------------------------------------------------------------- run
+MARK="$LOG/start"
+: >"$MARK"
+FAILED=
+STARTED=$(date +%s)
+
+printf '\n  %schoir%s %s%s gate%s\n\n' "$B" "$Z" "$D" "$LANE" "$Z"
+
+# The scan walks the object database with git and never touches cargo, so
+# it holds no build lock and has no reason to wait its turn. Started here
+# and collected at the end, it costs the gate nothing instead of ~26 s.
+SCAN_PID=
+SCAN_STATE=skip
+if [ "$LANE" != fast ]; then
+  if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || [ -f "$NEEDLES" ]; then
+    SCAN_STATE=run
+    run scan scan scan_needles &
+    SCAN_PID=$!
+  else
+    echo "no $NEEDLES: the object-database scan is skipped" >"$LOG/scan.log"
+  fi
+fi
+
+begin format
+run format format cargo fmt --all -- --check
+end $? ""
+
+# Every sub-stage passes `tests` as its injection key, so the fixture in
+# `crates/choir-cli/tests/it/gate.rs` still injects one failure and still
+# sees the gate refuse.
+count_of() {
+  awk '/^test result:/ {
+    for (i = 1; i <= NF; i++) {
+      if ($i == "passed;") p += $(i-1);
+      if ($i == "failed;") f += $(i-1);
+    }
+  } END { if (f) printf "%d ok, %d failed", p, f; else printf "%d ok", p }' "$1"
+}
+
+begin workspace
+run workspace tests t_workspace
+end $? "$(count_of "$LOG/workspace.log")"
+
+begin node
+if [ "$LANE" = fast ]; then
+  run node tests t_node_fast
+else
+  run node tests t_node
+fi
+end $? "$(count_of "$LOG/node.log")"
+
+begin doctests
+run doctests tests t_doc
+end $? "$(count_of "$LOG/doctests.log")"
+
+if [ "$LANE" != fast ]; then
+  begin measure
+  run measure tests t_measure
+  end $? "$(count_of "$LOG/measure.log")"
+fi
+
+begin clippy
+run clippy clippy cargo clippy --workspace --all-targets -- -D warnings
+end $? ""
+
+begin rustdoc
+run rustdoc rustdoc env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps
+end $? ""
+
+if [ "$LANE" != fast ]; then
+  begin spike
+  run spike spike cargo run -p choir-spike --release
+  end $? ""
+fi
+
+begin freshness
+if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
+  run freshness freshness true
+  FRESH=$?
+else
+  find crates scripts docs templates Cargo.toml Cargo.lock README.md DECISIONS.md SYNC.md gate \
+    -newer "$MARK" -print >"$LOG/freshness.log" 2>/dev/null
+  [ ! -s "$LOG/freshness.log" ]
+  FRESH=$?
+fi
+# A receipt describes the tree as of the gate's start. Edit anything
+# after the run begins, including a comment, and the receipt is void.
+end $FRESH "$([ $FRESH -eq 0 ] || echo 'tree changed')"
+
+if [ -n "$SCAN_PID" ]; then
+  begin scan
+  wait "$SCAN_PID"
+  end $? "$(sed -n 's/^scanning \([0-9]*\) objects.*/\1 objects/p' "$LOG/scan.log")"
+elif [ "$LANE" != fast ]; then
+  printf '  %s-  %-10s %s%s\n' "$D" scan "no $NEEDLES" "$Z"
+fi
+
+# -------------------------------------------------------------- report
+# Detail only for what failed. A green gate should be five lines, not a
+# transcript nobody reads; a red one should put the reason on screen
+# without a second command.
+for stage in $FAILED; do
+  printf '\n%s── %s ──%s\n' "$R" "$stage" "$Z"
+  case $stage in
+    workspace | node | doctests | measure)
+      grep -E '^(test .* FAILED|error(\[|:)|thread .* panicked)' "$LOG/$stage.log" | head -20 ;;
+    clippy)  grep -E '^(warning|error)' "$LOG/clippy.log" | head -20 ;;
+    rustdoc) grep -E '^(warning|error)' "$LOG/rustdoc.log" | head -20 ;;
+    format)  head -20 "$LOG/format.log" ;;
+    spike)   tail -20 "$LOG/spike.log" ;;
+    scan)    head -20 "$LOG/scan.log" ;;
+    freshness)
+      echo "these changed while the gate ran, so its receipt is void:"
+      head -20 "$LOG/freshness.log" ;;
+  esac
+  printf '%s  full log: %s%s\n' "$D" "$LOG/$stage.log" "$Z"
+done
+
+TOTAL=$(($(date +%s) - STARTED))
+if [ -z "$FAILED" ]; then
+  printf '\n  %sgreen%s in %s\n\n' "$G" "$Z" "$(secs $TOTAL)"
+  [ "$LANE" = fast ] && printf '  %sfast lane: run ./gate before committing%s\n\n' "$Y" "$Z"
+  exit 0
+fi
+printf '\n  %sfailed:%s%s  in %s\n\n' "$R" "$FAILED" "$Z" "$(secs $TOTAL)"
+exit 1

@@ -271,16 +271,19 @@ fn every_reason_an_invite_fails_answers_with_the_same_bytes() {
     // authenticates; the summary is what refuses), so without this the
     // most-travelled failure route is the one nothing covers.
     //
-    // The sleep is for the node's clock to pass a deadline, not for a
-    // duration this test then measures: nothing here asserts on elapsed
-    // time, which is what the shared harness forbids.
+    // Only one direction of the clock is safe to assert on here. This
+    // test first also checked the invite was *still valid* before the
+    // sleep, which reads as harmless and is not: it asserts that under a
+    // second passed between minting and fetching, and in a harness whose
+    // modules share a process and run in parallel, that is a race. It
+    // flaked on its second full run.
+    //
+    // What survives needs time only to move forward. Sleeping past a
+    // one-second lifetime cannot fail to expire the invite, however
+    // loaded the machine is — a slow machine makes this *more* certain,
+    // where the assertion it replaced got less.
     let (short_id, short_secret) =
         s.invite(r#"{"user":"cass","grants":["agents/demo.git read"],"expires_in_secs":1}"#);
-    let live = get(&s.join_url(&short_id, &short_secret), &[]);
-    assert!(
-        live.2.contains("cass"),
-        "the invite was not valid even when fresh"
-    );
     std::thread::sleep(std::time::Duration::from_millis(1_500));
     let stale = get(&s.join_url(&short_id, &short_secret), &[]);
     assert_eq!(

@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_VERSION: 1.97.1
+  CARGO_AUDIT_VERSION: 0.22.2
+  CARGO_CYCLONEDX_VERSION: 0.5.9
+  FORCE_COLOR: 1
+
 jobs:
   package:
     runs-on: ubuntu-24.04
@@ -20,15 +26,33 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
-          rustup override set 1.97.1
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal --component rustfmt --component clippy
+          rustup override set "$RUST_VERSION"
+
+      # The two tools are cached; `target/` deliberately is not. This job
+      # builds the bytes that get shipped, and a restored build directory
+      # is a place for something to have been put. The gate here is
+      # allowed to be slow — it runs on demand, not on every push — and
+      # what it buys is that the artifact is compiled from source every
+      # time. The tools only decide what to *report*, and both are pinned.
+      - name: Cache pinned release tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin/cargo-cyclonedx
+          key: release-tools-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}-${{ env.CARGO_CYCLONEDX_VERSION }}
+
       - name: Install pinned release tools
         run: |
-          cargo install cargo-audit --version 0.22.2 --locked
-          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          command -v cargo-audit >/dev/null \
+            || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+          command -v cargo-cyclonedx >/dev/null \
+            || cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked
       - name: Fail-closed quality gate
         run: |
-          sh scripts/gate full
+          ./gate
           cargo audit
       - name: Build checksummed artifact and SBOM
         run: sh scripts/build_private_beta_artifact.sh "$RUNNER_TEMP/release"

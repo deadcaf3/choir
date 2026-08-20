@@ -72,7 +72,7 @@ cargo build --release -p choir-node -p choir-cli
 Default `cargo build` / `cargo test` skip `choir-actor` (heavy Rivet dep). Full release gate:
 
 ```bash
-sh scripts/gate full
+./gate
 ```
 
 Put the CLI on your PATH (or use `cargo run -p choir-cli -- …`):
