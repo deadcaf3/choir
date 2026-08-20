@@ -1,0 +1,90 @@
+#!/bin/sh
+# Run a directory of mutations one at a time and report which ones the
+# test suite fails to catch.
+#
+#   sh scripts/mutation_run.sh <mutation-dir> <cargo-test-args...>
+#
+# Each mutation is a `*.py` file in the directory that edits exactly one
+# tracked file in place. The runner does not need to be told which file:
+# it asks git afterwards, which is also how it enforces that an edit
+# landed at all.
+#
+# The four rules below are each here because breaking one produced a
+# false result that read as a pass:
+#
+#   1. The tree must be committed before the first mutation. Restore is
+#      `git checkout -- <file>`, which restores from HEAD, so uncommitted
+#      work would be destroyed by the restore rather than by the edit.
+#   2. A mutation that changes nothing is a failure, not a survivor. A
+#      `sed` range that silently matches nothing reads exactly like a
+#      mutation the tests missed.
+#   3. Restore the FILE by name, never its directory, and prove the
+#      restore with `git status` rather than with the hand that made the
+#      edit.
+#   4. A compile failure proves nothing. Detect it by "could not
+#      compile" -- cargo also exits nonzero when tests merely fail, so
+#      the exit code alone cannot tell the two apart.
+#
+# A mutation that is NOT CAUGHT is a finding about the tests, never
+# evidence that some other check covers it.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+
+DIR=${1:-}
+[ -n "$DIR" ] || { echo "usage: sh scripts/mutation_run.sh <dir> <cargo-test-args...>" >&2; exit 2; }
+shift
+
+[ -d "$DIR" ] || { echo "no such mutation directory: $DIR" >&2; exit 2; }
+
+# Rule 1.
+if [ -n "$(git status --porcelain)" ]; then
+  echo "refusing to run: working tree is dirty, and restore is from HEAD" >&2
+  git status --short >&2
+  exit 2
+fi
+
+LOG=${TMPDIR:-/tmp}/choir-mutation
+mkdir -p "$LOG"
+findings=0
+ran=0
+
+for m in "$DIR"/*.py; do
+  [ -e "$m" ] || { echo "no *.py mutations in $DIR" >&2; exit 2; }
+  name=$(basename "$m" .py)
+  ran=$((ran+1))
+
+  if ! python3 "$m"; then
+    echo "$name: MUTATION SCRIPT ERRORED"
+    continue
+  fi
+
+  # Rule 2, and it also tells us what to restore.
+  changed=$(git status --porcelain | awk '{print $2}')
+  if [ -z "$changed" ]; then
+    echo "$name: NO EDIT LANDED (the mutation matched nothing)"
+    continue
+  fi
+
+  cargo test "$@" > "$LOG/$name.log" 2>&1
+  code=$?
+
+  # Rule 4.
+  if grep -q "could not compile" "$LOG/$name.log"; then
+    echo "$name: did not compile (proves nothing)"
+  elif [ "$code" -eq 0 ]; then
+    echo "$name: NOT CAUGHT  <-- finding"
+    findings=$((findings+1))
+  else
+    echo "$name: caught"
+    grep -E "^test .* FAILED" "$LOG/$name.log" | grep -v "test result" | head -4
+  fi
+
+  # Rule 3.
+  for f in $changed; do git checkout -- "$f"; done
+  leftover=$(git status --porcelain)
+  [ -z "$leftover" ] || { echo "$name: NOT RESTORED: $leftover" >&2; exit 1; }
+done
+
+echo "--- $ran mutation(s), $findings not caught ---"
+git status --porcelain
+[ "$findings" -eq 0 ]
