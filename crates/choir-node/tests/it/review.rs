@@ -123,6 +123,65 @@ fn review_fan_out_over_http() {
     node.unblock();
 }
 
+/// A reviewer's queue answers to the name the reviewer actually has.
+///
+/// Channels are `operator/agent`, so every real reviewer name carries a
+/// slash, and a client that percent-escapes it — the `choir` CLI does —
+/// was answered with an empty queue. `choir reviews` therefore told a
+/// drawn reviewer there was nothing to do while `choir state` told the
+/// same reviewer they were the only thing a change was waiting on. The
+/// endpoint's other tests use single-word names, which is why a broken
+/// queue read as a working one for as long as it did.
+#[test]
+fn a_queue_is_found_by_an_escaped_channel_name() {
+    let work = std::env::temp_dir().join(format!("choir-node-review-esc-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&author.public_key_bytes()).unwrap();
+
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+    );
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}/api");
+
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-escaped".into(),
+        target: choir_oplog::ContentHash::blake3(b"change with a real reviewer name"),
+        reviewers: vec!["bea/reviewer".into()],
+        target_ref: None,
+    });
+    let (code, resp) = curl(&[
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&author, "ada/agent", &request),
+        &format!("{api}/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    for spelling in ["bea/reviewer", "bea%2Freviewer", "bea%2freviewer"] {
+        let (_, pending) = curl(&[&format!("{api}/reviews?reviewer={spelling}")]);
+        assert!(
+            pending["pending"].get("r-escaped").is_some(),
+            "queue empty for {spelling}: {pending}"
+        );
+    }
+    // Decoding is not a wildcard: a different reviewer still sees none.
+    let (_, pending) = curl(&[&format!("{api}/reviews?reviewer=cai%2Freviewer")]);
+    assert!(pending["pending"].as_object().unwrap().is_empty());
+
+    node.unblock();
+}
+
 /// Discussion over the same signed path (D38): a comment is an operation,
 /// so it is admitted, sequenced and served exactly like a verdict, and
 /// the two attribution rules a discussion surface needs are enforced at

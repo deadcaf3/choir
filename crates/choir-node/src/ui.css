@@ -711,8 +711,14 @@ b.tab.here .count{color:var(--accent-ink)}
 table.flight{width:100%;border-collapse:collapse}
 table.flight td{padding:var(--sp-2) var(--sp-0);
   border-bottom:var(--border);vertical-align:top}
-table.flight td:first-child{white-space:nowrap;width:1%;padding-right:var(--sp-3)}
-table.flight td:last-child{white-space:nowrap;text-align:right;
+/* `max-width:0` on a cell in a full-width table is what makes the column
+   shrink to the space the pane has, rather than to the width of its
+   longest unbreakable word — the same pattern `.pane-files` uses. A
+   change id is one such word, and without this it pushed the table past
+   the pane and drew the row across the file listing beside it. */
+table.flight td:first-child{white-space:nowrap;max-width:var(--sp-0);width:100%;
+  overflow:hidden;text-overflow:ellipsis;padding-right:var(--sp-3)}
+table.flight td:last-child{white-space:nowrap;text-align:right;width:1%;
   font-size:var(--fs-200)}
 table.flight .why{display:block;font-size:var(--fs-200);margin-top:var(--sp-1)}
 /* `.mono` sets `overflow-wrap:anywhere`, which is right for a hash in a

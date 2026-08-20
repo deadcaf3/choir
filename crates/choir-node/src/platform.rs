@@ -5412,10 +5412,12 @@ impl Platform {
             // Pending queue for one reviewer: reviews that fanned out to
             // them and are still unanswered by them.
             ("GET", path) if path.starts_with("/api/reviews") => {
-                let reviewer = path
-                    .split_once("reviewer=")
-                    .map(|(_, v)| v.split('&').next().unwrap_or(v))
-                    .unwrap_or("");
+                let reviewer = decode_query_value(
+                    path.split_once("reviewer=")
+                        .map(|(_, v)| v.split('&').next().unwrap_or(v))
+                        .unwrap_or(""),
+                );
+                let reviewer = reviewer.as_str();
                 let view = self.view.lock().expect("view lock");
                 let pending: std::collections::BTreeMap<_, _> = view
                     .reviews
@@ -6356,6 +6358,48 @@ fn replay_from_disk(
         rows.push(entry_json(&entry));
     }
     Ok(rows)
+}
+
+/// Percent-decodes one query-string value.
+///
+/// `/api/reviews?reviewer=` compares its value against a channel name,
+/// and every channel here is `operator/agent` — a name with a slash in
+/// it. A client that escapes the slash, which the `choir` CLI does, was
+/// answered with an empty queue rather than with its reviews: `choir
+/// reviews` reported nothing to do to the very reviewer `choir state`
+/// named as blocking a change. The endpoint's own tests missed it by
+/// using single-word reviewer names, which no real channel is.
+///
+/// Undecodable input is returned unchanged rather than dropped: a name
+/// that was never encoded is still a name, and the comparison it fails
+/// is the right outcome for one that is genuinely unknown.
+fn decode_query_value(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let Some(byte) = raw
+                    .get(i + 1..i + 3)
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                else {
+                    return raw.to_string();
+                };
+                out.push(byte);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| raw.to_string())
 }
 
 /// Drops a trailing `\n` and an optional preceding `\r`, so a line read

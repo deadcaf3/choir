@@ -281,13 +281,7 @@ pub(crate) fn route(url: &str) -> Option<Page> {
             return Some(Page::Contribute { repo });
         }
         if let Some(id) = rest.strip_prefix("review/") {
-            let id = decode(id)?;
-            // The same rule repository and workspace names follow: an id
-            // reaches no subprocess, but it does reach a URL and a page,
-            // and one grammar for names is easier to keep right than two.
-            if !crate::provision::safe_segment(&id) {
-                return None;
-            }
+            let id = decode_review_id(id)?;
             return Some(Page::Review { repo, id });
         }
     }
@@ -400,6 +394,74 @@ fn decode(segment: &str) -> Option<String> {
     }
     Some(text)
 }
+
+/// Percent-decodes a review id, which is not a path segment.
+///
+/// A D52 change id is `propose:<owner>/<repo>:<fingerprint>`, so it
+/// carries both a colon and a slash. Held to [`crate::provision::safe_segment`]
+/// — the grammar for names that become directories — every id `choir
+/// propose` mints was refused, and the review page that both the pane
+/// and the reviews table link to answered 404 for the whole D51-D53
+/// onboarding path.
+///
+/// The id reaches a map lookup and a page, never a subprocess and never
+/// the filesystem, so the question here is not "could this be a name"
+/// but "could this be a path or a control byte". A traversal segment is
+/// refused anyway: an id is matched against the platform's own keys, and
+/// one that looks like a path only invites a future reader to join it to
+/// one.
+fn decode_review_id(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = raw.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let id = String::from_utf8(out).ok()?;
+    if id.is_empty() || id.len() > MAX_REVIEW_ID || id.chars().any(char::is_control) {
+        return None;
+    }
+    if id.contains('\\') || id.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+        return None;
+    }
+    Some(id)
+}
+
+/// Longest review id this router will decode.
+///
+/// A `propose` id is 87 characters plus the repository name; a hand-named
+/// one is a word. The cap is what stops a URL from carrying a page-sized
+/// string into a lookup that will miss.
+const MAX_REVIEW_ID: usize = 512;
+
+/// Renders a change id at the width of a sentence.
+///
+/// Mirrors `choir_cli::propose::short_change_id` deliberately rather than
+/// sharing it: the node does not depend on the client. A change id ends
+/// in a 64-character fingerprint, which is a record and not something
+/// anyone reads — rendered whole in the reviews pane it overran the pane
+/// and drew across the file listing beside it. The `href` and the
+/// `title` still carry the id whole, because that is what a reader
+/// copies into `choir verdict`.
+fn short_change_id(id: &str) -> String {
+    match id.rsplit_once(':') {
+        Some((head, digest)) if digest.chars().count() > SHORT_FINGERPRINT => {
+            let short: String = digest.chars().take(SHORT_FINGERPRINT).collect();
+            format!("{head}:{short}\u{2026}")
+        }
+        _ => id.to_string(),
+    }
+}
+
+/// Fingerprint characters kept by [`short_change_id`].
+const SHORT_FINGERPRINT: usize = 12;
 
 /// Validates a ref name, returning it unchanged.
 ///
@@ -2196,8 +2258,10 @@ fn reviews_pane(
         h.push_str(&esc(repo));
         h.push_str("/review/");
         h.push_str(&esc(id));
-        h.push_str("\">");
+        h.push_str("\" title=\"");
         h.push_str(&esc(id));
+        h.push_str("\">");
+        h.push_str(&esc(&short_change_id(id)));
         h.push_str("</a><span class=\"why\">");
         state_tag(h, review);
         // How far the destination has moved since this commit was
@@ -2450,8 +2514,8 @@ fn reviews(
     h.push_str("\">");
     h.push_str(&esc(repo));
     h.push_str("</a></h1><div class=\"sub\"><span class=\"pill\">");
-    h.push_str(&rows.len().to_string());
-    h.push_str(" reviews</span><span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
+    h.push_str(&plural(rows.len(), "review", "reviews"));
+    h.push_str("</span><span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
     h.push_str("</div></header><main id=\"main\"><section>");
     if rows.is_empty() {
         h.push_str(
@@ -2473,8 +2537,10 @@ fn reviews(
             h.push_str(&esc(repo));
             h.push_str("/review/");
             h.push_str(&esc(id));
-            h.push_str("\">");
+            h.push_str("\" title=\"");
             h.push_str(&esc(id));
+            h.push_str("\">");
+            h.push_str(&esc(&short_change_id(id)));
             h.push_str("</a></td><td class=\"mono muted\">");
             h.push_str(&esc(ref_name(review)));
             h.push_str("</td><td>");
@@ -2553,7 +2619,11 @@ fn review(
     h.push_str("\">");
     h.push_str(&esc(repo));
     h.push_str("</a> · review ");
-    h.push_str(&esc(id));
+    // The heading names the review; the `change` row below carries the id
+    // whole. A D52 id ends in a 64-character fingerprint, and a title
+    // that is mostly fingerprint says nothing at a glance while pushing
+    // the repository it belongs to off the first line.
+    h.push_str(&esc(&short_change_id(id)));
     h.push_str("</h1><div class=\"sub\">");
     state_tag(&mut h, &state);
     h.push_str("<span class=\"pill\">weight ");
@@ -2566,6 +2636,12 @@ fn review(
     // The relationship: what lands where, which is the thing reviews
     // have always carried and never shown in one place.
     h.push_str("<section><h2>Proposal</h2><table><tbody>");
+    // The id whole, because it is what a reviewer pastes into `choir
+    // verdict` and what `view.changes` is keyed by. Shortening it here
+    // would be an identity change wearing a display change's clothes.
+    h.push_str("<tr><td>change</td><td class=\"mono\">");
+    h.push_str(&esc(id));
+    h.push_str("</td></tr>");
     h.push_str("<tr><td>commit</td><td class=\"mono\"><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("/commit/");
@@ -3517,6 +3593,61 @@ mod tests {
         ] {
             assert_eq!(route(url), None, "a dangerous URL parsed: {url}");
         }
+    }
+
+    /// A change id is not a name, and holding it to the name grammar
+    /// 404-ed the whole onboarding path.
+    ///
+    /// `choir propose` mints `propose:<owner>/<repo>:<fingerprint>` (D52).
+    /// Both the reviews table and the repository pane link to that id,
+    /// and both links answered 404 because `safe_segment` refuses a
+    /// colon and a slash. Asserted on the exact shape the client
+    /// produces, since a shorter id kept passing while every real one
+    /// failed.
+    #[test]
+    fn a_change_id_reaches_its_review_page() {
+        let id = "propose:demo/hello:\
+                  fcd6a585169449d3c4579093d3cf60d335bdece958e2163a2538f6d2657403fc";
+        assert_eq!(
+            route(&format!("/r/demo/hello/review/{id}")),
+            Some(Page::Review {
+                repo: "demo/hello".into(),
+                id: id.into(),
+            })
+        );
+        // Percent-encoded arrives at the same place: a client that
+        // escapes the separators is not asking for a different review.
+        assert_eq!(
+            route("/r/demo/hello/review/propose%3Ademo%2Fhello%3Aabc"),
+            Some(Page::Review {
+                repo: "demo/hello".into(),
+                id: "propose:demo/hello:abc".into(),
+            })
+        );
+        // And an id that could be a path still cannot be one.
+        for url in [
+            "/r/demo/hello/review/../../etc/passwd",
+            "/r/demo/hello/review/a%2F..%2F..%2Fb",
+            "/r/demo/hello/review/a%00b",
+            "/r/demo/hello/review/",
+        ] {
+            assert_eq!(route(url), None, "a dangerous review id parsed: {url}");
+        }
+    }
+
+    /// The pane renders the id at the width of a sentence, and the
+    /// fingerprint is what gets elided rather than the namespace.
+    #[test]
+    fn a_change_id_is_shortened_from_the_fingerprint_end() {
+        let id = "propose:demo/hello:\
+                  fcd6a585169449d3c4579093d3cf60d335bdece958e2163a2538f6d2657403fc";
+        assert_eq!(
+            short_change_id(id),
+            "propose:demo/hello:fcd6a5851694\u{2026}"
+        );
+        // Nothing to elide: returned whole rather than claiming an
+        // elision it did not make.
+        assert_eq!(short_change_id("main-d6055a9"), "main-d6055a9");
     }
 
     /// Encoding and parsing are inverses, checked as a pair rather than
