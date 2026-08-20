@@ -554,6 +554,42 @@ fn a_half_tls_pair_is_refused_by_both_renderers() {
 /// refuse to render, because a node with no `--create` installs no
 /// pre-receive hook and its pushes are silently never sequenced.
 #[test]
+fn choirctl_runs_its_coloured_path_under_zsh() {
+    // `choirctl` is zsh, and zsh reads `"$ESC[32m"` as a subscript on
+    // ESC rather than as text after it -- `invalid subscript` -- where
+    // the identical line in the POSIX-sh `gate` is fine. That shipped,
+    // because the colour branch only runs on a terminal and every test
+    // and every run in development captured its output instead.
+    //
+    // `zsh -n` does not catch it: the broken file parsed clean. Only
+    // executing the branch does, so this executes it. No arguments, so
+    // the script prints its usage and touches nothing, while the style
+    // block at the top -- which is what breaks -- runs either way.
+    let out = std::process::Command::new("zsh")
+        .arg(repo_root().join("choirctl"))
+        .env("FORCE_COLOR", "1")
+        .output()
+        .expect("zsh runs choirctl");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "choirctl fails on a colour-capable terminal: {said}"
+    );
+    assert!(
+        !said.contains("invalid subscript"),
+        "a zsh parameter expansion broke on the colour path: {said}"
+    );
+    assert!(
+        said.contains("install-cli"),
+        "choirctl printed no usage, so it did not get as far as its commands: {said}"
+    );
+}
+
+#[test]
 fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
     let repos = "# comment\n\nowner/repo.git\nsecond/other.git\n";
     let plist_out = render_output(repos, Some("/state/protected-refs"), false, None, None);

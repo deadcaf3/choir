@@ -145,7 +145,13 @@ if [ -z "${NO_COLOR:-}" ]; then
   if [ -t 1 ]; then LIVE=1; fi
 fi
 if [ "$COLOR" = 1 ]; then
-  G="$ESC[32m"; R="$ESC[31m"; Y="$ESC[33m"; D="$ESC[2m"; B="$ESC[1m"; Z="$ESC[0m"
+  # Braced. This file is zsh, where `"$ESC[32m"` parses as a subscript on
+  # ESC -- `invalid subscript` -- while the identical line in `./gate` is
+  # fine because that is POSIX sh, which has no array subscripts. The
+  # colour branch only runs on a terminal, so every captured-output test
+  # took the `else` and this never executed until a person ran it.
+  G="${ESC}[32m"; R="${ESC}[31m"; Y="${ESC}[33m"
+  D="${ESC}[2m";  B="${ESC}[1m";  Z="${ESC}[0m"
 else
   G=; R=; Y=; D=; B=; Z=
 fi
