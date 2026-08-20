@@ -207,6 +207,19 @@ pub struct CreateAuthorization {
     pub base_revision: ContentHash,
     /// Owner-scoped retry identity.
     pub idempotency_key: String,
+    /// Directory prefixes the owner declares this change works within;
+    /// empty means the whole tree.
+    ///
+    /// Covered by the owner's signature on purpose. The cone lands in
+    /// the log as part of an op the *node* authors, so if it were not
+    /// signed here the node could attach a scope its owner never
+    /// declared — and a declaration nobody signed is worth no more than
+    /// the node-side config this was meant to replace. Additive under
+    /// invariant 1: an empty cone is not serialized, so every
+    /// authorization signed before this field existed still verifies
+    /// byte-for-byte.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cone: Vec<String>,
 }
 
 impl CreateAuthorization {
@@ -225,7 +238,20 @@ impl CreateAuthorization {
             workspace,
             base_revision,
             idempotency_key,
+            cone: Vec::new(),
         }
+    }
+
+    /// The same authorization, scoped to `cone`.
+    ///
+    /// A builder rather than a sixth parameter on [`Self::new`], so the
+    /// unscoped call sites -- which are most of them, and every one
+    /// written before cones existed -- keep reading as the plain thing
+    /// they are.
+    #[must_use]
+    pub fn with_cone(mut self, cone: Vec<String>) -> Self {
+        self.cone = cone;
+        self
     }
 
     /// Canonical bytes covered by the owner's submission signature.
@@ -655,6 +681,26 @@ pub enum OpKind {
         /// authorization was introduced.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner_sig: Option<Witness>,
+        /// Directory prefixes this change declares it works within, in
+        /// git's cone spelling (`"services/api"`). Empty = the whole
+        /// tree, which is what every change written before this field
+        /// existed decodes to and is exactly the previous behaviour
+        /// (invariant 1).
+        ///
+        /// **Declared, not enforced here.** The fold does not police
+        /// which paths a commit touches; a cone is a statement about
+        /// intent that the node can serve a matching partial clone from
+        /// and that [`conflicts_for_cone`] narrows a conflict report
+        /// against. Making it a hard boundary would need path
+        /// enforcement in the merge layer, which is a separate decision
+        /// and a much larger one.
+        ///
+        /// It sits in the signed payload rather than in node-side
+        /// config for the reason D49 puts a check there: a replayer can
+        /// then reproduce what the change said it was scoped to, and an
+        /// operator cannot rewrite it after the fact.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cone: Vec<String>,
     },
     /// Publish an immutable revision of an existing change and advance
     /// its bound workspace under compare-and-set.
@@ -815,6 +861,57 @@ pub enum OpKind {
         /// The channel that read it (must be the submitting channel,
         /// enforced at admission).
         viewer: String,
+    },
+    /// Record one automated check's outcome on a commit (D49; additive
+    /// variant, wire-format unchanged).
+    ///
+    /// **The node does not run the check.** Executing workflows is
+    /// containers, secrets, caches and artifacts — the largest surface
+    /// on the platform and the least differentiated part of it, since
+    /// every forge already has one. What no forge has is a check result
+    /// that is *ordered against the ref it attests* and replayable by
+    /// someone who trusts none of the parties. So this op carries the
+    /// verdict and nothing else: any runner, or a person, reports by
+    /// signing one.
+    ///
+    /// That inversion is what makes it stronger than a status field on a
+    /// merge gate. A field is mutable and is read at merge time, so
+    /// "was this green when it landed" decays into "is it green now". A
+    /// signed op is append-only and sits at a known sequence, so the
+    /// question stays decidable forever, and `choir log --verify`
+    /// already recomputes the hash and checks the signature.
+    ///
+    /// Re-reporting overwrites the reporter's own earlier result for the
+    /// same `(subject, name)`, exactly as [`OpKind::PostVerdict`] lets a
+    /// reviewer re-review. A check that flaps is a check that flaps; the
+    /// log keeps every report and the view keeps the latest.
+    ///
+    /// `reporter` is payload data covered by the author signature.
+    /// Binding it to the submitting channel is admission policy (L2),
+    /// the same split as `reviewer` and `viewer` above.
+    RecordCheck {
+        /// The commit the check ran against.
+        subject: ContentHash,
+        /// Check name, e.g. `"ci/build"` (non-empty).
+        name: String,
+        /// What the check found.
+        status: CheckStatus,
+        /// Where a human can read the run: a URL, a run id, or empty.
+        evidence: String,
+        /// The channel reporting it (must be the submitting channel,
+        /// enforced at admission).
+        reporter: String,
+        /// The ref this check's subject is proposed to land on, in the
+        /// view's namespaced form `<repo>:<refname>`. `None` = unbound.
+        ///
+        /// Present for the same reason [`OpKind::RequestReview`] carries
+        /// one, and it is load-bearing twice: per-ref policy conditions
+        /// on it, and it is the only thing that lets the ACL narrow a
+        /// check to a repository. A commit id names no repository, so a
+        /// check without this field is visible to node-wide readers
+        /// only — correct, and useless to the repository it belongs to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_ref: Option<String>,
     },
     /// Land a reviewed commit on a ref **and record why it was allowed**
     /// (D43; additive variant, wire-format unchanged).
@@ -980,6 +1077,66 @@ pub enum Verdict {
     RequestChanges,
 }
 
+/// What an automated check found about a commit (D49).
+///
+/// Three states and not two. "Not finished" is a real answer and the one
+/// a caller most needs to distinguish, because the action it implies —
+/// wait — differs from both pass and fail. Collapsing it into failure
+/// makes every in-flight check look like a broken build; collapsing it
+/// into success is worse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CheckStatus {
+    /// The check ran and was satisfied.
+    Passed,
+    /// The check ran and was not satisfied.
+    Failed,
+    /// The check has started and has not reported an outcome.
+    Running,
+}
+
+impl CheckStatus {
+    /// The wire spelling, which is also what the CLI accepts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckStatus::Passed => "passed",
+            CheckStatus::Failed => "failed",
+            CheckStatus::Running => "running",
+        }
+    }
+
+    /// Parses the CLI spelling, or `None` for anything else.
+    ///
+    /// Deliberately not a `FromStr` impl taking arbitrary case: a check
+    /// reported as `"PASSED"` by a runner that upcased its output should
+    /// be refused loudly rather than accepted into a signed op, because
+    /// the op is what a later audit reads.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "passed" => Some(CheckStatus::Passed),
+            "failed" => Some(CheckStatus::Failed),
+            "running" => Some(CheckStatus::Running),
+            _ => None,
+        }
+    }
+}
+
+/// The latest report for one `(subject, check name)` pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckState {
+    /// What the check found.
+    pub status: CheckStatus,
+    /// Where a human can read the run; may be empty.
+    pub evidence: String,
+    /// Channel that reported it.
+    pub reporter: String,
+    /// Ref the subject is proposed to land on, when the report named
+    /// one. This is what the node's ACL narrows a check on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ref: Option<String>,
+}
+
 /// Whether a review is still accepting verdicts, or has been settled and
 /// had its bulk dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1114,6 +1271,9 @@ pub struct ChangeState {
     pub revision_id: ContentHash,
     /// Owner-scoped identity of the create request.
     pub idempotency_key: String,
+    /// Directory prefixes the change declared it works within; empty
+    /// means the whole tree.
+    pub cone: Vec<String>,
 }
 
 impl ReviewState {
@@ -1304,6 +1464,9 @@ pub enum ViewError {
     Review(String),
     /// Provenance-record precondition failure (empty subject or kind).
     Provenance(String),
+    /// Check-report precondition failure: an empty name or reporter, or
+    /// a name carrying the key separator.
+    Check(String),
     /// Change lifecycle precondition failure (duplicate identity,
     /// invalid binding, unknown/archived change, or no-op checkpoint).
     Change(String),
@@ -1364,6 +1527,85 @@ pub struct Commit {
     /// byte-identically — invariant 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolves: Option<ContentHash>,
+}
+
+/// Conflicts in one commit, split by whether the reader's cone covers
+/// them (D50).
+///
+/// The split is the point. `inside` names paths whose content the reader
+/// may fetch; `outside` names paths and **nothing else** -- no base,
+/// left or right address, no size, no message. The type is the
+/// enforcement: `outside` is a list of strings, so there is no field a
+/// later change could accidentally start populating with content.
+///
+/// This is a capability the partial-clone story alone does not have.
+/// Withholding content is ordinary; git does it, and so does every
+/// system with a sparse checkout. What is unusual is being able to say
+/// *that a collision happened* at a path the reader cannot read, which
+/// choir can do only because the op log is separate from the content it
+/// orders. A reader who never receives `docs/guide.md` still learns
+/// that their merge collided there, and can go ask the person who owns
+/// it. Elsewhere that collision is simply invisible until someone else
+/// trips over it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConflictReport {
+    /// Conflicted paths the cone covers, readable in full.
+    pub inside: Vec<String>,
+    /// Conflicted paths the cone does not cover. Paths only.
+    pub outside: Vec<String>,
+}
+
+impl ConflictReport {
+    /// Whether the commit conflicts anywhere, in or out of the cone.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inside.is_empty() && self.outside.is_empty()
+    }
+}
+
+/// Whether `cone` covers `path`, in git's cone spelling.
+///
+/// An empty cone covers everything, which is what a change that
+/// declared no scope means and what every change written before cones
+/// existed decodes to. A prefix matches on a directory boundary, so
+/// `services/api` covers `services/api/main.rs` and does **not** cover
+/// `services/apiary/main.rs` -- the bug a bare `starts_with` would
+/// introduce, and the reason this is a named function with a test
+/// rather than an inline call.
+#[must_use]
+pub fn cone_covers(cone: &[String], path: &str) -> bool {
+    if cone.is_empty() {
+        return true;
+    }
+    cone.iter().any(|prefix| {
+        let prefix = prefix.trim_end_matches('/');
+        prefix.is_empty()
+            || path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// Splits `commit`'s conflicts into what `cone` covers and what it does
+/// not.
+///
+/// Pure, and deliberately takes the commit rather than a store handle:
+/// redaction that needed I/O would be redaction that can fail open.
+#[must_use]
+pub fn conflicts_for_cone(commit: &Commit, cone: &[String]) -> ConflictReport {
+    let mut report = ConflictReport::default();
+    for (path, entry) in &commit.tree {
+        if !matches!(entry, TreeEntry::Conflict { .. }) {
+            continue;
+        }
+        if cone_covers(cone, path) {
+            report.inside.push(path.clone());
+        } else {
+            report.outside.push(path.clone());
+        }
+    }
+    report
 }
 
 impl Commit {
@@ -1443,6 +1685,16 @@ pub struct View {
     pub reviews: BTreeMap<String, ReviewState>,
     /// Subject → record kind → latest body (D22 provenance records).
     pub provenance: BTreeMap<String, BTreeMap<String, String>>,
+    /// `<subject-hex>:<check-name>` → the latest report for it (D49).
+    ///
+    /// One flat map rather than subject → name → state, because every
+    /// consumer of a view section wants the same two things: the ACL
+    /// narrows section rows one at a time, and the node's paging bounds
+    /// them one at a time. A nested map would need both to learn a
+    /// second shape, and "all checks on commit X" is still a prefix
+    /// scan. The separator is `:` for the same reason `refs` uses it,
+    /// and it cannot collide: a hex subject contains no `:`.
+    pub checks: BTreeMap<String, CheckState>,
     /// Actor key id → its durable operator binding (D24 T1/T3 substrate).
     ///
     /// Keyed by [`ContentHash::to_hex`] rather than by the hash itself so
@@ -1821,6 +2073,24 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::RecordCheck { name, reporter, .. } => {
+                if name.is_empty() || reporter.is_empty() {
+                    return Err(ViewError::Check(
+                        "a check must name itself and its reporter".to_string(),
+                    ));
+                }
+                // The key is built by joining on `:`, so a name carrying
+                // one could address a row belonging to another subject.
+                // Refused here rather than escaped, because the view is
+                // a map and an escaping scheme is a second encoding of a
+                // hashed structure (invariant 3's failure mode).
+                if name.contains(':') {
+                    return Err(ViewError::Check(format!(
+                        "check name {name} may not contain ':'"
+                    )));
+                }
+                Ok(())
+            }
             OpKind::CreateChange {
                 id,
                 owner,
@@ -2035,6 +2305,46 @@ impl View {
         }
     }
 
+    /// The [`View::checks`] key for one `(subject, check name)` pair.
+    #[must_use]
+    pub fn check_key(subject: &ContentHash, name: &str) -> String {
+        format!("{}:{name}", subject.to_hex())
+    }
+
+    /// Every check reported against `subject`, as `(name, state)` in
+    /// name order.
+    #[must_use]
+    pub fn checks_for(&self, subject: &ContentHash) -> Vec<(&str, &CheckState)> {
+        let prefix = format!("{}:", subject.to_hex());
+        self.checks
+            .range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix))
+            .filter_map(|(key, state)| key.split_once(':').map(|(_, name)| (name, state)))
+            .collect()
+    }
+
+    /// The one answer for `subject`, or `None` when nothing reported.
+    ///
+    /// A failure outranks a run still in flight. Both are "not green",
+    /// but only one of them can still become green, and a caller
+    /// deciding whether to wait needs that distinction to point the
+    /// right way: told `Running` while a sibling check has already
+    /// failed, it waits for an outcome that cannot arrive.
+    #[must_use]
+    pub fn checks_verdict(&self, subject: &ContentHash) -> Option<CheckStatus> {
+        let states = self.checks_for(subject);
+        if states.is_empty() {
+            return None;
+        }
+        if states.iter().any(|(_, s)| s.status == CheckStatus::Failed) {
+            return Some(CheckStatus::Failed);
+        }
+        if states.iter().any(|(_, s)| s.status == CheckStatus::Running) {
+            return Some(CheckStatus::Running);
+        }
+        Some(CheckStatus::Passed)
+    }
+
     /// Applies one op, enforcing its CAS precondition. A rejected op
     /// leaves the view unchanged.
     ///
@@ -2200,6 +2510,24 @@ impl View {
                     .viewed
                     .insert(viewer.clone(), at);
             }
+            OpKind::RecordCheck {
+                subject,
+                name,
+                status,
+                evidence,
+                reporter,
+                target_ref,
+            } => {
+                self.checks.insert(
+                    Self::check_key(subject, name),
+                    CheckState {
+                        status: *status,
+                        evidence: evidence.clone(),
+                        reporter: reporter.clone(),
+                        target_ref: target_ref.clone(),
+                    },
+                );
+            }
             OpKind::RecordProvenance {
                 subject,
                 kind,
@@ -2219,6 +2547,7 @@ impl View {
                 workspace,
                 base_revision,
                 idempotency_key,
+                cone,
                 ..
             } => {
                 self.workspaces
@@ -2232,6 +2561,7 @@ impl View {
                         base_revision: base_revision.clone(),
                         revision_id: base_revision.clone(),
                         idempotency_key: idempotency_key.clone(),
+                        cone: cone.clone(),
                     },
                 );
             }

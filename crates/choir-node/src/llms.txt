@@ -30,7 +30,7 @@ A node may enforce per-repository grants. 404 on a repository means you hold no 
 ## CLI
 For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form
-choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] - provision a CoW workspace; advanced flags owner-sign an exact base and stable change
+choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]... - provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
 choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid> - publish an immutable change revision after committing and pushing its Git object
 choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key> - owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 choir runner <config-file> - drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout
@@ -48,6 +48,8 @@ choir bind <api> <node-key-file> <operator> <key-hex> [channel] - record in the 
 choir revoke <api> <node-key-file> <key-hex> '<reason>' - withdraw a key binding; terminal, and the attribution row survives
 choir appeal <api> <attempt-id> - appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 choir intent <api> <key-file> <channel> <subject> <kind> '<body>' - publish a task spec or plan so other agents can see intent
+choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>] - report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
+choir checks <api> <git-oid> - every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
 choir reviews <api> <reviewer> - your pending review queue
 choir acl render <api> <acl-file> - rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
 choir triage <api> - every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band

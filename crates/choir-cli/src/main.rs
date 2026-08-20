@@ -19,6 +19,8 @@
 //! choir revoke <api> <node-key-file> <key-hex> '<reason>'
 //! choir appeal <api> <attempt-id>
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
+//! choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]
+//! choir checks <api> <git-oid>
 //! choir reviews <api> <reviewer>
 //! choir acl render <api> <acl-file>
 //! choir view <api>
@@ -29,12 +31,13 @@
 //! ```
 //!
 //! Exit codes: 0 = the node accepted, 1 = the node rejected (the JSON
-//! error body is printed), 2 = usage error.
+//! error body is printed), 2 = usage error. `choir checks` adds 3 = the
+//! answer is not decided yet; see [`check_exit`].
 
 use choir_hash::ContentHash;
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_decode;
-use choir_view::{ArchiveAuthorization, CreateAuthorization, OpKind, Verdict, ViewOp};
+use choir_view::{ArchiveAuthorization, CheckStatus, CreateAuthorization, OpKind, Verdict, ViewOp};
 
 #[derive(Clone, Copy)]
 struct AuthOptions<'a> {
@@ -356,6 +359,73 @@ fn acl_render(api: &str, auth: AuthOptions<'_>, acl_file: &str) -> ! {
         "unresolved": grants - named,
     });
     finish(200, &doc.to_string());
+}
+
+/// Prints the checks on `subject` and exits with the trichotomy.
+///
+/// The only command here that has a third answer, and it is the reason
+/// the third answer exists: a caller asking "may I land this" gets three
+/// materially different instructions back, and two exit codes cannot
+/// carry three instructions. `0` land it, `1` do not, `3` not yet.
+///
+/// **Nothing reported exits `1`, not `3`.** `3` means a check said it
+/// was running, which is a promise that an outcome is coming. No check
+/// at all is not that promise -- there may be no runner configured, and
+/// a caller that waited would wait forever. Both `1` cases print a
+/// distinguishing `verdict`, so a human is never left guessing which of
+/// the two they hit.
+fn check_exit(subject: &ContentHash, body: &str) -> ! {
+    let view: serde_json::Value = match serde_json::from_str(body) {
+        Ok(view) => view,
+        Err(error) => {
+            eprintln!("choir checks: the node's view did not parse: {error}");
+            std::process::exit(1);
+        }
+    };
+    let prefix = format!("{}:", subject.to_hex());
+    let rows: serde_json::Map<String, serde_json::Value> = view
+        .get("checks")
+        .and_then(serde_json::Value::as_object)
+        .map(|checks| {
+            checks
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(key, value)| (key[prefix.len()..].to_string(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let status_of = |value: &serde_json::Value| {
+        value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_lowercase)
+    };
+    // Failed outranks Running for the reason `View::checks_verdict`
+    // gives: only one of the two can still turn green.
+    let (verdict, code) = if rows.is_empty() {
+        ("unreported", 1)
+    } else if rows
+        .values()
+        .any(|v| status_of(v).as_deref() == Some("failed"))
+    {
+        ("failed", 1)
+    } else if rows
+        .values()
+        .any(|v| status_of(v).as_deref() == Some("running"))
+    {
+        ("running", 3)
+    } else {
+        ("passed", 0)
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "subject": subject.to_hex(),
+            "verdict": verdict,
+            "checks": rows,
+        })
+    );
+    std::process::exit(code);
 }
 
 /// Prints the response body and exits nonzero unless the status is 2xx.
@@ -1002,11 +1072,20 @@ fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
     }
     let (mut base, mut owner, mut key_file, mut change, mut idempotency_key) =
         (None, None, None, None, None);
+    // Repeatable, unlike the five above: a change works within as many
+    // subtrees as it works within, and one flag per prefix is the same
+    // spelling `git sparse-checkout set` takes.
+    let mut cone: Vec<String> = Vec::new();
     let mut index = 0;
     while index < rest.len() {
         let Some(value) = rest.get(index + 1).copied() else {
             usage();
         };
+        if rest[index] == "--path" {
+            cone.push(value.to_string());
+            index += 2;
+            continue;
+        }
         let slot = match rest[index] {
             "--base" if base.is_none() => &mut base,
             "--owner" if owner.is_none() => &mut owner,
@@ -1018,6 +1097,12 @@ fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
         *slot = Some(value);
         index += 2;
     }
+    // Sorted and deduplicated before signing so that two clients naming
+    // the same subtrees in different orders produce the same
+    // authorization bytes. Canonical ordering is not decoration here:
+    // the node rebuilds these bytes to verify the signature.
+    cone.sort();
+    cone.dedup();
     let (Some(base), Some(owner), Some(key_file), Some(change), Some(idempotency_key)) =
         (base, owner, key_file, change, idempotency_key)
     else {
@@ -1033,7 +1118,8 @@ fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
         format!("{repo}/{name}"),
         base_revision,
         idempotency_key.into(),
-    );
+    )
+    .with_cone(cone);
     let mut body = signed_payload_body(key_file, owner, &authorization.to_payload());
     body["repo"] = serde_json::json!(repo);
     body["name"] = serde_json::json!(name);
@@ -1361,6 +1447,52 @@ fn main() {
                 body: (*body).into(),
             });
             submit(api, key_file, channel, &op, auth);
+        }
+        // The write half of D49. `channel` is the reporter: admission
+        // rejects a report whose reporter differs from the signed
+        // channel, the same binding `viewed` relies on.
+        ["check", api, key_file, channel, oid, name, status, rest @ ..] if rest.len() <= 3 => {
+            let Some(subject) = choir_hash::ContentHash::from_git_oid(oid) else {
+                eprintln!("<git-oid> must be a 40- or 64-char hex object id");
+                std::process::exit(2);
+            };
+            let Some(status) = CheckStatus::parse(status) else {
+                eprintln!("<status> must be passed, failed or running");
+                std::process::exit(2);
+            };
+            let mut evidence = String::new();
+            let mut target_ref = None;
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                if *arg == "--ref" {
+                    let Some(name) = it.next() else { usage() };
+                    target_ref = Some((*name).to_string());
+                } else {
+                    evidence = (*arg).to_string();
+                }
+            }
+            let op = ViewOp::new(OpKind::RecordCheck {
+                subject,
+                name: (*name).into(),
+                status,
+                evidence,
+                reporter: (*channel).into(),
+                target_ref,
+            });
+            submit(api, key_file, channel, &op, auth);
+        }
+        // The read half, and the one command in this binary that exits 3.
+        // See `check_exit`.
+        ["checks", api, oid] => {
+            let Some(subject) = choir_hash::ContentHash::from_git_oid(oid) else {
+                eprintln!("<git-oid> must be a 40- or 64-char hex object id");
+                std::process::exit(2);
+            };
+            let (status, resp) = http(api, auth, "choir_view", serde_json::json!({}));
+            if !(200..300).contains(&status) {
+                finish(status, &resp);
+            }
+            check_exit(&subject, &resp);
         }
         ["reviews", api, reviewer] => {
             let (status, resp) = http(

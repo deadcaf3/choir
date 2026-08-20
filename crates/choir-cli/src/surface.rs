@@ -276,8 +276,9 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "workspace",
-        args: "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]",
-        summary: "provision a CoW workspace; advanced flags owner-sign an exact base and stable change",
+        args: "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...",
+        summary: "provision a CoW workspace; advanced flags owner-sign an exact base and stable change, \
+                  and each --path owner-signs a subtree this change declares it works within",
         agent_facing: true,
     },
     Command {
@@ -387,6 +388,20 @@ pub const COMMANDS: &[Command] = &[
         name: "intent",
         args: "<api> <key-file> <channel> <subject> <kind> '<body>'",
         summary: "publish a task spec or plan so other agents can see intent",
+        agent_facing: true,
+    },
+    Command {
+        name: "check",
+        args: "<api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]",
+        summary: "report one automated check's outcome on a commit; any runner or a person \
+                  can report by signing, and the node never runs the check",
+        agent_facing: true,
+    },
+    Command {
+        name: "checks",
+        args: "<api> <git-oid>",
+        summary: "every check reported on a commit, and one verdict; exits 0 passed, \
+                  1 failed or unreported, 3 still running",
         agent_facing: true,
     },
     Command {

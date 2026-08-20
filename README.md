@@ -544,7 +544,7 @@ usage:
 
 commands:
   choir key <key-file> [name]
-  choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
+  choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...
   choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
   choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
   choir runner <config-file>
@@ -562,6 +562,8 @@ commands:
   choir revoke <api> <node-key-file> <key-hex> '<reason>'
   choir appeal <api> <attempt-id>
   choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
+  choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]
+  choir checks <api> <git-oid>
   choir reviews <api> <reviewer>
   choir acl render <api> <acl-file>
   choir triage <api>

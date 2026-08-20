@@ -72,6 +72,7 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             base_revision: h(b"base"),
             idempotency_key: "request-1".into(),
             owner_sig: None,
+            cone: Vec::new(),
         }))
         .expect("setup");
         v
@@ -187,6 +188,7 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             base_revision: h(b"base"),
             idempotency_key: "request-1".into(),
             owner_sig: None,
+            cone: Vec::new(),
         },
     );
     push(
@@ -199,6 +201,7 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             base_revision: h(b"base"),
             idempotency_key: "request-2".into(),
             owner_sig: None,
+            cone: Vec::new(),
         },
     );
     push(
@@ -211,6 +214,7 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             base_revision: h(b"base"),
             idempotency_key: "request-1".into(),
             owner_sig: None,
+            cone: Vec::new(),
         },
     );
     push(
@@ -223,6 +227,7 @@ fn cases() -> Vec<(&'static str, View, ViewOp)> {
             base_revision: h(b"base"),
             idempotency_key: "request-2".into(),
             owner_sig: None,
+            cone: Vec::new(),
         },
     );
     push(

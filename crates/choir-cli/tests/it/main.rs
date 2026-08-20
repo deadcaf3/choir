@@ -6,12 +6,14 @@
 
 mod acl_render;
 mod batch;
+mod check_exit_codes;
 mod claude_hooks;
 mod cli;
 mod gate;
 mod insight;
 mod install_policy;
 mod mcp;
+mod no_tty_block;
 mod python;
 mod repair;
 mod runner;

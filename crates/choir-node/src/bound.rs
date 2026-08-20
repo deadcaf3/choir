@@ -63,13 +63,14 @@ pub(crate) const MAX_LIMIT: usize = 1000;
 /// [`crate::acl::filter_response`] takes for disclosure, but pointed the
 /// other way — an unknown section keeps working and is merely unbounded,
 /// rather than silently truncated by a rule nobody wrote for it.
-const SECTIONS: [&str; 7] = [
+const SECTIONS: [&str; 8] = [
     "workspaces",
     "changes",
     "refs",
     "reviews",
     "provenance",
     "bindings",
+    "checks",
     // `/api/reviews`.
     "pending",
 ];

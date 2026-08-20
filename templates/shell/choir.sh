@@ -129,8 +129,8 @@ choir_key() {
 	choir_run key "$@"
 }
 
-# choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
-#   provision a CoW workspace; advanced flags owner-sign an exact base and stable change
+# choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...
+#   provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
 choir_workspace() {
 	choir_run workspace "$@"
 }
@@ -199,6 +199,18 @@ choir_appeal() {
 #   publish a task spec or plan so other agents can see intent
 choir_intent() {
 	choir_run intent "$@"
+}
+
+# choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]
+#   report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
+choir_check() {
+	choir_run check "$@"
+}
+
+# choir checks <api> <git-oid>
+#   every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+choir_checks() {
+	choir_run checks "$@"
 }
 
 # choir reviews <api> <reviewer>

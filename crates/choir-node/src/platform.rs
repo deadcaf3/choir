@@ -2946,8 +2946,14 @@ impl SubmitPolicy for ChoirPolicy {
             base_revision,
             idempotency_key,
             owner_sig: Some(owner_sig),
+            cone,
         } = &op.kind
         {
+            // The cone is rederived into the authorization rather than
+            // trusted from the op, which is what makes it a *declaration
+            // by the owner*: a node that attached a scope its owner did
+            // not sign produces different bytes here and fails the check
+            // below (D50).
             let authorization = CreateAuthorization::new(
                 id.clone(),
                 owner.clone(),
@@ -2955,6 +2961,7 @@ impl SubmitPolicy for ChoirPolicy {
                 base_revision.clone(),
                 idempotency_key.clone(),
             )
+            .with_cone(cone.clone())
             .to_payload();
             let mut verified_owner =
                 self.registry
@@ -3405,6 +3412,9 @@ pub struct AuthorizedChangeCreate<'a> {
     pub idempotency_key: &'a str,
     /// Owner proof over the matching [`CreateAuthorization`].
     pub owner_sig: Witness,
+    /// Directory prefixes the owner declared this change works within,
+    /// covered by `owner_sig`. Empty means the whole tree.
+    pub cone: Vec<String>,
 }
 
 impl Platform {
@@ -4358,6 +4368,7 @@ impl Platform {
             base_hex,
             idempotency_key,
             owner_sig,
+            cone,
         } = request;
         let base_revision = ContentHash::from_git_oid(base_hex).ok_or("bad base revision")?;
         let payload = ViewOp::new(OpKind::CreateChange {
@@ -4367,6 +4378,7 @@ impl Platform {
             base_revision,
             idempotency_key: idempotency_key.to_string(),
             owner_sig: Some(owner_sig),
+            cone,
         })
         .to_payload();
         let sig = self.node_key.sign_submission(attribution, &payload);
@@ -4402,8 +4414,8 @@ impl Platform {
         expected_workspace: &str,
         expected_revision: &ContentHash,
         expected_idempotency_key: &str,
-    ) -> Result<Witness, String> {
-        let sub = decode_create_submission(
+    ) -> Result<(Witness, Vec<String>), String> {
+        let (sub, cone) = decode_create_submission(
             request,
             expected_id,
             expected_owner,
@@ -4411,9 +4423,15 @@ impl Platform {
             expected_revision,
             expected_idempotency_key,
         )?;
-        Ok(sub
-            .author_sig
-            .expect("decode_submission always returns a signature"))
+        // The cone comes back out of the *signed* authorization and
+        // never out of the request body around it. That is the whole
+        // guarantee: the node reports a scope its owner signed, or it
+        // reports none (D50).
+        Ok((
+            sub.author_sig
+                .expect("decode_submission always returns a signature"),
+            cone,
+        ))
     }
 
     /// Submits a node-authored [`OpKind::ArchiveChange`] carrying the
@@ -5120,6 +5138,11 @@ impl Platform {
                                 "active_workspace": change.active_workspace,
                                 "base_revision": change.base_revision.to_hex(),
                                 "revision_id": change.revision_id.to_hex(),
+                                // Omitted when empty, so an unscoped
+                                // change reads as it always did rather
+                                // than gaining an empty list (D50).
+                                "cone": (!change.cone.is_empty())
+                                    .then(|| change.cone.clone()),
                             }),
                         )
                     })
@@ -5144,6 +5167,11 @@ impl Platform {
                 let refs = serde_json::json!(refs);
                 let reviews = serde_json::json!(reviews);
                 let provenance = serde_json::json!(&view.provenance);
+                // Not folded into `view_growth`'s authoritative total:
+                // that byte count is a tracked series, and a fifth
+                // section would move every past reading. Measured beside
+                // `bindings` instead, for the same reason.
+                let checks = serde_json::json!(&view.checks);
                 let bindings = serde_json::json!(bindings);
                 let counts = view_growth_counts(&view);
                 let as_of_seq = concentration_state.as_of_seq;
@@ -5196,6 +5224,7 @@ impl Platform {
                     "refs": refs,
                     "reviews": reviews,
                     "provenance": provenance,
+                    "checks": checks,
                     "bindings": bindings,
                     "concentration": concentration,
                     "view_growth": view_growth,
@@ -5881,7 +5910,7 @@ fn decode_create_submission(
     expected_workspace: &str,
     expected_revision: &ContentHash,
     expected_idempotency_key: &str,
-) -> Result<DecodedSubmission, String> {
+) -> Result<(DecodedSubmission, Vec<String>), String> {
     let sub = decode_submission(request).map_err(|reason| {
         Rejection::new(
             Code::MalformedRequest,
@@ -5899,13 +5928,14 @@ fn decode_create_submission(
             workspace,
             base_revision,
             idempotency_key,
+            cone,
             ..
         } if id == expected_id
             && owner == expected_owner
             && sub.channel == expected_owner
             && workspace == expected_workspace
             && &base_revision == expected_revision
-            && idempotency_key == expected_idempotency_key => Ok(sub),
+            && idempotency_key == expected_idempotency_key => Ok((sub, cone)),
         _ => Err(Rejection::new(
             Code::WorkspaceState,
             "signed create payload does not match the requested owner, change, workspace, base and idempotency key",

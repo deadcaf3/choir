@@ -26,7 +26,7 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
 For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` before the subcommand. Credentials are read from the named file, never an environment variable.
 
 - `choir key <key-file> [name]` — mint a key and print the line the operator registers; pass your channel name to print the bound form
-- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]` — provision a CoW workspace; advanced flags owner-sign an exact base and stable change
+- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...` — provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
 - `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>` — publish an immutable change revision after committing and pushing its Git object
 - `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>` — owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 - `choir schema <api>` — print this node's machine-readable API description and its live capabilities
@@ -38,6 +38,8 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir viewed <api> <key-file> <viewer> <review-id>` — record that you read a review, so its author can tell "reviewed and ignored" from "nobody looked"; first read only, resubmitting is refused
 - `choir appeal <api> <attempt-id>` — appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
+- `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]` — report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
+- `choir checks <api> <git-oid>` — every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
 - `choir reviews <api> <reviewer>` — your pending review queue
 - `choir triage <api>` — every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
 - `choir state <api> <channel>` — your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk

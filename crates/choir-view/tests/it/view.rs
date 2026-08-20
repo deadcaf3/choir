@@ -92,6 +92,7 @@ fn stable_change_survives_checkpoints_and_workspace_archive() {
         base_revision: base.clone(),
         idempotency_key: "request-1".into(),
         owner_sig: None,
+        cone: Vec::new(),
     });
     append_op(&mut log, "node", create).unwrap();
 
@@ -142,6 +143,7 @@ fn stable_change_survives_checkpoints_and_workspace_archive() {
             base_revision: checkpoint,
             idempotency_key: "request-2".into(),
             owner_sig: None,
+            cone: Vec::new(),
         }))
         .unwrap();
     assert_eq!(
@@ -161,6 +163,7 @@ fn change_checkpoint_rejects_stale_revision_without_mutation() {
         base_revision: base,
         idempotency_key: "request-1".into(),
         owner_sig: None,
+        cone: Vec::new(),
     }))
     .unwrap();
     let before = view.clone();
@@ -186,6 +189,7 @@ fn legacy_workspace_move_detaches_change_identity() {
         base_revision: base.clone(),
         idempotency_key: "request-1".into(),
         owner_sig: None,
+        cone: Vec::new(),
     }))
     .unwrap();
     view.apply(&set_head("repo/agent", &moved, Some(&base)))

@@ -9,9 +9,9 @@
     },
     {
       "agent_facing": true,
-      "args": "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]",
+      "args": "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...",
       "name": "workspace",
-      "summary": "provision a CoW workspace; advanced flags owner-sign an exact base and stable change"
+      "summary": "provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within"
     },
     {
       "agent_facing": true,
@@ -114,6 +114,18 @@
       "args": "<api> <key-file> <channel> <subject> <kind> '<body>'",
       "name": "intent",
       "summary": "publish a task spec or plan so other agents can see intent"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]",
+      "name": "check",
+      "summary": "report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <git-oid>",
+      "name": "checks",
+      "summary": "every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running"
     },
     {
       "agent_facing": true,

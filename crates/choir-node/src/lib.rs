@@ -723,6 +723,33 @@ impl Node {
                 )
                 .current_dir(path)
                 .status()?
+                .success()
+            // Serve filtered fetches, which is what makes `git clone
+            // --filter=blob:none --sparse` and `git sparse-checkout` work
+            // against this node. Git refuses a filter without it (D48).
+            //
+            // This is the whole of choir's answer to lazy checkouts of a
+            // large repository: the client already ships the feature, and
+            // the alternative -- a userspace filesystem hydrating blobs on
+            // demand -- would be our code on the read path of every file
+            // access, needing a kernel extension per platform, to
+            // reimplement something the transport already does. A node
+            // that speaks git inherits partial clone; it should not
+            // reimplement it.
+            && std::process::Command::new("git")
+                .args(["config", "uploadpack.allowFilter", "true"])
+                .current_dir(path)
+                .status()?
+                .success()
+            // A promisor client fetches missing blobs by exact oid, and
+            // those oids are reachable-but-not-advertised as far as
+            // upload-pack is concerned. Without this every lazy hydration
+            // after the initial clone fails, which presents as a working
+            // clone whose first `git checkout` cannot read a file.
+            && std::process::Command::new("git")
+                .args(["config", "uploadpack.allowAnySHA1InWant", "true"])
+                .current_dir(path)
+                .status()?
                 .success();
         if !ok {
             return Err(std::io::Error::other("git config failed"));

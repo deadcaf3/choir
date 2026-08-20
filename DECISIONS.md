@@ -59,6 +59,9 @@ that would reverse it are not published.
 | D45 | A passkey signature carries the credential key it is checked against, instead of a delegation op | Two-way |
 | D46 | The log names an account by an opaque handle; the readable name sits in the store, where it can be deleted | Two-way |
 | D47 | Refs the node serves but never sequenced are outside attestation; a backup reports them unverified rather than failing | Two-way |
+| D48 | Large-repo checkout is git's partial clone and sparse checkout, enabled in repository config, not a filesystem driver of ours | Two-way |
+| D49 | Automated check results are signed ops the node orders and never runs; the CLI answers pass, fail and not-yet as 0, 1 and 3 | **One-way for readers** |
+| D50 | A change declares its path cone in the owner-signed authorization, and a conflict outside that cone is reported as a path with no content | **One-way for readers** |
 
 ## Reading the door column
 

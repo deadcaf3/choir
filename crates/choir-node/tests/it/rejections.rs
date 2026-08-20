@@ -48,6 +48,7 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
                 base_hex: "1111111111111111111111111111111111111111",
                 idempotency_key: "request-1",
                 owner_sig: create_signature,
+                cone: Vec::new(),
             },
             "git/test",
         )
@@ -89,6 +90,7 @@ fn a_replayed_submission_is_told_where_it_landed_not_that_it_conflicted() {
         .unwrap(),
         idempotency_key: "request-2".into(),
         owner_sig: None,
+        cone: Vec::new(),
     });
     let (code, direct) = post(&create_directly);
     assert_eq!(code, 400, "{direct}");

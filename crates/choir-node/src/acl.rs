@@ -480,11 +480,17 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
         OpKind::CreateChange { workspace, .. }
         | OpKind::CheckpointChange { workspace, .. }
         | OpKind::ArchiveChange { workspace, .. } => subject_repo(workspace).into_iter().collect(),
-        OpKind::RequestReview { target_ref, .. } => target_ref
-            .as_deref()
-            .and_then(ref_repo)
-            .into_iter()
-            .collect(),
+        // A check reports on a commit, and a commit belongs to no
+        // repository, so the destination ref is the only thing that can
+        // scope it — the same reasoning, and the same fail-closed
+        // fallback, as the review request above.
+        OpKind::RequestReview { target_ref, .. } | OpKind::RecordCheck { target_ref, .. } => {
+            target_ref
+                .as_deref()
+                .and_then(ref_repo)
+                .into_iter()
+                .collect()
+        }
         // A comment authorizes against the repository under review, the
         // same as a verdict on the same review: discussion is part of the
         // review surface, not a node-wide fact.
@@ -697,7 +703,7 @@ pub enum Disclosure {
 /// `every_section_the_view_serves_is_classified` in `tests/it/acl.rs`
 /// makes it loud, comparing this table against a view a real node
 /// served rather than against a sample written from memory.
-pub const SECTIONS: [(&str, Disclosure); 23] = [
+pub const SECTIONS: [(&str, Disclosure); 25] = [
     ("log", Disclosure::Public),
     ("build", Disclosure::Public),
     // [`crate::bound`]'s marks. Public because of *when* they are
@@ -714,6 +720,7 @@ pub const SECTIONS: [(&str, Disclosure); 23] = [
     ("changes_omitted", Disclosure::Public),
     ("bindings_omitted", Disclosure::Public),
     ("pending_omitted", Disclosure::Public),
+    ("checks_omitted", Disclosure::Public),
     ("snapshot", Disclosure::NodeWide),
     ("bindings", Disclosure::NodeWide),
     ("concentration", Disclosure::NodeWide),
@@ -726,6 +733,10 @@ pub const SECTIONS: [(&str, Disclosure); 23] = [
     ("provenance", Disclosure::PerRepo),
     ("reviews", Disclosure::PerRepo),
     ("changes", Disclosure::PerRepo),
+    // Narrowed on the destination ref a report named, which is the only
+    // repository a commit id can be attributed to. A check reported
+    // without one stays node-wide, which is the fail-closed direction.
+    ("checks", Disclosure::PerRepo),
     // `/api/reviews` rather than `/api/view`, narrowed by the same rule.
     ("pending", Disclosure::PerRepo),
 ];
@@ -799,6 +810,14 @@ pub fn filter_response(acl: &Acl, user: &str, path: &str, body: &str) -> String 
     // the cleared field would send every archived change to the repo-less
     // branch, where a node-wide reader would still see it but the record
     // would no longer be attributable to the repository it came from.
+    retain_entries(object.get_mut("checks"), |_, check| {
+        readable(
+            check
+                .get("target_ref")
+                .and_then(serde_json::Value::as_str)
+                .and_then(ref_repo),
+        )
+    });
     retain_entries(object.get_mut("changes"), |_, change| {
         readable(
             change

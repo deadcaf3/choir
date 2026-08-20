@@ -6,7 +6,9 @@
 
 mod authorization;
 mod canonical;
+mod checks;
 mod comments;
+mod cone;
 mod depends;
 mod golden;
 mod operator_identity;

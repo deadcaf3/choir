@@ -223,7 +223,7 @@ pub fn create_workspace(
             &base_revision,
             field("idempotency_key"),
         ) {
-            Ok(owner_sig) => Some(owner_sig),
+            Ok(signed) => Some(signed),
             Err(reason) => {
                 let rejection = Rejection::decode(&reason);
                 let status = if rejection.code == Code::WorkspaceState.as_str() {
@@ -239,6 +239,7 @@ pub fn create_workspace(
     };
     if ws_dir.exists() {
         if advanced {
+            let verified = owner_sig.expect("advanced request was verified");
             return reuse_or_conflict(
                 platform,
                 &workspace,
@@ -248,7 +249,8 @@ pub fn create_workspace(
                     owner: field("owner"),
                     change_id: field("change"),
                     idempotency_key: field("idempotency_key"),
-                    owner_sig: owner_sig.expect("advanced request was verified"),
+                    owner_sig: verified.0,
+                    cone: verified.1,
                     attribution: &attribution,
                 },
             );
@@ -270,6 +272,7 @@ pub fn create_workspace(
     match provision(root, &bare, repo, &head, &ws_dir, base_url) {
         Ok(copy_ms) => {
             let registration = if advanced {
+                let verified = owner_sig.expect("advanced request was verified");
                 platform
                     .create_change(
                         AuthorizedChangeCreate {
@@ -278,7 +281,8 @@ pub fn create_workspace(
                             workspace: &workspace,
                             base_hex: &head,
                             idempotency_key: field("idempotency_key"),
-                            owner_sig: owner_sig.expect("advanced request was verified"),
+                            owner_sig: verified.0,
+                            cone: verified.1,
                         },
                         &attribution,
                     )
@@ -565,6 +569,8 @@ struct AdvancedBinding<'a> {
     change_id: &'a str,
     idempotency_key: &'a str,
     owner_sig: choir_oplog::Witness,
+    /// Directory prefixes the owner signed alongside the binding.
+    cone: Vec<String>,
     attribution: &'a str,
 }
 
@@ -580,6 +586,7 @@ fn reuse_or_conflict(
         change_id,
         idempotency_key,
         owner_sig,
+        cone,
         attribution,
     } = binding;
     let Some(change) = platform.change_state(change_id) else {
@@ -629,6 +636,7 @@ fn reuse_or_conflict(
             base_hex,
             idempotency_key,
             owner_sig,
+            cone,
         },
         attribution,
     ) {
