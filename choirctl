@@ -162,9 +162,39 @@ step_begin() {
     printf '  %s·%s %-10s %s…%s' "$D" "$Z" "$STEP" "$D" "$Z"
   fi
 }
+# Runs `$@` while the line animates, so a long build never looks like a
+# hang. The frame moves, the elapsed second counts, and the crate cargo
+# is on right now is read out of its own output -- a spinner that only
+# spins tells you the script is alive; this tells you what it is doing.
+#
+# Output goes to a file rather than the terminal because the step line is
+# redrawn in place and cargo's own progress would scroll it away.
+SPIN_LOG=
+spin_run() {
+  SPIN_LOG=$(mktemp -t choir-install)
+  if [ "$LIVE" != 1 ]; then
+    "$@" >"$SPIN_LOG" 2>&1
+    return $?
+  fi
+  "$@" >"$SPIN_LOG" 2>&1 &
+  local pid=$! i=0 frame doing el
+  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$(( (i % 10) + 1 ))
+    frame=${frames[$i]}
+    el=$(( $(date +%s) - STEP_T0 ))
+    doing=$(sed -n 's/^ *\(Compiling\|Building\|Downloading\|Installing\|Replacing\) /\1 /p' \
+              "$SPIN_LOG" 2>/dev/null | tail -1 | cut -c1-30)
+    printf '\r%s[2K  %s%s%s %-10s %s%-30s%s %s%ss%s' \
+      "$ESC" "$Y" "$frame" "$Z" "$STEP" "$D" "${doing:-working}" "$Z" "$D" "$el" "$Z"
+    sleep 0.08
+  done
+  wait "$pid"
+}
+
 step_end() {  # $1 status, $2 note, $3 detail
   local el=$(( $(date +%s) - STEP_T0 ))
-  if [ "$LIVE" = 1 ]; then printf '\r%s[K' "$ESC"; fi
+  if [ "$LIVE" = 1 ]; then printf '\r%s[2K' "$ESC"; fi
   if [ "$1" -eq 0 ]; then
     printf '  %s✓%s %-10s %-24s %s%s%s\n' "$G" "$Z" "$STEP" "$2" "$D" "${3:-${el}s}" "$Z"
   else
@@ -493,23 +523,31 @@ install-cli)
   step_end 0 "$SHOWN" "on PATH"
 
   step_begin build
-  # --force is not what keeps this current, and the comment here used to
-  # claim it was. Measured instead: a *path* install replaces every time,
-  # twice in a row with no source change, so the version never moving off
-  # 0.0.1 costs nothing. What --force actually buys is the case where a
-  # `choir` binary already on PATH belongs to some other package, which
-  # cargo otherwise refuses to overwrite.
-  #
-  # --target-dir reuses the workspace build instead of compiling the
-  # whole dependency tree again in a scratch directory: seconds rather
-  # than minutes.
-  if ! out=$(cargo install --path "$HERE/crates/choir-cli" --root "$ROOT" \
-              --locked --force --target-dir "$HERE/target" 2>&1); then
-    step_end 1 "cargo install failed"
-    printf '\n%s\n' "$out" | tail -20
+  # `cargo build`, not `cargo install`. Both produce the same binary, but
+  # this is the artifact `./gate` and every ordinary `cargo build` in
+  # this checkout already produced, so a tree that is up to date finishes
+  # in a fraction of a second instead of rebuilding the crate to install
+  # it. The install is then a copy, below.
+  if ! spin_run cargo build --release -p choir-cli; then
+    step_end 1 "build failed"
+    printf '\n'; tail -25 "$SPIN_LOG"; printf '\n'
     exit 1
   fi
   step_end 0 "choir, choir-mcp"
+
+  step_begin install
+  # `install` rather than `cp`: it replaces the target atomically-ish by
+  # writing and renaming, so a `choir` running from this path while the
+  # copy happens does not get a half-written file (ETXTBSY is the same
+  # hazard the landing round deals with on the node host).
+  mkdir -p "$BINDIR"
+  for b in choir choir-mcp; do
+    if ! install -m 755 "$HERE/target/release/$b" "$BINDIR/$b" 2>/dev/null; then
+      step_end 1 "cannot write to $BINDIR"
+      exit 1
+    fi
+  done
+  step_end 0 "2 binaries"
 
   step_begin verify
   # Installing it and finding it are different claims. An older `choir`
