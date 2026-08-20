@@ -103,6 +103,7 @@ The daemon serves **git smart-HTTP** and the **platform API** on one port (defau
 ### Option A: macOS dogfood (supervised)
 
 ```bash
+./choirctl install-cli          # put `choir` on your PATH as a real binary
 ./choirctl install              # build, mint ~/.choir secrets, load launchd
 ./choirctl status
 ./choirctl url                  # clone/push URL with credentials

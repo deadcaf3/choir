@@ -128,6 +128,56 @@ mirror_line() {
   esac
 }
 
+
+# ---------------------------------------------------------------- style
+# The same two questions `./gate` asks, answered the same way: colour when
+# the display renders it, redrawing only on a real terminal. Duplicated
+# rather than sourced because these are twelve lines and a shared file
+# between a sh script and a zsh one is a third thing to keep working.
+ESC=$(printf '\033')
+COLOR=0; LIVE=0
+if [ -z "${NO_COLOR:-}" ]; then
+  # Written as `if` rather than `[ … ] && x=1`: under `set -e` a trailing
+  # `&&` whose test fails is a nonzero status, and a nonzero status is
+  # the end of the script. That is how this file first aborted after
+  # printing exactly its header and nothing else.
+  if [ -t 1 ] || [ -n "${FORCE_COLOR:-}" ]; then COLOR=1; fi
+  if [ -t 1 ]; then LIVE=1; fi
+fi
+if [ "$COLOR" = 1 ]; then
+  G="$ESC[32m"; R="$ESC[31m"; Y="$ESC[33m"; D="$ESC[2m"; B="$ESC[1m"; Z="$ESC[0m"
+else
+  G=; R=; Y=; D=; B=; Z=
+fi
+
+step_begin() {
+  STEP=$1; STEP_T0=$(date +%s)
+  if [ "$LIVE" = 1 ]; then
+    printf '  %s·%s %-10s %s…%s' "$D" "$Z" "$STEP" "$D" "$Z"
+  fi
+}
+step_end() {  # $1 status, $2 note, $3 detail
+  local el=$(( $(date +%s) - STEP_T0 ))
+  if [ "$LIVE" = 1 ]; then printf '\r%s[K' "$ESC"; fi
+  if [ "$1" -eq 0 ]; then
+    printf '  %s✓%s %-10s %-24s %s%s%s\n' "$G" "$Z" "$STEP" "$2" "$D" "${3:-${el}s}" "$Z"
+  else
+    printf '  %s✗%s %-10s %s%s%s\n' "$R" "$Z" "$STEP" "$R" "$2" "$Z"
+  fi
+}
+
+# The first directory on PATH that we are willing to install into.
+# Order is preference: a user-owned directory before a system one, and
+# never a directory PATH does not actually contain -- installing
+# somewhere invisible is the failure this exists to prevent.
+pick_bindir() {
+  local d
+  for d in "$HOME/.local/bin" "$HOME/.cargo/bin" /usr/local/bin; do
+    case ":$PATH:" in *":$d:"*) echo "$d"; return 0 ;; esac
+  done
+  return 1
+}
+
 case "${1:-}" in
 
 install)
@@ -414,11 +464,78 @@ if "join_url" not in answer:
 print(answer["join_url"])'
   ;;
 
+install-cli)
+  # Puts `choir` on PATH as a real file. Not a symlink into
+  # target/release: that tracks rebuilds for free and dangles the moment
+  # anyone runs `cargo clean` or moves the checkout, and a broken PATH
+  # entry fails as "no such file" rather than "not installed".
+  printf '\n  %schoir%s %sinstall the CLI%s\n\n' "$B" "$Z" "$D" "$Z"
+
+  step_begin target
+  if ! BINDIR=$(pick_bindir); then
+    step_end 1 "no writable directory on PATH"
+    printf '\n  %sNone of ~/.local/bin, ~/.cargo/bin or /usr/local/bin is on your PATH.%s\n' "$Y" "$Z"
+    printf '  Add one and re-run:\n\n'
+    printf '    %secho '"'"'export PATH="$HOME/.local/bin:$PATH"'"'"' >> ~/.zshrc%s\n\n' "$D" "$Z"
+    exit 1
+  fi
+  ROOT=${BINDIR%/bin}
+  case "$BINDIR" in
+    "$HOME"/*) SHOWN="~${BINDIR#$HOME}" ;;
+    *) SHOWN=$BINDIR ;;
+  esac
+  step_end 0 "$SHOWN" "on PATH"
+
+  step_begin build
+  # --force is not what keeps this current, and the comment here used to
+  # claim it was. Measured instead: a *path* install replaces every time,
+  # twice in a row with no source change, so the version never moving off
+  # 0.0.1 costs nothing. What --force actually buys is the case where a
+  # `choir` binary already on PATH belongs to some other package, which
+  # cargo otherwise refuses to overwrite.
+  #
+  # --target-dir reuses the workspace build instead of compiling the
+  # whole dependency tree again in a scratch directory: seconds rather
+  # than minutes.
+  if ! out=$(cargo install --path "$HERE/crates/choir-cli" --root "$ROOT" \
+              --locked --force --target-dir "$HERE/target" 2>&1); then
+    step_end 1 "cargo install failed"
+    printf '\n%s\n' "$out" | tail -20
+    exit 1
+  fi
+  step_end 0 "choir, choir-mcp"
+
+  step_begin verify
+  # Installing it and finding it are different claims. An older `choir`
+  # earlier on PATH would shadow this one, and every symptom afterwards
+  # would look like the new binary being wrong.
+  FOUND=$(command -v choir 2>/dev/null || true)
+  if [ -z "$FOUND" ]; then
+    step_end 1 "installed but not found on PATH"
+    exit 1
+  fi
+  if [ "$FOUND" != "$BINDIR/choir" ]; then
+    step_end 1 "shadowed by $FOUND"
+    printf '\n  %sAnother choir earlier on PATH wins: %s%s\n' "$Y" "$FOUND" "$Z"
+    printf '  Remove it, or put %s first.\n\n' "$BINDIR"
+    exit 1
+  fi
+  choir --help >/dev/null 2>&1 || { step_end 1 "installed binary does not run"; exit 1; }
+  HEAD=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)
+  step_end 0 "runs, from $HEAD"
+
+  printf '\n  %sinstalled%s  %s%s/choir%s\n\n' "$G" "$Z" "$D" "$SHOWN" "$Z"
+  printf '  %schoir --help%s            the command index\n' "$B" "$Z"
+  printf '  %schoir <command> --help%s  one command'"'"'s arguments\n\n' "$B" "$Z"
+  printf '  %sRe-run this after changing the CLI; the installed copy does not\n  track your edits.%s\n\n' "$D" "$Z"
+  ;;
+
 *)
   cat <<USAGE
 ./choirctl <command>
 
   install [repo]   build + mint secrets + load the supervised daemon
+  install-cli      put `choir` on your PATH as a real binary
   status           is it running, is auth on, what does the view say
   logs [n]         last n lines of the daemon log
   stop             unload it for now (it returns at next login)
