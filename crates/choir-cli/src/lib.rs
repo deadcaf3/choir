@@ -16,6 +16,9 @@
 /// Regenerating the readable half of an ACL file (D46).
 pub mod acl;
 pub mod mcp;
+
+/// One-command proposal from a git checkout.
+pub mod propose;
 pub mod runner;
 pub mod surface;
 pub mod triage;

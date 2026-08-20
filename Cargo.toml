@@ -48,6 +48,35 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["asxeem"]
 
+# Release packaging (`dist`, formerly `cargo-dist`). Read only by that
+# tool, never by a build: it generates the release workflow, the archives
+# and the shell installer from this table, so what a contributor
+# downloads is described in the repository rather than in CI YAML nobody
+# reads.
+#
+# `choir` alone is published. The daemon is deliberately absent: an
+# operator running a node builds it from source, which is the audited
+# path, while a contributor needs one client binary and no toolchain.
+# `cargo-dist-version` is deliberately absent: it pins the exact
+# packaging tool a release was cut with, and a value written from memory
+# rather than from the installed tool is a pin that says something untrue
+# about how the artifact was built. `dist init` writes it, and refuses to
+# run until it has.
+[workspace.metadata.dist]
+ci = ["github"]
+installers = ["shell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# The gate is the gate. Release packaging runs after it rather than
+# beside it, so nothing is ever published that `scripts/gate full`
+# refused.
+publish-jobs = []
+install-path = "CARGO_HOME"
+
 [workspace.dependencies]
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }

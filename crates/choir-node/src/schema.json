@@ -8,6 +8,18 @@
       "summary": "mint a key and print the line the operator registers; pass your channel name to print the bound form"
     },
     {
+      "agent_facing": false,
+      "args": "<auth-file> [--auth-user <name>] get|store|erase",
+      "name": "git-credential",
+      "summary": "git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`"
+    },
+    {
+      "agent_facing": true,
+      "args": "<api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]",
+      "name": "join",
+      "summary": "redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself"
+    },
+    {
       "agent_facing": true,
       "args": "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...",
       "name": "workspace",
@@ -18,6 +30,12 @@
       "args": "<api> <key-file> <channel> <change-id> <workspace-id> <git-oid>",
       "name": "checkpoint",
       "summary": "publish an immutable change revision after committing and pushing its Git object"
+    },
+    {
+      "agent_facing": true,
+      "args": "<key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...",
+      "name": "propose",
+      "summary": "propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal"
     },
     {
       "agent_facing": true,
@@ -144,6 +162,12 @@
       "args": "<api>",
       "name": "triage",
       "summary": "every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api>",
+      "name": "funnel",
+      "summary": "the contribution funnel from admission to first verdict, and the steepest drop between two stages; counts what this credential may read, and reports the first-contact stage as null rather than inventing a zero"
     },
     {
       "agent_facing": true,

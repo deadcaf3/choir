@@ -146,6 +146,16 @@ struct Account {
     /// display name decides anything, deleting it changes what the node
     /// permits, and it stops being safe to delete.
     display_name: Option<String>,
+    /// The channel the redemption bound an ed25519 actor key to, and
+    /// that key's public hex. `None` on every account redeemed without
+    /// one, which is every account issued before invite binding existed.
+    ///
+    /// Recorded here so the roster can answer "which key did this
+    /// account arrive with" after the fact. It is **not** what admits
+    /// the key: the trusted-keys file is, exactly as for a key an
+    /// operator pasted by hand, so revoking stays one line to delete and
+    /// this row cannot contradict what the node actually trusts.
+    actor_key: Option<(String, String)>,
     /// Unix seconds at redemption.
     created_at: u64,
 }
@@ -256,6 +266,15 @@ pub struct SshKeysOut {
 pub struct Accounts {
     path: PathBuf,
     keys_out: Option<SshKeysOut>,
+    /// Trusted-keys file a redemption may append one bound actor key to,
+    /// when the operator asked for that with `--invite-binds-keys`.
+    ///
+    /// `None` is the default and the pre-existing behaviour: redemption
+    /// mints a token and nothing else, and an actor key still reaches
+    /// the node by an operator pasting a line. The flag exists because
+    /// that paste is the second out-of-band human step in admission, and
+    /// whether to automate it is the operator's call rather than ours.
+    actor_keys: Option<PathBuf>,
     /// Names the store may never issue, because something else already
     /// answers to them: every `--auth-file` user, plus the `anon`
     /// placeholder an unauthenticated request is attributed to.
@@ -292,6 +311,7 @@ impl Accounts {
         let store = Self {
             path,
             keys_out,
+            actor_keys: None,
             reserved,
             state: RwLock::new(state),
             generation: AtomicU64::new(0),
@@ -303,6 +323,75 @@ impl Accounts {
         store.write_authorized_keys(&state)?;
         drop(state);
         Ok(store)
+    }
+
+    /// Lets a redemption bind one actor key by appending it to the
+    /// operator's trusted-keys file at `path` (D51).
+    ///
+    /// Opt-in, and off unless the operator passed `--invite-binds-keys`.
+    /// What it removes is the *clerical* half of admission: the operator
+    /// still decides who is admitted, by issuing the invite, and the
+    /// invite still carries the grants. What it stops requiring is a
+    /// second out-of-band round trip in which a newcomer pastes a hex
+    /// string to a human who pastes it into a file.
+    ///
+    /// The key lands in the same file an operator would have edited, so
+    /// nothing downstream learns a new source of trust: the existing
+    /// mtime reload picks it up, `allowed_signers` is regenerated from
+    /// it, and revoking is still deleting one line.
+    #[must_use]
+    pub fn binding_actor_keys_into(mut self, path: PathBuf) -> Self {
+        self.actor_keys = Some(path);
+        self
+    }
+
+    /// Appends one `<channel> <hex>` line to the trusted-keys file.
+    ///
+    /// Read-modify-write rather than an open-in-append-mode: the file is
+    /// 0600 operator-authored config, and this must not widen its mode,
+    /// truncate it, or leave it half-written if the process dies. It
+    /// also must not append a line the file already carries, which is
+    /// what makes a replayed redemption a no-op instead of a duplicate
+    /// the parser then refuses as two keys for one name.
+    fn append_actor_key(&self, channel: &str, key_hex: &str) -> Result<(), String> {
+        let Some(path) = &self.actor_keys else {
+            return Ok(());
+        };
+        let existing = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let line = format!("{channel} {key_hex}");
+        if existing
+            .lines()
+            .any(|row| row.split('#').next().unwrap_or("").trim() == line)
+        {
+            return Ok(());
+        }
+        // A name already spoken for by another key is refused rather
+        // than appended: `parse_keys_file` rejects a file binding one
+        // name twice, so appending would not grant this key anything —
+        // it would break every key in the file at the next reload.
+        if existing.lines().any(|row| {
+            row.split('#')
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .next()
+                .is_some_and(|name| name == channel)
+        }) {
+            return Err(format!(
+                "the trusted-keys file already binds `{channel}` to a different key"
+            ));
+        }
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&line);
+        next.push('\n');
+        choir_fs::write_atomic_private(path, &next).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// Where the store is persisted. The `choir-ssh` shim is pointed at
@@ -528,6 +617,23 @@ impl Accounts {
     /// the SSH transport self-service rather than a second errand.
     #[must_use]
     pub fn redeem(&self, invite_id: &str, body: &serde_json::Value) -> (u16, String) {
+        let actor_key = match body.get("actor_key") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(hex)) => {
+                if self.actor_keys.is_none() {
+                    return bad_request(
+                        "this node does not bind actor keys at redemption; \
+                         ask the operator to register your key, or to start the \
+                         daemon with --invite-binds-keys",
+                    );
+                }
+                match validate_actor_key(hex) {
+                    Ok(hex) => Some(hex),
+                    Err(e) => return bad_request(&e),
+                }
+            }
+            Some(_) => return bad_request("`actor_key` must be a string"),
+        };
         let ssh_key = match body.get("ssh_key") {
             None | Some(serde_json::Value::Null) => None,
             Some(serde_json::Value::String(line)) => match validate_ssh_key(line) {
@@ -569,6 +675,49 @@ impl Accounts {
         if state.retired.contains(&invite.user) {
             return conflict("that name has been revoked and is never reused; ask for another");
         }
+        // The bound channel always carries the account name as its
+        // operator prefix. That is not decoration: the reviewer draw
+        // refuses to draw a reviewer sharing the author's operator
+        // prefix, so a channel a newcomer could name freely would let
+        // them place themselves outside their own operator and be drawn
+        // onto a colleague's review -- or name a prefix belonging to
+        // somebody else entirely.
+        let channel = match actor_key.as_ref() {
+            None => None,
+            Some(_) => match body.get("channel") {
+                None | Some(serde_json::Value::Null) => Some(format!("{}/agent", invite.user)),
+                Some(serde_json::Value::String(channel)) => {
+                    match channel.split_once('/') {
+                        Some((prefix, suffix))
+                            if prefix == invite.user
+                                && !suffix.is_empty()
+                                && suffix.len() <= 32
+                                && suffix
+                                    .bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
+                        {
+                            Some(channel.clone())
+                        }
+                        _ => {
+                            return bad_request(&format!(
+                                "`channel` must be `{}/<name>`, where <name> is letters, digits, `-` or `_`",
+                                invite.user
+                            ))
+                        }
+                    }
+                }
+                Some(_) => return bad_request("`channel` must be a string"),
+            },
+        };
+        // Before the account is inserted and the invite consumed: an
+        // append that fails must leave the invite redeemable, or a
+        // newcomer whose key collided with a name is left holding a
+        // spent invite and no account.
+        if let (Some(channel), Some(key_hex)) = (channel.as_ref(), actor_key.as_ref()) {
+            if let Err(e) = self.append_actor_key(channel, key_hex) {
+                return conflict(&e);
+            }
+        }
         let token = mint_secret();
         state.accounts.insert(
             invite.user.clone(),
@@ -577,6 +726,7 @@ impl Accounts {
                 display_name: invite.display_name.clone(),
                 grants: invite.grants.clone(),
                 ssh_keys: ssh_key.into_iter().collect(),
+                actor_key: channel.clone().zip(actor_key.clone()),
                 // Enrolment is a later, separately authenticated act:
                 // redemption proves you hold the invite, not that you
                 // hold an authenticator.
@@ -601,6 +751,8 @@ impl Accounts {
                 "user": user,
                 "token": token,
                 "grants": grants,
+                "channel": channel,
+                "actor_key_bound": actor_key.is_some(),
                 "note": "shown once; the node stores only its hash. Use it as the password in basic auth.",
             })
             .to_string(),
@@ -1114,6 +1266,25 @@ pub fn validate_username(user: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks an ed25519 actor public key and returns it lowercased.
+///
+/// Normalised rather than accepted as sent, because this string becomes
+/// a line in the trusted-keys file and the duplicate check that keeps a
+/// replayed redemption idempotent is a string comparison. Two spellings
+/// of one key would append it twice, and a file binding one name to two
+/// keys is refused wholesale at the next reload -- taking every other
+/// key in it down with it.
+///
+/// # Errors
+///
+/// Returns a message when the value is not 64 hex characters.
+pub fn validate_actor_key(hex: &str) -> Result<String, String> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("an actor key is 64 hex characters (an ed25519 public key)".to_string());
+    }
+    Ok(hex.to_ascii_lowercase())
+}
+
 /// Checks an OpenSSH public key line and returns it without its comment.
 ///
 /// The comment is dropped rather than validated: it is the one field a
@@ -1275,6 +1446,10 @@ fn render_state(state: &State) -> String {
             // tidiness rather than an invariant -- but a `null` on every
             // legacy row is noise an operator has to learn to ignore,
             // and things operators learn to ignore stop being read.
+            if let Some((channel, hex)) = account.actor_key.as_ref() {
+                record["actor_key_channel"] = serde_json::json!(channel);
+                record["actor_key"] = serde_json::json!(hex);
+            }
             if let Some(name) = account.display_name.as_deref() {
                 record
                     .as_object_mut()
@@ -1380,6 +1555,14 @@ fn parse_state(text: &str) -> Result<State, String> {
                 grants: strings(entry.get("grants")),
                 ssh_keys: strings(entry.get("ssh_keys")),
                 passkeys: parse_passkeys(entry.get("passkeys")),
+                // Both halves or neither: a channel with no key names
+                // nothing, and a key with no channel says the account
+                // arrived with a binding while refusing to say to what.
+                actor_key: entry
+                    .get("actor_key_channel")
+                    .and_then(serde_json::Value::as_str)
+                    .zip(entry.get("actor_key").and_then(serde_json::Value::as_str))
+                    .map(|(channel, hex)| (channel.to_string(), hex.to_string())),
                 created_at: entry
                     .get("created_at")
                     .and_then(serde_json::Value::as_u64)

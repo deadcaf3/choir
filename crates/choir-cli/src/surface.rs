@@ -275,6 +275,22 @@ pub const COMMANDS: &[Command] = &[
         agent_facing: true,
     },
     Command {
+        name: "git-credential",
+        args: "<auth-file> [--auth-user <name>] get|store|erase",
+        summary: "git credential helper: hands git your token on stdin so it never lives in a \
+                  remote URL; configure once with `git config credential.helper \
+                  '\''!choir git-credential <auth-file>'\''`",
+        agent_facing: false,
+    },
+    Command {
+        name: "join",
+        args: "<api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]",
+        summary: "redeem an operator's invite and mint your actor key in one step; \
+                  writes the issued token to an auth file at 0600, and on a node started \
+                  with --invite-binds-keys the key is registered by the redemption itself",
+        agent_facing: true,
+    },
+    Command {
         name: "workspace",
         args: "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...",
         summary: "provision a CoW workspace; advanced flags owner-sign an exact base and stable change, \
@@ -285,6 +301,15 @@ pub const COMMANDS: &[Command] = &[
         name: "checkpoint",
         args: "<api> <key-file> <channel> <change-id> <workspace-id> <git-oid>",
         summary: "publish an immutable change revision after committing and pushing its Git object",
+        agent_facing: true,
+    },
+    Command {
+        name: "propose",
+        args: "<key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...",
+        summary: "propose from a git checkout in one command: create the change, push the \
+                  commits, checkpoint the revision and request review; the node and repository \
+                  come from the git remote, and the branch name is the change identity, so \
+                  re-running after an amend updates the same proposal",
         agent_facing: true,
     },
     Command {
@@ -425,6 +450,14 @@ pub const COMMANDS: &[Command] = &[
                   verdicts, changes requested, approved awaiting landing — ranked \
                   most-actionable-first, capped, with truncation marked in-band",
         agent_facing: true,
+    },
+    Command {
+        name: "funnel",
+        args: "<api>",
+        summary: "the contribution funnel from admission to first verdict, and the steepest \
+                  drop between two stages; counts what this credential may read, and reports \
+                  the first-contact stage as null rather than inventing a zero",
+        agent_facing: false,
     },
     Command {
         name: "state",
@@ -791,6 +824,95 @@ pub fn llms_txt() -> String {
     out
 }
 
+/// The three commands a newcomer runs, as an HTML fragment the node
+/// serves on its contribute page.
+///
+/// Generated rather than written into `browse.rs` for the reason
+/// `llms.txt` is: a page that tells a newcomer which flag to pass is the
+/// worst place in the system for a stale signature, because its whole
+/// readership is people with no way to tell it is wrong. It lands in
+/// [`artifacts`], so the one staleness test that covers `--help` and the
+/// templates covers this too.
+///
+/// `NODE` and `REPO` are placeholders the node substitutes for its own
+/// base URL and the repository being read. They are spelled in capitals
+/// so that a page which somehow escapes substitution reads as obviously
+/// unfinished rather than as an address somebody might try.
+#[must_use]
+pub fn contribute_html() -> String {
+    // Pulled from the table by name, so removing or renaming a command
+    // breaks the build here instead of quietly emptying the page.
+    let find = |name: &str| {
+        COMMANDS
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("`choir {name}` is in the command table"))
+    };
+    let mut out = String::new();
+    for (step, name, what, example) in [
+        (
+            "1",
+            "join",
+            "Redeem the invite your operator sent you. This mints your key and stores your token; \
+             there is no registration, and no second message to wait for.",
+            "choir join NODE ~/.choir/invite ~/.choir/agent.key",
+        ),
+        (
+            "2",
+            "git-credential",
+            "Point git at your token once, then clone normally. The token stays in the file \
+             `choir join` wrote and never enters the URL, so it cannot leak through \
+             `git remote -v` or a pasted clone line.",
+            "git config --global credential.helper '!choir git-credential ~/.choir/choir.auth'\n\
+             git clone NODE/REPO.git",
+        ),
+        (
+            "3",
+            "propose",
+            "Commit on a branch as you always would, then run this from inside the checkout. \
+             It creates the change, pushes it, publishes the revision and requests review. \
+             Your channel is the one `choir join` printed. Run it again after an amend and it \
+             updates the same proposal rather than opening a second one -- the branch name is \
+             what identifies the change.",
+            "git checkout -b fix-the-thing\n\
+             git commit -am 'fix the thing'\n\
+             choir propose ~/.choir/agent.key <your-channel>",
+        ),
+    ] {
+        let command = find(name);
+        out.push_str("<li><h3><span class=\"step\">");
+        out.push_str(step);
+        out.push_str("</span> <code>choir ");
+        out.push_str(command.name);
+        out.push_str("</code></h3><p>");
+        out.push_str(what);
+        out.push_str("</p><pre class=\"cmd\">");
+        // Escaped like the signature below it: an example carrying
+        // `<your-channel>` would otherwise be parsed as a tag and vanish
+        // from the page, leaving a command that looks complete and is
+        // missing its last argument.
+        out.push_str(&escape_html(example));
+        out.push_str("</pre><p class=\"muted mono\">choir ");
+        out.push_str(command.name);
+        out.push(' ');
+        out.push_str(&escape_html(command.args));
+        out.push_str("</p></li>\n");
+    }
+    out
+}
+
+/// Minimal HTML escaping for text rendered into the generated fragment.
+///
+/// Only the three characters that can end an element or an attribute.
+/// The inputs are this file's own constants rather than anything a
+/// request carries, so this is here to keep `<api>` rendering as `<api>`
+/// rather than disappearing into an unknown tag.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// The machine-readable API description (D17), as pretty JSON.
 ///
 /// The Code-Mode bet is that an agent writes code against a typed API
@@ -1087,6 +1209,10 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
     let mut out = vec![
         (root.join("agents.md"), agents_md()),
         (root.join("crates/choir-node/src/llms.txt"), llms_txt()),
+        (
+            root.join("crates/choir-node/src/contribute.html"),
+            contribute_html(),
+        ),
         (
             root.join("crates/choir-node/src/schema.json"),
             schema_json(),

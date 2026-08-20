@@ -463,7 +463,7 @@ fn enrolment_acts_on_the_caller_and_refuses_the_principals_that_have_no_account(
     let mut node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(acl_path).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(
@@ -608,7 +608,7 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(work.join("acl")).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(
@@ -1121,7 +1121,7 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(work.join("acl")).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(
@@ -1253,7 +1253,7 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     node.watch_acl_file(work.join("acl")).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
@@ -1458,7 +1458,7 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     node.watch_acl_file(work.join("acl")).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
@@ -1672,7 +1672,7 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     node.watch_acl_file(work.join("acl")).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
@@ -1873,7 +1873,7 @@ fn the_account_page_still_lists_your_passkeys_with_scripting_disabled() {
     let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(work.join("acl")).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(

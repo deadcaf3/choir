@@ -544,8 +544,11 @@ usage:
 
 commands:
   choir key <key-file> [name]
+  choir git-credential <auth-file> [--auth-user <name>] get|store|erase
+  choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]
   choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...
   choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
+  choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...
   choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
   choir runner <config-file>
   choir submit <api> <key-file> <channel> '<op-json>'
@@ -567,6 +570,7 @@ commands:
   choir reviews <api> <reviewer>
   choir acl render <api> <acl-file>
   choir triage <api>
+  choir funnel <api>
   choir state <api> <channel>
   choir skill install [--into <dir>]
   choir view <api> [--limit <n>] [--offset <n>]

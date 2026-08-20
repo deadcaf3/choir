@@ -129,6 +129,12 @@ choir_key() {
 	choir_run key "$@"
 }
 
+# choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]
+#   redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
+choir_join() {
+	choir_run join "$@"
+}
+
 # choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...
 #   provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
 choir_workspace() {
@@ -139,6 +145,12 @@ choir_workspace() {
 #   publish an immutable change revision after committing and pushing its Git object
 choir_checkpoint() {
 	choir_run checkpoint "$@"
+}
+
+# choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...
+#   propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal
+choir_propose() {
+	choir_run propose "$@"
 }
 
 # choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>

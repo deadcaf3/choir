@@ -3966,16 +3966,177 @@ impl Platform {
         self.reviewer_conflict_graph = Some((path, max_distance));
         self
     }
+}
 
+/// The channel a push-derived op is attributed to, and how it was
+/// established.
+///
+/// Extracted so the ref op and the review a magic push opens beside it
+/// cannot disagree about who pushed. They are two ops about one act, and
+/// a review drawn against a different channel than the ref it belongs to
+/// would exclude the wrong operator from its own reviewer draw.
+fn push_attribution(user: &str, cert: Option<(&str, &str)>) -> (String, Provenance) {
+    // Verified push certificate ("G" = good signature) attributes the op
+    // to the pusher's own key; otherwise the transport user. Either way
+    // the node signs, and the payload says so (D41): the channel prefix
+    // alone carried this class only by convention.
+    match cert {
+        Some(("G", signer)) if !signer.is_empty() => {
+            (format!("key/{signer}"), Provenance::PushCertified)
+        }
+        _ => (crate::quota::channel_for(user), Provenance::PushTransport),
+    }
+}
+
+/// A proposal pushed to the magic refspec, as parsed from its refname
+/// (D53).
+///
+/// Gerrit's `refs/for/<branch>` and AGit's after it are the spelling
+/// every reviewer of a git-hosted project already knows, and the point
+/// of borrowing it is that the client is `git` and nothing else: no
+/// binary to install, no key to mint, one push.
+///
+/// Two departures from Gerrit, both deliberate:
+///
+/// 1. **The ref is really created.** Gerrit intercepts `refs/for/*` in a
+///    server it owns end to end and, in its own documentation's words,
+///    lies to the client about the result. Doing that over git's wire
+///    protocol needs a `proc-receive` hook, which is a second hook type
+///    and a second protocol; and a node that reported a ref it did not
+///    write would be a node whose push receipts cannot be trusted. Here
+///    the ref exists, holds the objects, and is sequenced like any other.
+/// 2. **A topic is required.** `refs/for/main` alone is one ref shared by
+///    everyone proposing onto `main`, so the second contributor's push
+///    would be a non-fast-forward against the first one's proposal
+///    rather than a proposal of their own. The topic is what makes the
+///    ref theirs.
+#[derive(Debug)]
+struct MagicRef {
+    /// Branch the proposal asks to land on, as a short name.
+    onto: String,
+    /// Review id, derived so that re-pushing the same topic reaches the
+    /// same review rather than opening a second one.
+    review_id: String,
+}
+
+impl MagicRef {
+    /// Parses `refs/for/<branch>/<topic>`, or `None` for any other ref.
+    ///
+    /// `Err` is reserved for a ref that *is* under `refs/for/` and
+    /// cannot be used, because that is a pusher who meant to propose and
+    /// needs telling why it did not work -- the one case where silence
+    /// would look like success.
+    fn parse(refname: &str) -> Option<Result<Self, String>> {
+        let rest = refname.strip_prefix("refs/for/")?;
+        let mut segments = rest.split('/').filter(|s| !s.is_empty());
+        let (Some(onto), Some(first_topic)) = (segments.next(), segments.next()) else {
+            return Some(Err(format!(
+                "push to refs/for/<branch>/<topic>, not {refname}: a topic is what makes this \
+                 proposal yours rather than one ref shared by everyone proposing onto that branch"
+            )));
+        };
+        let topic: Vec<&str> = std::iter::once(first_topic).chain(segments).collect();
+        let topic = topic.join("-");
+        if !crate::provision::safe_segment(onto) {
+            return Some(Err(format!(
+                "`{onto}` is not a branch name this node can land on"
+            )));
+        }
+        // The id reaches a URL (`/r/<repo>/review/<id>`), which admits
+        // one path segment. The branch is folded in so that the same
+        // topic proposed onto two branches is two reviews.
+        let review_id = format!("for-{onto}-{topic}");
+        if !crate::provision::safe_segment(&review_id) {
+            return Some(Err(format!(
+                "`{topic}` holds characters a review id cannot: use letters, digits, `-`, `_` \
+                 or `.`"
+            )));
+        }
+        Some(Ok(Self {
+            onto: onto.to_string(),
+            review_id,
+        }))
+    }
+}
+
+impl Platform {
+    /// Opens a review for a push to the magic refspec, if the ref was one.
+    ///
+    /// Runs after the ref op is already durable, and returns `Ok` when
+    /// the ref was not a magic one -- so an ordinary push pays nothing
+    /// and cannot fail here.
+    ///
+    /// A second push to the same topic does **not** re-request: a review
+    /// is one long-lived object per proposal, re-posting a verdict is the
+    /// re-review flow, and asking again would be refused. What advances
+    /// is the ref, which is where a reviewer reads the current commit
+    /// from.
+    fn open_magic_review(
+        &self,
+        repo: &str,
+        magic: &MagicRef,
+        new_hex: &str,
+        user: &str,
+        cert: Option<(&str, &str)>,
+    ) -> Result<(), String> {
+        if self
+            .view
+            .lock()
+            .expect("view lock")
+            .reviews
+            .contains_key(&magic.review_id)
+        {
+            return Ok(());
+        }
+        let target = ContentHash::from_git_oid(new_hex).ok_or("bad new oid")?;
+        self.submit_ref_op(
+            OpKind::RequestReview {
+                id: magic.review_id.clone(),
+                target,
+                // Empty on purpose: the node draws them, and a pusher
+                // cannot name their own reviewers here any more than
+                // they can through the CLI.
+                reviewers: Vec::new(),
+                target_ref: Some(format!("{repo}:refs/heads/{}", magic.onto)),
+            },
+            user,
+            cert,
+        )?;
+        // The draw is a second, separate submission -- the same shape
+        // `/api/submit` uses, and for the same reason: it names
+        // reviewers, so it cannot be folded into the request that has
+        // not been admitted yet.
+        //
+        // A failed draw does not fail the push. The request stands and
+        // is visibly unassigned, which is a state no verdict can
+        // complete; refusing the push instead would throw away objects
+        // the node has already accepted over an empty reviewer pool.
+        let (channel, _) = push_attribution(user, cert);
+        if let Err(reason) = self.assign_reviewers(&magic.review_id, &channel) {
+            eprintln!(
+                "choir: review {} opened unassigned: {reason}",
+                magic.review_id
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Platform {
     /// Routes one git ref update (from a repo's `update` hook) through
     /// the sequencer: CAS against the view, node-signed, totally ordered
     /// with API ops. Refs are namespaced `<repo>:<refname>`; git oids
     /// enter the envelope with their own codec ([`ContentHash::from_git_oid`]).
     ///
+    /// A push to `refs/for/<branch>/<topic>` additionally opens a review
+    /// targeting that branch, which is the whole magic-refspec path: one
+    /// `git push`, no client but git, and reviewers drawn by the node.
+    ///
     /// # Errors
     ///
     /// The policy's rejection reason (stale CAS = concurrent update git
-    /// itself would also have refused).
+    /// itself would also have refused), or the reason a `refs/for/` push
+    /// could not be read as a proposal.
     pub fn git_update(
         &self,
         repo: &str,
@@ -3985,13 +4146,22 @@ impl Platform {
         user: &str,
         cert: Option<(&str, &str)>,
     ) -> Result<(), String> {
+        // Read before anything is submitted: a `refs/for/` push that
+        // cannot be read as a proposal must be refused whole, not left
+        // as a created ref with no review beside it.
+        let magic = match MagicRef::parse(refname) {
+            Some(Ok(magic)) => Some(magic),
+            Some(Err(reason)) => return Err(reason),
+            None => None,
+        };
         let name = format!("{repo}:{refname}");
         let prev = if is_zero_oid(old_hex) {
             None
         } else {
             Some(ContentHash::from_git_oid(old_hex).ok_or("bad old oid")?)
         };
-        let kind = if is_zero_oid(new_hex) {
+        let deleting = is_zero_oid(new_hex);
+        let kind = if deleting {
             OpKind::DeleteRef { name, prev }
         } else {
             OpKind::SetRef {
@@ -4000,7 +4170,16 @@ impl Platform {
                 prev,
             }
         };
-        self.submit_ref_op(kind, user, cert)
+        self.submit_ref_op(kind, user, cert)?;
+        // Only on a ref that now points somewhere. Deleting a proposal
+        // ref withdraws the objects; it does not open a review on the
+        // zero oid, and it deliberately does not close the review
+        // either -- a review is append-only history, and abandoning one
+        // is its own signed act.
+        match magic {
+            Some(magic) if !deleting => self.open_magic_review(repo, &magic, new_hex, user, cert),
+            _ => Ok(()),
+        }
     }
 
     /// Retracts a ref op this push already had accepted, because the push
@@ -4256,12 +4435,7 @@ impl Platform {
         // the op to the pusher's own key; otherwise the transport user.
         // Either way the node signs, and the payload says so (D41): the
         // channel prefix alone carried this class only by convention.
-        let (workspace, provenance) = match cert {
-            Some(("G", signer)) if !signer.is_empty() => {
-                (format!("key/{signer}"), Provenance::PushCertified)
-            }
-            _ => (crate::quota::channel_for(user), Provenance::PushTransport),
-        };
+        let (workspace, provenance) = push_attribution(user, cert);
         let payload = ViewOp::new(kind)
             .in_scope(node, head)
             .with_provenance(provenance)
@@ -6284,4 +6458,84 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
 /// tests and the demo).
 pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod magic_ref_tests {
+    use super::MagicRef;
+
+    fn ok(refname: &str) -> MagicRef {
+        MagicRef::parse(refname)
+            .unwrap_or_else(|| panic!("{refname} is not recognised as a magic ref"))
+            .unwrap_or_else(|e| panic!("{refname} refused: {e}"))
+    }
+
+    fn refused(refname: &str) -> String {
+        MagicRef::parse(refname)
+            .unwrap_or_else(|| panic!("{refname} was not read as a magic ref at all"))
+            .expect_err("expected a refusal")
+    }
+
+    #[test]
+    fn an_ordinary_ref_is_not_magic_at_all() {
+        // The cost of the feature on every normal push is this `None`.
+        assert!(MagicRef::parse("refs/heads/main").is_none());
+        assert!(MagicRef::parse("refs/tags/v1").is_none());
+        // Adjacent but not under the prefix.
+        assert!(MagicRef::parse("refs/format/main/x").is_none());
+    }
+
+    #[test]
+    fn a_branch_and_topic_become_a_destination_and_a_review_id() {
+        let magic = ok("refs/for/main/fix-parser");
+        assert_eq!(magic.onto, "main");
+        assert_eq!(magic.review_id, "for-main-fix-parser");
+    }
+
+    #[test]
+    fn re_pushing_the_same_topic_reaches_the_same_review() {
+        assert_eq!(
+            ok("refs/for/main/fix-parser").review_id,
+            ok("refs/for/main/fix-parser").review_id
+        );
+    }
+
+    #[test]
+    fn the_same_topic_onto_two_branches_is_two_reviews() {
+        // Without the branch in the id, retargeting would silently
+        // collide with somebody's proposal onto another branch.
+        assert_ne!(
+            ok("refs/for/main/fix").review_id,
+            ok("refs/for/release/fix").review_id
+        );
+    }
+
+    #[test]
+    fn a_deeper_topic_still_yields_one_path_segment() {
+        // Review ids reach a URL, which admits one segment.
+        let magic = ok("refs/for/main/team/fix-parser");
+        assert!(!magic.review_id.contains('/'));
+        assert_eq!(magic.review_id, "for-main-team-fix-parser");
+    }
+
+    #[test]
+    fn a_missing_topic_is_refused_with_the_reason() {
+        // The case that would otherwise make every proposal onto `main`
+        // fight over one ref.
+        let reason = refused("refs/for/main");
+        assert!(reason.contains("<topic>"), "{reason}");
+        assert!(reason.contains("shared"), "{reason}");
+    }
+
+    #[test]
+    fn a_topic_that_cannot_be_a_review_id_is_refused_not_mangled() {
+        // Silently sanitising would map two topics onto one review.
+        let reason = refused("refs/for/main/fix parser");
+        assert!(reason.contains("review id"), "{reason}");
+    }
+
+    #[test]
+    fn an_unsafe_branch_is_refused() {
+        assert!(refused("refs/for/../fix").contains("branch name"));
+    }
 }

@@ -28,7 +28,7 @@ fn schema(tag: &str, enable: bool) -> serde_json::Value {
     if enable {
         std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
         node.watch_acl_file(work.join("acl")).expect("acl loads");
-        node.enable_accounts(work.join("accounts.json"), None)
+        node.enable_accounts(work.join("accounts.json"), None, None)
             .expect("accounts enable");
         node.enable_platform(
             Platform::start(

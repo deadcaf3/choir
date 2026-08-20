@@ -584,3 +584,273 @@ mod tests {
         assert_eq!(actions["waiting"], serde_json::json!([]));
     }
 }
+
+/// The contribution funnel, derived from the view.
+///
+/// Five stages, counted from what the node already serves rather than
+/// from telemetry nobody keeps: how many contributors are admitted, how
+/// many of them have opened a change, how many of those changes reached
+/// review, how many drew a verdict, and how many landed. The number that
+/// matters is not any one stage but the fall between two of them.
+///
+/// # What this deliberately cannot see
+///
+/// **S0, first contact.** Whether anybody read a page before asking for
+/// an invite is not in the view and is not inferable from it, so it is
+/// reported as `null` rather than as zero. A funnel that silently
+/// renders an unmeasured stage as zero is worse than one that admits the
+/// gap: it reads as total failure at the top, which is where a reader
+/// looks first.
+///
+/// **Whether a stage is empty or merely invisible.** The node filters
+/// `/api/view` per credential (D29), so these counts are of what the
+/// caller may see. Run as an auditor for the node-wide answer.
+///
+/// The stage names match the ones in the onboarding programme so a
+/// tripwire can be written against a number that exists.
+#[must_use]
+pub fn funnel(view: &serde_json::Value) -> serde_json::Value {
+    let object = |key: &str| {
+        view.get(key)
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let bindings = object("bindings");
+    let changes = object("changes");
+    let reviews = object("reviews");
+
+    // Admitted actors, by the channel their key is bound to. Counted by
+    // channel rather than by key so a contributor who rotated a key
+    // (D44) is one person, not two.
+    //
+    // `None`, not zero, when there are no bindings at all. Only a key
+    // bound by a `BindKey` op appears here; a key the operator pasted
+    // into the trusted-keys file is trusted by the node and invisible to
+    // the view, so on a file-registered node an empty map means "not
+    // measurable here" rather than "nobody was admitted". Reporting the
+    // zero was the first thing this funnel got wrong when it was pointed
+    // at a real node: it read as total failure at the stage everyone
+    // looks at first, on a node with contributors visibly past it.
+    let admitted: Option<usize> = (!bindings.is_empty()).then(|| {
+        bindings
+            .values()
+            .filter_map(|b| b.get("channel").and_then(serde_json::Value::as_str))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    });
+
+    // Owners who got as far as opening a change. A subset of the
+    // admitted in every healthy case; a channel here that is not in
+    // `admitted` means a key was revoked after its work, which is
+    // interesting rather than an error, so the sets are reported and not
+    // reconciled.
+    let proposing: std::collections::BTreeSet<String> = changes
+        .values()
+        .filter_map(|c| c.get("owner").and_then(serde_json::Value::as_str))
+        .map(ToString::to_string)
+        .collect();
+
+    let checkpointed = changes
+        .values()
+        .filter(|c| c.get("revision_id") != c.get("base_revision"))
+        .count();
+    let (mut answered, mut assigned) = (0usize, 0usize);
+    for review in reviews.values() {
+        let reviewers = review
+            .get("reviewers")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if !reviewers.is_empty() {
+            assigned += 1;
+        }
+        if reviewers.iter().any(|who| {
+            who.as_str().is_some_and(|who| {
+                review
+                    .get("verdicts")
+                    .and_then(|v| v.get(who))
+                    .and_then(|v| v.get("verdict"))
+                    .is_some()
+            })
+        }) {
+            answered += 1;
+        }
+    }
+
+    let stage = |name: &str, boundary: &str, count: Option<usize>| {
+        serde_json::json!({
+            "stage": name,
+            "boundary": boundary,
+            "count": count,
+        })
+    };
+    let proposing = proposing.len();
+    serde_json::json!({
+        "stages": [
+            stage(
+                "S0 land",
+                "read a page before asking for an invite (not in the view)",
+                None::<usize>,
+            ),
+            stage(
+                "S1 admit",
+                "actor key bound to a channel by a BindKey op; null on a node whose keys are \
+                 registered in the operator's trusted-keys file, which the view cannot see",
+                admitted,
+            ),
+            stage("S2 equip", "opened at least one change", Some(proposing)),
+            stage("S3 propose", "change published a revision past its base", Some(checkpointed)),
+            stage("S4 review", "review has drawn reviewers", Some(assigned)),
+            stage("S5 verdict", "at least one drawn reviewer answered", Some(answered)),
+        ],
+        // Named rather than left for the reader to divide, because the
+        // fall between two stages is the whole measurement and a reader
+        // scanning six counts will not compute it.
+        "largest_fall": largest_fall(&[
+            ("S1 admit -> S2 equip", admitted, Some(proposing)),
+            ("S2 equip -> S3 propose", Some(proposing), Some(checkpointed)),
+            ("S3 propose -> S4 review", Some(checkpointed), Some(assigned)),
+            ("S4 review -> S5 verdict", Some(assigned), Some(answered)),
+        ]),
+        "note": "counts are of what this credential may read (D29); S0 is not in the view \
+                 and is reported as null rather than zero",
+    })
+}
+
+/// The steepest drop between two adjacent stages, or `null` when nothing
+/// has entered the funnel.
+///
+/// A transition out of an empty stage is skipped rather than reported as
+/// a total loss: zero of zero is not a hundred percent drop, and a node
+/// with no contributors yet would otherwise always name its first
+/// transition as the problem.
+fn largest_fall(transitions: &[(&str, Option<usize>, Option<usize>)]) -> serde_json::Value {
+    // A transition with an unmeasured end is skipped entirely rather
+    // than treated as a drop to zero: an unknown is not a loss, and
+    // naming one as the worst transition would send a reader to fix the
+    // stage that is merely invisible.
+    let worst = transitions
+        .iter()
+        .filter_map(|(name, from, to)| Some((name, (*from)?, (*to)?)))
+        .filter(|(_, from, _)| *from > 0)
+        .max_by_key(|(_, from, to)| from.saturating_sub(*to));
+    match worst {
+        Some((name, from, to)) if from > to => serde_json::json!({
+            "transition": name,
+            "from": from,
+            "to": to,
+            "lost": from - to,
+        }),
+        _ => serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod funnel_tests {
+    use super::funnel;
+
+    fn view() -> serde_json::Value {
+        serde_json::json!({
+            "bindings": {
+                "k1": { "channel": "ana/agent" },
+                "k2": { "channel": "bo/agent" },
+                "k3": { "channel": "cy/agent" },
+            },
+            "changes": {
+                "c1": { "owner": "ana/agent", "base_revision": "11-aa", "revision_id": "11-bb" },
+                "c2": { "owner": "bo/agent", "base_revision": "11-cc", "revision_id": "11-cc" },
+            },
+            "reviews": {
+                "c1": { "reviewers": ["bo/agent"], "verdicts": { "bo/agent": { "verdict": "Approve" } } },
+                "c2": { "reviewers": [], "verdicts": {} },
+            },
+        })
+    }
+
+    fn count(doc: &serde_json::Value, stage: &str) -> serde_json::Value {
+        doc["stages"]
+            .as_array()
+            .expect("stages")
+            .iter()
+            .find(|s| s["stage"] == stage)
+            .expect("named stage")["count"]
+            .clone()
+    }
+
+    #[test]
+    fn counts_each_stage_from_the_view() {
+        let doc = funnel(&view());
+        assert_eq!(count(&doc, "S1 admit"), 3);
+        assert_eq!(count(&doc, "S2 equip"), 2);
+        // Only c1 moved past its base.
+        assert_eq!(count(&doc, "S3 propose"), 1);
+        assert_eq!(count(&doc, "S4 review"), 1);
+        assert_eq!(count(&doc, "S5 verdict"), 1);
+    }
+
+    #[test]
+    fn s0_is_null_not_zero() {
+        // The stage nothing measures must not read as total failure.
+        assert!(count(&funnel(&view()), "S0 land").is_null());
+    }
+
+    #[test]
+    fn names_the_steepest_drop() {
+        let doc = funnel(&view());
+        // 2 owners opened a change, 1 published a revision: a fall of 1,
+        // tied with admit->equip, and the tie goes to the first max.
+        let fall = &doc["largest_fall"];
+        assert_eq!(fall["lost"], 1);
+        assert!(fall["transition"].as_str().is_some());
+    }
+
+    #[test]
+    fn a_file_registered_node_reports_admission_as_null_not_zero() {
+        // The shape that exposed this: a node whose keys live in the
+        // operator's trusted-keys file has no `BindKey` ops, so
+        // `bindings` is empty while people are visibly contributing.
+        // Reporting 0 there read as total failure at the first stage.
+        let file_registered = serde_json::json!({
+            "bindings": {},
+            "changes": {
+                "c1": { "owner": "ana/agent", "base_revision": "11-aa", "revision_id": "11-bb" }
+            },
+            "reviews": {
+                "c1": { "reviewers": ["bo/agent"], "verdicts": {} }
+            },
+        });
+        let doc = funnel(&file_registered);
+        assert!(
+            count(&doc, "S1 admit").is_null(),
+            "an unmeasurable stage was reported as zero"
+        );
+        assert_eq!(count(&doc, "S2 equip"), 1);
+        // And the unknown must not be named as the worst transition: the
+        // real fall here is review -> verdict.
+        assert_eq!(doc["largest_fall"]["transition"], "S4 review -> S5 verdict");
+    }
+
+    #[test]
+    fn an_empty_node_names_no_fall() {
+        // Zero of zero is not a hundred percent drop.
+        let empty = serde_json::json!({});
+        assert!(funnel(&empty)["largest_fall"].is_null());
+        assert!(count(&funnel(&empty), "S1 admit").is_null());
+        assert_eq!(count(&funnel(&empty), "S2 equip"), 0);
+    }
+
+    #[test]
+    fn a_stage_that_did_not_lose_anyone_is_not_reported_as_a_fall() {
+        let perfect = serde_json::json!({
+            "bindings": { "k1": { "channel": "ana/agent" } },
+            "changes": {
+                "c1": { "owner": "ana/agent", "base_revision": "11-aa", "revision_id": "11-bb" }
+            },
+            "reviews": {
+                "c1": { "reviewers": ["bo/agent"], "verdicts": { "bo/agent": { "verdict": "Approve" } } }
+            },
+        });
+        assert!(funnel(&perfect)["largest_fall"].is_null());
+    }
+}

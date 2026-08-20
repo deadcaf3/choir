@@ -27,6 +27,19 @@ choir-oplog = { path = "../choir-oplog" }
 choir-view = { path = "../choir-view" }
 serde_json = "1"
 
+# Where `cargo binstall choir-cli` looks for a prebuilt `choir` rather
+# than compiling one. Release-time metadata only: nothing here is
+# compiled into the binary, and the from-source path is unchanged and
+# still what an operator is expected to use.
+#
+# The source build stays mandatory for the daemon on purpose. It is the
+# *contributor* who should not have to build a Rust workspace before
+# their first change, and `choir` is the only binary they need.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/choir-{ target }{ archive-suffix }"
+bin-dir = "choir-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [dev-dependencies]
 
 [lints]

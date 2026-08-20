@@ -116,6 +116,7 @@ fn served(tag: &str, repos: &[&str], rate_limit: Option<u32>) -> Served {
             root: root.clone(),
             handoff: handoff.clone(),
         }),
+        None,
     )
     .expect("accounts enable");
     if let Some(per_minute) = rate_limit {

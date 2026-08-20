@@ -1121,7 +1121,7 @@ fn a_review_page_names_the_person_behind_a_handle() {
     let port = node.port();
     node.create_repo("agents/one.git").expect("repo created");
     node.watch_acl_file(acl_path).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
@@ -2427,4 +2427,103 @@ fn the_reviews_pane_counts_what_is_behind_and_what_is_settled() {
         page.contains("r-fresh"),
         "the rebuilt page does not hold the new review: {page}"
     );
+}
+
+/// The contribute page: the one page whose whole readership cannot tell
+/// a stale instruction from a current one.
+///
+/// The assertions are about what the page *says*, not that it rendered.
+/// A page that 200s with the placeholder host still in it, or with an
+/// example silently truncated by an unescaped `<`, would pass every
+/// presence check and be useless to the only person who reads it.
+#[test]
+fn contribute_page_prints_commands_a_newcomer_can_paste() {
+    let (base, _work, _head, _acl) = served("contribute", "");
+    let (status, _headers, body) = get(
+        &format!("{base}/r/agents/one/contribute"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // The node substituted its own origin, so the first command is
+    // copyable rather than illustrative.
+    assert!(
+        body.contains(&format!("choir join {base} ")),
+        "the join command does not name this node: {body}"
+    );
+    for placeholder in ["NODE", "REPO"] {
+        assert!(
+            !body.contains(placeholder),
+            "the {placeholder} placeholder survived into the served page"
+        );
+    }
+    // The clone line names this repository, not a shape to fill in.
+    assert!(
+        body.contains(&format!("git clone {base}/agents/one.git")),
+        "the clone command is not copyable: {body}"
+    );
+
+    // Every step is present, in order, and none lost its example to the
+    // escaper. `&lt;your-channel&gt;` is the shape that breaks silently:
+    // unescaped it is parsed as a tag and the command loses its last
+    // argument while still looking complete.
+    let steps: Vec<usize> = ["choir join", "choir git-credential", "choir propose"]
+        .iter()
+        .map(|c| {
+            body.find(c)
+                .unwrap_or_else(|| panic!("page omits `{c}`: {body}"))
+        })
+        .collect();
+    assert!(
+        steps.windows(2).all(|w| w[0] < w[1]),
+        "steps are out of order"
+    );
+    assert!(
+        body.contains("choir propose ~/.choir/agent.key &lt;your-channel&gt;"),
+        "the propose example lost its channel argument: {body}"
+    );
+
+    // The three things a GitHub-shaped reader will otherwise get wrong.
+    for teaching in ["do not choose your reviewers", "not an error", "force-push"] {
+        assert!(body.contains(teaching), "page omits `{teaching}`");
+    }
+    // This fixture runs no credential self-service, so the page must
+    // *not* send a newcomer to `choir join`, which has no endpoint to
+    // call here. Getting this wrong produces a failure whose cause is
+    // the operator's configuration and whose symptom looks like the
+    // newcomer's own mistake.
+    assert!(
+        body.contains("issues no invites"),
+        "page promises invites a node without --accounts-file cannot issue: {body}"
+    );
+    assert!(
+        !body.contains("invite-only"),
+        "page claims invite-only admission on a node that issues none"
+    );
+
+    // The git-only path, naming this repository's own default branch
+    // rather than an assumed `main`.
+    assert!(
+        body.contains("git push origin HEAD:refs/for/main/my-topic"),
+        "page omits the magic refspec: {body}"
+    );
+
+    // Reachable, not just addressable: the repository page links it.
+    let (status, _headers, repo_page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
+    assert_eq!(status, 200);
+    assert!(
+        repo_page.contains("/r/agents/one/contribute"),
+        "the repository page does not link the contribute page"
+    );
+}
+
+/// The page is gated by the same grant every other page is.
+#[test]
+fn contribute_page_is_not_a_hole_in_the_acl() {
+    // bob holds nothing on agents/one.
+    let (base, _work, _head, _acl) = served("contribute-acl", "alice  agents/one  write\n");
+    let (status, _headers, body) =
+        get(&format!("{base}/r/agents/one/contribute"), &["-u", "bob:b"]);
+    assert_eq!(status, 404, "a reader with no grant was served: {body}");
+    assert!(!body.contains("choir join"), "the refusal leaked the page");
 }

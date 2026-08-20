@@ -38,6 +38,7 @@ mod key_binding;
 mod key_names;
 mod landing;
 mod landing_record;
+mod magic_refspec;
 mod newcomer_config;
 mod newcomer_harm;
 mod noscript;

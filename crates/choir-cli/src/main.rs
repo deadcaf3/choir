@@ -8,8 +8,11 @@
 //! ```text
 //! choir [--auth-file <path>] [--auth-user <name>] <command> ...
 //! choir key <key-file> [name]
+//! choir git-credential <auth-file> [--auth-user <name>] get|store|erase
+//! choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]
 //! choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
 //! choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
+//! choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--onto <branch>] [reviewer]...
 //! choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
 //! choir submit <api> <key-file> <channel> '<op-json>'
 //! choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
@@ -25,6 +28,7 @@
 //! choir acl render <api> <acl-file>
 //! choir view <api>
 //! choir triage <api>
+//! choir funnel <api>
 //! choir state <api> <channel>
 //! choir skill install [--into <dir>]
 //! choir repair <log-file> --verify | --truncate-tail
@@ -359,6 +363,544 @@ fn acl_render(api: &str, auth: AuthOptions<'_>, acl_file: &str) -> ! {
         "unresolved": grants - named,
     });
     finish(200, &doc.to_string());
+}
+
+/// `choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]`
+///
+/// Admission in one command: mint an actor key, redeem the operator's
+/// invite, and store the token where the rest of the CLI reads it.
+///
+/// The invite is read from a file rather than taken as an argument, for
+/// the reason every credential here is: an argv is readable by every
+/// process on the host through `ps`. The file's format is the node's
+/// own `user:token` auth-file spelling, so the invite an operator sent
+/// can be pasted straight into one.
+///
+/// What this does **not** do is decide admission. The operator issued
+/// the invite, and the invite carries the grants; this only spares them
+/// the second out-of-band step of pasting a key line into a file. A node
+/// started without `--invite-binds-keys` refuses the key and says so,
+/// and admission there still ends with an operator's edit.
+fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
+    let (mut channel, mut ssh_key, mut token_file) = (None, None, None);
+    let mut index = 0;
+    while index < rest.len() {
+        let Some(value) = rest.get(index + 1).copied() else {
+            usage();
+        };
+        let slot = match rest[index] {
+            "--channel" if channel.is_none() => &mut channel,
+            "--ssh-key" if ssh_key.is_none() => &mut ssh_key,
+            "--token-file" if token_file.is_none() => &mut token_file,
+            _ => usage(),
+        };
+        *slot = Some(value);
+        index += 2;
+    }
+    if !std::path::Path::new(invite_file).is_file() {
+        eprintln!(
+            "choir join: {invite_file} does not exist.\n\
+             Write the invite the operator sent you into it, as one line: <id>:<secret>"
+        );
+        std::process::exit(2);
+    }
+
+    // Minted before the request, so the key exists whatever the node
+    // answers. `load_key` is idempotent, which makes a retry after a
+    // network failure redeem the key that already exists rather than a
+    // second one the operator never saw.
+    let key = load_key(key_file);
+    let mut body = serde_json::json!({ "actor_key": hex_encode(&key.public_key_bytes()) });
+    if let Some(channel) = channel {
+        body["channel"] = serde_json::json!(channel);
+    }
+    if let Some(path) = ssh_key {
+        match std::fs::read_to_string(path) {
+            Ok(line) => body["ssh_key"] = serde_json::json!(line.trim()),
+            Err(error) => {
+                eprintln!("choir join: cannot read {path}: {error}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let endpoint = choir_cli::surface::endpoint("POST", "/api/accounts/redeem")
+        .expect("redemption is in the endpoint table");
+    let client =
+        match choir_cli::mcp::HttpClient::new(api, Some(std::path::Path::new(invite_file)), None) {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("choir join: {error}");
+                std::process::exit(2);
+            }
+        };
+    let (status, response) = match client.request(endpoint, &body) {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("choir join: {error}");
+            std::process::exit(1);
+        }
+    };
+    if !(200..300).contains(&status) {
+        println!("{response}");
+        std::process::exit(1);
+    }
+    let account: serde_json::Value = match serde_json::from_str(&response) {
+        Ok(account) => account,
+        Err(error) => {
+            eprintln!("choir join: the node's answer did not parse: {error}");
+            std::process::exit(1);
+        }
+    };
+    let (Some(user), Some(token)) = (account["user"].as_str(), account["token"].as_str()) else {
+        eprintln!("choir join: the node issued no token");
+        std::process::exit(1);
+    };
+
+    // An invite is single-use, so the token is shown exactly once and
+    // this is the only chance to keep it. Written 0600 before anything
+    // is printed: a token this process holds and never stored is one the
+    // contributor has to ask for a second invite to replace.
+    let token_path = token_file.map_or_else(
+        || {
+            std::path::Path::new(key_file)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("choir.auth")
+        },
+        std::path::PathBuf::from,
+    );
+    if let Err(error) = choir_fs::write_atomic_private(&token_path, format!("{user}:{token}\n")) {
+        eprintln!(
+            "choir join: the node issued a token but it could not be stored at {}: {error}\n\
+             The invite is spent. Ask the operator for another.",
+            token_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    let bound = account["actor_key_bound"] == serde_json::Value::Bool(true);
+    let summary = serde_json::json!({
+        "user": user,
+        "channel": account["channel"],
+        "grants": account["grants"],
+        "auth_file": token_path.display().to_string(),
+        "key_file": key_file,
+        "actor_key_bound": bound,
+        "next": if bound {
+            "choir --auth-file <auth_file> propose <key_file> <channel>"
+        } else {
+            // Said as an instruction rather than a warning, because it
+            // is the step that is still outstanding: nothing this
+            // contributor does next will work until the operator
+            // registers the key.
+            "ask the operator to register your key: run `choir key <key_file> <channel>` and send them the line"
+        },
+    });
+    finish(
+        200,
+        &serde_json::to_string_pretty(&summary).expect("summary is serializable"),
+    );
+}
+
+/// `choir git-credential <auth-file> [--auth-user <name>] <operation>`
+///
+/// A git credential helper, so a token reaches git over stdin instead of
+/// living in a remote URL.
+///
+/// A URL-embedded credential is written into `.git/config`, echoed by
+/// `git remote -v`, and copied into every shell history and bug report
+/// that quotes a clone line. Git's helper protocol exists to avoid
+/// exactly that: git runs the helper as a subprocess, writes the request
+/// as `key=value` lines on stdin, and reads the answer the same way.
+///
+/// Configure it once per checkout:
+///
+/// ```text
+/// git config credential.helper '!choir git-credential ~/.choir/auth'
+/// ```
+///
+/// `store` and `erase` are accepted and do nothing, deliberately. The
+/// auth file is written by `choir join` and owned by the contributor;
+/// a helper that honoured `erase` would let a routine authentication
+/// failure delete the credential the operator issued once.
+fn git_credential(auth_file: &str, user: Option<&str>, operation: &str) -> ! {
+    match operation {
+        // Git ignores unknown operations from a helper, and so does
+        // this: answering a `store` with a credential would be a helper
+        // volunteering one nobody asked for.
+        "store" | "erase" => std::process::exit(0),
+        "get" => {}
+        _ => {
+            eprintln!("choir git-credential: unknown operation `{operation}`");
+            std::process::exit(2);
+        }
+    }
+    // Git's request arrives on stdin and is *not* echoed back: replying
+    // with a host or path git did not ask about is how a helper hands a
+    // credential to the wrong server. Only the two fields git wants are
+    // printed, and git matches them against the request itself.
+    let mut request = String::new();
+    use std::io::Read;
+    if std::io::stdin().read_to_string(&mut request).is_err() {
+        std::process::exit(1);
+    }
+    let (user, token) = match choir_cli::mcp::credential_pair(std::path::Path::new(auth_file), user)
+    {
+        Ok(pair) => pair,
+        Err(error) => {
+            // Exit 0 with no output: git reads that as "this helper
+            // has nothing", and falls through to the next one or to
+            // prompting. Exiting nonzero would abort the whole
+            // operation over a helper that simply does not apply.
+            eprintln!("choir git-credential: {error}");
+            std::process::exit(0);
+        }
+    };
+    println!("username={user}");
+    println!("password={token}");
+    std::process::exit(0);
+}
+
+/// Runs `git` in `dir` and returns its trimmed stdout.
+///
+/// Failure carries git's own stderr rather than a paraphrase. Every
+/// error this can hit -- not a repository, no such remote, no upstream
+/// -- already has a message git words better than a wrapper would, and
+/// the contributor is going to fix it with git.
+fn git_capture(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Runs `git` in `dir` for effect, streaming its output to this
+/// process's own.
+fn git_run(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("git {} failed", args.join(" ")))
+    }
+}
+
+/// Aborts a proposal, naming the step that failed.
+///
+/// Every abort here is mid-sequence by construction, so it says which
+/// step stopped and leaves the contributor's checkout untouched. A
+/// proposal is resumable precisely because its identifiers are derived
+/// rather than minted: running the same command again re-reaches the
+/// same change instead of forking a second one.
+fn propose_abort(step: &str, detail: &str) -> ! {
+    eprintln!("choir propose: {step}: {detail}");
+    std::process::exit(1);
+}
+
+/// Flags of `choir propose`, after parsing.
+struct ProposeOptions<'a> {
+    api: Option<&'a str>,
+    repo: Option<&'a str>,
+    remote: &'a str,
+    onto: Option<&'a str>,
+    change: Option<&'a str>,
+    cone: Vec<String>,
+    reviewers: Vec<String>,
+}
+
+fn parse_propose<'a>(rest: &[&'a str]) -> ProposeOptions<'a> {
+    let (mut api, mut repo, mut onto, mut change) = (None, None, None, None);
+    let mut remote = "origin";
+    let (mut cone, mut reviewers) = (Vec::new(), Vec::new());
+    let mut index = 0;
+    while index < rest.len() {
+        let flag = rest[index];
+        if !flag.starts_with("--") {
+            reviewers.push(flag.to_string());
+            index += 1;
+            continue;
+        }
+        let Some(value) = rest.get(index + 1).copied() else {
+            usage();
+        };
+        match flag {
+            "--api" if api.is_none() => api = Some(value),
+            "--repo" if repo.is_none() => repo = Some(value),
+            "--remote" => remote = value,
+            "--onto" if onto.is_none() => onto = Some(value),
+            "--change" if change.is_none() => change = Some(value),
+            "--path" => cone.push(value.to_string()),
+            _ => usage(),
+        }
+        index += 2;
+    }
+    // Same canonical ordering `choir workspace` applies: the node
+    // rebuilds these bytes to verify the owner signature, so two
+    // clients naming the same subtrees in a different order must sign
+    // identical authorizations.
+    cone.sort();
+    cone.dedup();
+    ProposeOptions {
+        api,
+        repo,
+        remote,
+        onto,
+        change,
+        cone,
+        reviewers,
+    }
+}
+
+/// `choir propose <key-file> <channel> [flags] [reviewer]...`
+///
+/// The five-step path -- provision, commit, push, checkpoint, request
+/// review -- as one command, run from the contributor's own checkout.
+/// Nothing here is a new endpoint; the command is the inference that
+/// supplies each step's identifiers from what the checkout already
+/// knows, plus the ordering between them.
+///
+/// Unlike every other subcommand, the API base is a flag rather than the
+/// first positional. That is the point of the command: the git remote
+/// already names the node, and asking a newcomer to repeat it is the
+/// friction being removed. `--api` and `--repo` override the inference
+/// for a checkout whose remote is an `ssh://` URL or a proxy.
+///
+/// The sequence stops at the first refusal and says which step stopped.
+/// It is safe to re-run: the change, workspace and idempotency key are
+/// derived from the branch name, so a second run resumes the same
+/// proposal rather than opening a second one.
+fn propose(key_file: &str, channel: &str, rest: &[&str], auth: AuthOptions<'_>) -> ! {
+    let options = parse_propose(rest);
+    let cwd = std::env::current_dir().unwrap_or_else(|e| propose_abort("checkout", &e.to_string()));
+    let top = match git_capture(&cwd, &["rev-parse", "--show-toplevel"]) {
+        Ok(top) => std::path::PathBuf::from(top),
+        Err(error) => propose_abort("checkout", &error),
+    };
+
+    // 1. Where to send it. An explicit --api wins; otherwise the remote
+    //    URL carries both the node and the repository.
+    let remote_url = git_capture(&top, &["remote", "get-url", options.remote]);
+    let inferred = match (&options.api, &options.repo, &remote_url) {
+        // Both named explicitly: the remote need not even exist, which
+        // is what makes this work from a checkout cloned from elsewhere.
+        (Some(api), Some(repo), _) => choir_cli::propose::Remote {
+            api: (*api).to_string(),
+            repo: (*repo).to_string(),
+        },
+        (_, _, Ok(url)) => match choir_cli::propose::Remote::parse(url) {
+            Ok(remote) => remote,
+            Err(failure) => propose_abort("remote", &failure.message),
+        },
+        (_, _, Err(error)) => propose_abort("remote", error),
+    };
+    let api = options.api.map_or(inferred.api, str::to_string);
+    let repo = options.repo.map_or(inferred.repo, str::to_string);
+
+    // 2. What is being proposed, and onto what. The branch name is the
+    //    change identity, so an amend or a rebase reaches the same
+    //    change rather than forking a second one.
+    let branch =
+        git_capture(&top, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
+    let onto = options.onto.map_or_else(
+        || {
+            // The remote's own default branch when the clone recorded
+            // one, and `main` only as the last resort. Guessing first
+            // would silently propose onto the wrong branch on a
+            // repository whose default is `master` or `trunk`.
+            git_capture(
+                &top,
+                &[
+                    "symbolic-ref",
+                    "--short",
+                    &format!("refs/remotes/{}/HEAD", options.remote),
+                ],
+            )
+            .ok()
+            .and_then(|head| head.rsplit('/').next().map(str::to_string))
+            .unwrap_or_else(|| "main".to_string())
+        },
+        str::to_string,
+    );
+    let proposal = match choir_cli::propose::Proposal::derive(&repo, &branch, &onto) {
+        Ok(proposal) => proposal,
+        Err(failure) => propose_abort("branch", &failure.message),
+    };
+    let change_id = options
+        .change
+        .map_or(proposal.identity.change_id.clone(), str::to_string);
+    let head = match git_capture(&top, &["rev-parse", "HEAD"]) {
+        Ok(head) => head,
+        Err(error) => propose_abort("checkout", &error),
+    };
+
+    // 3. Does this change already exist? Reading first is what makes a
+    //    re-run resume. Provisioning again would be refused for a
+    //    rebased proposal, whose merge base has moved since the change
+    //    was bound to the older one.
+    let (status, body) = http(&api, auth, "choir_view", serde_json::json!({}));
+    if !(200..300).contains(&status) {
+        propose_abort("view", &format!("GET /api/view returned {status}: {body}"));
+    }
+    let view: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| propose_abort("view", &format!("response is not JSON: {e}")));
+    // Read before writing anything: whether a review is already open
+    // decides step 5, and asking after the checkpoint would race a
+    // reviewer's verdict landing in between.
+    let review_open = view["reviews"]
+        .get(&change_id)
+        .is_some_and(|review| !review.is_null() && review["status"] != "archived");
+    let existing = view["changes"]
+        .get(&change_id)
+        .filter(|state| !state.is_null());
+    let workspace_id = match existing {
+        Some(state) => {
+            let workspace = state["active_workspace"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    propose_abort(
+                        "change",
+                        "this change's workspace has been archived; propose from a new branch",
+                    )
+                })
+                .to_string();
+            eprintln!("choir propose: updating change {change_id}");
+            workspace
+        }
+        None => {
+            // The fork point, not the local branch tip: the node can only
+            // bind a base its bare repository already has, and the merge
+            // base is the newest commit both sides are known to share.
+            let base = git_capture(
+                &top,
+                &["merge-base", "HEAD", &format!("{}/{onto}", options.remote)],
+            )
+            .unwrap_or_else(|error| propose_abort(
+                "base",
+                &format!("{error}\ncannot find where this branch left {}/{onto}; fetch first, or pass --onto", options.remote),
+            ));
+            let workspace_name = proposal.identity.workspace_name.clone();
+            let mut body = serde_json::json!({
+                "repo": repo,
+                "name": workspace_name,
+                "base": base,
+                "owner": channel,
+                "change": change_id,
+                "idempotency_key": proposal.identity.idempotency_key,
+            });
+            let Some(base_revision) = choir_hash::ContentHash::from_git_oid(&base) else {
+                propose_abort("base", "merge-base did not return a git object id");
+            };
+            let authorization = CreateAuthorization::new(
+                change_id.clone(),
+                channel.into(),
+                format!("{repo}/{workspace_name}"),
+                base_revision,
+                proposal.identity.idempotency_key.clone(),
+            )
+            .with_cone(options.cone.clone());
+            let signed = signed_payload_body(key_file, channel, &authorization.to_payload());
+            for field in ["channel", "payload_hex", "key_id", "signature_hex"] {
+                body[field] = signed[field].clone();
+            }
+            let (status, response) = http(&api, auth, "choir_workspace", body);
+            if !(200..300).contains(&status) {
+                propose_abort("create change", &response);
+            }
+            eprintln!("choir propose: created change {change_id} on {base}");
+            format!("{repo}/{workspace_name}")
+        }
+    };
+
+    // 4. Send the objects. A checkpoint records identity and a CAS; it
+    //    does not transfer objects, so a checkpoint of a commit the node
+    //    does not have would name a revision nothing can check out.
+    //    The ref is named after the commit, so this adds one and never
+    //    moves one -- see `Proposal::revision_ref`.
+    let revision_ref = proposal.revision_ref(&head);
+    let refspec = format!("HEAD:{revision_ref}");
+    if let Err(error) = git_run(&top, &["push", options.remote, &refspec]) {
+        propose_abort("push", &error);
+    }
+
+    // 5. Publish the revision, then ask for review. In that order: a
+    //    review names a commit, and a reviewer drawn onto a revision the
+    //    change has not published yet is being asked about work the node
+    //    cannot show them.
+    let Some(revision) = choir_hash::ContentHash::from_git_oid(&head) else {
+        propose_abort("checkpoint", "HEAD is not a git object id");
+    };
+    let prev_revision = current_change_revision(&api, auth, &change_id);
+    if prev_revision != revision {
+        let op = ViewOp::new(OpKind::CheckpointChange {
+            id: change_id.clone(),
+            workspace: workspace_id.clone(),
+            revision: revision.clone(),
+            prev_revision,
+        });
+        let signed = signed_body(&api, key_file, channel, &op, auth);
+        let (status, response) = http(&api, auth, "choir_submit", signed);
+        if !(200..300).contains(&status) {
+            propose_abort("checkpoint", &response);
+        }
+    }
+
+    // A review is one long-lived object per change, not one per
+    // revision: re-posting a verdict *is* the re-review flow, so asking
+    // again would be refused and, if it were not, would discard the
+    // discussion and the verdicts already posted. What advances instead
+    // is the change's revision, which is where a reviewer reads the
+    // current commit from.
+    if !review_open {
+        let op = ViewOp::new(OpKind::RequestReview {
+            id: change_id.clone(),
+            target: revision,
+            reviewers: options.reviewers.clone(),
+            target_ref: Some(proposal.review_target(&repo)),
+        });
+        let signed = signed_body(&api, key_file, channel, &op, auth);
+        let (status, response) = http(&api, auth, "choir_submit", signed);
+        if !(200..300).contains(&status) {
+            propose_abort("request review", &response);
+        }
+    }
+
+    let summary = serde_json::json!({
+        "change": change_id,
+        "workspace": workspace_id,
+        "commit": head,
+        "pushed_ref": revision_ref,
+        "fetch": format!("git fetch {} {revision_ref}", options.remote),
+        "target_ref": proposal.review_target(&repo),
+        "reviewers": if options.reviewers.is_empty() {
+            serde_json::json!("drawn by the node")
+        } else {
+            serde_json::json!(options.reviewers)
+        },
+        "review": if review_open {
+            // Said plainly because the review's own `target` still names
+            // the commit it was opened on. The change's `revision_id` is
+            // the live pointer, and this is the sentence that stops a
+            // reviewer reading the superseded one.
+            "already open; it now needs re-review against this revision"
+        } else {
+            "opened"
+        },
+        "next": format!("choir state {api} {channel}"),
+    });
+    finish(
+        200,
+        &serde_json::to_string_pretty(&summary).expect("summary is serializable"),
+    );
 }
 
 /// Prints the checks on `subject` and exits with the trichotomy.
@@ -1228,6 +1770,21 @@ fn main() {
             let (status, resp) = http(api, auth, "choir_workspace_archive", body);
             finish(status, &resp);
         }
+        // Deliberately not `<api>`-first like its neighbours: the git
+        // remote already names the node, and repeating it is exactly the
+        // friction this command exists to remove.
+        ["propose", key_file, channel, rest @ ..] => propose(key_file, channel, rest, auth),
+        ["join", api, invite_file, key_file, rest @ ..] if auth.is_empty() => {
+            join(api, invite_file, key_file, rest)
+        }
+        // Argument order is git's, not ours: it appends the operation
+        // to whatever the configured helper line already carried.
+        ["git-credential", auth_file, operation] if auth.is_empty() => {
+            git_credential(auth_file, None, operation)
+        }
+        ["git-credential", auth_file, "--auth-user", user, operation] if auth.is_empty() => {
+            git_credential(auth_file, Some(user), operation)
+        }
         ["runner", config_file] => runner(config_file, auth),
         // The description a client generates against, and what this
         // node will accept. In the CLI so the shell library never needs
@@ -1547,6 +2104,9 @@ fn main() {
             finish(200, &doc.to_string());
         }
         ["acl", "render", api, acl_file] => acl_render(api, auth, acl_file),
+        ["funnel", api] => {
+            println!("{}", derived_view(api, auth, choir_cli::triage::funnel));
+        }
         ["triage", api] => {
             let doc = derived_view(api, auth, choir_cli::triage::triage);
             finish(200, &doc);

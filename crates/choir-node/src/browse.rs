@@ -197,6 +197,8 @@ pub(crate) enum Page {
     Commits { repo: String, rev: String },
     /// One commit and its diff.
     Commit { repo: String, oid: String },
+    /// How to propose a change to this repository, in three commands.
+    Contribute { repo: String },
     /// Every review proposing to land on this repository.
     Reviews { repo: String },
     /// One review: what it proposes, who was asked, what they said, and
@@ -222,6 +224,7 @@ impl Page {
             | Page::Blob { repo, .. }
             | Page::Commits { repo, .. }
             | Page::Commit { repo, .. }
+            | Page::Contribute { repo }
             | Page::Reviews { repo }
             | Page::Review { repo, .. }
             | Page::Search { repo, .. } => Some(repo),
@@ -273,6 +276,9 @@ pub(crate) fn route(url: &str) -> Option<Page> {
     if let Some(rest) = rest.strip_prefix(&format!("{owner}/{name}/")) {
         if rest == "reviews" {
             return Some(Page::Reviews { repo });
+        }
+        if rest == "contribute" {
+            return Some(Page::Contribute { repo });
         }
         if let Some(id) = rest.strip_prefix("review/") {
             let id = decode(id)?;
@@ -622,15 +628,43 @@ pub(crate) fn scope(page: Page, site: &str) -> Option<Page> {
     }
 }
 
+/// The four things a page needs to know about the *request* rather than
+/// about the repository.
+///
+/// Grouped rather than passed alongside `root`, `page` and `platform`
+/// because they travel together and always have: each new one -- browser
+/// writes, then the single-repository site, then the reader's origin --
+/// arrived as one more parameter on a signature that already carried
+/// the previous ones to every page whether it used them or not.
+#[derive(Clone, Copy)]
+pub(crate) struct Viewer<'a> {
+    /// The authenticated reader, whose grants decide what renders.
+    pub(crate) user: &'a str,
+    /// Whether the browser may offer mutation controls.
+    pub(crate) browser_writes: bool,
+    /// The one repository this node presents, if it presents one.
+    pub(crate) site: Option<&'a str>,
+    /// The scheme-and-host this reader reached the node on, so a page
+    /// that prints a command can print one they can paste.
+    pub(crate) origin: Option<&'a str>,
+    /// Whether this node issues invites at all.
+    pub(crate) self_service: bool,
+}
+
 pub(crate) fn render(
     root: &Path,
     page: &Page,
     readable: &dyn Fn(&str) -> bool,
     platform: Option<&crate::platform::Platform>,
-    user: &str,
-    browser_writes: bool,
-    site: Option<&str>,
+    viewer: Viewer<'_>,
 ) -> Rendered {
+    let Viewer {
+        user,
+        browser_writes,
+        site,
+        origin,
+        self_service,
+    } = viewer;
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
     // is handed git's own words — which name the absolute path git was
@@ -658,6 +692,7 @@ pub(crate) fn render(
         Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, site),
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, site),
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, site),
+        Page::Contribute { repo } => contribute(root, repo, site, origin, self_service),
         Page::Reviews { repo } => reviews(repo, platform, site),
         Page::Review { repo, id } => review(
             &bare(root, repo),
@@ -2252,6 +2287,148 @@ fn behind(dir: &Path, review: &serde_json::Value) -> Option<u64> {
 }
 
 /// Every review proposing to land on this repository.
+/// The three commands that turn a clone into a proposal.
+///
+/// Generated from the CLI's own command table (see
+/// `choir_cli::surface::contribute_html`) and included at build time, so
+/// this page cannot document a `choir` other than the one it ships
+/// beside. That matters more here than anywhere else on the browse
+/// surface: its entire readership is people with no way to tell a stale
+/// flag from a current one.
+///
+/// Served per repository rather than once per node because the two
+/// concrete things a newcomer needs — the clone URL and the branch they
+/// are proposing onto — are properties of the repository, and a page
+/// that made them fill those in themselves would be prose rather than
+/// instructions.
+const CONTRIBUTE_STEPS: &str = include_str!("contribute.html");
+
+fn contribute(
+    root: &Path,
+    repo: &str,
+    site: Option<&str>,
+    origin: Option<&str>,
+    self_service: bool,
+) -> Rendered {
+    let mut h = shell(
+        &format!("{repo}: how to contribute"),
+        Bar::repo(repo, "HEAD", site),
+    );
+    h.push_str("<header class=\"top\"><h1><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("\">");
+    h.push_str(&esc(repo));
+    h.push_str("</a></h1><div class=\"sub\"><span class=\"pill\">how to contribute</span>");
+    h.push_str("<span class=\"pill\"><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/reviews\">reviews</a></span></div></header><main id=\"main\"><section>");
+    h.push_str(
+        "<p class=\"lede\">There is no fork and no pull request. You push a branch and the \
+         node opens a proposal for it, drawing your reviewers itself. Three commands, and \
+         only the third is run more than once.</p>",
+    );
+
+    // The node's own address, so the commands are copyable rather than
+    // illustrative. `NODE` is left standing when this page is served
+    // from a request that carried no Host header, which is a client
+    // problem and reads as one -- better than substituting a guess a
+    // reader would paste.
+    // Named from the repository rather than assumed to be `main`: a
+    // page that prints a branch this repository does not have is a page
+    // whose one copyable command fails.
+    let default_onto = default_branch(&bare(root, repo)).unwrap_or_else(|| "main".to_string());
+    let steps = CONTRIBUTE_STEPS
+        .replace("NODE", &esc(&node_url(origin)))
+        .replace("REPO", &esc(repo));
+    h.push_str("<ol class=\"steps\">");
+    h.push_str(&steps);
+    h.push_str("</ol>");
+
+    h.push_str(
+        "<h2>Or: git and nothing else</h2>\
+         <p>If you would rather not install anything, push to the magic refspec. The node \
+         opens the review and draws the reviewers itself. The topic is what makes the \
+         proposal yours rather than a ref shared with everyone else proposing onto the same \
+         branch, so it is required.</p>",
+    );
+    h.push_str("<pre class=\"cmd\">git push origin HEAD:refs/for/");
+    h.push_str(&esc(&default_onto));
+    h.push_str("/my-topic</pre>");
+    h.push_str(
+        "<p class=\"muted\">Pushing the same topic again updates that proposal. You still \
+         need a credential to push, which is what step 1 gets you.</p>",
+    );
+
+    h.push_str("<h2>Three things that are not like GitHub</h2><ul>");
+    for (what, why) in [
+        (
+            "You do not choose your reviewers.",
+            "Name none and the node draws them. A review with no reviewers never counts as \
+             approved, and it will not draw anyone who shares your operator prefix.",
+        ),
+        (
+            "A merge conflict is a value, not an error.",
+            "A conflicted merge is a committed state you can build on. Commit it, keep \
+             working, and resolve it in a later commit.",
+        ),
+        (
+            "Never force-push over a rejection.",
+            "Every push is compare-and-set against one total order. A rejection means \
+             somebody moved the ref first: fetch, rebase, and propose again.",
+        ),
+    ] {
+        h.push_str("<li><strong>");
+        h.push_str(what);
+        h.push_str("</strong> ");
+        h.push_str(why);
+        h.push_str("</li>");
+    }
+    h.push_str("</ul>");
+    // Two different nodes, and the difference is not cosmetic: on a node
+    // with no credential self-service, step 1 names a command that has no
+    // endpoint to call. Printing it anyway would send a newcomer to a
+    // failure whose cause is the operator's configuration and whose
+    // symptom looks like their own mistake.
+    if self_service {
+        crate::ui::next_action(
+            &mut h,
+            "No invite yet? Admission is invite-only and there is no registration to fill in — \
+             ask the operator of this node for one. That is the only step here a person has to \
+             perform for you.",
+        );
+    } else {
+        crate::ui::next_action(
+            &mut h,
+            "This node issues no invites, so <code>choir join</code> has nothing to redeem \
+             here. Ask the operator for a credential and to register your key — \
+             <code>choir key &lt;key-file&gt; &lt;your-channel&gt;</code> prints the line they \
+             need. Steps 2 and 3 are unchanged once you hold one.",
+        );
+    }
+    h.push_str("</section>");
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
+}
+
+/// The node address to print in the instructions.
+///
+/// Taken from the origin the reader reached this page on, because that
+/// is the one address known to work for them: a node behind a reverse
+/// proxy, on a private network, or under a name this process has never
+/// been told does not know its own public URL, and a guess printed into
+/// a copyable command is worse than no command.
+///
+/// `None` is a request that carried no `Host`, which HTTP/1.1 requires.
+/// It leaves a visibly unfinished placeholder rather than a plausible
+/// address, because a reader who pastes the placeholder gets an error
+/// and a reader who pastes a wrong host gets a mystery.
+fn node_url(origin: Option<&str>) -> String {
+    origin.map_or_else(|| "<this node>".to_string(), ToString::to_string)
+}
+
 fn reviews(
     repo: &str,
     platform: Option<&crate::platform::Platform>,
@@ -3029,6 +3206,12 @@ fn repo_header(h: &mut String, repo: &str, rev: &str, oid: &str, path: &str, her
     h.push_str("<span class=\"pill\"><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("/reviews\">reviews</a></span>");
+    // Beside the clone path rather than buried in a README, because the
+    // reader who needs it is the one who has just arrived and does not
+    // yet know this node has no pull requests.
+    h.push_str("<span class=\"pill\"><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/contribute\">how to contribute</a></span>");
     // No "all repositories" pill: the fixed bar carries that link on
     // every page, and two links to one list in one header is noise.
     // The path a reader clones, which nothing on this surface showed. It

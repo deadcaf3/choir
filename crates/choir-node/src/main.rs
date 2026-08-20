@@ -2,6 +2,7 @@
 //!
 //! Configured usage: `choir-node <repo-root> <port> [--create owner/name.git]...
 //! [--auth-file path] [--acl-file path] [--keys-file path] [--reviewers-file path]
+//! [--invite-binds-keys]
 //! [--require-assignment] [--protected-refs path] [--require-review]
 //! [--require-scope]
 //! [--reviewer-conflict-graph path --reviewer-conflict-distance hops]
@@ -694,7 +695,27 @@ fn main() -> std::io::Result<()> {
             None => None,
         };
         let generated = keys_out.as_ref().map(|out| out.path.clone());
-        node.enable_accounts(path.into(), keys_out)
+        // The file the flag binds into is the one already being watched,
+        // not a second list: a key admitted here has to be admitted the
+        // same way an operator's paste is, or "revoke" would mean two
+        // different edits depending on how the key arrived.
+        let actor_keys = if rest.iter().any(|arg| arg == "--invite-binds-keys") {
+            let Some(keys_file) = flag_value("--keys-file") else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--invite-binds-keys needs --keys-file: there is no trusted-keys file to \
+                     bind a redeemed key into",
+                ));
+            };
+            eprintln!(
+                "accounts: redemption may bind one actor key into {keys_file}. The invite is \
+                 still the operator's assertion, and revoking is still deleting that line"
+            );
+            Some(std::path::PathBuf::from(keys_file))
+        } else {
+            None
+        };
+        node.enable_accounts(path.into(), keys_out, actor_keys)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         eprintln!(
             "accounts: invite-only self-service at /api/accounts (an @node write grant issues; \

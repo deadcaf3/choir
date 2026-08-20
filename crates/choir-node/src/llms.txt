@@ -30,8 +30,11 @@ A node may enforce per-repository grants. 404 on a repository means you hold no 
 ## CLI
 For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form
+choir git-credential <auth-file> [--auth-user <name>] get|store|erase - git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
+choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>] - redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
 choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]... - provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
 choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid> - publish an immutable change revision after committing and pushing its Git object
+choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]... - propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal
 choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key> - owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 choir runner <config-file> - drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout
 choir submit <api> <key-file> <channel> '<op-json>' - sign and submit one raw operation
@@ -53,6 +56,7 @@ choir checks <api> <git-oid> - every check reported on a commit, and one verdict
 choir reviews <api> <reviewer> - your pending review queue
 choir acl render <api> <acl-file> - rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
 choir triage <api> - every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
+choir funnel <api> - the contribution funnel from admission to first verdict, and the steepest drop between two stages; counts what this credential may read, and reports the first-contact stage as null rather than inventing a zero
 choir state <api> <channel> - your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
 choir skill install [--into <dir>] - install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
 choir view <api> [--limit <n>] [--offset <n>] - the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest

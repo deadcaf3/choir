@@ -62,6 +62,9 @@ that would reverse it are not published.
 | D48 | Large-repo checkout is git's partial clone and sparse checkout, enabled in repository config, not a filesystem driver of ours | Two-way |
 | D49 | Automated check results are signed ops the node orders and never runs; the CLI answers pass, fail and not-yet as 0, 1 and 3 | **One-way for readers** |
 | D50 | A change declares its path cone in the owner-signed authorization, and a conflict outside that cone is reported as a path with no content | **One-way for readers** |
+| D51 | Redeeming an invite may bind the newcomer's actor key, by appending it to the same trusted-keys file an operator would have edited; opt-in per node, and the invite remains the operator's assertion | Two-way |
+| D52 | A proposal's change identity is derived client-side from the branch name, so an amend or a rebase updates one change rather than opening a second | Two-way |
+| D53 | A push to `refs/for/<branch>/<topic>` opens a review through the existing pre-receive path and really creates the ref, rather than synthesizing one through a proc-receive hook | Two-way |
 
 ## Reading the door column
 

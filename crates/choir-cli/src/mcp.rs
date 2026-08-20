@@ -39,6 +39,21 @@ struct Credentials {
     token: String,
 }
 
+/// Reads one `user:token` pair from an auth file, for a caller that
+/// needs the credential itself rather than a request carrying it.
+///
+/// The git credential helper is that caller and the only one: git asks
+/// for a username and a password on stdout, so the pair cannot be kept
+/// inside a request the way every other use here keeps it.
+///
+/// # Errors
+///
+/// Returns a description when the file is unreadable, malformed, empty,
+/// or holds several credentials with none selected.
+pub fn credential_pair(path: &Path, selected: Option<&str>) -> Result<(String, String), String> {
+    read_credentials(path, selected).map(|found| (found.user, found.token))
+}
+
 /// Blocking HTTP client used by MCP tool calls.
 ///
 /// It shells out to `curl`, matching the repository's outbound-HTTP
@@ -111,13 +126,21 @@ impl HttpClient {
         ]);
 
         // `None` is an endpoint outside the MCP surface, reached by the
-        // CLI and never by an agent — the accounts roster is the case.
-        // Those are plain reads, so they take arguments exactly the way
-        // an `Empty` tool does.
-        let arguments_shape = endpoint
-            .mcp
-            .as_ref()
-            .map_or(McpArguments::Empty, |tool| tool.arguments);
+        // CLI and never by an agent — the accounts roster and the
+        // credential endpoints are the cases. A read there takes
+        // arguments exactly the way an `Empty` tool does; a write takes
+        // a JSON body, the way every other write on this node does.
+        // Deriving it from the method rather than listing paths means a
+        // credential endpoint stays off the agent surface without also
+        // having to be a second request shape.
+        let arguments_shape = endpoint.mcp.as_ref().map_or(
+            if endpoint.method == "GET" {
+                McpArguments::Empty
+            } else {
+                McpArguments::Body
+            },
+            |tool| tool.arguments,
+        );
         let body_file = match arguments_shape {
             McpArguments::Empty => {
                 if !object.is_empty() {

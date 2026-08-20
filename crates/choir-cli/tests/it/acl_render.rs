@@ -56,7 +56,7 @@ fn acl_render_names_the_handles_a_real_node_reports() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     node.watch_acl_file(acl_path.clone()).expect("acl loads");
-    node.enable_accounts(work.join("accounts.json"), None)
+    node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
         Platform::start(

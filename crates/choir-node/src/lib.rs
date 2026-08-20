@@ -472,10 +472,15 @@ impl Node {
     /// and one issued on a node with no ACL is a credential to every
     /// repository, which is the thing being issued *against*. Also
     /// returns the store's own load failures.
+    /// `actor_keys` names the trusted-keys file a redemption may bind
+    /// one actor key into (`--invite-binds-keys`). `None` keeps the
+    /// pre-existing behaviour, in which an actor key reaches the node
+    /// only by an operator editing that file.
     pub fn enable_accounts(
         &mut self,
         path: PathBuf,
         keys_out: Option<accounts::SshKeysOut>,
+        actor_keys: Option<PathBuf>,
     ) -> Result<(), String> {
         let Some(table) = self.auth.as_ref().as_ref() else {
             return Err(
@@ -494,7 +499,10 @@ impl Node {
         // Every operator credential's name, so self-service can never
         // issue an account that shadows one.
         let reserved = table.keys().cloned().collect();
-        let store = accounts::Accounts::open(path, keys_out, reserved)?;
+        let mut store = accounts::Accounts::open(path, keys_out, reserved)?;
+        if let Some(actor_keys) = actor_keys {
+            store = store.binding_actor_keys_into(actor_keys);
+        }
         eprintln!("accounts enabled ({} issued)", store.len());
         let store = std::sync::Arc::new(store);
         // Either order: whichever of the two flags is applied second
@@ -775,11 +783,23 @@ impl Node {
                 "#!/bin/sh\n",
                 "# choir: route this push's ref updates through the platform sequencer.\n",
                 "if [ -z \"$CHOIR_API\" ]; then cat >/dev/null; exit 0; fi\n",
+                // The response body is captured rather than discarded
+                // (which is what `curl -f` did): the node's refusals name
+                // a reason and a repair, and a pusher told only "rejected
+                // by sequencer" has to ask a human what they did wrong.
+                "reply=$(mktemp) || exit 1\n",
                 "post() {\n",
                 "  payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\",\"cert_status\":\"%s\",\"signer\":\"%s\"}' \\\n",
                 "    \"$CHOIR_REPO\" \"$3\" \"$1\" \"$2\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
-                "  curl -skf -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
-                "    -d \"$payload\" \"$4\" >/dev/null\n",
+                "  code=$(curl -sk -o \"$reply\" -w '%{http_code}' \\\n",
+                "    -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
+                "    -d \"$payload\" \"$4\")\n",
+                // A connection that never completed reports 000, which
+                // falls through to the failure branch with the others.
+                "  case \"$code\" in 2??) return 0 ;; *) return 1 ;; esac\n",
+                "}\n",
+                "reason() {\n",
+                "  sed -n 's/.*\"error\":\"\\([^\"]*\\)\".*/\\1/p' \"$reply\" | head -1\n",
                 "}\n",
                 // A file, not a shell variable: this has to survive being
                 // read back line by line, and the accepted list is the
@@ -794,14 +814,19 @@ impl Node {
                 "}\n",
                 "while read old new ref; do\n",
                 "  if ! post \"$old\" \"$new\" \"$ref\" \"$CHOIR_API\"; then\n",
-                "    echo \"choir: ref update rejected by sequencer: $ref\" >&2\n",
+                "    why=$(reason)\n",
+                "    if [ -n \"$why\" ]; then\n",
+                "      echo \"choir: $ref rejected: $why\" >&2\n",
+                "    else\n",
+                "      echo \"choir: ref update rejected by sequencer: $ref\" >&2\n",
+                "    fi\n",
                 "    abort\n",
-                "    rm -f \"$done_refs\"\n",
+                "    rm -f \"$done_refs\" \"$reply\"\n",
                 "    exit 1\n",
                 "  fi\n",
                 "  printf '%s %s %s\\n' \"$old\" \"$new\" \"$ref\" >> \"$done_refs\"\n",
                 "done\n",
-                "rm -f \"$done_refs\"\n",
+                "rm -f \"$done_refs\" \"$reply\"\n",
                 "exit 0\n",
             ),
         )?;
@@ -1326,6 +1351,8 @@ impl Node {
                                 platform: platform.as_deref(),
                                 browser_writes,
                                 site: site_repo.as_deref(),
+                                scheme,
+                                self_service: accounts.is_some(),
                             },
                             &page,
                             request,
@@ -2368,6 +2395,14 @@ struct BrowseContext<'a> {
     browser_writes: bool,
     /// The one repository this node presents, if it presents one.
     site: Option<&'a str>,
+    /// `http` or `https`, from how this node was started rather than
+    /// from anything the request said: a client must not be able to talk
+    /// the node into advertising `https` for a plaintext port.
+    scheme: &'static str,
+    /// Whether this node runs invite-based credential self-service
+    /// (D36). A page that tells a newcomer to redeem an invite on a node
+    /// that issues none is sending them to a command that cannot work.
+    self_service: bool,
 }
 
 fn handle_browse(
@@ -2382,6 +2417,8 @@ fn handle_browse(
         platform,
         browser_writes,
         site,
+        scheme,
+        self_service,
     } = context;
     let readable = |repo: &str| match acl {
         Some(table) => table.allows_repo(user, repo, acl::Level::Read),
@@ -2399,7 +2436,24 @@ fn handle_browse(
         }
     }
 
-    let rendered = browse::render(root, page, &readable, platform, user, browser_writes, site);
+    // The origin the reader actually reached this node on, so a page
+    // that prints a command can print one they can paste. Scheme comes
+    // from the connection rather than the request: a client cannot talk
+    // this node into advertising `https` for a plaintext port.
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let rendered = browse::render(
+        root,
+        page,
+        &readable,
+        platform,
+        browse::Viewer {
+            user,
+            browser_writes,
+            site,
+            origin: origin.as_deref(),
+            self_service,
+        },
+    );
     // Revalidation happens after the ACL check and before the body is
     // written, so a `304` costs the reader nothing and still cannot be
     // obtained for a repository they may not read.
