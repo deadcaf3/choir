@@ -242,6 +242,27 @@ fn workspace_key(branch: &str) -> String {
     }
 }
 
+/// Renders a change id for a progress line.
+///
+/// A change id ends in a 64-character fingerprint, which is a record
+/// rather than a sentence: at the width of a terminal it pushes the part
+/// a reader recognises -- the namespace and the repository -- off the
+/// line. The JSON summary still carries the id whole, so nothing anyone
+/// has to copy is shortened here.
+#[must_use]
+pub fn short_change_id(id: &str) -> String {
+    match id.rsplit_once(':') {
+        Some((head, digest)) if digest.chars().count() > SHORT_FINGERPRINT => {
+            let short: String = digest.chars().take(SHORT_FINGERPRINT).collect();
+            format!("{head}:{short}\u{2026}")
+        }
+        _ => id.to_string(),
+    }
+}
+
+/// Fingerprint characters kept by [`short_change_id`].
+const SHORT_FINGERPRINT: usize = 12;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +392,23 @@ mod tests {
             proposal.review_target("agents/demo"),
             proposal.revision_ref("abc")
         );
+    }
+
+    #[test]
+    fn a_shortened_change_id_keeps_the_part_a_reader_recognises() {
+        let long = "propose:agents/demo:".to_string() + &"a1".repeat(32);
+        let short = short_change_id(&long);
+        assert!(short.starts_with("propose:agents/demo:a1a1a1a1a1a1"));
+        assert!(short.ends_with('\u{2026}'));
+        assert!(short.chars().count() < long.chars().count());
+    }
+
+    #[test]
+    fn an_id_with_no_room_to_shorten_is_returned_whole() {
+        // Truncating here would produce an id shorter than the one it
+        // stands for while still claiming to elide something.
+        for id in ["propose:agents/demo:abc", "no-colons-at-all"] {
+            assert_eq!(short_change_id(id), id);
+        }
     }
 }

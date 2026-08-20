@@ -773,7 +773,10 @@ fn propose(key_file: &str, channel: &str, rest: &[&str], auth: AuthOptions<'_>) 
                     )
                 })
                 .to_string();
-            eprintln!("choir propose: updating change {change_id}");
+            eprintln!(
+                "choir propose: updating change {}",
+                choir_cli::propose::short_change_id(&change_id)
+            );
             workspace
         }
         None => {
@@ -816,7 +819,10 @@ fn propose(key_file: &str, channel: &str, rest: &[&str], auth: AuthOptions<'_>) 
             if !(200..300).contains(&status) {
                 propose_abort("create change", &response);
             }
-            eprintln!("choir propose: created change {change_id} on {base}");
+            eprintln!(
+                "choir propose: created change {} on {base}",
+                choir_cli::propose::short_change_id(&change_id)
+            );
             format!("{repo}/{workspace_name}")
         }
     };
