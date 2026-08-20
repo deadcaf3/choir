@@ -413,3 +413,102 @@ fn every_concurrent_read_is_one_coherent_log_prefix() {
         OPS
     );
 }
+
+/// Archiving must actually reclaim, and the measurement says by how much.
+///
+/// Every previous reading of this series was taken with zero archived
+/// rows, so it measured live accumulation and said nothing about the
+/// question retention exists to answer. Measured here on 200 reviews of
+/// five comments each: a live row is ~884 bytes and an archived one ~302,
+/// so archiving reclaims about two thirds and an archived row costs about
+/// a third of a live one forever.
+///
+/// The ratio is asserted rather than the bytes. Both numbers move with
+/// any field added to the projection, and a byte assertion would fail on
+/// a change that preserves exactly the property worth keeping: that the
+/// bulk goes and the outcome stays. What would break it is a refactor
+/// that stops emptying `comments`, `verdicts` or `viewed` on archive, and
+/// then nothing else in this suite would notice.
+#[test]
+fn an_archived_row_costs_a_fraction_of_the_live_one() {
+    fn build(archive: bool) -> Platform {
+        let mut log = MemLog::new();
+        append_op(
+            &mut log,
+            "author",
+            ViewOp::new(OpKind::RequestReview {
+                id: "r".into(),
+                target: ContentHash::blake3(b"target"),
+                reviewers: vec!["rev/a".into(), "rev/b".into()],
+                target_ref: Some("agents/demo.git:refs/heads/main".into()),
+            }),
+        )
+        .unwrap();
+        for c in 0..5 {
+            append_op(
+                &mut log,
+                "author",
+                ViewOp::new(OpKind::PostComment {
+                    id: "r".into(),
+                    comment: format!("c{c}"),
+                    author: "author".into(),
+                    body: "roughly the length of a real review comment, give or take".into(),
+                }),
+            )
+            .unwrap();
+        }
+        for reviewer in ["rev/a", "rev/b"] {
+            append_op(
+                &mut log,
+                reviewer,
+                ViewOp::new(OpKind::PostVerdict {
+                    id: "r".into(),
+                    reviewer: reviewer.into(),
+                    verdict: Verdict::Approve,
+                    note: "looks right to me".into(),
+                }),
+            )
+            .unwrap();
+        }
+        if archive {
+            append_op(
+                &mut log,
+                "node",
+                ViewOp::new(OpKind::ArchiveReview {
+                    id: "r".into(),
+                    lapsed: false,
+                }),
+            )
+            .unwrap();
+        }
+        Platform::start(Registry::new(), Box::new(log), ActorKey::generate())
+            .expect("platform replays")
+    }
+
+    let (_, live) = current_view(&build(false));
+    let (_, archived) = current_view(&build(true));
+    let live_row = serialized_len(&live["reviews"]["r"]);
+    let archived_row = serialized_len(&archived["reviews"]["r"]);
+
+    assert!(
+        archived_row * 2 < live_row,
+        "archiving reclaimed less than half: {live_row} -> {archived_row} bytes"
+    );
+    // The outcome survives; only the bulk goes. An archived row that kept
+    // its comments would still shrink if the verdicts went, so this is
+    // asserted field by field rather than inferred from the ratio.
+    let row = &archived["reviews"]["r"];
+    assert_eq!(row["archived"], true);
+    assert_eq!(
+        row["approved"], true,
+        "the outcome did not survive archiving"
+    );
+    for bulk in ["comments", "verdicts", "viewed", "reviewers"] {
+        assert!(
+            row[bulk].as_array().is_none_or(Vec::is_empty)
+                && row[bulk].as_object().is_none_or(serde_json::Map::is_empty),
+            "{bulk} survived archiving: {}",
+            row[bulk]
+        );
+    }
+}

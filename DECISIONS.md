@@ -65,6 +65,7 @@ that would reverse it are not published.
 | D51 | Redeeming an invite may bind the newcomer's actor key, by appending it to the same trusted-keys file an operator would have edited; opt-in per node, and the invite remains the operator's assertion | Two-way |
 | D52 | A proposal's change identity is derived client-side from the branch name, so an amend or a rebase updates one change rather than opening a second | Two-way |
 | D53 | A push to `refs/for/<branch>/<topic>` opens a review through the existing pre-receive path and really creates the ref, rather than synthesizing one through a proc-receive hook | Two-way |
+| D54 | The software keeps the singular name `choir` even where the registered domain is plural: a choir is already many voices under one score, which is the unit the model has | Two-way |
 
 ## Reading the door column
 
