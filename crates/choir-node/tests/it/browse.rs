@@ -1808,6 +1808,11 @@ fn one_search_box_sits_on_every_page_and_follows_the_revision_in_view() {
         "/r/agents/one/reviews",
         "/r/agents/one/search/main?q=lib&in=files",
         "/status",
+        // The account page, which used to hand-roll its own shell and
+        // so was the one surface with no bar on it: no search, no way
+        // back except two pills, and — once the palette became a
+        // control rather than a system setting — no way to change it.
+        "/account",
         // A repository that is not there: a refusal is where a reader is
         // most lost, so it is the page that can least afford to drop the
         // one control that gets them somewhere.

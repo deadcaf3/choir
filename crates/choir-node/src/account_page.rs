@@ -66,6 +66,13 @@ pub(crate) fn render(
     h.push_str(crate::ui::STYLE);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
+    // The same fixed bar every other page carries. Without it this page
+    // was the one surface with no way back except the two pills below
+    // it, no search box, and — once the palette became a control rather
+    // than a system setting — no way to change it. A page that drops
+    // the chrome reads as a different product, and this one is reached
+    // from a link in that chrome.
+    crate::browse::chrome(&mut h, crate::browse::Bar::index(chrome));
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(user));
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\"><a href=\"/r/\">repositories</a>");
@@ -140,9 +147,13 @@ pub(crate) fn render(
     }
 }
 
-/// Closing tags, matching the browse shell.
+/// Closing tags, matching the browse shell — including its footer,
+/// which this page used to omit. The sentence is the surface's one
+/// standing claim about itself, and it was absent from the page where a
+/// person enrols the thing that signs on their behalf.
 fn close(mut h: String) -> String {
-    h.push_str("</main></body></html>");
+    h.push_str("</main><footer>Every write here is a signed operation.</footer>");
+    h.push_str("</body></html>");
     h
 }
 

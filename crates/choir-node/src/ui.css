@@ -891,6 +891,17 @@ table.flight td:first-child a{overflow-wrap:normal}
 .pane-files .why{display:block;font-size:var(--fs-200);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 
+/* A file view is a panel whose whole content is the file, so the file
+   sheds its own frame and the panel becomes it: a bordered well inside
+   a bordered card is two frames drawn around one thing, and the inner
+   one carries no information the outer one has not already given.
+   `:only-child` is the guard — a blob page that also carries a note
+   about size or binary content keeps both, because there the well is
+   distinguishing the file from the sentence about it. */
+main>section>pre.code:only-child{border:0;border-radius:var(--sp-0);
+  margin:calc(-1 * var(--sp-5)) calc(-1 * var(--sp-6));
+  padding:var(--sp-5) var(--sp-6)}
+
 /* The comment box on a review page. A `rows` attribute sizes its height
    and nothing sizes its width, so the browser's default `cols` left a
    two-word field on a page where every other block runs to the measure —
