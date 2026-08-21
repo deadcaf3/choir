@@ -155,9 +155,25 @@ fn assert_growth_matches_sections(view: &serde_json::Value) {
                 .values()
                 .filter(|binding| !binding["revoked"].is_null())
                 .count(),
+            "vouch_subjects": view["vouches"].as_object().expect("vouch map").len(),
+            // Edges, not rows: the outer map is what paging bounds, and
+            // the inner one is where the graph grows (D65).
+            "vouch_edges": view["vouches"]
+                .as_object()
+                .expect("vouch map")
+                .values()
+                .map(|from| from.as_object().expect("voucher map").len())
+                .sum::<usize>(),
         })
     );
-    for section in ["workspaces", "refs", "reviews", "provenance", "bindings"] {
+    for section in [
+        "workspaces",
+        "refs",
+        "reviews",
+        "provenance",
+        "bindings",
+        "vouches",
+    ] {
         assert_eq!(
             growth["serialized_bytes"][section],
             serialized_len(&view[section]),
@@ -195,9 +211,18 @@ fn empty_view_reports_exact_non_self_referential_sizes() {
             "provenance_records": 0,
             "bindings": 0,
             "revoked_bindings": 0,
+            "vouch_subjects": 0,
+            "vouch_edges": 0,
         })
     );
-    for section in ["workspaces", "refs", "reviews", "provenance", "bindings"] {
+    for section in [
+        "workspaces",
+        "refs",
+        "reviews",
+        "provenance",
+        "bindings",
+        "vouches",
+    ] {
         assert_eq!(
             growth["serialized_bytes"][section],
             serialized_len(&view[section]),
@@ -314,9 +339,18 @@ fn counts_live_archived_and_latest_provenance_records_deterministically() {
             "provenance_records": 2,
             "bindings": 0,
             "revoked_bindings": 0,
+            "vouch_subjects": 0,
+            "vouch_edges": 0,
         })
     );
-    for section in ["workspaces", "refs", "reviews", "provenance", "bindings"] {
+    for section in [
+        "workspaces",
+        "refs",
+        "reviews",
+        "provenance",
+        "bindings",
+        "vouches",
+    ] {
         assert_eq!(
             growth["serialized_bytes"][section],
             serialized_len(&view[section]),

@@ -77,6 +77,10 @@ pub enum Code {
     /// operator, a revoked or unbound key, a channel naming a different
     /// operator).
     IdentityState,
+    /// A vouch precondition failed (an end with no unrevoked binding, a
+    /// self-vouch, an edge that already stands, or a withdrawal of one
+    /// that does not).
+    VouchState,
     /// The operator's protected-ref list could not be read, so the gate
     /// failed closed.
     PolicyUnavailable,
@@ -125,6 +129,7 @@ impl Code {
             Self::ChangeState => "change_state",
             Self::WorkspaceState => "workspace_state",
             Self::IdentityState => "identity_state",
+            Self::VouchState => "vouch_state",
             Self::PolicyUnavailable => "policy_unavailable",
             Self::LogEvicted => "log_evicted",
             Self::DuplicateSubmission => "duplicate_submission",
@@ -157,6 +162,7 @@ impl Code {
             Self::ChangeState,
             Self::WorkspaceState,
             Self::IdentityState,
+            Self::VouchState,
             Self::PolicyUnavailable,
             Self::LogEvicted,
             Self::DuplicateSubmission,
@@ -319,6 +325,12 @@ pub fn from_view_error(e: &choir_view::ViewError) -> Rejection {
             "not a retry: a key belongs to one operator for its lifetime and a revoked key is \
              never rebindable, so bind a fresh key instead",
         ),
+        ViewError::Vouch(msg) => Rejection::new(
+            Code::VouchState,
+            msg.clone(),
+            "read `vouches` in GET /api/view; both ends need an unrevoked key binding, and an \
+             edge that already stands is withdrawn rather than repeated",
+        ),
         ViewError::Decode(msg) => Rejection::new(
             Code::MalformedOp,
             format!("decode failed: {msg}"),
@@ -353,6 +365,7 @@ impl Code {
             Self::ChangeState => "A stable change was unknown, duplicated, archived, or mismatched",
             Self::WorkspaceState => "A workspace lifecycle request conflicted with its durable binding",
             Self::IdentityState => "A key-binding precondition failed (key already bound to another operator, revoked or unbound key, channel naming a different operator)",
+            Self::VouchState => "A vouch precondition failed (an end with no unrevoked key binding, a self-vouch, an edge that already stands, or a withdrawal of one that does not)",
             Self::PolicyUnavailable => "The operator's protected-ref list could not be read, so the gate failed closed",
             Self::LogEvicted => "Requested log entries are older than anything this node can serve",
             Self::DuplicateSubmission => "These exact signed bytes already landed; a signature is admissible once",
@@ -385,6 +398,7 @@ impl Code {
             Self::ChangeState => "Read `changes` in `GET /api/view`, then use its owner, workspace and revision or choose a new change id.",
             Self::WorkspaceState => "Read `changes` and `workspaces` in `GET /api/view`; retry only with the exact existing binding, or choose a new workspace name.",
             Self::IdentityState => "Read `bindings` in `GET /api/view` for this key. Not a retry:                 a key belongs to one operator for the life of the key, and a revoked key is                 never rebindable. Bind a fresh key instead. `error` names which of the two                 applies.",
+            Self::VouchState => "Read `vouches` in `GET /api/view`. Both ends of a vouch must                 be operators with an unrevoked key bound in the log, so if `error` names an                 unbound end the repair is the operator's: `choir bind`. An edge that already                 stands is not a retry — withdraw it and vouch again if the note should                 change.",
             Self::PolicyUnavailable => "Operator problem, not a client one: the gate fails                 closed rather than guessing. Retry once the file is restored.",
             Self::LogEvicted => "Resync from the sequence in `window_base`; entries before it                 are gone from this node.",
             Self::DuplicateSubmission => "If you are retrying, this is your op: read `seq`.                 A submission that already landed answers 200 with `already_applied`, and                 only reaches you as a rejection if the window moved underneath the retry.                 If you meant a second, distinct change, sign a new op — two otherwise                 byte-identical ops are told apart by their scope.",

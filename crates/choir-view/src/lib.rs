@@ -817,6 +817,81 @@ pub enum OpKind {
         /// Operator-visible reason for the withdrawal (non-empty).
         reason: String,
     },
+    /// Record that one operator vouches for another (D65; additive
+    /// variant, wire-format unchanged).
+    ///
+    /// This is the edge D24's Sybil resistance was missing. Key age
+    /// already orders identities by standing, and it cannot tell a
+    /// hundred keys one stranger bound from a hundred keys a hundred
+    /// operators bound: age is a fact about a key, never about anybody's
+    /// opinion of it. A vouch is the opinion, sequenced.
+    ///
+    /// **Both ends must already be operators this log knows.** The fold
+    /// refuses a `voucher` or `subject` with no unrevoked binding, which
+    /// is what makes the floor replayable rather than one node's private
+    /// admission rule: minting an identity to vouch *with* costs a
+    /// [`OpKind::BindKey`], and only the node authors those. The same
+    /// rule bounds the map — at most one edge per ordered pair of bound
+    /// operators, both drawn from a set the node itself admitted — so no
+    /// client can grow the view by inventing names (D64).
+    ///
+    /// One edge per `(voucher, subject)`: vouching where an edge already
+    /// stands is refused, so the pair is its own retry identity, exactly
+    /// as a comment id is for [`OpKind::PostComment`]. Changing the note
+    /// means withdrawing and vouching again, which is a new statement
+    /// and dated as one.
+    ///
+    /// **It authorizes nothing.** No threshold, no score, no path count:
+    /// nothing in this crate or the daemon reads a vouch to decide
+    /// anything. That is deliberate rather than unfinished. A number
+    /// computed from this graph would read as a measurement of
+    /// trustworthiness while measuring how willing operators are to type
+    /// each other's names, and the first thing that number would do is
+    /// become worth farming.
+    ///
+    /// *Who* may author one is admission policy (L2), as for
+    /// [`OpKind::PostVerdict`]: the daemon binds `voucher` to the
+    /// operator of the signing channel. The fold proves the ends exist
+    /// and the edge is new; it never proves the voucher signed it.
+    Vouch {
+        /// The operator doing the vouching (must be the operator of the
+        /// submitting channel, enforced at admission).
+        voucher: String,
+        /// The operator being vouched for. Never equal to `voucher`: an
+        /// identity asserting its own standing is the one statement a
+        /// Sybil can always make.
+        subject: String,
+        /// What the voucher wants a reader to know. May be empty.
+        note: String,
+    },
+    /// Withdraw a vouch (D65; additive variant, wire-format unchanged).
+    ///
+    /// The edge leaves the view and both ops stay in the log. That split
+    /// is the deliberate half: a tombstone row would either make
+    /// withdrawal terminal, which trust is not, or be overwritten by the
+    /// next vouch, which makes it a row that says nothing. So a current
+    /// view answers "who vouches for X **now**", and "who used to" is a
+    /// question for the log — the same division [`OpKind::DeleteRef`]
+    /// makes, where the ref goes and the commits stay.
+    ///
+    /// Withdrawal is not terminal for the pair, unlike
+    /// [`OpKind::RevokeKey`]. Vouching again is admissible and starts a
+    /// fresh [`VouchState::at`]. The revocation argument does not carry
+    /// over: a rebindable revocation is no revocation, but a withdrawal
+    /// that could never be reconsidered would make one bad afternoon
+    /// permanent, and the remedy `RevokeKey` offers — use a fresh key —
+    /// has no counterpart when the thing withdrawn is an opinion about
+    /// somebody else.
+    WithdrawVouch {
+        /// The operator withdrawing (must be the operator of the
+        /// submitting channel, enforced at admission).
+        voucher: String,
+        /// The operator no longer vouched for.
+        subject: String,
+        /// Operator-visible reason (non-empty). It lives in the log
+        /// rather than in the view, for the reason above.
+        reason: String,
+    },
     /// Record a signed attestation of the **complete** ref-state at one
     /// log position (D25; additive variant, wire-format unchanged).
     ///
@@ -1078,6 +1153,21 @@ pub struct Revocation {
     pub at: u64,
     /// Operator-visible reason for the withdrawal.
     pub reason: String,
+}
+
+/// One standing vouch, as the fold sees it after replaying
+/// [`OpKind::Vouch`] (D65).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VouchState {
+    /// Log sequence of the op that placed this edge.
+    ///
+    /// Sequenced ops rather than elapsed time, exactly as
+    /// [`KeyBinding::bound_at`] is. Unlike `bound_at` it *does* move:
+    /// withdrawing and vouching again writes a new position, because
+    /// that is a second statement and not a correction of the first.
+    pub at: u64,
+    /// What the voucher said. May be empty.
+    pub note: String,
 }
 
 /// A reviewer's answer to a review request.
@@ -1493,6 +1583,10 @@ pub enum ViewError {
     /// Resolution-link precondition failure: [`Commit::resolves`] names
     /// a commit the store does not hold, or one with nothing to resolve.
     Resolution(String),
+    /// Vouch precondition failure (D65): an end that is not an operator
+    /// with an unrevoked binding, a self-vouch, an edge that already
+    /// stands, or a withdrawal of one that does not.
+    Vouch(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -1731,9 +1825,86 @@ pub struct View {
     /// chain check needs its identity, which [`RefSnapshot::id`] derives
     /// from the value.
     pub latest_snapshot: Option<RefSnapshot>,
+    /// Vouched-for operator -> voucher -> the standing edge (D65).
+    ///
+    /// Keyed by subject first because that is the question a reader
+    /// brings: "who vouches for this actor". The other direction is a
+    /// scan, and it is the rarer one.
+    ///
+    /// Nested rather than the flat `a:b` key [`View::checks`] uses,
+    /// because that key would have to join two operator names and an
+    /// operator name is free-form: any separator can occur inside one.
+    /// `checks` gets away with `:` only because a hex subject cannot
+    /// contain it, and borrowing the shape without the property is how
+    /// two edges come to share a row.
+    pub vouches: BTreeMap<String, BTreeMap<String, VouchState>>,
 }
 
 impl View {
+    /// Whether `voucher`'s vouch for `subject` currently stands (D65).
+    ///
+    /// One lookup for both directions of the question, so admission and
+    /// withdrawal cannot come to disagree about what "already vouches"
+    /// means.
+    #[must_use]
+    pub fn vouch_stands(&self, voucher: &str, subject: &str) -> bool {
+        self.vouches
+            .get(subject)
+            .is_some_and(|from| from.contains_key(voucher))
+    }
+
+    /// Whether `operator` holds at least one key binding that has not
+    /// been revoked (D65).
+    ///
+    /// Revoked bindings do not count. A vouch from an operator whose
+    /// every key has been withdrawn would be a statement nobody can be
+    /// held to, which is the shape the floor exists to refuse.
+    #[must_use]
+    pub fn is_bound_operator(&self, operator: &str) -> bool {
+        self.bindings
+            .values()
+            .any(|binding| binding.operator == operator && !binding.is_revoked())
+    }
+
+    /// The two ends of a vouch: distinct operator identities, each with
+    /// an unrevoked binding in this log (D65).
+    ///
+    /// The binding requirement is the Sybil floor, and it lives here
+    /// rather than in the daemon so that every replayer enforces it and
+    /// not just the node that admitted the op. Since [`OpKind::BindKey`]
+    /// is node-only in the daemon, an attacker cannot mint the identity
+    /// a fresh vouch would come from; and because both ends are drawn
+    /// from a set the node itself admitted, the map this guards is
+    /// bounded by the operator population rather than by anything a
+    /// client can choose (D64).
+    fn validate_vouch_ends(&self, voucher: &str, subject: &str) -> Result<(), ViewError> {
+        if voucher == subject {
+            return Err(ViewError::Vouch(format!(
+                "{voucher} cannot vouch for itself"
+            )));
+        }
+        for (role, name) in [("voucher", voucher), ("subject", subject)] {
+            if name.is_empty() {
+                return Err(ViewError::Vouch(format!("a vouch must name a {role}")));
+            }
+            if name.contains('/') {
+                // Operator identities, not channels: `alice` and
+                // `alice/agent` are one operator, and letting both spell
+                // an edge would give that operator two rows and a reader
+                // two different answers.
+                return Err(ViewError::Vouch(format!(
+                    "{role} {name} must be an operator identity, with no '/'"
+                )));
+            }
+            if !self.is_bound_operator(name) {
+                return Err(ViewError::Vouch(format!(
+                    "{role} {name} has no unrevoked key bound in this log"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Rederives a [`OpKind::Submit`]'s authorization and refuses a
     /// mismatch (D43).
     ///
@@ -2287,6 +2458,43 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::Vouch {
+                voucher, subject, ..
+            } => {
+                self.validate_vouch_ends(voucher, subject)?;
+                if self.vouch_stands(voucher, subject) {
+                    // The pair is the retry identity, so a resubmitted
+                    // vouch whose response was lost is refused rather
+                    // than silently redating the edge it already placed.
+                    return Err(ViewError::Vouch(format!(
+                        "{voucher} already vouches for {subject}; withdraw first to say \
+                         something else"
+                    )));
+                }
+                Ok(())
+            }
+            OpKind::WithdrawVouch {
+                voucher,
+                subject,
+                reason,
+            } => {
+                if reason.is_empty() {
+                    return Err(ViewError::Vouch(
+                        "a withdrawal must carry a non-empty reason".to_string(),
+                    ));
+                }
+                // No `validate_vouch_ends` here on purpose: a voucher
+                // whose last key was revoked after vouching must still
+                // be able to take the edge back, and refusing that would
+                // strand the statement exactly when its author has most
+                // reason to retract it.
+                if !self.vouch_stands(voucher, subject) {
+                    return Err(ViewError::Vouch(format!(
+                        "{voucher} does not vouch for {subject}"
+                    )));
+                }
+                Ok(())
+            }
             OpKind::RecordRefSnapshot { snapshot } => {
                 // Truth first: an attestation the fold cannot reproduce
                 // is refused by every replayer, not archived as a claim.
@@ -2624,6 +2832,35 @@ impl View {
                     at,
                     reason: reason.clone(),
                 });
+            }
+            OpKind::Vouch {
+                voucher,
+                subject,
+                note,
+            } => {
+                let at = self.next_seq;
+                self.vouches.entry(subject.clone()).or_default().insert(
+                    voucher.clone(),
+                    VouchState {
+                        at,
+                        note: note.clone(),
+                    },
+                );
+            }
+            OpKind::WithdrawVouch {
+                voucher, subject, ..
+            } => {
+                let empty = self.vouches.get_mut(subject).is_some_and(|from| {
+                    from.remove(voucher);
+                    from.is_empty()
+                });
+                if empty {
+                    // An empty inner map is a row that says nothing and
+                    // still costs bytes on every read of the section.
+                    // Dropping it is what keeps vouch churn invisible to
+                    // the view-growth series (D64).
+                    self.vouches.remove(subject);
+                }
             }
             OpKind::RecordRefSnapshot { snapshot } => {
                 self.latest_snapshot = Some(snapshot.clone());

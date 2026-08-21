@@ -63,13 +63,17 @@ pub(crate) const MAX_LIMIT: usize = 1000;
 /// [`crate::acl::filter_response`] takes for disclosure, but pointed the
 /// other way — an unknown section keeps working and is merely unbounded,
 /// rather than silently truncated by a rule nobody wrote for it.
-const SECTIONS: [&str; 8] = [
+const SECTIONS: [&str; 9] = [
     "workspaces",
     "changes",
     "refs",
     "reviews",
     "provenance",
     "bindings",
+    // Bounded on subjects, which is the outer key. The inner map needs
+    // no bound of its own: it can hold at most one row per bound
+    // operator, and only the node mints those (D65).
+    "vouches",
     "checks",
     // `/api/reviews`.
     "pending",

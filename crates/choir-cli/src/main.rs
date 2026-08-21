@@ -41,7 +41,10 @@
 use choir_hash::ContentHash;
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_decode;
-use choir_view::{ArchiveAuthorization, CheckStatus, CreateAuthorization, OpKind, Verdict, ViewOp};
+use choir_view::{
+    reviewer_operator, ArchiveAuthorization, CheckStatus, CreateAuthorization, OpKind, Verdict,
+    ViewOp,
+};
 
 #[derive(Clone, Copy)]
 struct AuthOptions<'a> {
@@ -2118,6 +2121,27 @@ fn main() {
             // The channel is the viewer: admission rejects any receipt
             // whose viewer differs from the signed channel.
             submit(api, key_file, viewer, &op, auth);
+        }
+        // D65. The voucher is not an argument: it is the operator half
+        // of the channel being signed on, derived here so the two can
+        // never be given different values. Admission checks the same
+        // derivation, so a hand-rolled submission that disagrees is
+        // refused rather than believed.
+        ["vouch", api, key_file, channel, subject, rest @ ..] if rest.len() <= 1 => {
+            let op = ViewOp::new(OpKind::Vouch {
+                voucher: reviewer_operator(channel).into(),
+                subject: (*subject).into(),
+                note: rest.first().copied().unwrap_or("").into(),
+            });
+            submit(api, key_file, channel, &op, auth);
+        }
+        ["unvouch", api, key_file, channel, subject, reason] => {
+            let op = ViewOp::new(OpKind::WithdrawVouch {
+                voucher: reviewer_operator(channel).into(),
+                subject: (*subject).into(),
+                reason: (*reason).into(),
+            });
+            submit(api, key_file, channel, &op, auth);
         }
         ["slash", api, node_key_file, id, reviewer, reason] => {
             require_node_key_file(node_key_file);

@@ -75,5 +75,6 @@ mod t1_attack_edge;
 mod tls;
 mod ui;
 mod view_growth;
+mod vouches;
 mod window;
 mod workspace;

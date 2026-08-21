@@ -3444,8 +3444,9 @@ pub(crate) fn no_such_actor(chrome: Chrome<'_>) -> Rendered {
 ///
 /// It is deliberately a table of inputs and not a verdict. The question
 /// a reader brings is "should I trust this reviewer", and the honest
-/// answer today is four numbers and their units -- a score would imply
-/// D24's other three inputs exist.
+/// answer is the inputs and their units. Two of D24's four now exist --
+/// key age and the vouch graph (D65) -- and a score would still be a
+/// weighting of one against the other that nobody has measured.
 pub(crate) fn profile_page(
     channel: &str,
     profile: &serde_json::Value,
@@ -3549,11 +3550,62 @@ pub(crate) fn profile_page(
     );
     h.push_str("</section>");
 
+    // D65. The heading names the operator rather than the channel: a
+    // vouch is an edge between operator identities, so a page about
+    // `ops/agent` is showing what was vouched to `ops`, and a reader who
+    // had to work that out from a name that does not match the heading
+    // would reasonably read it as somebody else's record.
+    let operator = profile["vouches"]["operator"].as_str().unwrap_or(channel);
     h.push_str(
-        "<section><h2>vouches</h2><p class=\"empty\">None. Nothing on this node \
-         records one actor vouching for another, so there are none to show and no trust \
-         score to compute from them. D24 wants key age, vouches, scoped grants and bonds; \
-         only the first is persisted, and it is in the table above.</p></section>",
+        "<section><h2>vouches</h2><p class=\"lede\">Vouches are between operators. \
+                These are the ones held by <code>",
+    );
+    h.push_str(&esc(operator));
+    h.push_str("</code>.</p>");
+    match profile["vouches"]["received"].as_array() {
+        Some(received) if !received.is_empty() => {
+            h.push_str("<table><thead><tr><th>voucher</th><th>at</th><th>note</th>");
+            h.push_str("<th>direction</th></tr></thead><tbody>");
+            for edge in received {
+                h.push_str("<tr><td class=\"mono\"><a href=\"/p/");
+                h.push_str(&esc(edge["voucher"].as_str().unwrap_or("")));
+                h.push_str("\">");
+                h.push_str(&esc(edge["voucher"].as_str().unwrap_or("?")));
+                h.push_str("</a></td><td>");
+                h.push_str(&edge["at"].as_u64().unwrap_or_default().to_string());
+                h.push_str("</td><td>");
+                h.push_str(&esc(edge["note"].as_str().unwrap_or("")));
+                h.push_str("</td><td>");
+                // Shown, never scored. A mutual edge is the shape a
+                // farm of identities makes and also the shape a real
+                // team makes; which one a reader is looking at is their
+                // call, and it is not one this page can make for them.
+                if edge["reciprocal"].as_bool().unwrap_or_default() {
+                    h.push_str("<b class=\"tag\">mutual</b>");
+                } else {
+                    h.push_str("one way");
+                }
+                h.push_str("</td></tr>");
+            }
+            h.push_str("</tbody></table>");
+        }
+        _ => h.push_str(
+            "<p class=\"empty\">Nobody vouches for this operator on the records you may \
+             read. A vouch needs both ends to hold a key bound in the log, so a node whose \
+             operator has bound no keys has none to show.</p>",
+        ),
+    }
+    h.push_str("<p class=\"lede\">Vouched for ");
+    h.push_str(
+        &profile["vouches"]["given"]
+            .as_u64()
+            .unwrap_or_default()
+            .to_string(),
+    );
+    h.push_str(
+        " other operator(s). A vouch authorizes nothing on its own: no threshold \
+                reads it, and there is no score. D24 wants key age, vouches, scoped grants \
+                and bonds -- the last two are still absent.</p></section>",
     );
 
     Rendered {

@@ -218,10 +218,12 @@ class Choir:
         approvals slashed, checks they reported. It is a reading of
         `/api/view` and never a wider one -- two callers with different
         grants get different numbers about the same actor, which is the
-        point. `vouches` is present and null: D24 wants key age, vouches,
-        scoped grants and bonds for Sybil resistance, and only key age is
-        persisted today, so the input is reported rather than a score
-        invented from it
+        point. `vouches` names the operator whose graph it is (a vouch is
+        between operators, so `ops/agent` reads `ops`), who vouches for
+        them and whether each edge points both ways. D24 wants key age,
+        vouches, scoped grants and bonds for Sybil resistance; two of the
+        four exist and are reported as inputs, because a score would be a
+        weighting of one against the other that nobody has measured
 
         Arguments become the query string: channel.
         """

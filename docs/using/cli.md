@@ -34,7 +34,7 @@ The signed-operation API is the primary agent path: it carries actor identity an
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
 | `GET /api/schema` | This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17) |
 | `GET /api/search?q=X&in=code&repo=owner/name&rev=R&limit=N` | Search repository contents, file names or commit messages. Node-wide by default: every repository your credential may read, each at its own HEAD, which is why `rev` is accepted only alongside a single `repo`. A repository you were not granted is absent from the results and, asked for by name, is answered exactly as one that does not exist. Unindexed -- one `git grep` per repository -- so `limit` bounds what comes back while `matches` still counts everything found, and `truncated` says which happened. The same search the browser pages run, so the two cannot disagree about what a match is |
-| `GET /api/profile?channel=X` | One actor's standing, counted out of the view you may already see: the keys bound to them and how many ops ago, changes they own, reviews they were assigned and the verdicts they gave, approvals slashed, checks they reported. It is a reading of `/api/view` and never a wider one -- two callers with different grants get different numbers about the same actor, which is the point. `vouches` is present and null: D24 wants key age, vouches, scoped grants and bonds for Sybil resistance, and only key age is persisted today, so the input is reported rather than a score invented from it |
+| `GET /api/profile?channel=X` | One actor's standing, counted out of the view you may already see: the keys bound to them and how many ops ago, changes they own, reviews they were assigned and the verdicts they gave, approvals slashed, checks they reported. It is a reading of `/api/view` and never a wider one -- two callers with different grants get different numbers about the same actor, which is the point. `vouches` names the operator whose graph it is (a vouch is between operators, so `ops/agent` reads `ops`), who vouches for them and whether each edge points both ways. D24 wants key age, vouches, scoped grants and bonds for Sybil resistance; two of the four exist and are reported as inputs, because a score would be a weighting of one against the other that nobody has measured |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
@@ -102,6 +102,13 @@ The signed-operation API is the primary agent path: it carries actor identity an
   report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
 - `choir checks <api> <git-oid>`  
   every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+
+**trust**
+
+- `choir vouch <api> <key-file> <channel> <subject> [note]`  
+  vouch for another operator; both ends need a key bound in the log, it authorizes nothing on its own, and there is no score
+- `choir unvouch <api> <key-file> <channel> <subject> '<reason>'`  
+  withdraw a vouch; the edge leaves the view and both ops stay in the log, so vouching again is allowed and starts a fresh clock
 
 **reading the node**
 

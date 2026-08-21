@@ -18,3 +18,4 @@ mod resolution;
 mod snapshot;
 mod validate;
 mod view;
+mod vouches;

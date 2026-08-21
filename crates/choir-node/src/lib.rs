@@ -1526,7 +1526,19 @@ impl Node {
                 // it from disclosing a change or review the ACL withheld.
                 if request.url().split('?').next().unwrap_or("") == "/api/profile" {
                     let url = request.url().to_string();
-                    let channel = browse::param(&url, "channel").unwrap_or_default();
+                    // `raw_param` and not `param`: a channel legitimately
+                    // carries a `/`, and `param`'s decoder refuses one
+                    // because a decoded slash invents a path segment --
+                    // the same split `raw_param` exists for on a
+                    // repository name. Decoded by the function the `/p/`
+                    // page uses, so the two surfaces cannot come to
+                    // disagree about what a channel name is. Until this,
+                    // every agent channel -- `operator/agent`, which is
+                    // the ordinary shape here -- answered 400 on this
+                    // endpoint while its page rendered.
+                    let channel = browse::raw_param(&url, "channel")
+                        .and_then(browse::decode_channel)
+                        .unwrap_or_default();
                     let (status, body) = match (platform.as_deref(), channel.is_empty()) {
                         (_, true) => (
                             400,

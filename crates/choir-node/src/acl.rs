@@ -551,11 +551,15 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
         | OpKind::ViewedReview { id, .. }
         | OpKind::AssignReviewers { id, .. } => review_repo(id).into_iter().collect(),
         OpKind::RecordProvenance { subject, .. } => subject_repo(subject).into_iter().collect(),
-        // Node-scoped by nature: these name keys, or the whole ref
-        // state, and never one repository.
-        OpKind::BindKey { .. } | OpKind::RevokeKey { .. } | OpKind::RecordRefSnapshot { .. } => {
-            Vec::new()
-        }
+        // Node-scoped by nature: these name keys, operators, or the
+        // whole ref state, and never one repository. A vouch is about
+        // who somebody is, which is not a fact about any repository even
+        // when the only place the reader met them was one.
+        OpKind::BindKey { .. }
+        | OpKind::RevokeKey { .. }
+        | OpKind::Vouch { .. }
+        | OpKind::WithdrawVouch { .. }
+        | OpKind::RecordRefSnapshot { .. } => Vec::new(),
     };
     if repos.is_empty() {
         vec![Scope::Node]
@@ -567,16 +571,25 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
 /// The grant strength an op needs over the scopes [`op_scopes`] names.
 ///
 /// Write for everything that moves a ref or changes a review's shape,
-/// and read for the three ops that only report what their own signer
-/// thinks: a verdict, a comment, and a viewing receipt (D55).
+/// and read for the ops that only report what their own signer thinks:
+/// a verdict, a comment, a viewing receipt (D55), and a vouch or its
+/// withdrawal (D65).
 ///
-/// Those three are exactly the ops admission binds to the signing
-/// channel — a claimed attribution other than the channel is
-/// `reviewer_mismatch` — and the fold refuses a verdict from anybody
-/// the review does not list. Read is therefore the whole authority they
-/// need, and requiring write would mean handing push rights to every
-/// reviewer drawn onto a repository, which is the opposite of what
-/// asking for a review is for.
+/// Those are exactly the ops admission binds to the signing channel — a
+/// claimed attribution other than the channel is `reviewer_mismatch` —
+/// and the fold refuses a verdict from anybody the review does not list.
+/// Read is therefore the whole authority they need, and requiring write
+/// would mean handing push rights to every reviewer drawn onto a
+/// repository, which is the opposite of what asking for a review is for.
+///
+/// A vouch joins them for the same reason and one more. It is node-
+/// scoped, so `write` here would mean node-wide write: the web of trust
+/// would be authorable only by the handful of identities who can already
+/// move any ref on the node, which is not a web. What stops it being
+/// free is not this level but [`View::is_bound_operator`] — both ends of
+/// an edge need a binding, and only the node authors those.
+///
+/// [`View::is_bound_operator`]: choir_view::View::is_bound_operator
 ///
 /// Exhaustive on purpose, like [`op_scopes`]: a new [`OpKind`] variant
 /// will not compile until somebody says which side of this line it
@@ -584,9 +597,11 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
 #[must_use]
 pub fn op_level(kind: &OpKind) -> Level {
     match kind {
-        OpKind::PostVerdict { .. } | OpKind::PostComment { .. } | OpKind::ViewedReview { .. } => {
-            Level::Read
-        }
+        OpKind::PostVerdict { .. }
+        | OpKind::PostComment { .. }
+        | OpKind::ViewedReview { .. }
+        | OpKind::Vouch { .. }
+        | OpKind::WithdrawVouch { .. } => Level::Read,
         OpKind::SetRef { .. }
         | OpKind::DeleteRef { .. }
         | OpKind::Submit { .. }
@@ -797,7 +812,7 @@ pub enum Disclosure {
 /// `every_section_the_view_serves_is_classified` in `tests/it/acl.rs`
 /// makes it loud, comparing this table against a view a real node
 /// served rather than against a sample written from memory.
-pub const SECTIONS: [(&str, Disclosure); 25] = [
+pub const SECTIONS: [(&str, Disclosure); 27] = [
     ("log", Disclosure::Public),
     ("build", Disclosure::Public),
     // [`crate::bound`]'s marks. Public because of *when* they are
@@ -813,10 +828,19 @@ pub const SECTIONS: [(&str, Disclosure); 25] = [
     ("reviews_omitted", Disclosure::Public),
     ("changes_omitted", Disclosure::Public),
     ("bindings_omitted", Disclosure::Public),
+    ("vouches_omitted", Disclosure::Public),
     ("pending_omitted", Disclosure::Public),
     ("checks_omitted", Disclosure::Public),
     ("snapshot", Disclosure::NodeWide),
     ("bindings", Disclosure::NodeWide),
+    // Node-wide for the same reason `bindings` is, and it needs saying
+    // because a vouch reads like public reputation: the graph is a map
+    // of who the node's operators are and who stands behind whom, which
+    // is exactly the document a reader granted one repository was not
+    // given. A profile derives from the narrowed view, so such a reader
+    // is told there are no vouches to see rather than shown somebody
+    // else's.
+    ("vouches", Disclosure::NodeWide),
     ("concentration", Disclosure::NodeWide),
     ("view_growth", Disclosure::NodeWide),
     ("newcomer_harm", Disclosure::NodeWide),
@@ -1306,6 +1330,7 @@ mod tests {
             },
             "snapshot": { "id": "b3-snap" },
             "bindings": { "k1": { "operator": "someone" } },
+            "vouches": { "someone": { "another": { "at": 4, "note": "" } } },
             "concentration": { "as_of_seq": 9 },
             "view_growth": { "entries": 9 },
             "newcomer_harm": {},

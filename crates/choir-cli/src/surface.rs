@@ -104,6 +104,7 @@ pub const GROUPS: &[&str] = &[
     "changing code",
     "review",
     "checks",
+    "trust",
     "reading the node",
     "operating a node",
 ];
@@ -442,6 +443,22 @@ pub const COMMANDS: &[Command] = &[
         group: "review",
     },
     Command {
+        name: "vouch",
+        args: "<api> <key-file> <channel> <subject> [note]",
+        summary: "vouch for another operator; both ends need a key bound in the log, it \
+                  authorizes nothing on its own, and there is no score",
+        agent_facing: true,
+        group: "trust",
+    },
+    Command {
+        name: "unvouch",
+        args: "<api> <key-file> <channel> <subject> '<reason>'",
+        summary: "withdraw a vouch; the edge leaves the view and both ops stay in the log, \
+                  so vouching again is allowed and starts a fresh clock",
+        agent_facing: true,
+        group: "trust",
+    },
+    Command {
         name: "slash",
         args: "<api> <node-key-file> <id> <reviewer> '<reason>'",
         summary: "invalidate one reviewer's approval; operator-only and never moves a ref",
@@ -735,9 +752,11 @@ pub const ENDPOINTS: &[Endpoint] = &[
                   assigned and the verdicts they gave, approvals slashed, checks they \
                   reported. It is a reading of `/api/view` and never a wider one -- two callers \
                   with different grants get different numbers about the same actor, which is \
-                  the point. `vouches` is present and null: D24 wants key age, vouches, scoped \
-                  grants and bonds for Sybil resistance, and only key age is persisted today, \
-                  so the input is reported rather than a score invented from it",
+                  the point. `vouches` names the operator whose graph it is (a vouch is between \
+                  operators, so `ops/agent` reads `ops`), who vouches for them and whether each \
+                  edge points both ways. D24 wants key age, vouches, scoped grants and bonds for \
+                  Sybil resistance; two of the four exist and are reported as inputs, because a \
+                  score would be a weighting of one against the other that nobody has measured",
         mcp: Some(McpTool {
             name: "choir_profile",
             input_schema: PROFILE_MCP_SCHEMA,

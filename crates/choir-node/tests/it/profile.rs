@@ -105,9 +105,13 @@ fn a_profile_counts_what_the_log_records_and_says_when_it_knows_nothing() {
     assert_eq!(ana["reviews"]["assigned"], 2, "{ana}");
     assert_eq!(ana["reviews"]["approved"], 2, "{ana}");
     assert_eq!(ana["reviews"]["changes_requested"], 0, "{ana}");
-    // Named and null rather than missing: a reader who finds no vouches
-    // should learn there are none to find, not that this actor has none.
-    assert!(ana["vouches"].is_null(), "{ana}");
+    // Always an object, and `operator` always present (D65): an empty
+    // `received` says "nobody vouches for this operator on the records
+    // you may read", which is a different sentence from "this node
+    // cannot record vouches" and must not share a rendering with it.
+    assert_eq!(ana["vouches"]["operator"], "ana", "{ana}");
+    assert_eq!(ana["vouches"]["received"].as_array().map(Vec::len), Some(0));
+    assert_eq!(ana["vouches"]["given"], 0, "{ana}");
 
     let (code, nobody) = curl(&[
         "-u",

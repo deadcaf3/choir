@@ -1,10 +1,17 @@
 //! D24 T1 attack-edge rehearsal.
 //!
-//! Choir does not yet persist key age, vouches, scoped privilege grants or
-//! bonds, so the numeric T1 tripwire is not measurable. This test fixes the
-//! boundary that does exist: operator registration admits a fresh key
-//! immediately, while an existing protected ref still needs one exact review
-//! carrying approval weight from two distinct operators.
+//! Of D24's four T1 inputs, key age (D24) and the vouch graph (D65) are
+//! persisted; scoped privilege grants and bonds are not, so the numeric
+//! T1 tripwire is still not measurable. This test fixes the boundary
+//! that does exist: operator registration admits a fresh key
+//! immediately, while an existing protected ref still needs one exact
+//! review carrying approval weight from two distinct operators.
+//!
+//! Persisting a vouch deliberately did not move that boundary, and the
+//! rehearsal now carries a standing vouch so that claim is asserted
+//! rather than assumed. An operator every other operator endorses gets
+//! exactly what an operator nobody has heard of gets: registration
+//! admits it, and the protected ref still refuses it.
 
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::{hex_decode, hex_encode};
@@ -46,6 +53,7 @@ fn fresh_key_is_admitted_by_registration_not_age_or_vouches() {
     let protected_ref = "repo.git:refs/heads/main";
     std::fs::write(&refs_file, format!("{protected_ref}\n")).unwrap();
 
+    let node_key = ActorKey::generate();
     let mut registry = Registry::new();
     registry.register(&reviewer_a.public_key_bytes()).unwrap();
     registry.register(&reviewer_b.public_key_bytes()).unwrap();
@@ -54,7 +62,7 @@ fn fresh_key_is_admitted_by_registration_not_age_or_vouches() {
         Platform::start_reloading(
             registry,
             Box::new(MemLog::new()),
-            ActorKey::generate(),
+            ActorKey::from_secret_bytes(&node_key.secret_bytes()),
             Some(keys_file.clone()),
         )
         .unwrap()
@@ -88,8 +96,9 @@ fn fresh_key_is_admitted_by_registration_not_age_or_vouches() {
     assert_eq!(code, 400, "an unregistered key wrote a ref: {resp}");
     assert_eq!(resp["code"], "unknown_key", "{resp}");
 
-    // Registration is the whole standing key gate today. There is no age,
-    // vouch, activity or bond record to wait for or evaluate.
+    // Registration is the whole standing key gate today. There is no
+    // activity or bond record to wait for, and the vouch placed below
+    // shows the one input that now exists is not consulted either.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(
         &keys_file,
@@ -102,6 +111,29 @@ fn fresh_key_is_admitted_by_registration_not_age_or_vouches() {
         resp["seq"], 0,
         "its first accepted activity must be this write"
     );
+
+    // Give the fresh operator the best standing the graph can express:
+    // an endorsement from every reviewer on the node, which is the whole
+    // population here. D65 says that authorizes nothing, and the two
+    // assertions after it are what "nothing" has to mean.
+    for operator in ["requester", "reviewer-a", "reviewer-b"] {
+        let bind = ViewOp::new(OpKind::BindKey {
+            operator: operator.into(),
+            key: ContentHash::blake3(format!("{operator} key").as_bytes()),
+            channel: Some(format!("{operator}/agent")),
+        });
+        let (code, resp) = submit(&node_key, "node/bind", &bind);
+        assert_eq!(code, 200, "binding {operator}: {resp}");
+    }
+    for (channel, key) in reviewers {
+        let vouch = ViewOp::new(OpKind::Vouch {
+            voucher: channel.split('/').next().unwrap().into(),
+            subject: "requester".into(),
+            note: "known good".into(),
+        });
+        let (code, resp) = submit(key, channel, &vouch);
+        assert_eq!(code, 200, "vouch from {channel}: {resp}");
+    }
 
     // A protected ref can be created immediately because there is no prior
     // history to hijack. Advancing that ref is a separate, per-change gate.
@@ -119,7 +151,10 @@ fn fresh_key_is_admitted_by_registration_not_age_or_vouches() {
         prev: Some(base),
     });
     let (code, resp) = submit(&fresh, fresh_channel, &advance);
-    assert_eq!(code, 400, "fresh key bypassed protected landing: {resp}");
+    assert_eq!(
+        code, 400,
+        "a vouched key bypassed protected landing: {resp}"
+    );
     assert_eq!(resp["code"], "review_required", "{resp}");
 
     let review = ViewOp::new(OpKind::RequestReview {

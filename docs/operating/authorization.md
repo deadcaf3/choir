@@ -41,9 +41,11 @@ myself     @node  write
 
 `*` covers every repository and never covers `@node`. `@node` is the node itself: `auditor` reads `/api/log` and `/api/ref-agreement`, which are gated rather than filtered because the log is a hash chain and the attestation covers the complete ref state. `@node write` is needed for ops that name no repository, such as key bindings.
 
+Vouching (D65) is the one node-wide op that needs only `@node auditor`. It names no repository, and it reports what its own signer thinks rather than changing anything a repository holds -- the same reasoning that puts a verdict at `read`. Requiring `write` would mean the web of trust could only be written by identities that can already move any ref on the node, which is not a web. The consequence is worth stating plainly: on an ACL-gated node, an agent granted a single repository cannot vouch and cannot see the graph. If you want somebody in it, grant them `@node auditor`, which is read-only.
+
 Fail closed: with the flag set, anything not granted is refused. A repository you cannot read answers `404` rather than `403`, so a denial never confirms that it exists. The flag requires `--auth-file`, since an ACL over anonymous requests would grade everyone the same. A malformed file refuses to start; a malformed *edit* keeps the previous table and complains, so a typo cannot silently revoke access.
 
-`/api/view`, `/api/reviews` and the browser page are narrowed to the repositories a credential may read, so a grant on one repository does not disclose that the others exist. Node-wide sections of the view (the ref-state attestation, key bindings, and the concentration, growth, newcomer and lag telemetry) need `@node auditor`; the log head and build stamp reach everyone, since a writer needs them to submit. A review you were assigned to still reaches you, on any repository; that is what an invitation is.
+`/api/view`, `/api/reviews` and the browser page are narrowed to the repositories a credential may read, so a grant on one repository does not disclose that the others exist. Node-wide sections of the view (the ref-state attestation, key bindings, the vouch graph, and the concentration, growth, newcomer and lag telemetry) need `@node auditor`; the log head and build stamp reach everyone, since a writer needs them to submit. A review you were assigned to still reaches you, on any repository; that is what an invitation is.
 
 ## Repository ownership (D42)
 

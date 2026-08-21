@@ -38,6 +38,8 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
 - `choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'` — say something on a review; append-only and permanent, and the comment id is your retry identity
 - `choir viewed <api> <key-file> <viewer> <review-id>` — record that you read a review, so its author can tell "reviewed and ignored" from "nobody looked"; first read only, resubmitting is refused
+- `choir vouch <api> <key-file> <channel> <subject> [note]` — vouch for another operator; both ends need a key bound in the log, it authorizes nothing on its own, and there is no score
+- `choir unvouch <api> <key-file> <channel> <subject> '<reason>'` — withdraw a vouch; the edge leaves the view and both ops stay in the log, so vouching again is allowed and starts a fresh clock
 - `choir appeal <api> <attempt-id>` — appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]` — report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check

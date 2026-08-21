@@ -201,6 +201,18 @@ choir_viewed() {
 	choir_run viewed "$@"
 }
 
+# choir vouch <api> <key-file> <channel> <subject> [note]
+#   vouch for another operator; both ends need a key bound in the log, it authorizes nothing on its own, and there is no score
+choir_vouch() {
+	choir_run vouch "$@"
+}
+
+# choir unvouch <api> <key-file> <channel> <subject> '<reason>'
+#   withdraw a vouch; the edge leaves the view and both ops stay in the log, so vouching again is allowed and starts a fresh clock
+choir_unvouch() {
+	choir_run unvouch "$@"
+}
+
 # choir appeal <api> <attempt-id>
 #   appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 choir_appeal() {

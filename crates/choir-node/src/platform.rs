@@ -1696,7 +1696,7 @@ fn view_growth_json(
     refs: &serde_json::Value,
     reviews: &serde_json::Value,
     provenance: &serde_json::Value,
-    bindings: &serde_json::Value,
+    measured: &[(&str, &serde_json::Value)],
     as_of_seq: Option<u64>,
 ) -> serde_json::Value {
     let serialized_bytes = |value: &serde_json::Value| {
@@ -1704,30 +1704,39 @@ fn view_growth_json(
             .expect("materialized view JSON is always serializable")
             .len()
     };
-    // `bindings` is deliberately absent here. The four sections below are
-    // the authoritative view and `total_authoritative_view` is a tracked
-    // series; folding a fifth section in would move every past reading and
-    // destroy comparability. It is still *measured* — see the sibling byte
-    // count — because an append-only map nobody counts is how a view grows
-    // without anyone noticing.
+    // `measured` is deliberately absent from the total below. The four
+    // sections passed by name are the authoritative view and
+    // `total_authoritative_view` is a tracked series; folding a fifth
+    // section in would move every past reading and destroy comparability.
+    // They are still *measured* — see the sibling byte counts — because a
+    // map nobody counts is how a view grows without anyone noticing.
+    //
+    // A slice rather than one argument each, so the next section that
+    // has to be watched without being totalled costs a call site and not
+    // a signature. The two shapes are not interchangeable: an argument
+    // added to the authoritative four changes what a historical number
+    // means, and this one cannot.
     let authoritative = serde_json::json!({
         "workspaces": workspaces,
         "refs": refs,
         "reviews": reviews,
         "provenance": provenance,
     });
+    let mut bytes = serde_json::json!({
+        "workspaces": serialized_bytes(workspaces),
+        "refs": serialized_bytes(refs),
+        "reviews": serialized_bytes(reviews),
+        "provenance": serialized_bytes(provenance),
+        "total_authoritative_view": serialized_bytes(&authoritative),
+    });
+    for (name, value) in measured {
+        bytes[*name] = serde_json::json!(serialized_bytes(value));
+    }
     serde_json::json!({
         "format_version": 1,
         "as_of_seq": as_of_seq,
         "counts": counts,
-        "serialized_bytes": {
-            "workspaces": serialized_bytes(workspaces),
-            "refs": serialized_bytes(refs),
-            "reviews": serialized_bytes(reviews),
-            "provenance": serialized_bytes(provenance),
-            "total_authoritative_view": serialized_bytes(&authoritative),
-            "bindings": serialized_bytes(bindings),
-        },
+        "serialized_bytes": bytes,
     })
 }
 
@@ -1746,6 +1755,11 @@ fn view_growth_counts(view: &View) -> serde_json::Value {
         .values()
         .filter(|binding| binding.is_revoked())
         .count();
+    // Edges, not subjects: the outer map is what paging bounds, and the
+    // inner one is where the graph actually grows. Counting rows would
+    // report one number for an operator with a single vouch and for one
+    // every operator on the node stands behind.
+    let vouch_edges = view.vouches.values().map(BTreeMap::len).sum::<usize>();
     serde_json::json!({
         "workspaces": view.workspaces.len(),
         "refs": view.refs.len(),
@@ -1756,6 +1770,8 @@ fn view_growth_counts(view: &View) -> serde_json::Value {
         "provenance_records": provenance_records,
         "bindings": view.bindings.len(),
         "revoked_bindings": revoked_bindings,
+        "vouch_subjects": view.vouches.len(),
+        "vouch_edges": vouch_edges,
     })
 }
 
@@ -2875,6 +2891,26 @@ impl SubmitPolicy for ChoirPolicy {
                 .encode());
             }
         }
+        // A vouch's claimed voucher is bound the same way, one level up:
+        // the payload names an *operator* and the submission is signed on
+        // a *channel*, so the comparison is against the channel's
+        // operator prefix rather than the channel itself. `ops/agent` and
+        // `ops` are the same operator and either may sign; `rival` may
+        // not, and an unchecked `voucher` is precisely a Sybil writing
+        // somebody else's endorsements (D65).
+        if let OpKind::Vouch { voucher, .. } | OpKind::WithdrawVouch { voucher, .. } = &op.kind {
+            let operator = reviewer_operator(&sub.channel);
+            if voucher != operator {
+                return Err(Rejection::new(
+                    Code::ReviewerMismatch,
+                    "a vouch's voucher must be the operator of the channel it was signed on",
+                    "resubmit on a channel belonging to that operator: `choir vouch` derives \
+                     the voucher from the channel by construction",
+                )
+                .with_states(Some(operator.to_string()), Some(voucher.clone()))
+                .encode());
+            }
+        }
         // ...and the channel itself must belong to the signing key, or
         // the check above only proves a claim is self-consistent, not
         // that it is true. Review ops only: see `channel_is_owned`.
@@ -2884,6 +2920,8 @@ impl SubmitPolicy for ChoirPolicy {
                 | OpKind::RequestReview { .. }
                 | OpKind::PostComment { .. }
                 | OpKind::ViewedReview { .. }
+                | OpKind::Vouch { .. }
+                | OpKind::WithdrawVouch { .. }
         ) {
             self.channel_is_owned(&actor_id, &sub.channel)?;
         }
@@ -5426,6 +5464,10 @@ impl Platform {
                 // `bindings` instead, for the same reason.
                 let checks = serde_json::json!(&view.checks);
                 let bindings = serde_json::json!(bindings);
+                // D65. Serialized straight from the fold's own maps:
+                // there is no projection to write, and a hand-built one
+                // would be a second place for the shape to drift.
+                let vouches = serde_json::json!(&view.vouches);
                 let counts = view_growth_counts(&view);
                 let as_of_seq = concentration_state.as_of_seq;
                 // T3 attribution reads the durable record, not the keys
@@ -5455,7 +5497,7 @@ impl Platform {
                     &refs,
                     &reviews,
                     &provenance,
-                    &bindings,
+                    &[("bindings", &bindings), ("vouches", &vouches)],
                     as_of_seq,
                 );
                 let newcomer_harm = newcomer_harm_json(self.newcomer_audit.as_ref());
@@ -5496,6 +5538,7 @@ impl Platform {
                     "provenance": provenance,
                     "checks": checks,
                     "bindings": bindings,
+                    "vouches": vouches,
                     "concentration": concentration,
                     "view_growth": view_growth,
                     "newcomer_harm": newcomer_harm,

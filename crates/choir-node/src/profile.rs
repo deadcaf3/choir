@@ -13,14 +13,26 @@
 //! second thing to keep right, and the first time the two disagreed the
 //! profile would be the one that leaked.
 //!
-//! What is deliberately absent is vouches. D24's Sybil resistance wants
-//! key age, vouches, scoped grants and bonds; only the first of those is
-//! persisted today, as [`KeyBinding::bound_at`], and this page reports it
-//! rather than pretending the rest exist. A profile that showed a
-//! trust score computed from one input would be worse than one that
-//! shows the input.
+//! D24's Sybil resistance wants key age, vouches, scoped grants and
+//! bonds. Two of the four are persisted now — key age as
+//! [`KeyBinding::bound_at`], and the vouch graph as [`View::vouches`]
+//! (D65) — and this reads both. Scoped grants and bonds still do not
+//! exist, and are still named rather than implied.
+//!
+//! There is deliberately no score. Two inputs are not more scoreable
+//! than one: any weighting of age against vouches is a claim about how
+//! much an endorsement is worth, which nothing here has measured, and a
+//! number would read as that measurement while being a guess. The
+//! reader gets the inputs.
+//!
+//! **Vouches are operator-scoped, and the profile says so.** They are
+//! edges between operator identities, so a page about the channel
+//! `ops/agent` shows what was vouched to `ops` — which is the truth, and
+//! is why the operator is named in the section rather than left for a
+//! reader to infer from a name that does not match the heading.
 //!
 //! [`KeyBinding::bound_at`]: choir_view::KeyBinding::bound_at
+//! [`View::vouches`]: choir_view::View::vouches
 //!
 //! # Examples
 //!
@@ -37,12 +49,19 @@
 //!     "changes": { "c1": { "owner": "alice" } },
 //!     "reviews": {},
 //!     "checks": {},
+//!     // Subject -> voucher, the direction the fold stores. `bob`
+//!     // vouches for `alice`, and `alice` does not vouch back.
+//!     "vouches": { "alice": { "bob": { "at": 55, "note": "shipped the parser" } } },
 //! });
 //! let profile = choir_node::profile::of(&view, "alice");
 //! assert_eq!(profile["channel"], "alice");
 //! assert_eq!(profile["changes"]["owned"], 1);
 //! // 100 ops have been sequenced, 40 of them before this key existed.
 //! assert_eq!(profile["keys"][0]["ops_since_binding"], 60);
+//! assert_eq!(profile["vouches"]["operator"], "alice");
+//! assert_eq!(profile["vouches"]["received"][0]["voucher"], "bob");
+//! assert_eq!(profile["vouches"]["received"][0]["reciprocal"], false);
+//! assert_eq!(profile["vouches"]["given"], 0);
 //! ```
 
 /// Counts one actor's standing out of a view body.
@@ -143,7 +162,44 @@ pub fn of(view: &serde_json::Value, channel: &str) -> serde_json::Value {
         }
     }
 
-    let known = !keys.is_empty() || owned > 0 || assigned > 0 || reported > 0 || commented > 0;
+    // D65. Operator-scoped, so an agent channel reads its operator's
+    // graph: `ops/agent` and `ops` are one identity here, and a page
+    // that showed nothing for the agent would be hiding the record
+    // rather than reporting it.
+    let operator = channel.split('/').next().unwrap_or(channel);
+    let mut received: Vec<serde_json::Value> = Vec::new();
+    if let Some(from) = view["vouches"][operator].as_object() {
+        for (voucher, edge) in from {
+            received.push(serde_json::json!({
+                "voucher": voucher,
+                "at": edge["at"].as_u64().unwrap_or_default(),
+                "note": edge["note"],
+                // The cheapest Sybil tell there is, and a fact rather
+                // than a judgement: a ring of identities vouching for
+                // each other is the shape a farm makes, and it looks
+                // identical to a real team until you can see which
+                // edges point both ways.
+                "reciprocal": view["vouches"][voucher.as_str()][operator].is_object(),
+            }));
+        }
+    }
+    received.sort_by_key(|edge| edge["at"].as_u64().unwrap_or_default());
+    let given = view["vouches"].as_object().map_or(0, |subjects| {
+        subjects
+            .values()
+            .filter(|from| from[operator].is_object())
+            .count()
+    });
+
+    // `received` earns a place in this disjunction because a binding
+    // carrying no channel never reaches `keys`, so an operator can be
+    // vouched for here and hold nothing above.
+    let known = !keys.is_empty()
+        || owned > 0
+        || assigned > 0
+        || reported > 0
+        || commented > 0
+        || !received.is_empty();
 
     serde_json::json!({
         "channel": channel,
@@ -159,9 +215,15 @@ pub fn of(view: &serde_json::Value, channel: &str) -> serde_json::Value {
             "first_verdict_at": first_verdict,
         },
         "checks": { "reported": reported, "failed": failed },
-        // Named rather than omitted. A reader who does not find vouches
-        // here should learn that there are none to find, not conclude
-        // this actor has none.
-        "vouches": serde_json::Value::Null,
+        // Always an object, never null, and `operator` is always
+        // present: an empty `received` says "nobody vouches for this
+        // operator on the records you may read", which is a different
+        // sentence from "this node cannot record vouches" and the two
+        // must not share a rendering.
+        "vouches": {
+            "operator": operator,
+            "received": received,
+            "given": given,
+        },
     })
 }
