@@ -10,13 +10,25 @@
 
 use choir_cli::mcp::{serve, HttpClient};
 
+const USAGE: &str = "usage: choir-mcp <api> [--auth-file <path>] [--auth-user <name>]
+
+  Speaks MCP over stdin and stdout. Point an agent's MCP configuration at
+  it; it is not meant to be run at a prompt.
+";
+
 fn usage() -> ! {
-    eprintln!("usage: choir-mcp <api> [--auth-file <path>] [--auth-user <name>]");
+    eprint!("{USAGE}");
     std::process::exit(2);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Before the URL check, or `--help` is read as an address and
+    // answered with a complaint about its scheme.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        std::process::exit(0);
+    }
     let Some(api) = args.first() else {
         usage();
     };

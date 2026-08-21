@@ -43,12 +43,22 @@ fn crate_sources() -> Vec<(String, String)> {
 /// Nothing in the crate opens an editor or asks whether it has a
 /// terminal.
 ///
-/// `is_terminal` is on the list even though it is the *correct* way to
-/// branch on having a TTY. A command that asks has a branch for the
-/// answer, and the branch that runs on "yes" is the one that prompts.
-/// There is no such branch here and there should be no reason to add
-/// one: this binary behaves identically either way, which is the
-/// property being locked in.
+/// `is_terminal` was on this list, banned outright, on the reasoning
+/// that a command which asks has a branch for the answer and the branch
+/// taken on "yes" is the one that prompts.
+///
+/// It is now permitted in exactly one file. `style.rs` asks so that it
+/// can decide whether to emit colour, which is the one question about a
+/// terminal that has no prompting branch behind it: both answers print
+/// the same words and exit the same way, and the only difference is
+/// whether four escape sequences surround them. Data written to stdout
+/// is never styled at all, so a pipeline reads identical bytes either
+/// way.
+///
+/// The exemption is by file rather than by pattern because a pattern
+/// exemption would let the next `is_terminal` in, wherever it appeared.
+/// A second file asking the question fails this test, and should: that
+/// is where a prompt would go.
 #[test]
 fn no_source_reaches_for_a_terminal() {
     let banned = [
@@ -60,8 +70,12 @@ fn no_source_reaches_for_a_terminal() {
         "rpassword",
         "dialoguer",
     ];
+    // Colour, and nothing else. Named here so that widening it is an
+    // edit to this list rather than to the rule.
+    let terminal_probes_allowed_in = "style.rs";
     let mut findings = Vec::new();
     for (path, text) in crate_sources() {
+        let colour_module = path.ends_with(terminal_probes_allowed_in);
         for (number, line) in text.lines().enumerate() {
             // The rule is about code. This test names every pattern it
             // bans, and so does the module doc above it.
@@ -70,7 +84,12 @@ fn no_source_reaches_for_a_terminal() {
                 continue;
             }
             for needle in banned {
-                if line.contains(needle) {
+                // Only the terminal probe is exempted, and only there.
+                // A prompt primitive in the colour module is still a
+                // finding -- that is the failure the exemption must not
+                // create a hole for.
+                let exempt = colour_module && matches!(needle, "is_terminal" | "IsTerminal");
+                if line.contains(needle) && !exempt {
                     findings.push(format!("{path}:{}: {needle}", number + 1));
                 }
             }

@@ -74,8 +74,11 @@ fn without_a_config_the_url_is_still_required() {
         is_usage_error(&out),
         "a missing node was accepted rather than refused"
     );
+    // The refusal names the arguments `reviews` takes, rather than the
+    // whole command index: the reader knows which command they wanted,
+    // and what they are missing is that command's spec.
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("usage:"),
+        String::from_utf8_lossy(&out.stderr).contains("choir reviews <api>"),
         "the refusal does not say how to invoke it"
     );
 }

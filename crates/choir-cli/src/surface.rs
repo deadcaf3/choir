@@ -57,6 +57,8 @@ pub const AUTH_OPTIONS: &str = "[--auth-file <path>] [--auth-user <name>]";
 /// in the document from its first byte, before anyone depends on it.
 pub const API_VERSION: u32 = 1;
 
+use crate::style::Style;
+
 /// Wire names this API still accepts and no longer documents, with what
 /// replaced them.
 ///
@@ -769,29 +771,49 @@ pub fn endpoint(method: &str, path: &str) -> Option<&'static Endpoint> {
 /// for one command, which is the question anybody actually has.
 #[must_use]
 pub fn usage() -> String {
+    usage_in(Style::plain())
+}
+
+/// [`usage`], styled for a terminal.
+///
+/// One renderer, two callers: the plain form is what the README and the
+/// tests read, and a second copy of this layout would be a second place
+/// for the index to be wrong.
+#[must_use]
+pub fn usage_in(style: Style) -> String {
     let width = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
-    let mut out = String::from("usage:\n  choir <command> [args]\n");
+    let mut out = format!("{}\n  choir <command> [args]\n", style.bold("usage:"));
     out.push_str(&format!("  choir {AUTH_OPTIONS} <command> [args]\n"));
     out.push_str("  choir <command> --help\n");
     for group in GROUPS {
-        out.push_str(&format!("\n{group}\n"));
+        out.push_str(&format!("\n{}\n", style.bold(group)));
         for c in COMMANDS.iter().filter(|c| &c.group == group) {
             // First clause only. A summary here earns one line, and the
             // clauses after the first are the caveats -- which belong on
             // the command's own help, next to the argument they qualify.
             let short = first_clause(c.summary, 58);
-            out.push_str(&format!("  {:width$}  {}\n", c.name, short));
+            // Padded before painting: an escape sequence has width in
+            // bytes and none on screen, so `{:width$}` over a painted
+            // name indents every line differently.
+            let name = format!("{:width$}", c.name);
+            out.push_str(&format!("  {}  {}\n", style.cyan(&name), style.dim(&short)));
         }
     }
-    out.push_str(
-        "\nMost commands take the node's URL as their first argument. Put it in \n\
-         `.choir/config` as `node = <url>`, in this directory or any parent, and \n\
-         it is filled in when you leave it out.\n",
-    );
-    out.push_str(
-        "\nExit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), \
-         2 usage error.\n",
-    );
+    out.push_str(&format!(
+        "\n{}\n",
+        style.dim(
+            "Most commands take the node's URL as their first argument. Put it in \n\
+             `.choir/config` as `node = <url>`, in this directory or any parent, and \n\
+             it is filled in when you leave it out."
+        )
+    ));
+    out.push_str(&format!(
+        "\n{}\n",
+        style.dim(
+            "Exit codes: 0 accepted, 1 the node rejected (its JSON error body is \
+             printed), 2 usage error."
+        )
+    ));
     out
 }
 
@@ -828,8 +850,14 @@ fn first_clause(summary: &str, max: usize) -> String {
 /// The help for one command: its full spec and its whole summary.
 #[must_use]
 pub fn command_help(name: &str) -> Option<String> {
+    command_help_in(name, Style::plain())
+}
+
+/// [`command_help`], styled for a terminal.
+#[must_use]
+pub fn command_help_in(name: &str, style: Style) -> Option<String> {
     let c = COMMANDS.iter().find(|c| c.name == name)?;
-    let mut out = format!("  choir {} {}\n\n", c.name, c.args);
+    let mut out = format!("  choir {} {}\n\n", style.cyan(c.name), style.dim(c.args));
     // The summary's clauses, one per line. They are written as one
     // sentence of several clauses, and read far better as a short list
     // than as a paragraph wrapped by the terminal.
@@ -842,10 +870,13 @@ pub fn command_help(name: &str) -> Option<String> {
         }
     }
     if c.args.starts_with("<api>") {
-        out.push_str(
-            "\n  <api> may be omitted when `.choir/config` names a node, here or in\n  \
-             any parent directory.\n",
-        );
+        out.push_str(&format!(
+            "\n  {}\n",
+            style.dim(
+                "<api> may be omitted when `.choir/config` names a node, here or in\n  \
+                 any parent directory."
+            )
+        ));
     }
     Some(out)
 }

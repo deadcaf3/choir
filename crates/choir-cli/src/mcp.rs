@@ -212,14 +212,18 @@ impl HttpClient {
             .map_err(|_| "could not wait for curl".to_string())?;
         drop(body_file);
         if !output.status.success() {
-            // Name the likeliest fix, not just the failure: on a
-            // tunnelled operator machine the usual cause is an expired
-            // SSH forward, and the operator retyping the same command
-            // at a dead port three times was measured, not imagined.
+            // Name the likeliest fix, not just the failure. Two
+            // readers reach this line and they are not the same person:
+            // whoever typed the URL, who needs to check it and the
+            // node, and the operator on a tunnelled machine, whose
+            // usual cause is an expired SSH forward -- measured, from
+            // retyping the same command at a dead port three times.
+            // This used to address only the second, and sent everyone
+            // else to a script they do not have.
             return Err(
-                "curl could not reach the choir node (if the node is remote, \
-                 the tunnel may have expired: run `./choirctl status` \
-                 and retry)"
+                "could not reach the choir node: check the URL, and that the node \
+                 is running (operators on a tunnelled machine: the SSH forward may \
+                 have expired)"
                     .to_string(),
             );
         }

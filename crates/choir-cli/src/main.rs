@@ -55,10 +55,100 @@ impl AuthOptions<'_> {
     }
 }
 
+/// A short human summary on stderr, when a person is looking.
+///
+/// Never on stdout. The commands that call this answer with JSON, and
+/// that JSON is read by agents, `jq`, and the tests -- so it stays byte
+/// for byte what it was, whatever is attached. This is the second
+/// audience: someone at a prompt who has just run their first choir
+/// command and would otherwise be reading a brace.
+///
+/// Nothing here is load-bearing. A reader who redirects stderr loses
+/// decoration and no information: every field printed is already in the
+/// document on stdout.
+fn note(heading: &str, rows: &[(&str, String)]) {
+    let style = choir_cli::style::Style::for_stderr();
+    if !style.is_painted() {
+        return;
+    }
+    let width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    eprintln!("\n  {}", style.green(heading));
+    for (key, value) in rows {
+        let key = format!("{key:width$}");
+        eprintln!("  {}  {value}", style.dim(&key));
+    }
+    eprintln!();
+}
+
+/// Both spellings of the request for help.
+///
+/// `-h` is what a reader tries when `--help` has not occurred to them
+/// yet, and answering it with "not a choir command" refuses the one
+/// question every command line has to answer.
+fn is_help(argument: &str) -> bool {
+    argument == "--help" || argument == "-h"
+}
+
+/// The command word this invocation was reaching for, if any.
+///
+/// Reads the process arguments again rather than being handed them:
+/// [`usage`] is called from a dozen places, most of them deep inside a
+/// command's own flag parsing where the name has long since been
+/// destructured away, and threading it through all of them would be a
+/// dozen chances to pass the wrong one.
+fn invoked_command() -> Option<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // The same two-argument skip [`parse_auth`] performs, so that
+    // `choir --auth-file f frobnicate` names `frobnicate` and not `f`.
+    let mut index = 0;
+    while matches!(
+        args.get(index).map(String::as_str),
+        Some("--auth-file" | "--auth-user")
+    ) {
+        index += 2;
+    }
+    let first = args.get(index)?.clone();
+    // `acl render` is the one two-word command, and a reader who typed
+    // only half of it should be told about the half they typed.
+    if first == "acl" && args.get(index + 1).map(String::as_str) == Some("render") {
+        return Some("acl render".to_string());
+    }
+    Some(first)
+}
+
+/// Refuses an invocation, saying the smallest true thing about it.
+///
+/// The wall of thirty-two commands is the right answer to "what can this
+/// do" and the wrong answer to every other question. A reader who
+/// mistyped a name needs that name and a candidate; a reader who got a
+/// known command's arguments wrong needs *that command's* spec, which
+/// the index does not carry. Printing the index at all three was the
+/// same as printing nothing: the one line that mattered was buried
+/// forty lines from the top, above the prompt, off the screen.
 fn usage() -> ! {
-    // Rendered from the surface table, so help can never disagree with
-    // the README, the templates, or agents.md.
-    eprint!("{}", choir_cli::surface::usage());
+    let style = choir_cli::style::Style::for_stderr();
+    match invoked_command() {
+        // No command at all: this is the question the index answers.
+        None => eprint!("{}", choir_cli::surface::usage_in(style)),
+        Some(name) => match choir_cli::surface::command_help_in(&name, style) {
+            Some(help) => {
+                eprintln!(
+                    "{} those arguments do not match `{}`. It takes:\n",
+                    style.red("choir:"),
+                    name
+                );
+                eprint!("{help}");
+            }
+            None => {
+                eprintln!("{} `{}` is not a choir command.", style.red("choir:"), name);
+                let names = choir_cli::surface::COMMANDS.iter().map(|c| c.name);
+                if let Some(near) = choir_cli::style::nearest(&name, names) {
+                    eprintln!("       did you mean {}?", style.cyan(near));
+                }
+                eprintln!("       {} lists every command.", style.cyan("choir --help"));
+            }
+        },
+    }
     std::process::exit(2);
 }
 
@@ -497,6 +587,17 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
             "ask the operator to register your key: run `choir key <key_file> <channel>` and send them the line"
         },
     });
+    note(
+        &format!("joined as {user}"),
+        &[
+            ("token", format!("{} (0600)", token_path.display())),
+            ("key", key_file.to_string()),
+            (
+                "next",
+                summary["next"].as_str().unwrap_or_default().to_string(),
+            ),
+        ],
+    );
     finish(
         200,
         &serde_json::to_string_pretty(&summary).expect("summary is serializable"),
@@ -1795,14 +1896,40 @@ fn main() {
     // `choir <command> --help` before anything else parses: a reader
     // asking what a command takes must not have to satisfy its argument
     // rules to be told.
-    if args.len() >= 2 && args[1] == "--help" {
-        if let Some(help) = choir_cli::surface::command_help(&args[0]) {
+    let style = choir_cli::style::Style::for_stdout();
+    // What this binary was built from, before anything else parses.
+    //
+    // The stamp is the node crate's, which is this workspace's, which is
+    // the commit this file was compiled at -- not a `git rev-parse` in
+    // whatever directory the reader happens to be standing in. That
+    // difference is the whole point: "I rebuilt it" and "the rebuild is
+    // what is running" are separate claims, and only the binary can
+    // settle the second.
+    if args.first().is_some_and(|a| a == "--version" || a == "-V") {
+        println!("choir {}", choir_node::build_line());
+        std::process::exit(0);
+    }
+    // `choir acl render --help` names a two-word command; every other
+    // command's help is under args[1].
+    //
+    // Recognised in place rather than by rewriting `-h` to `--help`
+    // first: a rewrite pass has to guess how far right a flag can stand
+    // before it becomes somebody's argument, and it guesses wrong.
+    // `choir key <file> -h` names an actor `-h`, and the rewriting
+    // version of this printed a binding for an actor called `--help`.
+    let asked = match args.iter().position(|a| is_help(a)) {
+        Some(1) => Some(args[0].clone()),
+        Some(2) if args[0] == "acl" => Some(format!("{} {}", args[0], args[1])),
+        _ => None,
+    };
+    if let Some(name) = asked {
+        if let Some(help) = choir_cli::surface::command_help_in(&name, style) {
             print!("{help}");
             std::process::exit(0);
         }
     }
-    if args.first().map(String::as_str) == Some("--help") {
-        print!("{}", choir_cli::surface::usage());
+    if args.first().is_some_and(|a| is_help(a)) {
+        print!("{}", choir_cli::surface::usage_in(style));
         std::process::exit(0);
     }
     let (auth, args) = parse_auth(&args);
@@ -2191,6 +2318,14 @@ fn main() {
                 }
             }
             let doc = serde_json::json!({ "path": path.display().to_string(), "wrote": wrote });
+            note(
+                if wrote {
+                    "skill installed"
+                } else {
+                    "skill already current"
+                },
+                &[("path", path.display().to_string())],
+            );
             finish(200, &doc.to_string());
         }
         ["acl", "render", api, acl_file] => acl_render(api, auth, acl_file),

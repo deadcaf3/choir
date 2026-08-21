@@ -1554,3 +1554,54 @@ fn an_unattested_repo_is_reported_unverified_and_divergence_still_fails() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The installer's progress line must name what cargo is compiling.
+///
+/// It did not, for its whole first life: the extraction was a BSD-sed
+/// basic regular expression using `\|` alternation, which BSD sed does
+/// not have. It matched nothing, silently, so every build showed the
+/// fallback word and was exactly as uninformative as the static `...`
+/// the spinner had replaced -- which is the complaint the spinner was
+/// built to answer.
+///
+/// The expression is lifted out of `choirctl` and run here on cargo
+/// output captured from a real `cargo build --release -p choir-cli`,
+/// not on a line written by hand: a hand-written sample would have the
+/// leading whitespace and field order I *believe* cargo uses, and it is
+/// precisely that belief the last version got wrong.
+#[test]
+fn the_installers_progress_line_names_the_crate_and_not_the_path() {
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl source");
+    let open = driver
+        .find("SPIN_AWK='")
+        .expect("the progress extraction is a named awk program")
+        + "SPIN_AWK='".len();
+    let end = driver[open..].find('\'').expect("the awk program closes") + open;
+    let program = &driver[open..end];
+
+    // Captured verbatim from `cargo build --release -p choir-cli`,
+    // three leading spaces and all. The path is the workspace's, with
+    // the home directory replaced -- what matters about it here is that
+    // the extraction drops it.
+    let cargo_output = "   Compiling choir-hash v0.0.1 (/home/<user>/choir/crates/choir-hash)\n\
+         Compiling choir-node v0.0.1 (/home/<user>/choir/crates/choir-node)\n   \
+         Compiling choir-cli v0.0.1 (/home/<user>/choir/crates/choir-cli)\n";
+    let input = std::env::temp_dir().join(format!("choir-progress-{}", std::process::id()));
+    std::fs::write(&input, cargo_output).expect("scratch input");
+    let out = std::process::Command::new("awk")
+        .arg(program)
+        .arg(&input)
+        .output()
+        .expect("awk runs");
+    let label = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    std::fs::remove_file(&input).ok();
+
+    assert_eq!(
+        label, "Compiling choir-cli",
+        "the progress line does not name the crate cargo is on"
+    );
+    assert!(
+        !label.contains('/'),
+        "a filesystem path reached the progress line: {label}"
+    );
+}

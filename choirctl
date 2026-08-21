@@ -170,6 +170,20 @@ step_begin() {
 # Output goes to a file rather than the terminal because the step line is
 # redrawn in place and cargo's own progress would scroll it away.
 SPIN_LOG=
+# The last thing cargo said it was working on, reduced to two fields.
+#
+# awk, not sed: BSD sed has no `\|` alternation in a basic regular
+# expression and matches nothing at all, silently. The first version of
+# this was a BSD-incompatible sed, so every build showed the fallback
+# word for its whole run and was exactly as uninformative as the static
+# `...` the spinner had replaced.
+#
+# Two fields, never the whole line: cargo writes the crate's directory
+# after the version, and that path names the operator's home directory.
+# On one line so that a test can lift it out and run it against real
+# cargo output rather than against a line somebody imagined.
+SPIN_AWK='/^ *(Compiling|Building|Downloading|Installing|Replacing) / { sub(/^ +/, ""); last = $1 " " $2 } END { print last }'
+
 spin_run() {
   SPIN_LOG=$(mktemp -t choir-install)
   if [ "$LIVE" != 1 ]; then
@@ -183,8 +197,7 @@ spin_run() {
     i=$(( (i % 10) + 1 ))
     frame=${frames[$i]}
     el=$(( $(date +%s) - STEP_T0 ))
-    doing=$(sed -n 's/^ *\(Compiling\|Building\|Downloading\|Installing\|Replacing\) /\1 /p' \
-              "$SPIN_LOG" 2>/dev/null | tail -1 | cut -c1-30)
+    doing=$(awk "$SPIN_AWK" "$SPIN_LOG" 2>/dev/null)
     printf '\r%s[2K  %s%s%s %-10s %s%-30s%s %s%ss%s' \
       "$ESC" "$Y" "$frame" "$Z" "$STEP" "$D" "${doing:-working}" "$Z" "$D" "$el" "$Z"
     sleep 0.08
@@ -565,8 +578,24 @@ install-cli)
     exit 1
   fi
   choir --help >/dev/null 2>&1 || { step_end 1 "installed binary does not run"; exit 1; }
-  HEAD=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)
-  step_end 0 "runs, from $HEAD"
+  # Asked of the binary, not of the directory. `git rev-parse` here would
+  # report the commit the *repository* is on, which is what this step
+  # exists to doubt: a build that failed, or an install that copied
+  # something else, leaves the repository at the same commit either way.
+  # The stamp is baked in at compile time and cannot be restated by a
+  # later checkout.
+  STAMP=$(choir --version 2>/dev/null | sed -n 's/^choir build \([0-9a-f]*\).*/\1/p')
+  HEAD=$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)
+  if [ -z "$STAMP" ]; then
+    step_end 0 "runs, build unstamped"
+  elif [ "${HEAD#"$STAMP"}" != "$HEAD" ]; then
+    step_end 0 "runs, from $STAMP"
+  else
+    step_end 0 "runs, from $STAMP"
+    printf '\n  %sThe installed binary reports %s; this checkout is at %s.%s\n' \
+      "$Y" "$STAMP" "$(printf '%.12s' "$HEAD")" "$Z"
+    printf '  %sThe build did not reach the copy that just installed.%s\n\n' "$D" "$Z"
+  fi
 
   printf '\n  %sinstalled%s  %s%s/choir%s\n\n' "$G" "$Z" "$D" "$SHOWN" "$Z"
   printf '  %schoir --help%s            the command index\n' "$B" "$Z"

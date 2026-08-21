@@ -22,6 +22,9 @@ pub mod mcp;
 /// One-command proposal from a git checkout.
 pub mod propose;
 pub mod runner;
+
+/// Colour, and the "did you mean" a refusal needs to be useful.
+pub mod style;
 pub mod surface;
 pub mod triage;
 
