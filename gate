@@ -21,12 +21,22 @@
 #
 #   1. build   one serial compilation of every debug test target
 #   2. overlap the test suites execute in parallel, and clippy, rustdoc
-#              and the release builds cycle through the now-idle lock
-#   3. quiet   timing-sensitive suites, one at a time on an idle machine:
-#              hooks_isolation asserts an admission ceiling and the
-#              measurement binaries assert throughput/alloc ceilings, and
-#              any of them sharing the machine with another suite fails
-#              healthy code
+#              and the release builds cycle through the now-idle lock;
+#              alloc_budget and throughput run here too, because what they
+#              assert survives a loaded machine — allocation counts are
+#              deterministic, and throughput's ops/s figures are reports
+#              with correctness assertions only (its wall-clock assertion
+#              was removed on purpose; its own comment tells the story)
+#   3. quiet   suites whose ASSERTIONS are load-sensitive, one at a time
+#              on an idle machine: hooks_isolation's admission ceiling,
+#              choir-sequencer's drain and p99 ceilings, and
+#              retention_cost's off/on ratio — each has failed or would
+#              fail healthy code when sharing the machine with another
+#              suite
+#
+# The numbers throughput and alloc_budget PRINT during a gate share the
+# machine and are noise; for the report, run them isolated with
+# `--nocapture` as their own docs say.
 set -u
 cd "$(dirname "$0")" || exit 1
 
@@ -194,18 +204,19 @@ t_isolated()  {
   cargo test -p choir-sequencer --no-fail-fast || _tc=1
   return $_tc
 }
+# The overlap-phase half of the measurement suite. Builds first —
+# compilation wants the lock, which the test suites are no longer
+# holding, and retention_cost and spike must be ready before the quiet
+# phase so it starts quiet — then runs the two load-immune binaries.
 t_measure()   {
-  cargo test -p choir-node --release --no-fail-fast \
-    --test alloc_budget --test retention_cost --test throughput
+  cargo test -p choir-node --release --no-run --test retention_cost \
+    && cargo build --release -p choir-spike \
+    && cargo test -p choir-node --release --no-fail-fast \
+         --test alloc_budget --test throughput
 }
-# The release builds run during the overlap phase — compilation wants the
-# lock, which the test suites are no longer holding — so that the quiet
-# phase starts with everything already built and stays quiet.
-b_release()   {
-  cargo test -p choir-node --release --no-run \
-    --test alloc_budget --test retention_cost --test throughput \
-    && cargo build --release -p choir-spike
-}
+# The quiet-phase half: the one measurement whose assertion is a
+# wall-clock ratio and has failed healthy code under suite contention.
+t_retention() { cargo test -p choir-node --release --no-fail-fast --test retention_cost; }
 
 # The object-database scan. The needles are the strings that must not be
 # in any reachable blob -- a removed hosted repository's name, and
@@ -296,9 +307,9 @@ job doctests tests t_doc & DOC_PID=$!
 [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || sleep 3
 job clippy clippy cargo clippy --workspace --all-targets -- -D warnings & CLIPPY_PID=$!
 job rustdoc rustdoc env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps & RUSTDOC_PID=$!
-RELEASE_PID=
+MEASURE_PID=
 if [ "$LANE" != fast ]; then
-  job release tests b_release & RELEASE_PID=$!
+  job measure tests t_measure & MEASURE_PID=$!
 fi
 
 collect "$WS_PID" workspace workspace 'count_of "$LOG/workspace.log"'
@@ -306,19 +317,26 @@ collect "$NODE_PID" node node 'count_of "$LOG/node.log"'
 collect "$DOC_PID" doctests doctests 'count_of "$LOG/doctests.log"'
 collect "$CLIPPY_PID" clippy clippy 'echo'
 collect "$RUSTDOC_PID" rustdoc rustdoc 'echo'
-[ -n "$RELEASE_PID" ] && collect "$RELEASE_PID" release release 'echo'
+[ -n "$MEASURE_PID" ] && collect "$MEASURE_PID" measure measure 'count_of "$LOG/measure.log"'
 
 # Phase 3: quiet. Timing-sensitive suites get the machine to themselves,
 # one at a time — everything above has finished, and everything they
-# need is already built.
+# need is already built. Quiet includes the disk: the overlap ends with
+# thousands of scratch files awaiting lazy writeback, and spike's CoW
+# provisioning ceiling (p50 < 50 ms warm) failed at 73 ms while that
+# backlog flushed underneath it — then passed isolated at 15 ms
+# immediately after. Drain it here so the quiet suites measure the code,
+# not the flush.
+[ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || sync
+
 begin isolation
 run isolation tests t_isolated
 end $? "$(count_of "$LOG/isolation.log")"
 
 if [ "$LANE" != fast ]; then
-  begin measure
-  run measure tests t_measure
-  end $? "$(count_of "$LOG/measure.log")"
+  begin retention
+  run retention tests t_retention
+  end $? "$(count_of "$LOG/retention.log")"
 
   begin spike
   run spike spike cargo run -p choir-spike --release
@@ -353,9 +371,9 @@ fi
 for stage in $FAILED; do
   printf '\n%s── %s ──%s\n' "$R" "$stage" "$Z"
   case $stage in
-    workspace | node | doctests | isolation | measure)
+    workspace | node | doctests | isolation | measure | retention)
       grep -E '^(test .* FAILED|error(\[|:)|thread .* panicked)' "$LOG/$stage.log" | head -20 ;;
-    build | release)
+    build)
       grep -E '^error(\[|:)' "$LOG/$stage.log" | head -20 ;;
     clippy)  grep -E '^(warning|error)' "$LOG/clippy.log" | head -20 ;;
     rustdoc) grep -E '^(warning|error)' "$LOG/rustdoc.log" | head -20 ;;
