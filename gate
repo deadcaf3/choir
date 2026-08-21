@@ -226,6 +226,22 @@ begin rustdoc
 run rustdoc rustdoc env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps
 end $? ""
 
+# The book over the same `docs/` files rustdoc just compiled. It is a
+# separate renderer and can fail on its own: a SUMMARY.md entry naming a
+# file that does not exist is caught here and nowhere else, because
+# `create-missing` is off and mdBook refuses rather than writing a stub.
+#
+# Skipped, announced, when mdbook is absent -- the same rule the object
+# scan follows. A contributor without the tool still gets a green gate,
+# and nobody gets a silent pass: the line says which it was.
+if command -v mdbook >/dev/null 2>&1 || [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
+  begin book
+  run book book mdbook build
+  end $? ""
+else
+  printf '  %s-  %-10s %s%s\n' "$D" book "no mdbook" "$Z"
+fi
+
 if [ "$LANE" != fast ]; then
   begin spike
   run spike spike cargo run -p choir-spike --release
@@ -237,7 +253,8 @@ if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
   run freshness freshness true
   FRESH=$?
 else
-  find crates scripts docs templates Cargo.toml Cargo.lock README.md DECISIONS.md SYNC.md gate \
+  find crates scripts docs templates theme Cargo.toml Cargo.lock book.toml \
+    README.md DECISIONS.md SYNC.md gate \
     -newer "$MARK" -print >"$LOG/freshness.log" 2>/dev/null
   [ ! -s "$LOG/freshness.log" ]
   FRESH=$?

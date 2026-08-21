@@ -3,11 +3,17 @@
 Getting started lives in the [top-level README](../README.md). Everything
 else is here, indexed by what you are trying to do.
 
-Every page under `docs/` is also compiled into the API documentation: run
-`cargo doc --workspace --no-deps --open` and each one appears on the crate
-that implements it. That is not a convenience — it is what keeps these pages
-honest. The release gate runs `cargo doc` with `-D warnings`, so a Rust
-example in any of these files that stops compiling fails the build.
+Every page here is also compiled into the API documentation: each one is
+pulled into the crate that implements it with `#![doc = include_str!]`, so
+`cargo doc` renders this prose beside the types it describes. That is not a
+convenience — it is what keeps these pages honest. The release gate runs
+`cargo doc` with `-D warnings`, so a Rust example in any of these files that
+stops compiling fails the build.
+
+<a class="api-link" href="api/index.html">API documentation →</a>
+
+Build both halves together with `scripts/build_docs.sh`, which renders the
+book and puts rustdoc inside it at `/api/`.
 
 ## Start here
 
@@ -68,6 +74,7 @@ it against its source and fails when they differ. Regenerate with
 | Generated | Source |
 |:--|:--|
 | The surface block in [using/cli.md](using/cli.md) | `crates/choir-cli/src/surface.rs` |
+| `theme/choir-tokens.css`, the book's palette | `crates/choir-node/src/ui.css` |
 | The cheat-sheet block in [the README](../README.md) | `crates/choir-cli/src/surface.rs` |
 | [`agents.md`](../agents.md), `/llms.txt`, `/api/schema` | `crates/choir-cli/src/surface.rs` |
 | [`ERRORS.md`](../ERRORS.md) | `crates/choir-node/src/reject.rs` |

@@ -1,0 +1,627 @@
+/* =========================================================================
+   choir — mdBook chrome, drawn with the daemon's own design tokens.
+
+   `choir-tokens.css` loads before this and is GENERATED from
+   `crates/choir-node/src/ui.css`; it defines every `--` name used below
+   and nothing else. This file is hand-written and maps those tokens onto
+   mdBook's variables and markup.
+
+   The split is the point. Sharing the tokens makes the book and the
+   node's own pages one product; sharing the component styles would not,
+   because that sheet styles `h2` as a small uppercase eyebrow and gives
+   `body` a centred max-width — correct for a page built of `section`
+   elements, wrong for a book with a sidebar.
+
+   No web fonts and no external requests: the node's pages work inside a
+   network with no route to the internet, and its documentation should
+   not be the thing that needs one.
+   ====================================================================== */
+
+/* -------------------------------------------------------------------------
+   1. mdBook's variables, answered with choir tokens.
+
+   Listed against every theme class as well as `:root` so this beats
+   mdBook's own `.light{…}` / `.coal{…}` blocks on specificity rather
+   than on load order alone. The token sheet already decides which
+   palette those classes mean, so one mapping serves all of them.
+   ---------------------------------------------------------------------- */
+:root,
+html.light,
+html.rust,
+html.coal,
+html.navy,
+html.ayu {
+  --bg: var(--ground);
+  --fg: var(--ink);
+
+  --sidebar-bg: var(--surface);
+  --sidebar-fg: var(--muted);
+  --sidebar-non-existant: var(--faint);
+  --sidebar-active: var(--accent-ink);
+  --sidebar-spacer: var(--line);
+  --sidebar-target-width: var(--side);
+  --sidebar-width: var(--side);
+
+  --scrollbar: var(--line-strong);
+  --icons: var(--faint);
+  --icons-hover: var(--accent-ink);
+
+  --links: var(--accent-ink);
+  --inline-code-color: var(--syn-const);
+
+  --theme-popup-bg: var(--card);
+  --theme-popup-border: var(--line);
+  --theme-hover: var(--raise);
+
+  --quote-bg: var(--card);
+  --quote-border: var(--accent-line);
+
+  --table-border-color: var(--line);
+  --table-header-bg: var(--surface);
+  /* Zebra striping fights the hairline rules this design already uses to
+     separate rows; the row hover below carries that job instead. */
+  --table-alternate-bg: transparent;
+
+  --searchbar-border-color: var(--line);
+  --searchbar-bg: var(--raise);
+  --searchbar-fg: var(--ink);
+  --searchbar-shadow-color: var(--accent-line);
+  --searchresults-header-fg: var(--faint);
+  --searchresults-border-color: var(--line);
+  --searchresults-li-bg: var(--card);
+  --search-mark-bg: var(--accent-tint);
+
+  --overlay-bg: color-mix(in srgb, var(--ground) 72%, transparent);
+  --warning-border: var(--warn);
+
+  --blockquote-note-color: var(--info);
+  --blockquote-tip-color: var(--ok);
+  --blockquote-important-color: var(--accent-ink);
+  --blockquote-warning-color: var(--warn);
+  --blockquote-caution-color: var(--danger);
+
+  --mono-font: var(--font-mono);
+  --code-font-size: var(--fs-300);
+
+  /* choir's own docs measure. The source sheet names it exactly that:
+     46rem, annotated there as the docs prose column. */
+  --content-max-width: var(--measure);
+  --menu-bar-height: var(--topbar-h);
+}
+
+/* -------------------------------------------------------------------------
+   2. Type.
+   ---------------------------------------------------------------------- */
+
+/* `:root`, not `html`.
+   mdBook opens with `:root{font-size:62.5%}` so that 1rem is 10px. Every
+   size in the token sheet is calibrated against a 17px root instead —
+   `--fs-500:1rem` is annotated there as 17.0px body copy — so leaving
+   mdBook's root in place renders the entire scale at 59% of its
+   intended size. It looks like a slightly small book rather than like a
+   bug, which is why it is worth stating: an `html{}` rule here does not
+   fix it, because `:root` is a pseudo-class and wins on specificity. */
+:root {
+  font-size: 17px;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* mdBook sets `body{font-size:1.6rem}` for its 10px root; at a 17px root
+   that is 27px and leaks into every piece of chrome not restyled below. */
+body {
+  font-size: var(--fs-400);
+}
+
+body,
+.content {
+  font-family: var(--font-sans);
+  letter-spacing: var(--tr-body);
+}
+
+.content {
+  font-size: var(--fs-500);
+  line-height: var(--lh-copy);
+}
+
+/* mdBook sets `.content p/ol/ul { line-height: 1.45em }` directly, and a
+   rule on the element beats a value inherited from `.content` whatever
+   the specificity of the ancestor rule. So the roomy docs measure has to
+   be restated on the same elements rather than set once on the parent. */
+.content p,
+.content ul,
+.content ol,
+.content blockquote {
+  margin-block: var(--sp-4);
+  line-height: var(--lh-copy);
+}
+
+.content li + li {
+  margin-top: var(--sp-2);
+}
+
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5,
+.content h6 {
+  font-family: var(--font-sans);
+  color: var(--strong);
+  font-weight: var(--fw-bold);
+  letter-spacing: var(--tr-heading);
+  line-height: var(--lh-snug);
+}
+
+.content h1 {
+  font-size: var(--fs-900);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tr-display);
+  margin-block: var(--sp-4) var(--sp-6);
+}
+
+/* An accent rule on the section head, which is what `--bw-rule` is for
+   in the source sheet. It is the one ornament in this stylesheet, and it
+   does a job: on a long operating page it is the thing the eye finds
+   when scrolling for the next section. */
+.content h2 {
+  font-size: var(--fs-800);
+  margin-block: var(--sp-12) var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: var(--bw-hair) solid var(--hairline);
+  position: relative;
+}
+
+.content h2::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 0;
+  width: var(--sp-8);
+  height: var(--bw-rule);
+  background: var(--accent);
+  border-radius: var(--r-pill);
+}
+
+.content h1 + h2 {
+  margin-top: var(--sp-8);
+}
+
+.content h3 {
+  font-size: var(--fs-700);
+  margin-block: var(--sp-8) var(--sp-3);
+}
+
+.content h4 {
+  font-size: var(--fs-600);
+  font-weight: var(--fw-medium);
+  margin-block: var(--sp-6) var(--sp-3);
+}
+
+.content strong {
+  color: var(--strong);
+  font-weight: var(--fw-bold);
+}
+
+.content em {
+  color: var(--strong);
+}
+
+.content hr {
+  border: 0;
+  border-top: var(--bw-hair) solid var(--line);
+  margin-block: var(--sp-10);
+}
+
+/* -------------------------------------------------------------------------
+   3. Links.
+   ---------------------------------------------------------------------- */
+.content a,
+.content a:visited {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-line);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  transition: color 120ms var(--ease-out),
+    text-decoration-color 120ms var(--ease-out);
+}
+
+.content a:hover {
+  color: var(--accent-hover);
+  text-decoration-color: currentColor;
+}
+
+/* The anchor mdBook puts beside a heading is navigation, not prose. */
+.content .header:hover a.header,
+.content a.header {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-sm);
+}
+
+::selection {
+  background: var(--selection);
+  color: var(--strong);
+}
+
+/* -------------------------------------------------------------------------
+   4. Code.
+
+   Most fences in this book are `text`: ACL columns, hooks-file lines,
+   an authorized_keys entry. They should read as a quiet panel rather
+   than as a highlighted program, which is why the block is carded and
+   the plain colour is body ink.
+   ---------------------------------------------------------------------- */
+.content code,
+.content pre,
+.content kbd {
+  font-family: var(--font-mono);
+  letter-spacing: var(--tr-mono);
+}
+
+.content :not(pre) > code {
+  background: var(--raise);
+  border: var(--bw-hair) solid var(--hairline);
+  border-radius: var(--r-sm);
+  padding: 0.12em 0.36em;
+  font-size: 0.88em;
+  color: var(--syn-const);
+}
+
+.content a > code {
+  color: inherit;
+}
+
+.content pre {
+  background: var(--card);
+  border: var(--bw-hair) solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--sp-4) var(--sp-5);
+  line-height: var(--lh-code);
+  box-shadow: var(--shadow-inset);
+  overflow-x: auto;
+}
+
+.content pre > code {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--syn-plain);
+  font-size: var(--fs-300);
+}
+
+.content pre .boring {
+  opacity: 0.5;
+}
+
+/* -------------------------------------------------------------------------
+   5. Syntax, from the source sheet's own `--syn-*` ramp.
+   ---------------------------------------------------------------------- */
+.hljs-comment,
+.hljs-quote {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-name {
+  color: var(--syn-keyword);
+}
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: var(--syn-type);
+}
+.hljs-title,
+.hljs-function .hljs-title {
+  color: var(--syn-func);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-link,
+.hljs-attribute {
+  color: var(--syn-string);
+}
+.hljs-number,
+.hljs-bullet,
+.hljs-symbol {
+  color: var(--syn-number);
+}
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-variable,
+.hljs-template-variable {
+  color: var(--syn-const);
+}
+.hljs-meta,
+.hljs-tag {
+  color: var(--syn-macro);
+}
+.hljs-attr,
+.hljs-params {
+  color: var(--syn-plain);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: var(--fw-bold);
+}
+.hljs-addition {
+  background: var(--syn-added);
+}
+.hljs-deletion {
+  background: var(--syn-removed);
+}
+
+/* -------------------------------------------------------------------------
+   6. Tables.
+
+   These pages are mostly tables — flag references, decision registers,
+   symptom/cause/fix. The header is the source sheet's eyebrow: small,
+   uppercase, tracked out.
+   ---------------------------------------------------------------------- */
+.content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-block: var(--sp-5);
+  font-size: var(--fs-400);
+  line-height: var(--lh-normal);
+  display: block;
+  overflow-x: auto;
+}
+
+.content thead th {
+  font-size: var(--fs-100);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tr-caps);
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-bottom: var(--bw-1) solid var(--line-strong);
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.content td {
+  border: 0;
+  border-bottom: var(--bw-hair) solid var(--hairline);
+  padding: var(--sp-3);
+  vertical-align: top;
+  background: none;
+}
+
+.content tbody tr:last-child > td {
+  border-bottom: 0;
+}
+
+.content tbody tr:hover > td {
+  background: var(--raise);
+}
+
+.content tr > td:first-child,
+.content tr > th:first-child {
+  padding-left: 0;
+}
+
+.content tr > td:last-child,
+.content tr > th:last-child {
+  padding-right: 0;
+}
+
+/* -------------------------------------------------------------------------
+   7. Blockquotes and GitHub-style callouts.
+   ---------------------------------------------------------------------- */
+.content blockquote {
+  background: var(--card);
+  border: 0;
+  border-left: var(--bw-rule) solid var(--accent-line);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: var(--sp-3) var(--sp-5);
+  color: var(--ink);
+}
+
+.content blockquote > :first-child {
+  margin-top: 0;
+}
+.content blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.content .markdown-alert {
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--card);
+}
+
+.content .markdown-alert-title {
+  font-size: var(--fs-100);
+  text-transform: uppercase;
+  letter-spacing: var(--tr-caps);
+  font-weight: var(--fw-bold);
+}
+
+/* -------------------------------------------------------------------------
+   8. Chrome: menu bar, sidebar, search.
+   ---------------------------------------------------------------------- */
+#menu-bar {
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: saturate(150%) blur(12px);
+  border-bottom: var(--bw-hair) solid var(--line);
+  box-shadow: none;
+}
+
+#menu-bar .icon-button,
+#menu-bar i,
+#menu-bar a {
+  color: var(--icons);
+  transition: color 120ms var(--ease-out);
+}
+
+#menu-bar .icon-button:hover,
+#menu-bar a:hover {
+  color: var(--accent-ink);
+}
+
+.menu-title {
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tr-heading);
+  color: var(--strong);
+  opacity: 1;
+}
+
+.sidebar {
+  font-size: var(--fs-300);
+  line-height: var(--lh-normal);
+  border-right: var(--bw-hair) solid var(--line);
+}
+
+.sidebar .sidebar-scrollbox {
+  padding: var(--sp-5) var(--sp-4);
+}
+
+/* A part heading in SUMMARY.md — "Operating a node" — is a label, not a
+   link, and should not compete with the pages under it. */
+.sidebar .part-title {
+  font-size: var(--fs-100);
+  text-transform: uppercase;
+  letter-spacing: var(--tr-caps);
+  font-weight: var(--fw-medium);
+  color: var(--faint);
+  padding: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-5);
+}
+
+.chapter li.chapter-item {
+  margin-block: 1px;
+  line-height: var(--lh-normal);
+}
+
+.chapter li.chapter-item a {
+  display: block;
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  text-decoration: none;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+
+.chapter li.chapter-item a:hover {
+  background: var(--raise);
+  color: var(--strong);
+}
+
+.chapter li.chapter-item a.active {
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+  font-weight: var(--fw-medium);
+  box-shadow: inset var(--bw-2) 0 0 var(--accent);
+}
+
+.chapter li.spacer {
+  background: var(--line);
+  margin-block: var(--sp-4);
+}
+
+#searchbar {
+  border-radius: var(--r-md);
+  border: var(--bw-1) solid var(--line);
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font-sans);
+  font-size: var(--fs-400);
+}
+
+#searchbar:focus {
+  border-color: var(--accent-line);
+  box-shadow: var(--accent-glow);
+  outline: none;
+}
+
+.searchresults-header {
+  font-size: var(--fs-100);
+  text-transform: uppercase;
+  letter-spacing: var(--tr-caps);
+}
+
+#searchresults li {
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+}
+
+mark {
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+  border-radius: var(--r-xs);
+  padding: 0 2px;
+}
+
+/* Navigation chevrons: present, but not louder than the prose. */
+.nav-chapters {
+  color: var(--faint);
+  transition: color 120ms var(--ease-out);
+}
+
+.nav-chapters:hover {
+  color: var(--accent-ink);
+  background: none;
+}
+
+/* -------------------------------------------------------------------------
+   9. The API-documentation link.
+
+   `scripts/build_docs.sh` puts rustdoc at `/api/`, and this is what
+   makes that visible from inside the book rather than a URL somebody
+   has to be told about.
+   ---------------------------------------------------------------------- */
+.content a.api-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--accent-tint);
+  border: var(--bw-1) solid var(--accent-line);
+  border-radius: var(--r-pill);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-400);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+}
+
+.content a.api-link:hover {
+  background: var(--accent-tint);
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
+
+/* -------------------------------------------------------------------------
+   10. Motion and print.
+   ---------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  .content h2 {
+    border-top: 1px solid #999;
+  }
+  .content h2::before {
+    display: none;
+  }
+  .content pre {
+    box-shadow: none;
+  }
+}

@@ -1472,6 +1472,14 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
         // staleness test covers every generated artifact rather than two
         // tests each covering half.
         (root.join("ERRORS.md"), choir_node::reject::errors_md()),
+        // The book's palette, cut from the daemon's own stylesheet, so
+        // the documentation and the product cannot drift apart in
+        // colour, type scale or spacing. Same reason it lives here: one
+        // staleness test over every generated artifact.
+        (
+            root.join("theme/choir-tokens.css"),
+            choir_node::ui_tokens_css(),
+        ),
         // Two documents, two audiences, one table. `docs/using/cli.md`
         // gets the complete surface; the README gets the eight commands
         // a first change needs. Both are generated so neither can drift

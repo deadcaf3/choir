@@ -88,6 +88,94 @@ pub fn build_line() -> String {
     format!("build {commit}{dirty} (stamp source: {BUILD_SOURCE})")
 }
 
+/// The design tokens from `ui.css`, alone, for the documentation book.
+///
+/// The book and this daemon's own pages should look like one product,
+/// and the honest way to get that is one definition of the palette
+/// rather than two that agree today. What is shared is deliberately
+/// *only* the tokens: `ui.css` below the reset styles `h2` as a small
+/// uppercase eyebrow and gives `body` a centred max-width, which is
+/// right for a node page built out of `section` elements and wrong for
+/// a book with a sidebar. Components stay per-surface; colour, type
+/// scale, spacing and easing are shared.
+///
+/// The cut is the reset marker rather than a line number, and a missing
+/// marker is a panic rather than a silent half-file: this is rendered
+/// into a generated artifact that a staleness test compares, so a slice
+/// that quietly returned everything would put the whole sheet in the
+/// book and still look like it worked.
+///
+/// # Panics
+///
+/// If `ui.css` no longer carries the reset marker that separates its
+/// tokens from its component styles, or either theme selector this
+/// widens for mdBook.
+#[must_use]
+pub fn ui_tokens_css() -> String {
+    const SHEET: &str = include_str!("ui.css");
+    const RESET: &str = "/* --- global reset (token-only) ---";
+
+    // mdBook picks a palette by putting a class on `<html>`; this
+    // workspace picks one with `data-theme` (D56). Rather than keep a
+    // second copy of the palette in mdBook's spelling, each selector is
+    // widened to answer to both. Two literal rewrites, and a missing
+    // one is a panic: a silent no-op here renders the book's light
+    // theme in dark colours, which reads as a CSS bug rather than as a
+    // generator that stopped generating.
+    // The `:not()` is load-bearing and is not about matching: it is
+    // there for specificity. `ui.css` resolves "follow the system" with
+    // `@media (prefers-color-scheme:light){ :root:not([data-theme="dark"]) }`,
+    // which scores (0,2,0). A plain `html.coal` scores (0,1,1) and
+    // loses to it, so mdBook's dark themes rendered in light colours on
+    // a machine set to light -- a book that looked like the theme
+    // picker was broken rather than like a specificity bug. Each
+    // selector below scores (0,3,0) and beats it, while still matching
+    // exactly the same elements.
+    const THEMES: [(&str, &str); 2] = [
+        (
+            ":root[data-theme=\"dark\"]{",
+            ":root[data-theme=\"dark\"],\
+             :root.coal:not([data-theme=\"light\"]),\
+             :root.navy:not([data-theme=\"light\"]),\
+             :root.ayu:not([data-theme=\"light\"]){",
+        ),
+        (
+            ":root[data-theme=\"light\"]{",
+            ":root[data-theme=\"light\"],\
+             :root.light:not([data-theme=\"dark\"]),\
+             :root.rust:not([data-theme=\"dark\"]){",
+        ),
+    ];
+
+    let mut tokens = SHEET
+        .split_once(RESET)
+        .expect("ui.css must keep the reset marker that ends its token block")
+        .0
+        .trim_end()
+        .to_string();
+
+    for (from, to) in THEMES {
+        assert!(
+            tokens.contains(from),
+            "ui.css must keep the `{from}` selector the book's theme mapping widens"
+        );
+        tokens = tokens.replace(from, to);
+    }
+
+    format!(
+        "/* generated from crates/choir-node/src/ui.css -- do not edit.\n\
+         \x20  Regenerate: cargo run -p choir-cli --example gen-surface\n\
+         \x20\n\
+         \x20  The token block of that sheet, cut at its reset marker, with\n\
+         \x20  each theme selector widened to answer to mdBook's `<html>`\n\
+         \x20  class as well as this workspace's `data-theme`. Edit the\n\
+         \x20  tokens there and the node's pages and the book move together.\n\
+         \x20  Component styles are deliberately NOT shared: that sheet\n\
+         \x20  styles `h2` as an uppercase eyebrow and centres `body`,\n\
+         \x20  which is right for a node page and wrong for a book. */\n\n{tokens}\n"
+    )
+}
+
 /// Per-actor credentials: username → token, checked as HTTP basic auth
 /// (the standard git-over-HTTP shape; every forge client speaks it).
 ///

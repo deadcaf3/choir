@@ -153,7 +153,11 @@ fn readme_keeps_getting_started_and_the_complete_gate() {
             .expect("doc stays under the repository")
             .to_string_lossy()
             .replace('\\', "/");
-        if rel == "docs/README.md" {
+        // Both of these are navigation rather than pages: `README.md`
+        // is the index itself, and `SUMMARY.md` is the book's table of
+        // contents. Requiring the index to link to the table of
+        // contents that links to the index is a cycle, not a check.
+        if rel == "docs/README.md" || rel == "docs/SUMMARY.md" {
             continue;
         }
         // The index links relative to itself, the README relative to the
@@ -167,6 +171,109 @@ fn readme_keeps_getting_started_and_the_complete_gate() {
         unlinked.is_empty(),
         "documentation pages nothing links to: {unlinked:?}"
     );
+}
+
+/// Every page the book's table of contents names is a page that exists,
+/// and every page that exists is in the table of contents.
+///
+/// mdBook is configured with `create-missing = false`, so the first half
+/// is also caught by the gate's book stage — but only on a machine that
+/// has mdbook installed, and the gate announces a skip when it does not.
+/// This half runs everywhere.
+///
+/// The second half is the one mdBook cannot check at all: a page added
+/// under `docs/` and never listed builds fine and is simply absent from
+/// the book, reachable only by typing its URL.
+#[test]
+fn the_book_lists_every_page_and_only_real_ones() {
+    let root = repo_root();
+    let summary = std::fs::read_to_string(root.join("docs/SUMMARY.md")).expect("docs/SUMMARY.md");
+
+    let mut missing = Vec::new();
+    let mut listed = std::collections::HashSet::new();
+    let mut rest = summary.as_str();
+    while let Some(open) = rest.find("](") {
+        rest = &rest[open + 2..];
+        let Some(close) = rest.find(')') else { break };
+        let target = rest[..close].split('#').next().unwrap_or_default();
+        rest = &rest[close + 1..];
+        if target.is_empty() || target.starts_with("http") {
+            continue;
+        }
+        if !root.join("docs").join(target).is_file() {
+            missing.push(target.to_string());
+        }
+        listed.insert(format!("docs/{target}"));
+    }
+    assert!(
+        missing.is_empty(),
+        "SUMMARY.md names pages that do not exist: {missing:?}"
+    );
+
+    let mut unlisted = Vec::new();
+    for path in walk_docs(&root.join("docs")) {
+        let rel = path
+            .strip_prefix(&root)
+            .expect("doc stays under the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == "docs/SUMMARY.md" || rel == "docs/README.md" {
+            continue;
+        }
+        if !listed.contains(&rel) {
+            unlisted.push(rel);
+        }
+    }
+    assert!(
+        unlisted.is_empty(),
+        "pages under docs/ that the book never shows: {unlisted:?}\n\
+         add them to docs/SUMMARY.md"
+    );
+}
+
+/// The book's palette is the daemon's palette, cut at the right place.
+///
+/// [`choir_node::ui_tokens_css`] slices `ui.css` at its reset marker and
+/// widens two selectors for mdBook's theme classes. Each of those steps
+/// fails loudly inside the function, but only when it is *called* — and
+/// the thing that calls it is artifact generation, which a reader can
+/// forget to run. These are the properties the book depends on.
+#[test]
+fn the_books_tokens_are_the_daemons_tokens() {
+    let css = choir_node::ui_tokens_css();
+
+    // Tokens, and nothing after them: the component styles below the
+    // reset are the half that must not be shared.
+    assert!(
+        css.contains("--accent-ink"),
+        "the token block lost its palette"
+    );
+    assert!(
+        css.contains("--measure"),
+        "the token block lost the docs prose measure the book's width uses"
+    );
+    assert!(
+        !css.contains("global reset"),
+        "the cut let the reset through, so component styles are in the book"
+    );
+    assert!(
+        !css.contains("main>section"),
+        "component styles reached the book's stylesheet"
+    );
+
+    // The widening, without which mdBook's picker changes nothing.
+    for theme in ["coal", "navy", "ayu"] {
+        assert!(
+            css.contains(&format!(":root.{theme}:not([data-theme=\"light\"])")),
+            "mdBook's `{theme}` theme is not mapped to the dark palette"
+        );
+    }
+    for theme in ["light", "rust"] {
+        assert!(
+            css.contains(&format!(":root.{theme}:not([data-theme=\"dark\"])")),
+            "mdBook's `{theme}` theme is not mapped to the light palette"
+        );
+    }
 }
 
 /// GitHub's heading-slug rule, which is what a `#fragment` in these

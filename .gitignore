@@ -28,3 +28,7 @@ __pycache__/
 # the snapshots and PNGs that leaves behind are evidence for one session,
 # not artifacts of the project.
 /.playwright-mcp/
+
+# The built documentation: `scripts/build_docs.sh` renders it from
+# `docs/` and the crates, and both halves regenerate from source.
+/book
