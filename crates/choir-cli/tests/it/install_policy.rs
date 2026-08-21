@@ -373,8 +373,8 @@ fn private_beta_service_is_loopback_only_fail_closed_and_hardened() {
     assert!(!unit.contains("--ssh-handoff"), "SSH stays disabled");
 }
 
-#[test]
-fn private_beta_proxy_terminates_tls_and_separates_api_from_git_limits() {
+/// The rendered private-beta proxy configuration.
+fn beta_proxy_config() -> String {
     let output = std::process::Command::new("sh")
         .arg(repo_root().join("scripts/flip/render_beta_nginx.sh"))
         .args([
@@ -382,18 +382,59 @@ fn private_beta_proxy_terminates_tls_and_separates_api_from_git_limits() {
             "8417",
             "/etc/ssl/choir/fullchain.pem",
             "/etc/ssl/choir/privkey.pem",
-            "/var/log/nginx/choir-access.log",
         ])
         .output()
         .expect("render nginx config");
     assert!(output.status.success());
-    let config = String::from_utf8(output.stdout).expect("UTF-8 nginx config");
+    String::from_utf8(output.stdout).expect("UTF-8 nginx config")
+}
+
+/// The proxy is the only part of the deployment that can see a client
+/// address, so it is the only place this can be checked (D59). Written
+/// as a forbidden list rather than a shape assertion: the failure mode
+/// is somebody restoring one directive, and a list names each one.
+#[test]
+fn private_beta_proxy_handles_no_client_address() {
+    let config = beta_proxy_config();
+    for forbidden in [
+        "$remote_addr",
+        "$binary_remote_addr",
+        "$proxy_add_x_forwarded_for",
+        "limit_req_zone",
+        "limit_conn_zone",
+        "log_format",
+    ] {
+        assert!(
+            !config.contains(forbidden),
+            "proxy config reintroduced {forbidden}:\n{config}"
+        );
+    }
+    for required in [
+        "access_log off;",
+        "error_log /dev/null crit;",
+        // Set empty, not omitted: an omitted directive forwards
+        // whatever the caller sent under that name.
+        "proxy_set_header X-Forwarded-For \"\";",
+    ] {
+        assert!(
+            config.contains(required),
+            "proxy config dropped {required}:\n{config}"
+        );
+    }
+    assert_eq!(
+        config.matches("proxy_set_header X-Forwarded-For").count(),
+        config.matches("proxy_pass").count(),
+        "every proxied location must clear the forwarded-address header"
+    );
+}
+
+#[test]
+fn private_beta_proxy_terminates_tls_and_separates_api_from_git_limits() {
+    let config = beta_proxy_config();
     for required in [
         "server 127.0.0.1:8417",
         "return 308 https://$host$request_uri",
         "Strict-Transport-Security",
-        "limit_req_zone",
-        "limit_conn",
         "client_max_body_size 1m",
         "client_max_body_size 512m",
         "proxy_request_buffering off",

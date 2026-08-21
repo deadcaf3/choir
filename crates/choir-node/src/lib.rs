@@ -263,12 +263,12 @@ impl Node {
             request_log: None,
             rate: None,
             accounts: None,
-            // Chosen to be generous for the one page a person opens once
-            // and restrictive for anything doing it in a loop: a reader
-            // fetches the join page, submits it, and lands on the
-            // welcome page, which is three. The node-wide ceiling is the
-            // one that matters under a flood from many addresses.
-            public_rate: std::sync::Arc::new(limits::PublicLimiter::new(30, 600)),
+            // One ceiling for the whole pre-auth surface, because there
+            // is no per-client key to hold a second one against (D59).
+            // Sized for a node's worth of real joining rather than for one
+            // reader: a reader fetches the join page, submits it, and
+            // lands on the welcome page, which is three requests.
+            public_rate: std::sync::Arc::new(limits::PublicLimiter::new(600)),
             ssh_enabled: false,
             acl_merged: std::sync::RwLock::new(None),
             quotas: quota::Quotas::default(),
@@ -1013,11 +1013,14 @@ impl Node {
                 // Everything the auth gate would have done downstream has
                 // to be done here instead, because a request that returns
                 // from this block never reaches it. In order: admission
-                // control, which is *not* the authenticated limiter (see
-                // `PublicLimiter` — a map keyed on an anonymous caller's
-                // address is the attack, not the defence); a bounded read
-                // of any body; and `access.finish` on every exit, since
-                // each branch logs itself.
+                // control, which is *not* the authenticated limiter and
+                // takes no argument describing the caller (see
+                // `PublicLimiter`: a map keyed on something an anonymous
+                // caller supplies is the attack, and the one key that is
+                // not supplied by them is their address, which this
+                // deployment does not handle at all); a bounded read of
+                // any body; and `access.finish` on every exit, since each
+                // branch logs itself.
                 let public_path = request
                     .url()
                     .split(['?', '#'])
@@ -1040,7 +1043,7 @@ impl Node {
                         && authenticated
                         && header(&request, "authorization").is_none());
                 if public {
-                    if let Some(retry) = public_rate.check(&limits::peer_key(&request)) {
+                    if let Some(retry) = public_rate.check() {
                         let outcome = respond_public_busy(request, retry);
                         access.finish(log, "anon", &outcome);
                         return;

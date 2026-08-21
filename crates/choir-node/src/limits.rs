@@ -26,6 +26,11 @@
 //! running an incident: a token that reaches a log is a token that has to
 //! be rotated.
 //!
+//! No client address either, and not by omission: [`Access`] has no field
+//! that could hold one, so there is no formatting decision anywhere that
+//! could begin writing one (D59). That is also why this file, rather than
+//! a proxy access log, is the record the deployment keeps.
+//!
 //! # Lock discipline
 //!
 //! Both locks are leaf locks held for arithmetic or one `write_all`, never
@@ -391,12 +396,7 @@ impl Access {
     }
 }
 
-/// How many peer buckets [`PublicLimiter`] keeps. A power of two so the
-/// index is a mask rather than a division, and small enough that the
-/// whole table is one cache-friendly array rather than a map.
-const PUBLIC_BUCKETS: usize = 256;
-
-/// The window both counters are measured over.
+/// The window the pre-auth counter is measured over.
 const PUBLIC_WINDOW: Duration = Duration::from_secs(60);
 
 /// Admission control for the routes that answer *before* a credential is
@@ -405,166 +405,99 @@ const PUBLIC_WINDOW: Duration = Duration::from_secs(60);
 /// [`RateLimiter`] cannot do this job, and the reason is written into its
 /// own bounds note: its map holds one entry per key it has seen, which is
 /// safe only because its keys come from the operator's auth file. Keyed on
-/// something an anonymous caller chooses — an address, a header — the same
+/// something an anonymous caller chooses, an address or a header, the same
 /// map is an unbounded allocation driven by whoever is calling, which is
 /// the attack rather than the defence against it.
 ///
-/// So this is a fixed table. `PUBLIC_BUCKETS` counters, indexed by a hash
-/// of the peer address, plus one counter for the whole node; a fixed
-/// window rather than a token bucket, because the state has to be a
-/// number in a slot rather than a `(tokens, last)` pair per caller. Memory
-/// is constant at startup and no caller can grow it.
+/// So this counter has no key at all. One number for the whole pre-auth
+/// surface, reset each window. It bounds the node's total pre-auth work no
+/// matter how many callers the traffic arrives from, its memory is one
+/// `u32` decided at startup, and there is nothing a caller can supply that
+/// makes it allocate or that buys them a second allowance.
 ///
-/// The cost of that choice, stated rather than hidden: **peers collide**.
-/// Two addresses landing in the same slot share an allowance, so a busy
-/// neighbour can spend yours. That is acceptable here and would not be on
-/// an authenticated route, because these routes exist to hand a stranger
-/// one page and one redemption. Someone refused a join page retries in a
-/// minute; someone refused a `git push` has a broken workflow.
+/// **There is deliberately no per-client ceiling, here or at the proxy**
+/// (D59). Every key that would give one is either a client address, which
+/// this deployment does not handle at any layer, or something the caller
+/// chooses, which is the attack above. This type used to hold a 256-slot
+/// table hashed from the peer address; it was removed rather than left
+/// dormant, so the property is a fact about the code instead of a fact
+/// about where the node happens to be bound.
 ///
-/// The global counter is the one that matters under a real flood: it
-/// bounds the node's total pre-auth work no matter how many addresses the
-/// traffic arrives from, which is exactly the case per-peer limiting
-/// cannot see.
-///
-/// It is also the only counter that applies behind a reverse proxy, which
-/// is the supported deployment. There, every request arrives from
-/// `127.0.0.1` and this node genuinely cannot tell two callers apart, so
-/// it stops pretending to rather than putting the internet in one bucket
-/// — see [`PublicLimiter::check_at`].
+/// The cost is stated rather than hidden: a flood spends the node's whole
+/// pre-auth budget and the join page is unavailable to real invitees until
+/// the window rolls. That is an outage and never a disclosure, because the
+/// invite link is a bearer secret, `GET` never spends one, and every
+/// failure renders one byte-identical page (D57). Whoever can see the
+/// client can still limit per client; nothing in this deployment can.
 pub struct PublicLimiter {
-    /// Requests one peer bucket may spend per window.
-    per_peer: u32,
     /// Requests the whole pre-auth surface may spend per window.
     global: u32,
     counters: Mutex<PublicWindow>,
 }
 
-/// The counters for the window currently open.
+/// The counter for the window currently open.
 struct PublicWindow {
     /// When the open window began. Reaching `PUBLIC_WINDOW` past this
-    /// resets every counter at once.
+    /// resets the counter.
     opened: Instant,
-    peers: [u32; PUBLIC_BUCKETS],
     total: u32,
 }
 
 impl PublicLimiter {
-    /// A limiter allowing `per_peer` requests per peer bucket and
-    /// `global` across the whole pre-auth surface, each per minute.
+    /// A limiter allowing `global` requests per minute across the whole
+    /// pre-auth surface.
     #[must_use]
-    pub fn new(per_peer: u32, global: u32) -> Self {
+    pub fn new(global: u32) -> Self {
         Self {
-            per_peer,
             global,
             counters: Mutex::new(PublicWindow {
                 opened: Instant::now(),
-                peers: [0; PUBLIC_BUCKETS],
                 total: 0,
             }),
         }
     }
 
-    /// Spends one request for `peer`.
+    /// Spends one request against the pre-auth allowance.
     ///
     /// `None` admits it. `Some(seconds)` refuses it and is the
     /// `Retry-After` to answer with: whole seconds until the window rolls,
     /// never less than one, so a client obeying it does not spin.
-    pub fn check(&self, peer: &str) -> Option<u64> {
-        self.check_at(peer, Instant::now())
+    ///
+    /// Takes no argument describing the caller, which is the point: there
+    /// is no caller identity to take before a credential has been checked
+    /// that is not either a client address or a value the caller picked.
+    pub fn check(&self) -> Option<u64> {
+        self.check_at(Instant::now())
     }
 
     /// [`PublicLimiter::check`] against a caller-supplied clock, so the
     /// window roll can be proved without sleeping through it.
-    pub fn check_at(&self, peer: &str, now: Instant) -> Option<u64> {
+    pub fn check_at(&self, now: Instant) -> Option<u64> {
         let mut window = self.counters.lock().expect("public limiter lock");
         // Saturating, because a caller-supplied reading may predate the
         // one before it; `Instant` forbids that but this signature does
         // not, and an underflow here would roll the window every call.
         if now.saturating_duration_since(window.opened) >= PUBLIC_WINDOW {
             window.opened = now;
-            window.peers = [0; PUBLIC_BUCKETS];
             window.total = 0;
         }
         let remaining = PUBLIC_WINDOW.saturating_sub(now.saturating_duration_since(window.opened));
         // Round up and never say "retry immediately".
         let retry_after = u64::from(remaining.subsec_nanos() > 0) + remaining.as_secs();
-        // Checked before either counter moves: a refused request must not
-        // spend the allowance it was refused, or a caller hammering a full
-        // bucket would hold it full forever and never see it drain.
+        // Checked before the counter moves, so `total` reads as
+        // "admitted this window" rather than "seen this window". That is a
+        // legibility choice, not a safety one, and the distinction is
+        // worth stating because the obvious justification is wrong here: a
+        // fixed window rolls on time, so counting refusals too would
+        // change no admission decision. It is `RateLimiter`, which refills
+        // continuously, where spending on a refusal would hold a bucket
+        // empty against its own refill.
         if window.total >= self.global {
             return Some(retry_after.max(1));
-        }
-        // A loopback peer is not a peer. The supported deployment binds
-        // this node to `127.0.0.1` behind a TLS proxy, so every request
-        // in the world arrives with the same address, and counting them
-        // per address would put the entire internet in one bucket: the
-        // per-peer ceiling would become a far *lower* global one, and a
-        // single crawler would lock out every real invitee. That is a
-        // protection turning into an outage.
-        //
-        // So when the node cannot tell callers apart it does not pretend
-        // to. Per-client limiting belongs to whoever can see the client,
-        // and in that deployment the proxy already does it
-        // (`limit_req_zone $binary_remote_addr` in the rendered nginx
-        // config). What stays is the node-wide ceiling, which is the
-        // bound that still means something behind a proxy.
-        //
-        // A node bound directly to a public address sees real peers and
-        // gets the per-peer limit as written.
-        if !is_loopback(peer) {
-            let slot = peer_slot(peer);
-            if window.peers[slot] >= self.per_peer {
-                return Some(retry_after.max(1));
-            }
-            window.peers[slot] = window.peers[slot].saturating_add(1);
         }
         window.total = window.total.saturating_add(1);
         None
     }
-}
-
-/// Whether an address is this machine talking to itself.
-///
-/// Compared as text because that is what the caller holds, and the two
-/// spellings that matter are the two a `SocketAddr` produces. A hostname
-/// never reaches here: [`peer_key`] renders an IP.
-fn is_loopback(peer: &str) -> bool {
-    peer == "127.0.0.1" || peer == "::1" || peer.starts_with("127.")
-}
-
-/// Which bucket a peer address falls in.
-///
-/// FNV-1a, hand-rolled for the same reason the tests hand-roll an
-/// xorshift: this needs to spread addresses across a table, not to resist
-/// anybody, and the standard `DefaultHasher` is explicitly not stable
-/// across releases. A dependency for eight lines of arithmetic would be
-/// the wrong trade.
-///
-/// Note what it hashes: whatever string the caller passes. The caller
-/// passes the peer *address without its port*, because a port changes on
-/// every connection and hashing it would give one client a fresh bucket
-/// per request, which is a limiter that limits nothing.
-fn peer_slot(peer: &str) -> usize {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in peer.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    // `PUBLIC_BUCKETS` is a power of two, so this is the low bits.
-    (hash as usize) & (PUBLIC_BUCKETS - 1)
-}
-
-/// The peer address a [`PublicLimiter`] should key on, port stripped.
-///
-/// A request that carries no remote address at all is keyed as `"unknown"`
-/// rather than admitted: an address the server could not read is not a
-/// reason to stop counting.
-#[must_use]
-pub fn peer_key(request: &tiny_http::Request) -> String {
-    request
-        .remote_addr()
-        .map_or_else(|| "unknown".to_string(), |addr| addr.ip().to_string())
 }
 
 #[cfg(test)]
@@ -664,14 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn a_public_peer_spends_its_window_and_is_told_when_to_return() {
-        let limiter = PublicLimiter::new(3, 1000);
+    fn the_pre_auth_ceiling_admits_its_allowance_then_refuses_with_a_wait() {
+        let limiter = PublicLimiter::new(3);
         let now = Instant::now();
         for _ in 0..3 {
-            assert_eq!(limiter.check_at("198.51.100.7", now), None);
+            assert_eq!(limiter.check_at(now), None);
         }
         let retry = limiter
-            .check_at("198.51.100.7", now)
+            .check_at(now)
             .expect("the fourth request in a window of three is refused");
         assert!(
             (1..=60).contains(&retry),
@@ -679,103 +612,24 @@ mod tests {
         );
     }
 
+    /// Named for what it proves. It does *not* prove that a refusal
+    /// leaves the allowance alone: this counter is a fixed window, so it
+    /// resets wholesale on time and every total at or above the ceiling
+    /// behaves alike. A mutation that spends on refusal passes this test,
+    /// and passed the version of it that keyed on a peer address too. The
+    /// property is real for [`RateLimiter`] and vacuous here.
     #[test]
-    fn a_refused_request_does_not_spend_the_allowance_it_was_refused() {
-        // Otherwise a caller hammering a full bucket keeps it full and it
-        // never drains, which turns a one-minute limit into a permanent
-        // ban held open by the traffic it is refusing.
-        let limiter = PublicLimiter::new(1, 1000);
+    fn the_window_rolls_and_the_allowance_comes_back() {
+        let limiter = PublicLimiter::new(1);
         let start = Instant::now();
-        assert_eq!(limiter.check_at("203.0.113.9", start), None);
+        assert_eq!(limiter.check_at(start), None);
         for _ in 0..50 {
-            assert!(limiter.check_at("203.0.113.9", start).is_some());
+            assert!(limiter.check_at(start).is_some());
         }
-        let next = start + PUBLIC_WINDOW;
         assert_eq!(
-            limiter.check_at("203.0.113.9", next),
+            limiter.check_at(start + PUBLIC_WINDOW),
             None,
-            "the window rolled and the peer is still refused"
-        );
-    }
-
-    #[test]
-    fn the_global_counter_bounds_a_flood_arriving_from_many_addresses() {
-        // The case per-peer limiting cannot see: every request from a
-        // different address, each one well inside its own allowance.
-        let limiter = PublicLimiter::new(1000, 5);
-        let now = Instant::now();
-        for n in 0..5 {
-            assert_eq!(limiter.check_at(&format!("192.0.2.{n}"), now), None);
-        }
-        assert!(
-            limiter.check_at("192.0.2.99", now).is_some(),
-            "a fresh address was admitted past the node-wide ceiling"
-        );
-    }
-
-    #[test]
-    fn the_port_is_not_part_of_the_key() {
-        // A client gets a new source port per connection. Keying on it
-        // would hand every request its own bucket, and the limiter would
-        // admit everything while appearing to work.
-        let one: std::net::SocketAddr = "198.51.100.7:41000".parse().expect("addr");
-        let two: std::net::SocketAddr = "198.51.100.7:41001".parse().expect("addr");
-        assert_eq!(
-            peer_slot(&one.ip().to_string()),
-            peer_slot(&two.ip().to_string())
-        );
-    }
-
-    /// The deployment this node actually ships into binds to `127.0.0.1`
-    /// behind a TLS proxy, so every request in the world arrives with one
-    /// address. Counting those per address would put the whole internet
-    /// in a single bucket and turn a 30-per-minute peer ceiling into a
-    /// 30-per-minute *global* one — one crawler locking out every real
-    /// invitee. The node-wide ceiling is what still means something
-    /// there, and per-client limiting belongs to the proxy, which can
-    /// see the client.
-    #[test]
-    fn a_proxied_node_is_not_rate_limited_into_an_outage() {
-        let limiter = PublicLimiter::new(3, 1000);
-        let now = Instant::now();
-        for n in 0..500 {
-            assert_eq!(
-                limiter.check_at("127.0.0.1", now),
-                None,
-                "loopback request {n} was refused, so every client behind a proxy \
-                 shares one tiny bucket"
-            );
-        }
-        assert_eq!(limiter.check_at("::1", now), None);
-    }
-
-    /// ...but the node-wide ceiling still bounds it, so "not per-peer"
-    /// does not mean "unlimited".
-    #[test]
-    fn a_proxied_node_is_still_bounded_node_wide() {
-        let limiter = PublicLimiter::new(1000, 5);
-        let now = Instant::now();
-        for _ in 0..5 {
-            assert_eq!(limiter.check_at("127.0.0.1", now), None);
-        }
-        assert!(
-            limiter.check_at("127.0.0.1", now).is_some(),
-            "a proxied node has no ceiling at all"
-        );
-    }
-
-    #[test]
-    fn the_slot_hash_spreads_addresses_across_the_table() {
-        // A hash that returned a constant would still pass every test
-        // above, and would silently make the per-peer limit a global one.
-        let mut seen = std::collections::HashSet::new();
-        for n in 0..=255u8 {
-            seen.insert(peer_slot(&format!("198.51.100.{n}")));
-        }
-        assert!(
-            seen.len() > 128,
-            "256 addresses reached only {} of {PUBLIC_BUCKETS} slots",
-            seen.len()
+            "the window rolled and the caller is still refused"
         );
     }
 }
