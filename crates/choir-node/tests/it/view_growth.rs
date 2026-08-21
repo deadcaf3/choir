@@ -512,3 +512,156 @@ fn an_archived_row_costs_a_fraction_of_the_live_one() {
         );
     }
 }
+
+/// Cycles of create-then-delete, enough that a per-op leak is unmissable.
+const CHURN: u64 = 200;
+
+/// Distinct live refs, for the linearity half.
+const LIVE: u64 = 50;
+
+/// The view grows with live data, not with log length.
+///
+/// This is the Phase-1 question about the complete view, and no existing
+/// test asks it. `bindings_are_measured_but_stay_out_of_the_authoritative_total`
+/// is about which sections the total *means*; `retention_cost.rs` is
+/// about what pruning costs the submit path. Neither says what happens to
+/// a node that has simply been running for a long time.
+///
+/// The claim: the authoritative total is a function of what is live now.
+/// A create/delete cycle leaves nothing live, so two hundred of them must
+/// leave the total exactly where it started, however long the log got.
+/// If the total ever tracked the log instead, every reader of a
+/// long-running node would pay for history none of them can see, and the
+/// first symptom would be a slow `/api/view` on the busiest node rather
+/// than an error anywhere a test would look.
+///
+/// The second half is the other direction, because a total that never
+/// moves is equally broken: fifty distinct live refs must cost fifty
+/// times one ref, not more. Linear in live data is the property; a total
+/// that grew superlinearly would still pass the churn half.
+///
+/// Deterministic on purpose — serialized byte counts, no wall clock — so
+/// it belongs in the merged harness and does not move with machine load.
+/// Same argument as `tests/phase1_spawns.rs` makes for git spawns.
+#[test]
+fn the_authoritative_view_tracks_live_data_and_not_log_length() {
+    let node_key = ActorKey::generate();
+    let platform = Platform::start(
+        Registry::new(),
+        Box::new(MemLog::new()),
+        ActorKey::from_secret_bytes(&node_key.secret_bytes()),
+    )
+    .expect("platform starts");
+
+    let submit = |op: ViewOp| {
+        let payload = op.to_payload();
+        let sig = node_key.sign_submission("node/test", &payload);
+        let (status, body) = platform.handle_api(
+            "POST",
+            "/api/submit",
+            serde_json::json!({
+                "channel": "node/test",
+                "payload_hex": hex_encode(&payload),
+                "key_id": sig.key_id,
+                "signature_hex": hex_encode(&sig.signature),
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(status, 200, "{body}");
+    };
+    let reading = || {
+        let (_, view) = current_view(&platform);
+        let growth = &view["view_growth"];
+        (
+            growth["serialized_bytes"]["total_authoritative_view"]
+                .as_u64()
+                .expect("total is a number"),
+            // `null` until the first op is folded, which is exactly the
+            // baseline state this test starts from.
+            growth["as_of_seq"].as_u64(),
+            growth["counts"]["refs"]
+                .as_u64()
+                .expect("count is a number"),
+        )
+    };
+
+    let (baseline, seq_before, refs_before) = reading();
+    assert_eq!(refs_before, 0, "the fixture starts with no refs");
+    assert_eq!(seq_before, None, "the fixture starts with an unfolded log");
+
+    for i in 0..CHURN {
+        let commit = ContentHash::blake3(format!("churn {i}").as_bytes());
+        submit(ViewOp::new(OpKind::SetRef {
+            name: "agents/one.git:refs/heads/churn".into(),
+            commit: commit.clone(),
+            prev: None,
+        }));
+        submit(ViewOp::new(OpKind::DeleteRef {
+            name: "agents/one.git:refs/heads/churn".into(),
+            prev: Some(commit),
+        }));
+    }
+
+    let (after_churn, seq_after, refs_after) = reading();
+    // Vacuity first. A total that did not move because nothing was
+    // sequenced would pass the real assertion silently, which is how a
+    // deleted counter passed the spawn budget before it was two-sided.
+    assert_eq!(
+        seq_after,
+        Some(2 * CHURN - 1),
+        "the churn did not reach the log, so the totals below prove nothing"
+    );
+    assert_eq!(refs_after, 0, "the churn left a ref behind");
+    assert_eq!(
+        after_churn,
+        baseline,
+        "the authoritative view grew by {} bytes over {} operations that left \
+         nothing live, so it is tracking log length rather than live data",
+        after_churn as i64 - baseline as i64,
+        2 * CHURN
+    );
+
+    // The other direction: live data must actually cost something, and
+    // must cost it linearly.
+    let one = ContentHash::blake3(b"first live ref");
+    submit(ViewOp::new(OpKind::SetRef {
+        name: "agents/one.git:refs/heads/live0000".into(),
+        commit: one,
+        prev: None,
+    }));
+    let (with_one, _, _) = reading();
+    let per_ref = with_one
+        .checked_sub(baseline)
+        .expect("a live ref costs something");
+    assert!(per_ref > 0, "a live ref must move the authoritative total");
+
+    for i in 1..LIVE {
+        submit(ViewOp::new(OpKind::SetRef {
+            name: format!("agents/one.git:refs/heads/live{i:04}"),
+            commit: ContentHash::blake3(format!("live {i}").as_bytes()),
+            prev: None,
+        }));
+    }
+    let (with_many, _, refs_live) = reading();
+    assert_eq!(refs_live, LIVE, "the live refs did not all land");
+    // Every ref name here is the same length and every commit is a
+    // BLAKE3 hash, so the rows are the same size and the total is exactly
+    // linear -- to the byte, separators included. The `LIVE - 1` is the
+    // commas: the first entry in a JSON map has nothing before it and
+    // every later one costs a separator, which is why fifty rows are 49
+    // bytes more than fifty times one row rather than a round multiple.
+    //
+    // Asserting equality rather than a bound is the point. A tolerance is
+    // where superlinear growth hides, and the first version of this
+    // assertion was a plain multiple that failed by exactly those 49
+    // bytes -- the model was wrong, not the node, and a loose bound would
+    // have hidden which.
+    assert_eq!(
+        with_many - baseline,
+        per_ref * LIVE + (LIVE - 1),
+        "{LIVE} identical-shaped refs cost {} bytes where one costs {per_ref} \
+         and a separator costs 1; the view is not linear in live data",
+        with_many - baseline
+    );
+}
