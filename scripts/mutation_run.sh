@@ -46,6 +46,28 @@ fi
 LOG=${TMPDIR:-/tmp}/choir-mutation
 mkdir -p "$LOG"
 
+# Rule 3, also on the way out: an interrupt mid-mutation must not leave
+# the tree mutated -- the next run would refuse to start, and a reader
+# of the tree would be reading the mutation. The handler asks git what to
+# restore rather than trusting the loop's own bookkeeping, because the
+# signal can land before the bookkeeping exists; and every cargo child
+# runs in the background under the `wait` builtin, because a shell defers
+# -- and this shell then discards -- a signal that arrives while a
+# foreground child is running, which left this very trap unreachable for
+# the whole of every cargo run.
+CHANGED=
+restore() {
+  for f in $CHANGED; do git checkout -- "$f"; done
+  CHANGED=
+}
+on_signal() {
+  [ -n "${TESTPID:-}" ] && { kill "$TESTPID" 2>/dev/null; wait "$TESTPID" 2>/dev/null; }
+  CHANGED=$(git status --porcelain | awk '{print $2}')
+  restore
+  exit 130
+}
+trap on_signal INT TERM
+
 # Build the unmutated suite once, up front. Every mutation's `cargo test`
 # then recompiles only the mutated crate and its dependents instead of
 # the first one paying for the whole build -- and a baseline that does
@@ -53,7 +75,12 @@ mkdir -p "$LOG"
 # reading as every mutation "not compiling". Some argument shapes reject
 # `--no-run` (`--doc` does); that only forfeits the head start, so it is
 # a fatal error only when the tree itself failed to compile.
-if ! cargo test --no-run "$@" >"$LOG/prebuild.log" 2>&1; then
+cargo test --no-run "$@" >"$LOG/prebuild.log" 2>&1 &
+TESTPID=$!
+wait "$TESTPID"
+prebuilt=$?
+TESTPID=
+if [ "$prebuilt" -ne 0 ]; then
   if grep -q "could not compile" "$LOG/prebuild.log"; then
     echo "the UNMUTATED tree does not build with these arguments; nothing was mutated" >&2
     grep -E '^error(\[|:)' "$LOG/prebuild.log" | head -10 >&2
@@ -62,16 +89,6 @@ if ! cargo test --no-run "$@" >"$LOG/prebuild.log" 2>&1; then
   fi
   echo "note: prebuild skipped (cargo rejected --no-run with these arguments)" >&2
 fi
-
-# Rule 3, also on the way out: an interrupt mid-mutation must not leave
-# the tree mutated -- the next run would refuse to start, and a reader
-# of the tree would be reading the mutation.
-CHANGED=
-restore() {
-  for f in $CHANGED; do git checkout -- "$f"; done
-  CHANGED=
-}
-trap 'restore; exit 130' INT TERM
 
 # `findings` are mutations the tests missed; `void` are mutations that
 # produced no evidence at all (script errored, matched nothing, or did
@@ -103,8 +120,11 @@ for m in "$DIR"/*.py; do
   fi
 
   t0=$(date +%s)
-  cargo test "$@" > "$LOG/$name.log" 2>&1
+  cargo test "$@" > "$LOG/$name.log" 2>&1 &
+  TESTPID=$!
+  wait "$TESTPID"
   code=$?
+  TESTPID=
   el=$(($(date +%s) - t0))
 
   # Rule 4.
