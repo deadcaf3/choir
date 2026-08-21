@@ -5444,6 +5444,10 @@ impl Platform {
                 );
                 drop(key_names);
                 drop(concentration_state);
+                // Read under the guard, reported below it. The guard is
+                // released before `scope_now`, so the position has to be
+                // taken while the view still holds still.
+                let next_seq = view.next_seq;
                 drop(view);
                 let view_growth = view_growth_json(
                     counts,
@@ -5465,6 +5469,19 @@ impl Platform {
                 let log = serde_json::json!({
                     "node": node.to_hex(),
                     "head": head.as_ref().map(ContentHash::to_hex),
+                    // The position this view describes. It belongs to the
+                    // log rather than beside it, which is also what keeps
+                    // it readable: `log` is `Disclosure::Public`, and a
+                    // reader granted one repository still needs to know
+                    // where the view they were handed sits. It says no
+                    // more about a repository than `head` already does.
+                    //
+                    // Without it the view could not say its own position,
+                    // and a caller wanting the age of anything had
+                    // nothing to measure against -- which is exactly how
+                    // `ops_since_binding` came to be zero for every key
+                    // on every real node while its doctest passed.
+                    "next_seq": next_seq,
                     "scope_required": self
                         .require_scope
                         .load(std::sync::atomic::Ordering::Relaxed),

@@ -227,6 +227,96 @@ fn bind(api: &str, node_key: &ActorKey, key: &ContentHash, channel: &str, user: 
     assert_eq!(code, 200, "binding {channel}: {resp}");
 }
 
+/// Key age is counted in sequenced ops, and the only way to show that is
+/// to sequence some and watch it move.
+///
+/// Two mutations walked past the first version of this file. Reporting
+/// the binding's own position as its age survived every assertion, and so
+/// did reporting a revoked key as live -- the first because nothing
+/// pinned the number, the second because nothing ever revoked anything.
+/// Both are the numbers the "no trust score, here is the input" argument
+/// rests on, so they are the two that most needed pinning.
+#[test]
+fn key_age_grows_with_the_log_and_a_withdrawal_is_visible() {
+    let (base, actor, node_key, _work) = served("age", "");
+    let key = ContentHash::blake3(b"a key with a history");
+    bind(&base, &node_key, &key, "mira", "alice:a");
+
+    let age = || -> (u64, u64) {
+        let (_, body) = curl(&["-u", "alice:a", &format!("{base}/api/profile?channel=mira")]);
+        let row = &body["keys"][0];
+        (
+            row["bound_at"]
+                .as_u64()
+                .expect("a bound key has a position"),
+            row["ops_since_binding"]
+                .as_u64()
+                .expect("and an age in ops"),
+        )
+    };
+
+    let (bound_at, before) = age();
+    // Three more ops through the sequencer. The position the key was
+    // bound at cannot move -- it is assigned once -- so an age that is
+    // really the position would not move either.
+    for id in ["a-1", "a-2", "a-3"] {
+        reviewed(&base, &actor, id, "agents/one", "mira", "alice:a");
+    }
+    let (still_bound_at, after) = age();
+    assert_eq!(
+        bound_at, still_bound_at,
+        "a binding position moved, and it is assigned once"
+    );
+    assert!(
+        after > before,
+        "age did not move over {} ops: {before} then {after}",
+        after.saturating_sub(before)
+    );
+    // Six ops: three reviews opened, three verdicts posted.
+    assert_eq!(
+        after - before,
+        6,
+        "age is counted in sequenced ops, and six were sequenced"
+    );
+
+    // Withdrawing the binding is visible on both surfaces. The row stays
+    // -- attribution for what the key already did has to survive -- so
+    // "still listed" is not evidence that it is still good.
+    let revoke = ViewOp::new(OpKind::RevokeKey {
+        key,
+        reason: "rotated".into(),
+    });
+    let (code, resp) = curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        &submit_body(&node_key, "node", &revoke),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "revoking: {resp}");
+
+    let (_, body) = curl(&["-u", "alice:a", &format!("{base}/api/profile?channel=mira")]);
+    assert!(
+        !body["keys"][0]["revoked"].is_null(),
+        "a withdrawn binding still reads as live: {body}"
+    );
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-u", "alice:a", &format!("{base}/p/mira")])
+        .output()
+        .expect("curl runs");
+    let page = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        page.contains("revoked"),
+        "the page still shows it live: {page}"
+    );
+    assert!(
+        !page.contains(">live<"),
+        "the page shows both states at once: {page}"
+    );
+}
+
 /// The page and the endpoint are one reading of one view.
 ///
 /// Asserted as agreement rather than as two lists of expected strings,

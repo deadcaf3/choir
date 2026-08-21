@@ -25,8 +25,12 @@
 //! # Examples
 //!
 //! ```
+//! // Shaped the way `/api/view` really answers, which is the whole
+//! // reason this example is worth reading: `next_seq` lives inside
+//! // `log`, and an example that put it anywhere else would document a
+//! // response no node sends.
 //! let view = serde_json::json!({
-//!     "next_seq": 100,
+//!     "log": { "next_seq": 100 },
 //!     "bindings": {
 //!         "b3:aa": { "operator": "ops", "channel": "alice", "bound_at": 40 }
 //!     },
@@ -53,7 +57,12 @@
 /// reviewer needs to be told which one it got.
 #[must_use]
 pub fn of(view: &serde_json::Value, channel: &str) -> serde_json::Value {
-    let next_seq = view["next_seq"].as_u64().unwrap_or_default();
+    // `log.next_seq`, not a top-level `next_seq`. The first version of
+    // this read the latter, which `/api/view` does not emit, so every
+    // key on every node reported an age of zero -- and the doctest below
+    // passed the whole time, because it fed a hand-written document
+    // shaped the way the code wished the view were.
+    let next_seq = view["log"]["next_seq"].as_u64().unwrap_or_default();
 
     // Keys, oldest binding first. `bound_at` is assigned once and never
     // moves, so this order is one replay reproduces exactly.
