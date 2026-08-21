@@ -45,6 +45,34 @@ fi
 
 LOG=${TMPDIR:-/tmp}/choir-mutation
 mkdir -p "$LOG"
+
+# Build the unmutated suite once, up front. Every mutation's `cargo test`
+# then recompiles only the mutated crate and its dependents instead of
+# the first one paying for the whole build -- and a baseline that does
+# not even compile is reported before any mutation runs, rather than
+# reading as every mutation "not compiling". Some argument shapes reject
+# `--no-run` (`--doc` does); that only forfeits the head start, so it is
+# a fatal error only when the tree itself failed to compile.
+if ! cargo test --no-run "$@" >"$LOG/prebuild.log" 2>&1; then
+  if grep -q "could not compile" "$LOG/prebuild.log"; then
+    echo "the UNMUTATED tree does not build with these arguments; nothing was mutated" >&2
+    grep -E '^error(\[|:)' "$LOG/prebuild.log" | head -10 >&2
+    echo "full log: $LOG/prebuild.log" >&2
+    exit 2
+  fi
+  echo "note: prebuild skipped (cargo rejected --no-run with these arguments)" >&2
+fi
+
+# Rule 3, also on the way out: an interrupt mid-mutation must not leave
+# the tree mutated -- the next run would refuse to start, and a reader
+# of the tree would be reading the mutation.
+CHANGED=
+restore() {
+  for f in $CHANGED; do git checkout -- "$f"; done
+  CHANGED=
+}
+trap 'restore; exit 130' INT TERM
+
 findings=0
 ran=0
 
@@ -59,28 +87,30 @@ for m in "$DIR"/*.py; do
   fi
 
   # Rule 2, and it also tells us what to restore.
-  changed=$(git status --porcelain | awk '{print $2}')
-  if [ -z "$changed" ]; then
+  CHANGED=$(git status --porcelain | awk '{print $2}')
+  if [ -z "$CHANGED" ]; then
     echo "$name: NO EDIT LANDED (the mutation matched nothing)"
     continue
   fi
 
+  t0=$(date +%s)
   cargo test "$@" > "$LOG/$name.log" 2>&1
   code=$?
+  el=$(($(date +%s) - t0))
 
   # Rule 4.
   if grep -q "could not compile" "$LOG/$name.log"; then
-    echo "$name: did not compile (proves nothing)"
+    echo "$name: did not compile (proves nothing)  [${el}s]"
   elif [ "$code" -eq 0 ]; then
-    echo "$name: NOT CAUGHT  <-- finding"
+    echo "$name: NOT CAUGHT  <-- finding  [${el}s]"
     findings=$((findings+1))
   else
-    echo "$name: caught"
+    echo "$name: caught  [${el}s]"
     grep -E "^test .* FAILED" "$LOG/$name.log" | grep -v "test result" | head -4
   fi
 
   # Rule 3.
-  for f in $changed; do git checkout -- "$f"; done
+  restore
   leftover=$(git status --porcelain)
   [ -z "$leftover" ] || { echo "$name: NOT RESTORED: $leftover" >&2; exit 1; }
 done

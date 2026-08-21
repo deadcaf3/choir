@@ -12,6 +12,21 @@
 # It fails closed: any stage failing exits nonzero, and the exit code of
 # every command is read directly rather than through a pipe, because
 # `cargo test | tail` reports tail's status and hides the verdict.
+#
+# The gate runs in three phases, because cargo holds the build-directory
+# lock only while *building* — it releases it before the test binaries
+# run (verified by racing `cargo check` against a running `cargo test`).
+# So: build everything once up front, then let every suite's run phase
+# overlap; only the timing-sensitive binaries wait for a quiet machine.
+#
+#   1. build   one serial compilation of every debug test target
+#   2. overlap the test suites execute in parallel, and clippy, rustdoc
+#              and the release builds cycle through the now-idle lock
+#   3. quiet   timing-sensitive suites, one at a time on an idle machine:
+#              hooks_isolation asserts an admission ceiling and the
+#              measurement binaries assert throughput/alloc ceilings, and
+#              any of them sharing the machine with another suite fails
+#              healthy code
 set -u
 cd "$(dirname "$0")" || exit 1
 
@@ -44,8 +59,8 @@ secs() {
   else printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)); fi
 }
 
-# A stage begins: on a terminal, show it running so a three-minute gate
-# is visibly working rather than apparently hung.
+# A stage begins: on a terminal, show it running so a long gate is
+# visibly working rather than apparently hung.
 begin() {
   STAGE=$1
   T0=$(date +%s)
@@ -55,14 +70,20 @@ begin() {
 # A stage ends. $1 is its exit status, $2 a short note for the line.
 end() {
   _el=$(($(date +%s) - T0))
+  finish "$1" "$STAGE" "$2" "$_el"
+}
+
+# The line itself, shared by serial stages and collected parallel ones.
+# $1 exit status, $2 stage, $3 note, $4 elapsed seconds.
+finish() {
   [ "$LIVE" = 1 ] && printf '\r%s[K' "$ESC"
   if [ "$1" -eq 0 ]; then
     printf '  %s✓%s %-10s %s%-18s%s %s%s%s\n' \
-      "$G" "$Z" "$STAGE" "$Z" "$2" "$Z" "$D" "$(secs $_el)" "$Z"
+      "$G" "$Z" "$2" "$Z" "$3" "$Z" "$D" "$(secs "$4")" "$Z"
   else
     printf '  %s✗%s %-10s %s%-18s%s %s%s%s\n' \
-      "$R" "$Z" "$STAGE" "$R" "$2" "$Z" "$D" "$(secs $_el)" "$Z"
-    FAILED="$FAILED $STAGE"
+      "$R" "$Z" "$2" "$R" "$3" "$Z" "$D" "$(secs "$4")" "$Z"
+    FAILED="$FAILED $2"
   fi
 }
 
@@ -72,8 +93,8 @@ end() {
 # the named one, so the test proves status propagation without
 # recursively invoking this entire gate from inside `cargo test`.
 # $1 names the log and the display line; $2 is the key the injection
-# fixture matches, which lets the four test sub-stages share one key
-# while reporting themselves separately.
+# fixture matches, which lets the test sub-stages share one key while
+# reporting themselves separately.
 run() {
   _logfile=$LOG/$1.log _stage=$2
   shift 2
@@ -88,6 +109,33 @@ run() {
   "$@" >"$_logfile" 2>&1
 }
 
+# A background job around `run`: records its own exit code and duration,
+# because `wait` can only return one of them and the collector needs
+# both. A missing status file means the job died without reporting,
+# which fails closed like everything else here.
+job() {
+  _name=$1
+  _j0=$(date +%s)
+  shift
+  run "$_name" "$@"
+  _jc=$?
+  echo "$_jc $(($(date +%s) - _j0))" >"$LOG/$_name.status"
+}
+
+# Collect one background job: $1 its pid, $2 the log/status name, $3 the
+# display name, $4 a note command evaluated against the finished log.
+collect() {
+  [ "$LIVE" = 1 ] && printf '  %s·%s %-10s %s…%s' "$D" "$Z" "$3" "$D" "$Z"
+  wait "$1"
+  if [ -r "$LOG/$2.status" ]; then
+    read -r _code _dur <"$LOG/$2.status"
+  else
+    _code=98 _dur=0
+    echo "job for $2 died without writing a status" >>"$LOG/$2.log"
+  fi
+  finish "$_code" "$3" "$(eval "$4")" "$_dur"
+}
+
 # The measurement binaries, skipped by the fast lane: throughput ~36 s,
 # alloc_budget ~13 s, retention_cost ~7 s.
 #
@@ -99,10 +147,19 @@ run() {
 # about.
 SLOW="alloc_budget retention_cost throughput"
 
+# Debug-build tests that assert a wall-clock ceiling. They run in the
+# quiet phase in BOTH lanes: hooks_isolation's 2 s admission ceiling has
+# been exceeded by gate parallelism alone while passing 3/3 isolated at
+# the same machine load, and a timing test that shares the machine with
+# another suite reports on the scheduler, not on the code. choir-sequencer
+# is quarantined whole for the same reason: group_commit asserts a 50 ms
+# drain ceiling and concurrency a p99 latency ceiling.
+ISOLATED="hooks_isolation"
+
 fast_targets() {
   for f in crates/choir-node/tests/*.rs; do
     name=$(basename "$f" .rs)
-    case " $SLOW " in *" $name "*) continue ;; esac
+    case " $SLOW $ISOLATED " in *" $name "*) continue ;; esac
     printf ' --test %s' "$name"
   done
   printf ' --test it'   # the merged harness, crates/choir-node/tests/it/
@@ -113,21 +170,41 @@ fast_targets() {
 # own because they state release-profile ceilings: running them under the
 # debug allocator makes the number meaningless and can fail a healthy
 # release.
-#
-# Four invocations, shown as four stages rather than one. They used to be
-# a single `tests` line that sat silent for six minutes, which is the
-# "apparently hung" problem this gate's own progress display exists to
-# solve — and when it failed, it named the whole six minutes rather than
-# the twenty seconds that actually broke.
-t_workspace() { cargo test --workspace --no-fail-fast --exclude choir-node; }
+b_workspace() {
+  cargo test --workspace --no-run --exclude choir-node --exclude choir-sequencer \
+    && cargo test -p choir-sequencer --no-run
+}
+# shellcheck disable=SC2046
+b_node()      { cargo test -p choir-node --no-run --lib --bins $(fast_targets) --test "$ISOLATED"; }
+# shellcheck disable=SC2046
+b_node_fast() { cargo test -p choir-node --no-run --lib $(fast_targets) --test "$ISOLATED"; }
+build_debug() { b_workspace && if [ "$LANE" = fast ]; then b_node_fast; else b_node; fi; }
+
+t_workspace() { cargo test --workspace --no-fail-fast --exclude choir-node --exclude choir-sequencer; }
 # shellcheck disable=SC2046
 t_node()      { cargo test -p choir-node --no-fail-fast --lib --bins $(fast_targets); }
 # shellcheck disable=SC2046
 t_node_fast() { cargo test -p choir-node --no-fail-fast --lib $(fast_targets); }
 t_doc()       { cargo test -p choir-node --doc; }
+# Both quarantined suites run even if the first fails: the report should
+# name everything that is broken, not the first thing.
+t_isolated()  {
+  _tc=0
+  cargo test -p choir-node --test "$ISOLATED" || _tc=1
+  cargo test -p choir-sequencer --no-fail-fast || _tc=1
+  return $_tc
+}
 t_measure()   {
   cargo test -p choir-node --release --no-fail-fast \
     --test alloc_budget --test retention_cost --test throughput
+}
+# The release builds run during the overlap phase — compilation wants the
+# lock, which the test suites are no longer holding — so that the quiet
+# phase starts with everything already built and stays quiet.
+b_release()   {
+  cargo test -p choir-node --release --no-run \
+    --test alloc_budget --test retention_cost --test throughput \
+    && cargo build --release -p choir-spike
 }
 
 # The object-database scan. The needles are the strings that must not be
@@ -160,6 +237,7 @@ scan_needles() {
 # ----------------------------------------------------------------- run
 MARK="$LOG/start"
 : >"$MARK"
+rm -f "$LOG"/*.status
 FAILED=
 STARTED=$(date +%s)
 
@@ -169,11 +247,9 @@ printf '\n  %schoir%s %s%s gate%s\n\n' "$B" "$Z" "$D" "$LANE" "$Z"
 # it holds no build lock and has no reason to wait its turn. Started here
 # and collected at the end, it costs the gate nothing instead of ~26 s.
 SCAN_PID=
-SCAN_STATE=skip
 if [ "$LANE" != fast ]; then
   if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || [ -f "$NEEDLES" ]; then
-    SCAN_STATE=run
-    run scan scan scan_needles &
+    job scan scan scan_needles &
     SCAN_PID=$!
   else
     echo "no $NEEDLES: the object-database scan is skipped" >"$LOG/scan.log"
@@ -184,9 +260,13 @@ begin format
 run format format cargo fmt --all -- --check
 end $? ""
 
-# Every sub-stage passes `tests` as its injection key, so the fixture in
-# `crates/choir-cli/tests/it/gate.rs` still injects one failure and still
-# sees the gate refuse.
+# Phase 1: one serial build of every debug test target, under the lock.
+# Its failure key is `tests` — a test that does not compile is a failed
+# test, and the injection fixture treats it the same way.
+begin build
+run build tests build_debug
+end $? ""
+
 count_of() {
   awk '/^test result:/ {
     for (i = 1; i <= NF; i++) {
@@ -196,37 +276,50 @@ count_of() {
   } END { if (f) printf "%d ok, %d failed", p, f; else printf "%d ok", p }' "$1"
 }
 
-begin workspace
-run workspace tests t_workspace
-end $? "$(count_of "$LOG/workspace.log")"
-
-begin node
+# Phase 2: the overlap. Everything is prebuilt, so the test invocations
+# clear the lock in about a second of freshness checking each and then
+# only *run*; clippy, rustdoc and the release builds queue up behind
+# them and compile while the suites execute. Launch order is the lock
+# queue: runners first, compilers last. If the build stage failed, run
+# the suites anyway (`--no-fail-fast` for invocations) — cargo repeats
+# the same failure cheaply and the report names every broken stage.
 if [ "$LANE" = fast ]; then
-  run node tests t_node_fast
+  job node tests t_node_fast & NODE_PID=$!
 else
-  run node tests t_node
+  job node tests t_node & NODE_PID=$!
 fi
-end $? "$(count_of "$LOG/node.log")"
+job workspace tests t_workspace & WS_PID=$!
+job doctests tests t_doc & DOC_PID=$!
+# The lock has no queue discipline: on a changed tree, a compiler that
+# wins it first would stall every runner behind a long recompile. Give
+# the runners a head start to clear their freshness checks.
+[ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || sleep 3
+job clippy clippy cargo clippy --workspace --all-targets -- -D warnings & CLIPPY_PID=$!
+job rustdoc rustdoc env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps & RUSTDOC_PID=$!
+RELEASE_PID=
+if [ "$LANE" != fast ]; then
+  job release tests b_release & RELEASE_PID=$!
+fi
 
-begin doctests
-run doctests tests t_doc
-end $? "$(count_of "$LOG/doctests.log")"
+collect "$WS_PID" workspace workspace 'count_of "$LOG/workspace.log"'
+collect "$NODE_PID" node node 'count_of "$LOG/node.log"'
+collect "$DOC_PID" doctests doctests 'count_of "$LOG/doctests.log"'
+collect "$CLIPPY_PID" clippy clippy 'echo'
+collect "$RUSTDOC_PID" rustdoc rustdoc 'echo'
+[ -n "$RELEASE_PID" ] && collect "$RELEASE_PID" release release 'echo'
+
+# Phase 3: quiet. Timing-sensitive suites get the machine to themselves,
+# one at a time — everything above has finished, and everything they
+# need is already built.
+begin isolation
+run isolation tests t_isolated
+end $? "$(count_of "$LOG/isolation.log")"
 
 if [ "$LANE" != fast ]; then
   begin measure
   run measure tests t_measure
   end $? "$(count_of "$LOG/measure.log")"
-fi
 
-begin clippy
-run clippy clippy cargo clippy --workspace --all-targets -- -D warnings
-end $? ""
-
-begin rustdoc
-run rustdoc rustdoc env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps
-end $? ""
-
-if [ "$LANE" != fast ]; then
   begin spike
   run spike spike cargo run -p choir-spike --release
   end $? ""
@@ -247,22 +340,23 @@ fi
 end $FRESH "$([ $FRESH -eq 0 ] || echo 'tree changed')"
 
 if [ -n "$SCAN_PID" ]; then
-  begin scan
-  wait "$SCAN_PID"
-  end $? "$(sed -n 's/^scanning \([0-9]*\) objects.*/\1 objects/p' "$LOG/scan.log")"
+  collect "$SCAN_PID" scan scan \
+    'sed -n "s/^scanning \([0-9]*\) objects.*/\1 objects/p" "$LOG/scan.log"'
 elif [ "$LANE" != fast ]; then
   printf '  %s-  %-10s %s%s\n' "$D" scan "no $NEEDLES" "$Z"
 fi
 
 # -------------------------------------------------------------- report
-# Detail only for what failed. A green gate should be five lines, not a
+# Detail only for what failed. A green gate should be a screenful, not a
 # transcript nobody reads; a red one should put the reason on screen
 # without a second command.
 for stage in $FAILED; do
   printf '\n%s── %s ──%s\n' "$R" "$stage" "$Z"
   case $stage in
-    workspace | node | doctests | measure)
+    workspace | node | doctests | isolation | measure)
       grep -E '^(test .* FAILED|error(\[|:)|thread .* panicked)' "$LOG/$stage.log" | head -20 ;;
+    build | release)
+      grep -E '^error(\[|:)' "$LOG/$stage.log" | head -20 ;;
     clippy)  grep -E '^(warning|error)' "$LOG/clippy.log" | head -20 ;;
     rustdoc) grep -E '^(warning|error)' "$LOG/rustdoc.log" | head -20 ;;
     format)  head -20 "$LOG/format.log" ;;
