@@ -4,6 +4,13 @@
 //! sequencer (one gets rejected, one gets a first-class conflict and
 //! keeps working), the op log is time-traveled, and a real `git` client
 //! pushes through the choir-node daemon at the end.
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is a narrated walkthrough of the whole stack, and the fastest answer to "what is this?".
+//!
+//! It builds on [`choir_hash`], [`choir_identity`], [`choir_merge`], [`choir_node`], [`choir_oplog`], [`choir_sequencer`], [`choir_store`] and [`choir_view`].
 
 use std::collections::BTreeMap;
 

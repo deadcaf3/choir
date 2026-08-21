@@ -1,0 +1,322 @@
+/* generated from crates/choir-node/src/ui.css -- do not edit.
+   Regenerate: cargo run -p choir-cli --example gen-surface
+ 
+   The token block of that sheet, cut at its reset marker, with
+   each theme selector widened to answer to mdBook's `<html>`
+   class as well as this workspace's `data-theme`. Edit the
+   tokens there and the node's pages and the book move together.
+   Component styles are deliberately NOT shared: that sheet
+   styles `h2` as an uppercase eyebrow and centres `body`,
+   which is right for a node page and wrong for a book. */
+
+/* choir node browser surface — design tokens + choir components.
+   =========================================================================
+   TWO HALVES, ONE SHEET, BOTH OURS. Above the CHOIR COMPONENTS marker is
+   the token block: every colour, size, radius, shadow and duration this
+   surface is allowed to use, named once. Below it is the component block,
+   which styles this node's pages out of those tokens.
+
+   This file is self-contained on purpose. It was once kept in sync with a
+   separate repository's design system, which made choir's stylesheet a
+   mirror of something not present in this tree — a rule no contributor
+   here could follow. The tokens are choir's now. No font files ship, so
+   the stacks name system faces only.
+
+   THE RULE: no colour, size, radius, shadow or duration is authored below
+   the marker. The component block references `var(--…)` and nothing else.
+   A value that does not exist yet gets a token in the block above first.
+   Two tests enforce this — `the_component_sheet_authors_no_raw_values`
+   catches a raw value, and `every_component_token_is_defined_by_the_token_block`
+   catches a `var()` naming a token nobody defined, which a browser drops
+   in silence.
+   ========================================================================= */
+
+:root{
+  /* ---- type -------------------------------------------------------- */
+  --font-sans:"Helvetica Neue",Helvetica,"Segoe UI",system-ui,sans-serif;
+  --font-mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+
+  --fs-100:0.6875rem;  /* 11.7px — micro labels, table eyebrows */
+  --fs-200:0.75rem;    /* 12.8px — kbd, pills, captions */
+  --fs-300:0.8125rem;  /* 13.8px — code, dense UI, sidebar */
+  --fs-400:0.9375rem;  /* 16.0px — UI default */
+  --fs-500:1rem;       /* 17.0px — body copy */
+  --fs-600:1.125rem;   /* 19.1px — lede */
+  --fs-700:1.375rem;   /* 23.4px — h3 */
+  --fs-800:1.75rem;    /* 29.8px — h2 */
+  --fs-900:2.375rem;   /* 40.4px — h1 */
+  --fs-1000:3.25rem;   /* 55.3px — landing display */
+  --fs-1100:4.25rem;   /* 72.3px — hero display, wide only */
+
+  --lh-tight:1.06;
+  --lh-snug:1.24;
+  --lh-normal:1.5;
+  --lh-copy:1.68;   /* roomy: docs body */
+  --lh-code:1.6;
+
+  --fw-regular:400;
+  --fw-medium:500;
+  --fw-bold:700;
+
+  --tr-display:-0.024em;
+  --tr-heading:-0.014em;
+  --tr-body:-0.006em;
+  --tr-mono:0;
+  --tr-caps:0.09em;   /* eyebrows, small-caps labels */
+
+  /* ---- space (4px grid at 17px root) ------------------------------- */
+  --sp-0:0;
+  --sp-1:0.235rem;   /* 4  */
+  --sp-2:0.47rem;    /* 8  */
+  --sp-3:0.705rem;   /* 12 */
+  --sp-4:0.94rem;    /* 16 */
+  --sp-5:1.176rem;   /* 20 */
+  --sp-6:1.41rem;    /* 24 */
+  --sp-8:1.88rem;    /* 32 */
+  --sp-10:2.35rem;   /* 40 */
+  --sp-12:2.82rem;   /* 48 */
+  --sp-16:3.76rem;   /* 64 */
+  --sp-20:4.7rem;    /* 80 */
+  --sp-28:6.58rem;   /* 112 */
+  --sp-40:9.4rem;    /* 160 */
+
+  /* ---- radii ------------------------------------------------------- */
+  --r-xs:2px;
+  --r-sm:4px;
+  --r-md:7px;
+  --r-lg:11px;
+  --r-xl:16px;
+  --r-pill:999px;
+
+  /* ---- borders ----------------------------------------------------- */
+  --bw-hair:1px;
+  --bw-1:1px;
+  --bw-2:2px;
+  --bw-rule:3px;      /* accent rule on section heads / callouts */
+  --border:var(--bw-1) solid var(--line);
+  --border-hair:var(--bw-hair) solid var(--hairline);
+  --border-accent:var(--bw-1) solid var(--accent-line);
+
+  /* ---- motion ------------------------------------------------------ */
+  --dur-1:80ms;    /* state flips: hover, focus */
+  --dur-2:150ms;   /* small transforms, dropdowns */
+  --dur-3:240ms;   /* panels, dialogs */
+  --dur-4:420ms;   /* progress sweeps, page-scale */
+  --ease-out:cubic-bezier(.22,.61,.36,1);
+  --ease-in-out:cubic-bezier(.45,.05,.55,.95);
+  --ease-emphatic:cubic-bezier(.16,.84,.24,1);
+  --ease-linear:linear;
+
+  /* ---- layout ------------------------------------------------------ */
+  --measure:46rem;      /* docs prose column */
+  --search:21rem;       /* the one search box: a field, not a banner */
+  --article:48rem;      /* legacy alias, same intent */
+  --side:17.5rem;       /* docs sidebar */
+  --toc:14rem;
+  --topbar-h:3.35rem;
+  --page-max:80rem;
+  --tool-header-h:2.9rem; /* twin / flasher / graph chrome */
+
+  /* ---- z ----------------------------------------------------------- */
+  --z-base:0;
+  --z-sticky:10;
+  --z-header:20;
+  --z-dropdown:30;
+  --z-scrim:40;
+  --z-palette:50;
+}
+
+/* =========================================================================
+   DARK — the canonical theme. Ground is a cool near-black with a faint blue
+   cast; accent is "signal cyan", the colour of an impulse-radio trace.
+   ====================================================================== */
+:root,
+:root[data-theme="dark"],:root.coal:not([data-theme="light"]),:root.navy:not([data-theme="light"]),:root.ayu:not([data-theme="light"]){
+  color-scheme:dark;
+
+  --ground:#07090b;          /* page */
+  --surface:#0b0e12;         /* nav, sidebar, footer */
+  --card:#0f1319;            /* cards, code blocks */
+  --raise:#161b22;           /* hover / active fills, inputs */
+  --sunken:#040608;          /* terminal, wells */
+
+  --ink:#c8d1da;             /* body copy        — 12.9:1 on ground */
+  --strong:#f3f7fa;          /* headings         — 18.5:1 */
+  --muted:#8d99a5;           /* secondary        —  6.9:1 */
+  --faint:#7b8792;           /* tertiary, meta   —  5.4:1 (4.7:1 on --raise) */
+  --inverse:#05080a;         /* text on accent fills */
+
+  --line:rgba(200,216,232,.145);
+  --hairline:rgba(200,216,232,.075);
+  --line-strong:rgba(200,216,232,.30);
+
+  --accent:#2fd0e6;          /* fills, rules, active states */
+  --accent-ink:#63e0f0;      /* accent as text/links — 12.8:1 on ground */
+  --accent-hover:#8ceaf6;
+  --accent-tint:rgba(47,208,230,.11);
+  --accent-line:rgba(47,208,230,.42);
+  --accent-glow:0 0 0 1px rgba(47,208,230,.35),0 6px 26px -10px rgba(47,208,230,.5);
+
+  --ok:#41c98a;      --ok-tint:rgba(65,201,138,.12);   --ok-line:rgba(65,201,138,.4);
+  --warn:#e0b341;    --warn-tint:rgba(224,179,65,.12); --warn-line:rgba(224,179,65,.4);
+  --danger:#f2717a;  --danger-tint:rgba(242,113,122,.12); --danger-line:rgba(242,113,122,.4);
+  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+  --focus:#7fe6f5;
+  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 4px var(--focus);
+  --selection:rgba(47,208,230,.28);
+
+  --shadow-1:0 1px 1px rgba(0,0,0,.6);
+  --shadow-2:0 1px 2px rgba(0,0,0,.6),0 10px 24px -14px rgba(0,0,0,.75);
+  --shadow-3:0 2px 4px rgba(0,0,0,.55),0 26px 60px -22px rgba(0,0,0,.85);
+  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.035);
+
+  /* syntax — one hue family plus three signals, so code reads as instrument
+     output rather than confetti. All ≥ 4.5:1 on --card. */
+  --syn-plain:#c8d1da;
+  --syn-comment:#7b8792;
+  --syn-keyword:#7fb8ff;
+  --syn-type:#63e0f0;
+  --syn-func:#a9d6ff;
+  --syn-string:#8fd6a8;
+  --syn-number:#e6c069;
+  --syn-const:#d5a8f0;
+  --syn-macro:#e59a76;
+  --syn-punct:#8d99a5;
+  --syn-added:rgba(65,201,138,.14);
+  --syn-removed:rgba(242,113,122,.14);
+  --syn-gutter:#7b8792;
+}
+
+/* =========================================================================
+   LIGHT — paper-white with the same cool cast; accent darkens to hold AA
+   against white (4.9:1 as text).
+   ====================================================================== */
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){
+    color-scheme:light;
+
+    --ground:#f6f8fa;
+    --surface:#ffffff;
+    --card:#ffffff;
+    --raise:#eef1f5;
+    --sunken:#e7ebf0;
+
+    --ink:#242a31;           /* 13.6:1 on ground */
+    --strong:#0d1116;        /* 17.8:1 */
+    --muted:#525c66;         /*  6.4:1 */
+    --faint:#646e78;         /*  4.9:1 (4.6:1 on --raise) */
+    --inverse:#ffffff;
+
+    --line:rgba(16,26,36,.14);
+    --hairline:rgba(16,26,36,.075);
+    --line-strong:rgba(16,26,36,.28);
+
+    --accent:#0f7c8f;
+    --accent-ink:#0b6675;    /*  6.2:1 on ground */
+    --accent-hover:#084f5c;
+    --accent-tint:rgba(15,124,143,.09);
+    --accent-line:rgba(15,124,143,.32);
+    --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
+
+    --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
+    --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
+    --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
+    --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+    --focus:#0b6675;
+    --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
+    --selection:rgba(15,124,143,.2);
+
+    --shadow-1:0 1px 1px rgba(13,26,38,.06);
+    --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
+    --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
+    --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+
+    --syn-plain:#242a31;
+    --syn-comment:#6d7883;
+    --syn-keyword:#1c4fbd;
+    --syn-type:#0b6675;
+    --syn-func:#2a4a86;
+    --syn-string:#1c6b41;
+    --syn-number:#8a5b06;
+    --syn-const:#6b3a9c;
+    --syn-macro:#9c4a1e;
+    --syn-punct:#525c66;
+    --syn-added:rgba(13,122,77,.1);
+    --syn-removed:rgba(189,47,58,.09);
+    --syn-gutter:#6d7883;
+  }
+}
+
+/* Manual override — duplicated rather than @extend'd because plain CSS has no
+   mixins and the attribute must beat the media query above. */
+:root[data-theme="light"],:root.light:not([data-theme="dark"]),:root.rust:not([data-theme="dark"]){
+  color-scheme:light;
+
+  --ground:#f6f8fa;
+  --surface:#ffffff;
+  --card:#ffffff;
+  --raise:#eef1f5;
+  --sunken:#e7ebf0;
+
+  --ink:#242a31;
+  --strong:#0d1116;
+  --muted:#525c66;
+  --faint:#646e78;
+  --inverse:#ffffff;
+
+  --line:rgba(16,26,36,.14);
+  --hairline:rgba(16,26,36,.075);
+  --line-strong:rgba(16,26,36,.28);
+
+  --accent:#0f7c8f;
+  --accent-ink:#0b6675;
+  --accent-hover:#084f5c;
+  --accent-tint:rgba(15,124,143,.09);
+  --accent-line:rgba(15,124,143,.32);
+  --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
+
+  --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
+  --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
+  --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
+  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+  --focus:#0b6675;
+  --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
+  --selection:rgba(15,124,143,.2);
+
+  --shadow-1:0 1px 1px rgba(13,26,38,.06);
+  --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
+  --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
+  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+
+  --syn-plain:#242a31;
+  --syn-comment:#6d7883;
+  --syn-keyword:#1c4fbd;
+  --syn-type:#0b6675;
+  --syn-func:#2a4a86;
+  --syn-string:#1c6b41;
+  --syn-number:#8a5b06;
+  --syn-const:#6b3a9c;
+  --syn-macro:#9c4a1e;
+  --syn-punct:#525c66;
+  --syn-added:rgba(13,122,77,.1);
+  --syn-removed:rgba(189,47,58,.09);
+  --syn-gutter:#6d7883;
+}
+
+/* --- legacy aliases -----------------------------------------------------
+   The v0.3.0 sheet and the documate-owned shell markup reference these
+   names. Keep them so generated HTML keeps rendering during migration;
+   author nothing new against them.
+   ----------------------------------------------------------------------- */
+:root{
+  --sans:var(--font-sans);
+  --mono:var(--font-mono);
+  --serif:var(--font-sans);
+  --tint:var(--accent-tint);
+  --tint-line:var(--accent-line);
+  --shadow:var(--shadow-2);
+  --shadow-lg:var(--shadow-3);
+}

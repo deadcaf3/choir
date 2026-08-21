@@ -33,6 +33,10 @@
 //! assert_eq!(remote.api, "https://node.example");
 //! assert_eq!(remote.repo, "agents/demo");
 //! ```
+//!
+//! The workflow this command collapses into one step:
+//!
+#![doc = include_str!("../../../docs/using/workflow.md")]
 
 use crate::runner::{safe_segment, split_repo, Failure, Identity};
 

@@ -47,6 +47,11 @@
 //! repository, and are gated rather than filtered because filtering a
 //! hash chain or a complete-ref-state snapshot destroys the property each
 //! exists to provide.
+//!
+//! The operator's guide to every authorization question this module
+//! and its neighbours answer:
+//!
+#![doc = include_str!("../../../docs/operating/authorization.md")]
 
 use std::collections::HashMap;
 use std::path::Path;

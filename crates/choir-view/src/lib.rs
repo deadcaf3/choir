@@ -34,6 +34,18 @@
 //! let view = View::materialize(&log).unwrap();
 //! assert_eq!(view.workspaces.get("agent-1"), Some(&commit_id));
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is L1, the view that refs, reviews and workspaces are all folded from.
+//!
+//! It builds on [`choir_hash`], [`choir_oplog`] and [`choir_store`].
+//!
+//! The workspace's architecture, included here because this crate is
+//! the version model the rest of it folds into:
+//!
+#![doc = include_str!("../../../docs/architecture.md")]
 
 use std::collections::BTreeMap;
 

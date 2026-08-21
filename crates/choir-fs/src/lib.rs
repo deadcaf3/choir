@@ -5,6 +5,13 @@
 //! Ported from Oak (oak.space) `cli/src/atomic_file.rs` and
 //! `cli/src/workdir_lock.rs`, v0.102.1 (commit `8de9515`), Apache-2.0;
 //! adapted to std errors and this workspace's needs.
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is the durable-file primitives — atomic writes and a working-directory lock — that the binaries share.
+//!
+//! It depends on no other crate in this workspace.
 
 pub mod atomic_file;
 pub mod workdir_lock;

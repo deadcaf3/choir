@@ -26,6 +26,13 @@
 //! assert_eq!(log.head(), Some(head));
 //! assert_eq!(log.len(), 1);
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is L1, the op log's wire format and the seam every log backend implements.
+//!
+//! It builds on [`choir_hash`].
 
 use serde::{Deserialize, Serialize};
 

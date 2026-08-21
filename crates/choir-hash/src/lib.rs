@@ -14,6 +14,13 @@
 //! assert_eq!(h.digest.len(), 32);
 //! assert_eq!(h, ContentHash::blake3(b"hello"));
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is the bottom of the stack: self-describing content addressing (D6), shared by L0 and L1.
+//!
+//! It depends on no other crate in this workspace.
 
 use serde::{Deserialize, Serialize};
 

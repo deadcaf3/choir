@@ -27,6 +27,10 @@
 //! as `application/problem+json` because every existing client and test
 //! reads `error` out of an ordinary JSON body, and changing the media
 //! type would break them for no gain an agent can use.
+//!
+//! The symptom-first companion to the code table below:
+//!
+#![doc = include_str!("../../../docs/reference/troubleshooting.md")]
 
 /// Stable, machine-readable rejection reasons.
 ///

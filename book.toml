@@ -1,0 +1,47 @@
+# The documentation book.
+#
+# `src` is `docs/`, which is the same directory rustdoc pulls into the
+# crates with `#![doc = include_str!]`. One set of files, three readers:
+# a person browsing the repository, a person reading the book, and a
+# person in `cargo doc`. Nothing here duplicates a page; if it did, the
+# copies would disagree within a week.
+#
+# Build both halves together with `choir docs`, which puts the API
+# documentation inside the book at `/api/` so the two link to each
+# other.
+
+[book]
+title = "choir"
+description = "Agent-first code collaboration: many agents on one repository, one total order from a single-writer sequencer, and merge conflicts as first-class values."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "book"
+# Fail on a SUMMARY entry with no file behind it. The default is to
+# create the missing file, which turns a typo in the table of contents
+# into a committed empty page nobody notices.
+create-missing = false
+
+[output.html]
+# The palette comes from the daemon's own stylesheet, so the book and
+# the product look like one thing. `choir-tokens.css` is generated from
+# `crates/choir-node/src/ui.css`; `choir.css` maps those tokens onto
+# mdBook's chrome and is hand-written.
+additional-css = ["theme/choir-tokens.css", "theme/choir.css"]
+
+# mdBook's own names, kept because its theme picker writes them to
+# localStorage and the generated token sheet answers to both spellings.
+# `light` and `coal` are the two this book actually renders.
+default-theme = "light"
+preferred-dark-theme = "coal"
+
+# The sidebar reads as a table of contents rather than a numbered
+# specification; the sections are short enough that "3.2.1" is noise.
+no-section-label = true
+
+# Every page gets an anchor beside its headings, and the fold-out is
+# only useful on a book with deeper nesting than this one.
+[output.html.fold]
+enable = true
+level = 1

@@ -1,0 +1,147 @@
+# The `choir` CLI and the node's HTTP API
+
+The complete surface, rendered from one table so that the CLI's `--help`,
+`agents.md`, `/llms.txt`, `/api/schema` and this page cannot disagree with
+each other. A staleness test fails the release gate when they do.
+
+## Authentication and exit codes
+
+Auth on the CLI is flags, not env:
+
+```bash
+choir --auth-file ~/.choir/auth --auth-user choir <command> ...
+```
+
+Exit codes: **0** accepted, **1** rejected (JSON body printed, see `ERRORS.md`), **2** usage.
+
+The signed-operation API is the primary agent path: it carries actor identity and batches many operations behind one durability barrier. `git push` remains the compatibility and bulk-transfer path.
+
+## Signed-operation CLI and API (primary agent path)
+
+<!-- generated: choir surface, do not edit -->
+
+### HTTP endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
+| `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in the build log, not here, so they cannot go stale) |
+| `GET /api/view?limit=N&offset=M` | The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone. Every map-shaped section is bounded: `limit` rows each (200 by default, 1000 at most), `offset` rows skipped in key order, `<section>_omitted` counting what this page left out, and `paging.next` naming the request that fetches the rest or being null when there is none |
+| `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege |
+| `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained and verified without trusting the node; SYNC.md is that procedure |
+| `POST /api/workspace` | Provision a CoW workspace; optional exact base/change binding makes retries idempotent |
+| `POST /api/workspace/archive` | Recoverably archive a change-bound workspace and remove it from the active view |
+| `GET /api/reviews?reviewer=X` | One actor's pending review queue |
+| `GET /api/schema` | This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17) |
+| `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
+| `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
+| `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
+| `POST /api/accounts/invite` | Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one |
+| `POST /api/accounts/redeem` | Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it |
+| `POST /api/accounts/revoke` | Delete an account: its token stops authenticating on the next request, and its grants and keys go with it |
+| `GET /api/accounts` | Who holds an account, what they were granted, and which invites are outstanding; never a secret or its hash |
+| `POST /api/git-update` | Internal: the pre-receive hook callback |
+| `POST /api/git-abort` | Internal: retracts a refused push's already-accepted refs |
+
+### The `choir` CLI
+
+**getting started**
+
+- `choir key <key-file> [name]`  
+  mint a key and print the line the operator registers; pass your channel name to print the bound form
+- `choir git-credential <auth-file> [--auth-user <name>] get|store|erase`  
+  git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
+- `choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]`  
+  redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
+- `choir docs [--open]`  
+  build this repository's documentation: the book from `docs/`, and the API documentation inside it at `book/api/` so the prose can link to a type; needs a checkout and `mdbook`, and refuses with the command that installs it
+- `choir skill install [--into <dir>]`  
+  install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
+
+**changing code**
+
+- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...`  
+  provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
+- `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>`  
+  publish an immutable change revision after committing and pushing its Git object
+- `choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...`  
+  propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal
+- `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>`  
+  owner-sign and recoverably archive a bound workspace; exact retries are idempotent
+- `choir submit <api> <key-file> <channel> '<op-json>'`  
+  sign and submit one raw operation
+- `choir batch <api> <key-file> <channel> <ops-file>`  
+  sign and submit many operations as one batch — the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op in order
+- `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'`  
+  publish a task spec or plan so other agents can see intent
+- `choir state <api> <channel>`  
+  your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
+
+**review**
+
+- `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...`  
+  request review on a commit; name no reviewers and the node draws them
+- `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]`  
+  answer a review you were assigned
+- `choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'`  
+  say something on a review; append-only and permanent, and the comment id is your retry identity
+- `choir viewed <api> <key-file> <viewer> <review-id>`  
+  record that you read a review, so its author can tell "reviewed and ignored" from "nobody looked"; first read only, resubmitting is refused
+- `choir slash <api> <node-key-file> <id> <reviewer> '<reason>'`  
+  invalidate one reviewer's approval; operator-only and never moves a ref
+- `choir abandon <api> <node-key-file> <id>`  
+  archive a stale incomplete review as lapsed, settling it unapproved; operator-only and never moves a ref
+- `choir reviews <api> <reviewer>`  
+  your pending review queue
+
+**checks**
+
+- `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]`  
+  report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
+- `choir checks <api> <git-oid>`  
+  every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+
+**reading the node**
+
+- `choir schema <api>`  
+  print this node's machine-readable API description and its live capabilities
+- `choir log <api> [--from <n>] [--verify] [--keys <file>]`  
+  read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag
+- `choir appeal <api> <attempt-id>`  
+  appeal a rejected newcomer attempt for operator adjudication; never grants privilege
+- `choir triage <api>`  
+  every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
+- `choir funnel <api>`  
+  the contribution funnel from admission to first verdict, and the steepest drop between two stages; counts what this credential may read, and reports the first-contact stage as null rather than inventing a zero
+- `choir view <api> [--limit <n>] [--offset <n>]`  
+  the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest
+
+**operating a node**
+
+- `choir runner <config-file>`  
+  drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout
+- `choir bind <api> <node-key-file> <operator> <key-hex> [channel]`  
+  record in the log that a key belongs to an operator; operator-only and never moves a ref
+- `choir revoke <api> <node-key-file> <key-hex> '<reason>'`  
+  withdraw a key binding; terminal, and the attribution row survives
+- `choir acl render <api> <acl-file>`  
+  rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
+- `choir repair <log-file> --verify | --truncate-tail`  
+  inspect a stopped node's op log, or repair a tail that was still being written; `--verify` walks the hash chain and changes nothing, `--truncate-tail` quarantines the partial record to a sidecar before cutting, and damage anywhere but the tail is refused rather than patched over
+
+Most commands take the node's URL first. Put `node = <url>` in `.choir/config`, in the working directory or any parent, and it is filled in when omitted. `choir <command> --help` prints one command's spec.
+
+Exit codes: 0 accepted, 1 the node rejected (its JSON error body is printed), 2 usage error.
+<!-- /generated -->
+
+Live surface on a running node: `GET /llms.txt`. Sync verification: `SYNC.md` / `GET /sync.md`.
+
+## MCP adapter
+
+For MCP clients, run the synchronous stdio adapter. It maps generated tools onto the same HTTP endpoints and owns no second implementation or session state.
+
+```bash
+choir-mcp http://127.0.0.1:8417 --auth-file ~/.choir/auth --auth-user choir
+```
+
+It serves the measured legacy handshakes and the stateless 2026-07-28 request path. Tool order and schemas come from `crates/choir-cli/src/surface.rs`.

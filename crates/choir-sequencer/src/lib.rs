@@ -18,6 +18,13 @@
 //! let log = sequencer.shutdown();
 //! assert_eq!(log.len(), 1);
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is the single writer itself (D2): one thread per repository decides the total order.
+//!
+//! It builds on [`choir_oplog`].
 
 pub mod fairness;
 pub mod journal;

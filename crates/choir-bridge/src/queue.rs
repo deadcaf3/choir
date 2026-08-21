@@ -640,6 +640,22 @@ pub fn parse_observed_merges(text: &str) -> std::collections::BTreeSet<String> {
 /// fixture — counts as relevant, because the cost of wrongly skipping a
 /// merge is a semantic conflict that never enters the corpus, while the cost
 /// of wrongly keeping one is three builds.
+///
+/// # Examples
+///
+/// ```
+/// use choir_bridge::queue::path_is_inert;
+///
+/// // Documentation and forge bookkeeping cannot move a test result.
+/// assert!(path_is_inert("README.md"));
+/// assert!(path_is_inert("docs/operating/limits.md"));
+/// assert!(path_is_inert(".github/workflows/ci.yml"));
+///
+/// // Everything else counts, including the files that only look inert.
+/// assert!(!path_is_inert("src/lib.rs"));
+/// assert!(!path_is_inert("Cargo.toml"));
+/// assert!(!path_is_inert("tests/fixtures/input.txt"));
+/// ```
 #[must_use]
 pub fn path_is_inert(path: &str) -> bool {
     if path.starts_with(".github/") {

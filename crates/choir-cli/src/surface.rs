@@ -1,9 +1,9 @@
 //! The agent-facing surface, as data, and the generators that render it.
 //!
-//! `choir --help`, the README's API and CLI sections, the three
-//! `templates/` snippets, the root `agents.md` and the node's `llms.txt`
-//! all describe one surface. Hand-maintained, they drift — and they had
-//! already started to: the README's API table carried a throughput
+//! `choir --help`, `docs/using/cli.md`, the README's cheat-sheet, the
+//! three `templates/` snippets, the root `agents.md` and the node's
+//! `llms.txt` all describe one surface. Hand-maintained, they drift —
+//! and they had already started to: the API table carried a throughput
 //! figure that three later measurements had superseded.
 //!
 //! So the surface is described once, here, and everything else is
@@ -521,6 +521,18 @@ pub const COMMANDS: &[Command] = &[
         group: "changing code",
     },
     Command {
+        name: "docs",
+        args: "[--open]",
+        summary: "build this repository's documentation: the book from `docs/`, and the API \
+                  documentation inside it at `book/api/` so the prose can link to a type; \
+                  needs a checkout and `mdbook`, and refuses with the command that installs it",
+        // A contributor's command, not an agent's: it builds a local
+        // tree from a checkout and touches no node. An agent that wants
+        // this surface reads `/llms.txt` from a running one.
+        agent_facing: false,
+        group: "getting started",
+    },
+    Command {
         name: "skill",
         args: "install [--into <dir>]",
         summary: "install the choir agent skill (default .claude/skills), rendered from \
@@ -549,7 +561,8 @@ pub const COMMANDS: &[Command] = &[
     },
 ];
 
-/// Every endpoint the node serves, in the order the README lists them.
+/// Every endpoint the node serves, in the order `docs/using/cli.md`
+/// lists them.
 pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "POST",
@@ -721,7 +734,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
 ///
 /// The order is deliberately not sorted at runtime: stable tool order
 /// improves client prompt-cache hits, and table order is the one source
-/// shared with the README and discovery documents.
+/// shared with the reference page and the discovery documents.
 #[must_use]
 pub fn mcp_tools() -> Vec<serde_json::Value> {
     ENDPOINTS
@@ -776,9 +789,9 @@ pub fn usage() -> String {
 
 /// [`usage`], styled for a terminal.
 ///
-/// One renderer, two callers: the plain form is what the README and the
-/// tests read, and a second copy of this layout would be a second place
-/// for the index to be wrong.
+/// One renderer, two callers: the plain form is what the tests read,
+/// and a second copy of this layout would be a second place for the
+/// index to be wrong.
 #[must_use]
 pub fn usage_in(style: Style) -> String {
     let width = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
@@ -881,7 +894,7 @@ pub fn command_help_in(name: &str, style: Style) -> Option<String> {
     Some(out)
 }
 
-/// The README's endpoint table.
+/// The endpoint table `docs/using/cli.md` carries.
 #[must_use]
 pub fn api_table() -> String {
     let mut out = String::from("| Endpoint | Purpose |\n|---|---|\n");
@@ -891,26 +904,79 @@ pub fn api_table() -> String {
     out
 }
 
-/// The README's generated API and CLI reference.
+/// The generated API and CLI reference in `docs/using/cli.md`.
+///
+/// Named for the document it fills rather than for the README, which is
+/// where it used to live. The README now carries [`readme_cheatsheet`]
+/// instead: a reader arriving at a repository wants the shortest path to
+/// a first change, and thirty-two full argument specs is not it.
 #[must_use]
-pub fn readme_surface() -> String {
+pub fn cli_doc_surface() -> String {
     format!(
-        "#### HTTP endpoints\n\n{}\n#### The `choir` CLI\n\n{}",
+        "### HTTP endpoints\n\n{}\n### The `choir` CLI\n\n{}",
         api_table(),
         cli_reference()
     )
 }
 
-/// The README's command reference: every command, its full argument
-/// spec, and what it is for.
+/// The commands a first contribution needs, in reading order.
+///
+/// `key` and `join` are alternatives rather than steps: an operator
+/// mints a key, somebody holding an invite runs `join` and gets one.
+/// The rest are the loop.
+///
+/// A list of names rather than a `day_one` field on [`Command`],
+/// deliberately, and the argument cuts the other way from the one
+/// [`Command::group`] makes. Every command must belong to *some* help
+/// section, so a field is right there and the compiler should ask. No
+/// command has to be on a getting-started path, so a new one is
+/// presumptively absent, and a field would ask thirty-two questions
+/// whose answer is `false`.
+///
+/// Checked against [`COMMANDS`] by the surface test: a name here that no
+/// longer exists fails rather than silently rendering nothing.
+pub const DAY_ONE: &[&str] = &[
+    "key",
+    "join",
+    "workspace",
+    "propose",
+    "reviews",
+    "verdict",
+    "state",
+    "log",
+];
+
+/// The README's cheat-sheet: the day-one commands and nothing else.
+///
+/// Generated rather than hand-written for the reason every other table
+/// here is. A short list beside a complete one is the drift this module
+/// exists to stop, and a cheat-sheet is exactly the kind of document
+/// that gets written once and then quietly stops being true.
+#[must_use]
+pub fn readme_cheatsheet() -> String {
+    let mut out = String::from("| Command | What it does |\n|:--|:--|\n");
+    for name in DAY_ONE {
+        if let Some(c) = COMMANDS.iter().find(|c| &c.name == name) {
+            out.push_str(&format!("| `choir {}` | {} |\n", c.name, c.summary));
+        }
+    }
+    out.push_str("\nFull surface, every command and every endpoint: [`docs/using/cli.md`](docs/using/cli.md).\n");
+    out
+}
+
+/// The command reference in `docs/using/cli.md`: every command, its full
+/// argument spec, and what it is for.
 ///
 /// Not [`usage`]. Help is an index — the reader is at a prompt and wants
 /// the name of the thing, and thirty-two full argument specs is what
-/// they have to read past to find it. A README is the opposite
+/// they have to read past to find it. A reference page is the opposite
 /// situation: the reader is already looking the command up, and the
 /// specs are the reason they came. Rendering both from the same table
 /// keeps them from disagreeing without pretending they answer the same
 /// question.
+///
+/// [`readme_cheatsheet`] is the third answer to the same table, for the
+/// third reader: somebody deciding whether to try this at all.
 #[must_use]
 pub fn cli_reference() -> String {
     let mut out = String::new();
@@ -1114,8 +1180,9 @@ fn escape_html(text: &str) -> String {
 /// rather than making many tool calls. Whatever language that code is
 /// eventually written in, it needs one description of the surface that
 /// cannot drift from the surface — so this is rendered from the same
-/// table that already renders `--help`, the README, `llms.txt`, the
-/// three `templates/` snippets and the MCP tool list, and lands in
+/// table that already renders `--help`, `docs/using/cli.md`,
+/// `llms.txt`, the three `templates/` snippets and the MCP tool list,
+/// and lands in
 /// [`artifacts`] beside them so the one staleness test covers it.
 ///
 /// **Static facts only.** What a *particular* node will accept —
@@ -1149,8 +1216,9 @@ pub fn schema_json() -> String {
                 // build did not say".
                 "query_parameters": query,
                 // The documented spelling, kept because `llms.txt` and
-                // the README show it and a client comparing the two
-                // should not have to wonder whether they disagree.
+                // `docs/using/cli.md` show it, and a client comparing
+                // the two should not have to wonder whether they
+                // disagree.
                 "documented_as": e.path,
                 "purpose": e.purpose,
                 // The stable programmatic name, and the signal that this
@@ -1416,9 +1484,26 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
         // staleness test covers every generated artifact rather than two
         // tests each covering half.
         (root.join("ERRORS.md"), choir_node::reject::errors_md()),
+        // The book's palette, cut from the daemon's own stylesheet, so
+        // the documentation and the product cannot drift apart in
+        // colour, type scale or spacing. Same reason it lives here: one
+        // staleness test over every generated artifact.
+        (
+            root.join("theme/choir-tokens.css"),
+            choir_node::ui_tokens_css(),
+        ),
+        // Two documents, two audiences, one table. `docs/using/cli.md`
+        // gets the complete surface; the README gets the eight commands
+        // a first change needs. Both are generated so neither can drift
+        // from the other.
+        (
+            root.join("docs/using/cli.md"),
+            splice(&read("docs/using/cli.md")?, &cli_doc_surface())
+                .map_err(|e| format!("docs/using/cli.md: {e}"))?,
+        ),
         (
             root.join("README.md"),
-            splice(&read("README.md")?, &readme_surface())
+            splice(&read("README.md")?, &readme_cheatsheet())
                 .map_err(|e| format!("README.md: {e}"))?,
         ),
     ];

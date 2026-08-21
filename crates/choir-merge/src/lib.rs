@@ -19,6 +19,13 @@
 //!     _ => unreachable!(),
 //! }
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is the merge-strategy pipeline (D4/D19), cheapest strategy first.
+//!
+//! It depends on no other crate in this workspace.
 
 pub mod safety;
 

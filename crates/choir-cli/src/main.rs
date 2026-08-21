@@ -2298,6 +2298,45 @@ fn main() {
             let (status, resp) = http(api, auth, "choir_view", arguments.into());
             finish(status, &resp);
         }
+        ["docs", rest @ ..] => {
+            let open = match rest {
+                [] => false,
+                ["--open"] => true,
+                _ => usage(),
+            };
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("choir: cannot read the working directory: {e}");
+                std::process::exit(1);
+            });
+            let Some(root) = choir_cli::docs::find_root(&cwd) else {
+                eprintln!("choir: {}", choir_cli::docs::Failure::NotACheckout);
+                std::process::exit(1);
+            };
+            let built = match choir_cli::docs::build(&root) {
+                Ok(built) => built,
+                Err(failure) => {
+                    eprintln!("choir: {failure}");
+                    std::process::exit(1);
+                }
+            };
+            let opened = open && choir_cli::docs::open(&built.book.join("index.html"));
+            note(
+                "documentation built",
+                &[
+                    ("book", built.book.join("index.html").display().to_string()),
+                    ("api", built.api.join("index.html").display().to_string()),
+                    ("crates", built.crates.len().to_string()),
+                ],
+            );
+            let doc = serde_json::json!({
+                "root": built.root.display().to_string(),
+                "book": built.book.display().to_string(),
+                "api": built.api.display().to_string(),
+                "crates": built.crates,
+                "opened": opened,
+            });
+            finish(200, &doc.to_string());
+        }
         ["skill", "install", rest @ ..] => {
             let into = match rest {
                 [] => ".claude/skills",

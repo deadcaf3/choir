@@ -10,6 +10,13 @@
 //! implementation's tests assert.
 //!
 //! [`choir_sequencer`]: ../choir_sequencer/index.html
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is the *second* implementation of the actor-runtime seam (D3), on Rivet; it exists so the seam has two implementations passing one conformance suite.
+//!
+//! It builds on [`choir_oplog`].
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
