@@ -4161,19 +4161,44 @@ pub(crate) fn proposal_denial(acl: &crate::acl::Acl, body: &[u8]) -> Option<crat
     if acl.allows_repo(user, repo, crate::acl::Level::Write) {
         return None;
     }
-    // `Some` covers a malformed proposal ref as well as a good one, on
-    // purpose: `refs/for/main` with no topic is somebody proposing, and
-    // `git_update` answers that with the reason it did not work. Two
-    // refusals for one mistake, the less useful one first, would bury it.
-    if MagicRef::parse(refname).is_some() {
-        return None;
+    let refuse = |reason: String| {
+        Some(crate::acl::Denial {
+            status: 403,
+            reason,
+        })
+    };
+    let Some(rest) = refname.strip_prefix("refs/for/") else {
+        return refuse(format!(
+            "`{user}` may propose to {repo} but not write {refname}; \
+             push to refs/for/<branch>/{user}/<topic> to open a review instead"
+        ));
+    };
+    // Under their own name, so two proposers cannot reach one ref. A
+    // `propose` grant is the level given to somebody the repository does
+    // not trust, and several of them hold it at once: without this,
+    // whoever pushes second silently takes over the first one's proposal,
+    // or deletes it.
+    //
+    // Read off the raw segments rather than `MagicRef`'s topic, because
+    // that topic is joined with dashes and therefore lossy -- `a/b` and
+    // `a-b` reach the same review id, and a rule about who owns a ref
+    // must not be decided by a form that has already merged two names.
+    //
+    // A ref under `refs/for/` that this refuses is answered here rather
+    // than by `git_update`'s own "a topic is what makes this proposal
+    // yours": for this pusher, naming themselves is the missing part, and
+    // the message that says so is the more useful of the two. A `write`
+    // holder never reaches here and still gets the other one.
+    let mut segments = rest.split('/').filter(|s| !s.is_empty());
+    let (branch, owner) = (segments.next(), segments.next());
+    if owner != Some(user) {
+        let branch = branch.unwrap_or("<branch>");
+        return refuse(format!(
+            "`{user}` may propose to {repo} only under their own name; \
+             push to refs/for/{branch}/{user}/<topic>"
+        ));
     }
-    Some(crate::acl::Denial {
-        status: 403,
-        reason: format!(
-            "`{user}` may propose to {repo} but not write {refname};              push to refs/for/<branch>/<topic> to open a review instead"
-        ),
-    })
+    None
 }
 
 impl Platform {

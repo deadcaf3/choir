@@ -2437,13 +2437,15 @@ fn contribute(
     h.push_str(
         "<h2>Or: git and nothing else</h2>\
          <p>If you would rather not install anything, push to the magic refspec. The node \
-         opens the review and draws the reviewers itself. The topic is what makes the \
-         proposal yours rather than a ref shared with everyone else proposing onto the same \
-         branch, so it is required.</p>",
+         opens the review and draws the reviewers itself. Your own name comes first, then \
+         a topic: together they make the proposal yours rather than a ref shared with \
+         everyone else proposing onto the same branch, so both are required. A contributor \
+         holding <code>propose</code> is held to this; anyone with <code>write</code> is \
+         not, and should still follow it.</p>",
     );
     h.push_str("<pre class=\"cmd\">git push origin HEAD:refs/for/");
     h.push_str(&esc(&default_onto));
-    h.push_str("/my-topic</pre>");
+    h.push_str("/your-name/my-topic</pre>");
     h.push_str(
         "<p class=\"muted\">Pushing the same topic again updates that proposal. You still \
          need a credential to push, which is what step 1 gets you.</p>",

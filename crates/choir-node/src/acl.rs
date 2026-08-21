@@ -22,7 +22,8 @@
 //! Four levels, `read` < `propose` < `write` < `own`. `propose` arrived
 //! with D60 and is the one that lets a repository take contributions
 //! from someone who is not trusted with its branches: it admits a push
-//! to `refs/for/<branch>/<topic>` and refuses every other ref. `own`
+//! to `refs/for/<branch>/<user>/<topic>`, where the pusher's own name is
+//! what keeps two of them apart, and refuses every other ref. `own`
 //! arrived with D42, which
 //! is the first repository-scoped administrative action to exist: on a
 //! protected ref an owner's assent authorizes the landing, and `write`
@@ -82,8 +83,17 @@ pub enum Level {
     /// Spelled `read` on a repository and `auditor` on `@node`.
     Read,
     /// Everything [`Level::Read`] allows, plus opening a proposal: a
-    /// push to `refs/for/<branch>/<topic>` (D53) and no other ref.
-    /// Spelled `propose` (D60).
+    /// push to `refs/for/<branch>/<user>/<topic>` (D53) and no other
+    /// ref. Spelled `propose` (D60).
+    ///
+    /// The pusher's own name is a required segment, and that is what
+    /// keeps two holders of this level apart. Several people hold
+    /// `propose` at once, by construction -- it is the grant given to
+    /// contributors a repository does not trust -- so without it whoever
+    /// pushed second would take over or delete the first one's proposal,
+    /// and the log would record the takeover as an ordinary update by an
+    /// authorized pusher. A `write` holder is not held to the rule,
+    /// because a `write` holder can already reach every ref anyway.
     ///
     /// This is the grant for a contributor the operator does not trust
     /// with the repository's branches, which until it existed was not

@@ -809,7 +809,7 @@ fn a_propose_grant_opens_a_review_and_cannot_push_a_branch() {
     assert!(git(&dir, &["commit", "-q", "-m", "carol"]).status.success());
 
     // The proposal ref is admitted.
-    let proposed = git(&dir, &["push", "origin", "HEAD:refs/for/main/fix"]);
+    let proposed = git(&dir, &["push", "origin", "HEAD:refs/for/main/carol/fix"]);
     assert!(
         proposed.status.success(),
         "a propose grant could not open a review: {}",
@@ -819,7 +819,7 @@ fn a_propose_grant_opens_a_review_and_cannot_push_a_branch() {
     let (status, view) = curl(&["-u", "alice:a", &format!("{base}/api/view")]);
     assert_eq!(status, 200, "the view was refused: {view}");
     assert!(
-        !view["refs"]["owner/p.git:refs/for/main/fix"].is_null(),
+        !view["refs"]["owner/p.git:refs/for/main/carol/fix"].is_null(),
         "the proposal ref never reached the view: {}",
         view["refs"]
     );
@@ -876,5 +876,123 @@ fn a_propose_grant_does_not_reach_the_write_api() {
     assert_eq!(
         status, 403,
         "a propose grant moved a ref through the API: {body}"
+    );
+}
+
+/// D60. `propose` is the level handed to somebody the repository does not
+/// trust, and more than one person holds it at once, so "may open a
+/// review" must not mean "may reach every review".
+///
+/// Without a rule the refname itself carries, whoever pushes second takes
+/// over the first one's proposal or deletes it, and the log records the
+/// takeover as an ordinary update by an authorized pusher. The rule is
+/// that a proposer writes under their own name.
+///
+/// The assertion that matters is the *second* pusher, and it has to be a
+/// push the server actually gets to refuse. A plain update of somebody
+/// else's ref is a non-fast-forward, which git declines on the client
+/// before the hook is ever reached: asserting on that passes whether or
+/// not this rule exists. So dave builds on carol's own commit, which
+/// makes his push a legitimate fast-forward and leaves the ownership
+/// rule as the only thing that can stop it.
+#[test]
+fn one_proposer_cannot_reach_another_proposers_ref() {
+    let (base, _key, work, _acl) = served(
+        "propose-owner",
+        "alice  owner/q  write
+         carol  owner/q  propose
+         dave   owner/q  propose
+",
+        &["owner/q.git"],
+    );
+    seed(&work, &base, "alice:a", "owner/q.git");
+    let host = base.trim_start_matches("http://");
+
+    let mut clones = Vec::new();
+    for (who, token) in [("carol", "c"), ("dave", "d")] {
+        let dir = work.join(who);
+        assert!(
+            git(
+                &work,
+                &[
+                    "clone",
+                    "-q",
+                    &format!("http://{who}:{token}@{host}/owner/q.git"),
+                    dir.to_str().unwrap()
+                ]
+            )
+            .status
+            .success(),
+            "{who} could not clone"
+        );
+        clones.push(dir);
+    }
+    let (carol, dave) = (&clones[0], &clones[1]);
+
+    let commit = |dir: &std::path::Path, text: &str| {
+        std::fs::write(dir.join("f.txt"), text).unwrap();
+        assert!(git(dir, &["add", "."]).status.success());
+        assert!(git(dir, &["commit", "-q", "-m", text]).status.success());
+    };
+
+    commit(carol, "carol");
+    assert!(
+        git(carol, &["push", "origin", "HEAD:refs/for/main/carol/fix"])
+            .status
+            .success(),
+        "carol could not open her own proposal"
+    );
+    let carol_head = String::from_utf8_lossy(&git(carol, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    // Dave stands on carol's commit, so what follows is a fast-forward
+    // and git has no objection of its own to raise.
+    assert!(
+        git(dave, &["fetch", "-q", "origin", "refs/for/main/carol/fix"])
+            .status
+            .success(),
+        "dave could not fetch carol's proposal"
+    );
+    assert!(git(dave, &["checkout", "-q", "FETCH_HEAD"])
+        .status
+        .success());
+    commit(dave, "dave takes over");
+
+    for refspec in [
+        "HEAD:refs/for/main/carol/fix",
+        "+HEAD:refs/for/main/carol/fix",
+        ":refs/for/main/carol/fix",
+    ] {
+        let refused = git(dave, &["push", "origin", refspec]);
+        assert!(
+            !refused.status.success(),
+            "dave reached carol's proposal with {refspec}"
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr.contains("own name"),
+            "the refusal of {refspec} was not this rule's: {stderr}"
+        );
+    }
+
+    // His own name is his to use, so the rule is a namespace rather than
+    // a second way of saying no.
+    assert!(
+        git(dave, &["push", "origin", "HEAD:refs/for/main/dave/fix"])
+            .status
+            .success(),
+        "dave could not open a proposal under his own name"
+    );
+
+    // And carol's proposal still points where she left it.
+    let (_, view) = curl(&["-u", "alice:a", &format!("{base}/api/view")]);
+    assert_eq!(
+        view["refs"]["owner/q.git:refs/for/main/carol/fix"]
+            .as_str()
+            .map(|r| r.ends_with(&carol_head)),
+        Some(true),
+        "carol's proposal moved: {}",
+        view["refs"]
     );
 }
