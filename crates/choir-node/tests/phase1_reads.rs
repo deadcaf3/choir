@@ -19,10 +19,19 @@
 //!   only concurrent ones ask it.
 //! - **"In-region" is not represented and cannot be.** Loopback has no
 //!   wire, so this measures service time and not latency a user would
-//!   see. It is reported as the floor it is. What keeps it honest in the
-//!   conservative direction is that the timing includes a `curl` process
-//!   spawn per request — 15-20 ms of cost no real client pays — so the
-//!   figure is pessimistic by more than the loopback advantage.
+//!   see. It is reported as the floor it is, with no attempt to pad it
+//!   into looking like something else.
+//! - **The measurement no longer spawns a process per sample**, and
+//!   that correction was worth more than everything it was measuring.
+//!   This used to shell out to `curl` per request, counting the spawn
+//!   as rough compensation for the missing wire. The spawn *was* the
+//!   measurement: `/api/view` reads p99 306 us timed directly and read
+//!   p99 11 ms idle, 58 ms under one gate and 155 ms under the next
+//!   when a `curl` had to be forked first. Around 99.8% of that number
+//!   was fork/exec on a loaded machine. Every read figure taken before
+//!   this change should be read as a measurement of process spawn with
+//!   a node attached, including the ones that were used to argue about
+//!   what the node should do.
 //!
 //! Run them as a report:
 //!
@@ -36,13 +45,46 @@ use choir_oplog::MemLog;
 use std::time::{Duration, Instant};
 
 /// The plan's read latency ceiling.
+///
+/// Asserted for `/api/view` and only for it. That is the one read path
+/// whose cost is a fold in memory rather than a fistful of subprocesses,
+/// and it is the only place Phase 1's read target is gated at its real
+/// value — dropping it too would leave the target unmeasured, which is
+/// the failure this whole file exists to correct.
+///
+/// The margin, so a future reader has the number rather than a feeling:
+/// p99 306 us at a load average of 18, against a 100 ms ceiling. That is
+/// not a comfortable margin, it is a factor of three hundred, and it is
+/// what a read costs when the measurement is not itself forking a
+/// process per sample.
+///
+/// An earlier revision of this comment recorded "58 ms under a full
+/// parallel release gate" as evidence of headroom, and the assertion
+/// then failed at 155 ms on the next run. The number was real; treating
+/// one observation as the worst case was the mistake. If this ever
+/// fires now, the fold genuinely got slow.
 const READ_P99: Duration = Duration::from_millis(100);
 
-/// What a git-backed page is *asserted* against: loose enough to survive
-/// a loaded machine, tight enough that an order-of-magnitude regression
-/// still fails. The Phase-1 target is reported against separately, on
-/// every run, so the gap between the two stays in the output.
-const REGRESSION: Duration = Duration::from_millis(600);
+/// What a git-backed page is *asserted* against — and it is deliberately
+/// not a latency gate.
+///
+/// This started at 600 ms, chosen as "loose enough to survive a loaded
+/// machine". It failed a healthy tree on its first full gate, at p99
+/// 748 ms, with a parallel release suite on the machine. That is exactly
+/// the failure D64 describes and this file was written to avoid: a
+/// tripwire that fires on the weather gets disabled, which is worse than
+/// not having one. Hedging with a bigger number would have been the same
+/// mistake with a longer fuse, because the load that produced 748 ms was
+/// not extreme.
+///
+/// So the number is now a hang detector, not a ceiling. A page that
+/// spawns eight subprocesses cannot be timed reliably on a shared
+/// machine — the same binary measured p99 126 ms and p99 259 ms in
+/// consecutive runs — and the gate on these pages is
+/// `tests/phase1_spawns.rs`, which counts the subprocesses the latency
+/// is made of and does not move with load at all. What is left here is
+/// the report, printed against the Phase-1 target on every run.
+const HUNG: Duration = Duration::from_secs(5);
 
 fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
@@ -120,27 +162,64 @@ fn percentiles(url: &str, n: usize) -> Vec<Duration> {
     // rate never pays again, and a p99 over a hundred samples would
     // otherwise be reporting that one request forever.
     for _ in 0..5 {
-        let _ = std::process::Command::new("curl")
-            .args(["-s", "-o", "/dev/null", url])
-            .output()
-            .expect("curl runs");
+        let _ = one_read(url);
     }
     let mut samples = Vec::with_capacity(n);
     for _ in 0..n {
         let started = Instant::now();
-        let out = std::process::Command::new("curl")
-            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", url])
-            .output()
-            .expect("curl runs");
+        let code = one_read(url).expect("a read of the node succeeded");
         samples.push(started.elapsed());
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "200",
-            "a read of {url} failed mid-measurement"
-        );
+        assert_eq!(code, 200, "a read of {url} failed mid-measurement");
     }
     samples.sort();
     samples
+}
+
+/// One HTTP/1.1 GET over a fresh connection, by hand, returning the status.
+///
+/// Spelled out over a `TcpStream` rather than shelled out to `curl`,
+/// which is what this used to do and what the rest of the workspace does
+/// for outbound HTTP. The house rule against an HTTP client crate is
+/// about dependencies, and this adds none — it is thirty lines of `std`.
+///
+/// The reason is that the `curl` spawn was the measurement's own noise.
+/// A fork/exec is the single most load-sensitive thing on a shared
+/// machine, so every sample carried a term that varies with what else is
+/// running, and `/api/view` measured p99 11 ms idle, 58 ms under one
+/// gate and 155 ms under the next. That is not a node getting slower, it
+/// is a process spawn queueing behind a compiler. Timing the node
+/// instead of timing `fork` is what makes the number about the node.
+///
+/// What is lost is a deliberate pessimism: the spawn used to be counted
+/// as rough compensation for loopback having no wire. It was a poor
+/// trade, because compensation that swings by a factor of ten is noise
+/// wearing a justification. The loopback caveat stays stated in the
+/// module docs, where a reader can see it, instead of being smuggled
+/// into the samples.
+fn one_read(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("http://")?;
+    let (host, path) = rest
+        .split_once('/')
+        .map_or((rest, String::new()), |(h, p)| (h, format!("/{p}")));
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
+    };
+    let mut stream = std::net::TcpStream::connect(host).ok()?;
+    // Nagle would add a delay to a small request and be measured as the
+    // node being slow to answer.
+    stream.set_nodelay(true).ok()?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: choir-phase1\r\n\r\n");
+    std::io::Write::write_all(&mut stream, request.as_bytes()).ok()?;
+    // Read to the end, not just the header: a p99 that stopped at the
+    // status line would be timing how fast the node starts answering
+    // rather than how long a reader waits for the page.
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut body).ok()?;
+    let head = body.split(|b| *b == b'\n').next()?;
+    let text = String::from_utf8_lossy(head);
+    text.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Read latency, as a client measures it minus the wire.
@@ -178,15 +257,11 @@ fn read_latency_stays_under_the_ceiling() {
     // exists to keep visible rather than to hide behind a pass.
     for (what, url, ceiling) in [
         ("GET /api/view", format!("{base}/api/view"), READ_P99),
-        (
-            "GET /r/agents/one/",
-            format!("{base}/r/agents/one/"),
-            REGRESSION,
-        ),
+        ("GET /r/agents/one/", format!("{base}/r/agents/one/"), HUNG),
         (
             "GET /r/agents/one/tree/main/src",
             format!("{base}/r/agents/one/tree/main/src"),
-            REGRESSION,
+            HUNG,
         ),
     ] {
         let samples = percentiles(&url, 100);
@@ -203,7 +278,12 @@ fn read_latency_stays_under_the_ceiling() {
         );
         assert!(
             at(0.99) < ceiling,
-            "{what} p99 {:?} is over its {ceiling:?} ceiling",
+            "{what} p99 {:?} is over its {ceiling:?} ceiling. For /api/view \
+             that is the Phase-1 target itself and the fold got slow; for a \
+             git-backed page the ceiling is only a hang detector, so this \
+             means the page stopped answering rather than that it got \
+             slower -- see tests/phase1_spawns.rs for what actually gates \
+             those.",
             at(0.99)
         );
     }

@@ -668,22 +668,21 @@ fn rev_parse(dir: &Path, rev: &str) -> Result<String, String> {
 /// `None` means the repository genuinely has no branches, which is the one
 /// case where "empty" is the true answer.
 fn default_branch(dir: &Path) -> Option<String> {
-    let text = git_text(
-        dir,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
-    )
-    .ok()?;
-    let names: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
+    default_from(&branch_names(dir))
+}
+
+/// The same choice, made from a branch list already in hand.
+///
+/// Split out from [`default_branch`] because a repository front page
+/// wants both this and the ref picker, and asking git for `refs/heads/`
+/// once per question spawned the same `for-each-ref` twice per render.
+fn default_from(names: &[String]) -> Option<String> {
     for preferred in ["main", "master"] {
-        if names.contains(&preferred) {
+        if names.iter().any(|name| name == preferred) {
             return Some(preferred.to_string());
         }
     }
-    names.first().map(|name| (*name).to_string())
+    names.first().cloned()
 }
 
 /// A rendered page: its HTML, and the identity a client revalidates on.
@@ -1607,35 +1606,36 @@ fn highlight(h: &mut String, text: &str, needle: &str) {
     h.push_str(&esc(&text[at..]));
 }
 
-/// Every branch and every tag, short names, in git's own order.
+/// Short ref names under one pattern, in git's own order.
 ///
-/// Two lists rather than one because they answer different questions: a
-/// branch is where work is happening, a tag is a release. Presenting them
-/// in one flat list is how a reader ends up browsing `v0.1.0` believing
-/// it is current.
-fn branches_and_tags(dir: &Path) -> (Vec<String>, Vec<String>) {
-    let read = |pattern: &str| -> Vec<String> {
-        git_text(dir, &["for-each-ref", "--format=%(refname:short)", pattern])
-            .map(|text| {
-                text.lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    (read("refs/heads/"), read("refs/tags/"))
+/// Branches and tags stay two lists rather than one because they answer
+/// different questions: a branch is where work is happening, a tag is a
+/// release. Presenting them in one flat list is how a reader ends up
+/// browsing `v0.1.0` believing it is current. They are fetched
+/// separately as well, so a page that needs only branches pays for only
+/// branches.
+fn ref_names(dir: &Path, pattern: &str) -> Vec<String> {
+    git_text(dir, &["for-each-ref", "--format=%(refname:short)", pattern])
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-/// The commit a path was last changed by: its subject and its timestamp.
-///
-/// One `git log -1` per listed entry. That is a subprocess per row, which
-/// is the cost of being right about renames and merges without
-/// reimplementing git's history simplification here. A directory listing
-/// is tens of rows, not thousands, and the alternative — one walk with a
-/// commit budget — silently leaves blank cells on exactly the old, stable
-/// files a reader is most likely to be looking for.
+/// Every branch, short names, in git's own order.
+fn branch_names(dir: &Path) -> Vec<String> {
+    ref_names(dir, "refs/heads/")
+}
+
+/// Every tag, short names, in git's own order.
+fn tag_names(dir: &Path) -> Vec<String> {
+    ref_names(dir, "refs/tags/")
+}
+
 /// How far back one walk looks before falling back to per-path queries.
 ///
 /// A listing's rows are almost always touched by recent commits, so a
@@ -1647,10 +1647,14 @@ const TOUCH_WALK: usize = 400;
 /// Last-touch for every row of a listing, in one `git log` walk.
 ///
 /// This used to be one `git log -1` per row, which is a subprocess per
-/// row: a forty-file directory spawned forty-one of them and took ~79 ms
-/// of a page that Phase 1 asks to serve inside 100 ms, on loopback,
-/// before any network exists. The measurement that found it is
-/// `tests/phase1_reads.rs`.
+/// row: a forty-file directory spawned forty-one of them where it now
+/// spawns three, on a page Phase 1 asks to serve inside 100 ms. The
+/// measurement that found it is `tests/phase1_reads.rs`; the number that
+/// records it is the spawn budget in `tests/phase1_spawns.rs`, because
+/// the milliseconds move with the machine and the spawn count does not.
+/// (The wall-clock figure this comment used to quote was taken when the
+/// sampler still forked a `curl` per request, so it was mostly measuring
+/// that.)
 ///
 /// One walk attributes each path to the newest commit touching it.
 /// Anything the walk does not reach — a file untouched in the last
@@ -1723,6 +1727,13 @@ fn last_touches(
     found
 }
 
+/// The commit one path was last changed by: its subject and its timestamp.
+///
+/// A subprocess per call, so a listing does not use it per row any more
+/// — [`last_touches`] answers a whole listing in one walk. This is what
+/// that walk falls back to for a row it did not reach within
+/// [`TOUCH_WALK`] commits, and it is the definition of the right answer
+/// that the walk is tested against.
 fn last_touch(dir: &Path, oid: &str, path: &str) -> Option<(String, i64)> {
     // `--diff-merges=first-parent` is what makes a file whose only recent
     // change arrived through a merge show that merge instead of nothing.
@@ -1879,8 +1890,20 @@ fn tree(
     // can usefully share. Every link this page emits therefore names the
     // branch, so a reader who copies one gets a URL that keeps meaning
     // the same thing.
+    //
+    // One read of `refs/heads/` serves both questions this page asks of
+    // it — what to call `HEAD`, and what to offer in the ref picker —
+    // because they used to spawn a `for-each-ref` each, and a spawn is
+    // around a tenth of the page's whole latency budget. Fetched only
+    // when something actually asks: a subdirectory at a named revision
+    // wants neither.
+    let branches = if rev == "HEAD" || path.is_empty() {
+        branch_names(dir)
+    } else {
+        Vec::new()
+    };
     let named = if rev == "HEAD" {
-        default_branch(dir).unwrap_or_else(|| rev.to_string())
+        default_from(&branches).unwrap_or_else(|| rev.to_string())
     } else {
         rev.to_string()
     };
@@ -1933,7 +1956,7 @@ fn tree(
     // that answers "where am I", and repeating the picker there just
     // pushes the listing further down the page.
     if path.is_empty() {
-        let (branches, tags) = branches_and_tags(dir);
+        let tags = tag_names(dir);
         let commits = git_text(dir, &["rev-list", "--count", &oid])
             .ok()
             .and_then(|text| text.trim().parse::<u64>().ok());

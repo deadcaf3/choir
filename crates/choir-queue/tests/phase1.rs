@@ -145,6 +145,24 @@ fn green_keeping_holds_at_fifty_in_flight() {
 /// says "this is overhead" and would still catch a regression of an
 /// order of magnitude.
 #[test]
+// Release only, and skipped rather than loosened in debug.
+//
+// The gate's `--workspace` stage is a debug build, and there the same
+// batch costs 22.2 ms per change against 244 us in release -- 91x, which
+// is the unoptimized merge and diff, not anything this measures. A
+// threshold wide enough for both would be a threshold that means nothing
+// in either, and the number here is a claim about what the queue costs a
+// real node.
+//
+// `cfg_attr` rather than a silent early return: cargo reports it as
+// ignored, so a debug run says the measurement did not happen instead of
+// printing a pass for a check it skipped. `[profile.release]` leaves
+// `debug-assertions` at its default of off, which is what makes this
+// exact.
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release-only measurement; debug is ~91x slower and measures the profile"
+)]
 fn the_queue_leaves_ci_almost_all_of_the_five_per_second_budget() {
     // Warm once, measure after. The first drain pays for lazily built
     // state that a sustained rate never pays again, and reporting it as

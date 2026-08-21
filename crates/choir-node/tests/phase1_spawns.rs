@@ -126,11 +126,17 @@ fn a_page_render_stays_inside_its_git_spawn_budget() {
     println!("== Phase-1 git-spawn budget ==");
     let mut outside = Vec::new();
     for (path, measured, budget) in [
-        // The repository front page: resolve, default branch, tree
-        // listing, refs, commit count, readme, and one walk for the
-        // listing's dates. The walk is one call for the whole listing --
-        // it was one per row until the read measurement found it.
-        ("/r/agents/one/", 9u64, 10u64),
+        // The repository front page, spawn by spawn: resolve HEAD, read
+        // refs/heads/, list the tree, read refs/tags/, count commits,
+        // walk the listing's dates, then size and read the README.
+        //
+        // Two of those were removed by measuring rather than by
+        // guessing. The dates were one `git log` per row until
+        // `phase1_reads.rs` priced a forty-file directory, and
+        // refs/heads/ was read twice per render -- once to decide what
+        // to call HEAD, once to fill the ref picker -- until this file
+        // was asked what the nine were actually doing.
+        ("/r/agents/one/", 8u64, 9u64),
         // A forty-file directory, at three. It is *cheaper* than the
         // root, which carries refs, a commit count and a readme that a
         // subdirectory does not -- and it does not grow with the number
