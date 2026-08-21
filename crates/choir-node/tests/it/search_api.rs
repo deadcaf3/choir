@@ -341,15 +341,56 @@ fn a_named_repository_can_be_searched_at_an_older_commit() {
 /// name reaches `git` as a directory under the node's root, so the
 /// question is not whether the answer is wrong but whether the argument
 /// can be constructed at all.
+///
+/// The escapes are rehearsed against a repository that really exists
+/// outside the root, because the first version of this test could not
+/// see them: every hostile name it tried resolved to a path with nothing
+/// at it, so refusing and failing to find were the same 404 and the
+/// check that does the refusing could be deleted with the suite still
+/// green. Two of these reach past what `decode` already stops -- `..`
+/// climbs a level, and an empty first segment makes the name absolute,
+/// which `Path::join` honours by discarding the root entirely.
 #[test]
 fn a_repo_parameter_cannot_climb_out_of_the_root() {
     let base = served("traversal", "");
+
+    // A real bare repository one level above the node's root, holding a
+    // term no repository inside the root carries. If an escape lands,
+    // the term comes back and says so by name.
+    let work = std::env::temp_dir().join("choir-node-search-api-traversal");
+    let outside = work.join("outside.git");
+    assert!(
+        git(&work, &["init", "-q", "--bare", outside.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let seed = work.join("outside-seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    assert!(git(&seed, &["init", "-q"]).status.success());
+    std::fs::write(seed.join("secretive.rs"), "// the escapee is here\n").unwrap();
+    assert!(git(&seed, &["add", "."]).status.success());
+    assert!(git(&seed, &["commit", "-q", "-m", "outside the root"])
+        .status
+        .success());
+    assert!(git(
+        &seed,
+        &["push", "-q", outside.to_str().unwrap(), "HEAD:main"]
+    )
+    .status
+    .success());
     let (code, body) = get(
-        &format!("{base}/api/search?q=sequencer&repo=agents/nowhere"),
+        &format!("{base}/api/search?q=escapee&repo=agents/nowhere"),
         "alice:a",
     );
     assert_eq!(code, 404, "{body}");
     for hostile in [
+        // These two resolve to the repository seeded above, and only the
+        // segment rule stops them.
+        "../outside",
+        "/outside",
+        // These are already dead before the segment rule: `decode`
+        // refuses a slash inside either half. Kept so that a change to
+        // `decode` cannot quietly open them.
         "../../etc",
         "agents/..",
         "..%2f..%2fetc",
@@ -358,8 +399,12 @@ fn a_repo_parameter_cannot_climb_out_of_the_root() {
         "agents",
     ] {
         let (status, answer) = get(
-            &format!("{base}/api/search?q=sequencer&repo={hostile}"),
+            &format!("{base}/api/search?q=escapee&repo={hostile}"),
             "alice:a",
+        );
+        assert!(
+            !answer.to_string().contains("escapee"),
+            "`{hostile}` reached a repository outside the node root: {answer}"
         );
         assert_eq!(
             (status, &answer),
