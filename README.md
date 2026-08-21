@@ -143,7 +143,7 @@ Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (require
 | File | Format |
 |:--|:--|
 | `--auth-file` | `user:token` per line; authentication only, pair with `--acl-file` |
-| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `write` < `own`, and `auditor` on `@node` |
+| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `propose` < `write` < `own`, and `auditor` on `@node` |
 | `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |
@@ -165,9 +165,12 @@ bob        owner/demo       read
 bob        owner/notes      write
 carol      *                read
 dave       @node            auditor
+erin       owner/demo       propose
 ```
 
-`read` clones and fetches; `write` adds push, workspace provisioning, and submitting ops that touch that repository; `own` adds authorizing a landing on a protected ref (D42, below). There is no `admin`: the only repository-scoped administrative action that exists is the landing gate, and `own` is it.
+`read` clones and fetches; `propose` adds opening a review, and nothing else; `write` adds pushing any other ref, workspace provisioning, and submitting ops that touch that repository; `own` adds authorizing a landing on a protected ref (D42, below). There is no `admin`: the only repository-scoped administrative action that exists is the landing gate, and `own` is it.
+
+**`propose` is how a repository takes a contribution from somebody it does not trust with its branches (D60).** It admits exactly one thing, a push to `refs/for/<branch>/<topic>`, which opens a review (D53, below); every other ref is refused with a message naming that spelling. Until it existed this was not expressible, because opening a review is a push and `write` reaches every unprotected ref, so inviting an outsider to propose meant handing them the repository. The grant is checked twice, and it has to be: the smart-HTTP boundary sees no refname, since git sends the ref list only after the server agrees to receive the pack, so the push is admitted there and the refs are judged when the `pre-receive` hook reports them. Nothing is applied in between. Both transports get it, because the SSH shim borrows the HTTP mapping rather than restating it.
 
 The operator's own credential usually wants two lines, since neither covers the other:
 

@@ -1492,6 +1492,7 @@ impl Node {
                             base_url: &base_url,
                             user: &user,
                             acl: acl_for_api,
+                            push_acl: acl.as_deref(),
                             workspaces: metered.then_some(quotas.workspaces).flatten(),
                             body_limit: api_body_limit,
                         },
@@ -3201,6 +3202,17 @@ struct ApiRequestContext<'a> {
     base_url: &'a str,
     user: &'a str,
     acl: Option<&'a acl::Acl>,
+    /// The same table as `acl`, but supplied for the hook callbacks too,
+    /// which deliberately receive `acl: None` (D60).
+    ///
+    /// Those callbacks are privileged: they spend authorization the git
+    /// route already checked, so running the ordinary API denials over
+    /// them would re-ask a question that has been answered. One question
+    /// has *not* been answered there, because it could not be: a
+    /// `propose` grant is admitted at the smart-HTTP boundary before any
+    /// refname exists. This field carries the table for that one check
+    /// and nothing else.
+    push_acl: Option<&'a acl::Acl>,
     workspaces: Option<std::num::NonZeroU32>,
     body_limit: std::num::NonZeroU64,
 }
@@ -3215,6 +3227,7 @@ fn handle_api(
         base_url,
         user,
         acl,
+        push_acl,
         workspaces,
         body_limit,
     } = context;
@@ -3230,11 +3243,22 @@ fn handle_api(
             let path = request.url().to_string();
             // The body is already in hand, which is the only place the
             // repository a submission touches can be recovered from.
-            let denial = acl.and_then(|table| {
-                acl::api_denial(table, user, &method, &path, &req_body, |id| {
-                    p.review_repo(id)
+            let denial = acl
+                .and_then(|table| {
+                    acl::api_denial(table, user, &method, &path, &req_body, |id| {
+                        p.review_repo(id)
+                    })
                 })
-            });
+                .or_else(|| {
+                    // D60. Deliberately not inside `api_denial`: that one
+                    // authorizes the caller of this endpoint, and the
+                    // caller here is the hook. This authorizes the person
+                    // whose push triggered it, named in the body.
+                    ((method.as_str(), path.as_str()) == ("POST", "/api/git-update"))
+                        .then_some(push_acl)
+                        .flatten()
+                        .and_then(|table| platform::proposal_denial(table, &req_body))
+                });
             if let Some(denial) = denial {
                 (
                     denial.status,

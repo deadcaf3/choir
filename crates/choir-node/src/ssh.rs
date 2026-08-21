@@ -600,7 +600,12 @@ mod tests {
         );
         assert_eq!(
             Shim::required_level("owner/repo.git", Service::ReceivePack).unwrap(),
-            Level::Write
+            // `propose` since D60, and this test is the proof the
+            // borrowing works: nothing in this file changed to say so.
+            // The refname half is transport-agnostic too, because an SSH
+            // push runs the same `pre-receive` hook and reaches the same
+            // `/api/git-update`.
+            Level::Propose
         );
     }
 

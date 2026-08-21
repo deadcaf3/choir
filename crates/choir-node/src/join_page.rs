@@ -220,6 +220,7 @@ fn grant_in_words(grant: &str) -> String {
     };
     match level {
         "write" => format!("push to {what}"),
+        "propose" => format!("propose changes to {what}"),
         "read" => format!("read {what}"),
         other => format!("{other} {what}"),
     }

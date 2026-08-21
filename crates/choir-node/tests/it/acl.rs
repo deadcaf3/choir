@@ -755,3 +755,126 @@ fn a_drawn_reviewer_answers_with_read_and_still_cannot_push() {
     ]);
     assert_eq!(status, 404, "an ungranted credential reached a review");
 }
+
+/// D60. The level that lets a repository take a contribution from
+/// somebody it does not trust with its branches.
+///
+/// Until it existed this was not expressible. Opening a review is a push
+/// (D53 creates a real ref), a push needed `write`, and `write` reaches
+/// every unprotected ref -- so inviting an outsider to propose meant
+/// handing them the repository. `propose` is checked in two places
+/// because it has to be: the smart-HTTP boundary sees no refname, since
+/// git sends the ref list only after the server agrees to receive the
+/// pack, so the level is admitted there and the refs are judged when the
+/// `pre-receive` hook reports them.
+///
+/// Both halves are asserted here. Testing only the refusal would pass
+/// against a node that had simply dropped `propose` on the floor.
+#[test]
+fn a_propose_grant_opens_a_review_and_cannot_push_a_branch() {
+    let (base, _key, work, _acl) = served(
+        "propose-level",
+        "alice  owner/p  write
+         alice  @node    auditor
+         carol  owner/p  propose
+",
+        &["owner/p.git"],
+    );
+    seed(&work, &base, "alice:a", "owner/p.git");
+
+    let host = base.trim_start_matches("http://");
+    let dir = work.join("carol");
+    // `propose` implies `read`, so the clone is the first assertion.
+    assert!(
+        git(
+            &work,
+            &[
+                "clone",
+                "-q",
+                &format!("http://carol:c@{host}/owner/p.git"),
+                dir.to_str().unwrap()
+            ]
+        )
+        .status
+        .success(),
+        "a propose grant could not clone"
+    );
+    std::fs::write(
+        dir.join("f.txt"),
+        "carol was here
+",
+    )
+    .unwrap();
+    assert!(git(&dir, &["add", "."]).status.success());
+    assert!(git(&dir, &["commit", "-q", "-m", "carol"]).status.success());
+
+    // The proposal ref is admitted.
+    let proposed = git(&dir, &["push", "origin", "HEAD:refs/for/main/fix"]);
+    assert!(
+        proposed.status.success(),
+        "a propose grant could not open a review: {}",
+        String::from_utf8_lossy(&proposed.stderr)
+    );
+    // And really reached the log, rather than git merely being told yes.
+    let (status, view) = curl(&["-u", "alice:a", &format!("{base}/api/view")]);
+    assert_eq!(status, 200, "the view was refused: {view}");
+    assert!(
+        !view["refs"]["owner/p.git:refs/for/main/fix"].is_null(),
+        "the proposal ref never reached the view: {}",
+        view["refs"]
+    );
+
+    // Every other ref is refused, and the refusal names the way in.
+    for refspec in ["HEAD:refs/heads/carol-branch", "HEAD:main"] {
+        let refused = git(&dir, &["push", "origin", refspec]);
+        assert!(
+            !refused.status.success(),
+            "a propose grant pushed {refspec}"
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr.contains("refs/for/"),
+            "the refusal of {refspec} did not say how to propose instead: {stderr}"
+        );
+    }
+
+    // The refused pushes left nothing behind: a refusal before anything
+    // is submitted is the whole reason this check sits where it does,
+    // and a stranded ref is what it exists to avoid.
+    let (_, after) = curl(&["-u", "alice:a", &format!("{base}/api/view")]);
+    assert!(
+        after["refs"]["owner/p.git:refs/heads/carol-branch"].is_null(),
+        "a refused push left a ref in the view: {}",
+        after["refs"]
+    );
+}
+
+/// The grant that a `propose` holder does *not* get, stated separately
+/// because it is a different enforcement point: `write` on the API is
+/// what provisions a workspace and submits ops, and `propose` sits below
+/// it, so the ordering of the enum is what is under test here.
+#[test]
+fn a_propose_grant_does_not_reach_the_write_api() {
+    let (base, key, _work, _acl) = served(
+        "propose-api",
+        "carol  agents/one  propose
+",
+        &["agents/one.git"],
+    );
+    let op = ViewOp::new(OpKind::SetRef {
+        name: "agents/one.git:refs/heads/main".into(),
+        commit: choir_oplog::ContentHash::blake3(b"not carol's to move"),
+        prev: None,
+    });
+    let (status, body) = curl(&[
+        "-u",
+        "carol:c",
+        "-d",
+        &submit_body(&key, "carol/agent", &op),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(
+        status, 403,
+        "a propose grant moved a ref through the API: {body}"
+    );
+}
