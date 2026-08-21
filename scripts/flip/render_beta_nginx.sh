@@ -90,7 +90,22 @@ http {
         add_header X-Frame-Options DENY always;
         add_header Referrer-Policy no-referrer always;
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-        add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'" always;
+
+        # No Content-Security-Policy here, deliberately. \`add_header\`
+        # appends rather than replaces, so a policy set here would arrive
+        # alongside the node's own and both would be enforced, directive by
+        # directive, at their strictest. The node sends a policy per page
+        # and one of them is looser on purpose: the passkey pages carry
+        # \`script-src 'self'; connect-src 'self'\` for the one script this
+        # node has (D39). A blanket \`default-src 'none'\` here silently
+        # revokes exactly that, and would do it only on the pages that
+        # needed the exception. The node's own note gives the rule:
+        # per page, never node-wide.
+        #
+        # \`X-Content-Type-Options\` above is the opposite case and stays:
+        # it is genuinely node-wide, the node sends the identical value,
+        # and a duplicate of a single-valued directive cannot narrow
+        # anything.
 
         client_header_timeout 10s;
         client_body_timeout 30s;

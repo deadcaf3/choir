@@ -428,6 +428,40 @@ fn private_beta_proxy_handles_no_client_address() {
     );
 }
 
+/// The node sends a content policy per page and deliberately loosens it
+/// on the two passkey pages (D39). `add_header` appends rather than
+/// replaces, so anything set at the proxy is enforced *alongside* that one
+/// at its strictest, and a blanket policy here revokes the exception on
+/// exactly the pages that needed it. Nothing else in the suite would
+/// notice, because the beta manifest disables passkeys.
+#[test]
+fn private_beta_proxy_leaves_the_content_policy_to_the_node() {
+    let config = beta_proxy_config();
+    // Directives only. The comment explaining the absence names the header,
+    // and a bare `contains` over the whole file matches that prose.
+    let directives: String = config
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !directives.contains("Content-Security-Policy"),
+        "the proxy set a node-wide content policy over the node's per-page one:\n{config}"
+    );
+    for required in [
+        "add_header Strict-Transport-Security",
+        "add_header X-Frame-Options DENY",
+        "add_header Referrer-Policy no-referrer",
+        "add_header Permissions-Policy",
+        "add_header X-Content-Type-Options nosniff",
+    ] {
+        assert!(
+            config.contains(required),
+            "proxy config dropped {required}, which the node does not send:\n{config}"
+        );
+    }
+}
+
 #[test]
 fn private_beta_proxy_terminates_tls_and_separates_api_from_git_limits() {
     let config = beta_proxy_config();
