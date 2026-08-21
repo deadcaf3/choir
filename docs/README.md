@@ -12,8 +12,9 @@ stops compiling fails the build.
 
 <a class="api-link" href="api/index.html">API documentation →</a>
 
-Build both halves together with `scripts/build_docs.sh`, which renders the
-book and puts rustdoc inside it at `/api/`.
+Build both halves together with `choir docs`, which renders the book and
+puts rustdoc inside it at `/api/`. From a checkout without the CLI
+installed: `cargo run -p choir-cli -- docs --open`.
 
 ## Start here
 

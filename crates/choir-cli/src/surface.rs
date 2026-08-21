@@ -521,6 +521,18 @@ pub const COMMANDS: &[Command] = &[
         group: "changing code",
     },
     Command {
+        name: "docs",
+        args: "[--open]",
+        summary: "build this repository's documentation: the book from `docs/`, and the API \
+                  documentation inside it at `book/api/` so the prose can link to a type; \
+                  needs a checkout and `mdbook`, and refuses with the command that installs it",
+        // A contributor's command, not an agent's: it builds a local
+        // tree from a checkout and touches no node. An agent that wants
+        // this surface reads `/llms.txt` from a running one.
+        agent_facing: false,
+        group: "getting started",
+    },
+    Command {
         name: "skill",
         args: "install [--into <dir>]",
         summary: "install the choir agent skill (default .claude/skills), rendered from \

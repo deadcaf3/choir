@@ -29,6 +29,14 @@
 
 /// Regenerating the readable half of an ACL file (D46).
 pub mod acl;
+// Deliberately no `///` here, unlike some of its neighbours. A doc
+// comment written on the `pub mod` line is merged with the module's own
+// `//!` header, and the merged text resolves its intra-doc links in
+// *this* module's scope rather than in `docs`'s -- so `docs`'s header
+// linking to `docs::target_dir_from_metadata` became an unresolved link
+// and, under the workspace's `deny`, failed `cargo doc` outright. The
+// module documents itself.
+pub mod docs;
 pub mod mcp;
 
 /// One-command proposal from a git checkout.

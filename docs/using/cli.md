@@ -53,6 +53,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
 - `choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]`  
   redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
+- `choir docs [--open]`  
+  build this repository's documentation: the book from `docs/`, and the API documentation inside it at `book/api/` so the prose can link to a type; needs a checkout and `mdbook`, and refuses with the command that installs it
 - `choir skill install [--into <dir>]`  
   install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
 

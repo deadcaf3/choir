@@ -176,6 +176,12 @@
       "summary": "your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk"
     },
     {
+      "agent_facing": false,
+      "args": "[--open]",
+      "name": "docs",
+      "summary": "build this repository's documentation: the book from `docs/`, and the API documentation inside it at `book/api/` so the prose can link to a type; needs a checkout and `mdbook`, and refuses with the command that installs it"
+    },
+    {
       "agent_facing": true,
       "args": "install [--into <dir>]",
       "name": "skill",

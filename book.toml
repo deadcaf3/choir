@@ -6,9 +6,9 @@
 # person in `cargo doc`. Nothing here duplicates a page; if it did, the
 # copies would disagree within a week.
 #
-# Build both halves together with `scripts/build_docs.sh`, which puts
-# the API documentation inside the book at `/api/` so the two link to
-# each other.
+# Build both halves together with `choir docs`, which puts the API
+# documentation inside the book at `/api/` so the two link to each
+# other.
 
 [book]
 title = "choir"

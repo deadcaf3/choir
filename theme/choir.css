@@ -578,9 +578,9 @@ mark {
 /* -------------------------------------------------------------------------
    9. The API-documentation link.
 
-   `scripts/build_docs.sh` puts rustdoc at `/api/`, and this is what
-   makes that visible from inside the book rather than a URL somebody
-   has to be told about.
+   `choir docs` puts rustdoc at `/api/`, and this is what makes that
+   visible from inside the book rather than a URL somebody has to be
+   told about.
    ---------------------------------------------------------------------- */
 .content a.api-link {
   display: inline-flex;

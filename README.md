@@ -153,8 +153,8 @@ Full index: [**`docs/README.md`**](docs/README.md).
 Those pages render three ways from one source. On GitHub, as the files themselves. In `cargo doc`, because each is pulled into the crate that implements it with `#![doc = include_str!]`. And as a book:
 
 ```bash
-cargo install mdbook --locked   # once
-scripts/build_docs.sh --open    # book + API docs, cross-linked
+cargo install mdbook --locked        # once
+cargo run -p choir-cli -- docs --open
 ```
 
 That builds `book/`, with the API documentation inside it at `book/api/`, so a link from the prose to a type resolves. The book's palette is generated from the node's own stylesheet, so the documentation and the product look like one thing.
