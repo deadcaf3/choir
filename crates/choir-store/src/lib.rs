@@ -19,6 +19,13 @@
 //! let manifest_hash = put_blob(&mut store, &data, ChunkerParams::default()).unwrap();
 //! assert_eq!(get_blob(&store, &manifest_hash).unwrap(), data);
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is L0, the content-addressed store.
+//!
+//! It builds on [`choir_hash`].
 
 use choir_hash::ContentHash;
 use serde::{Deserialize, Serialize};

@@ -1,9 +1,9 @@
 //! L3 node daemon: a minimal git smart-HTTP server (DECISIONS.md D12).
 //!
-//! v1 wraps `git http-backend` (git's own CGI) over bare repositories, the
-//! the daemon is a thin, self-hostable shell
-//! over git plumbing, and platform behavior (sequencer, queue, identity)
-//! layers on top. ForgeMark benchmarks this surface directly.
+//! v1 wraps `git http-backend` (git's own CGI) over bare repositories, so
+//! the daemon is a thin, self-hostable shell over git plumbing, and
+//! platform behavior (sequencer, queue, identity) layers on top.
+//! ForgeMark benchmarks this surface directly.
 //!
 //! Authentication is per-actor basic auth ([`AuthTable`], `--auth-file`),
 //! plus the credentials self-service has issued ([`accounts`],
@@ -11,6 +11,17 @@
 //! verifies ed25519 op signatures. The bind stays loopback-only: beyond
 //! localhost you still need TLS or an SSH tunnel so tokens aren't sent in
 //! the clear.
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is L3, the daemon that serves both git smart-HTTP and the platform API.
+//!
+//! It builds on [`choir_fs`], [`choir_hash`], [`choir_identity`], [`choir_oplog`], [`choir_sequencer`] and [`choir_view`].
+//!
+//! The operator's guide to this daemon:
+//!
+#![doc = include_str!("../../../docs/operating/running-a-node.md")]
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

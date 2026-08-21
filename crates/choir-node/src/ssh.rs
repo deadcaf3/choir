@@ -37,6 +37,10 @@
 //! joins the same total order as an HTTPS one, rather than being a second,
 //! unsequenced way in. A shim with no `--handoff` refuses pushes outright
 //! rather than let one through unsequenced.
+//!
+//! The operator's guide to every way a client reaches a node:
+//!
+#![doc = include_str!("../../../docs/operating/transports.md")]
 
 use std::path::{Path, PathBuf};
 

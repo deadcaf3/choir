@@ -12,6 +12,41 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Atomically replace `path` with `contents`.
+///
+/// # Examples
+///
+/// The destination either holds the old bytes or the new ones. A reader
+/// racing the write never sees a prefix of the new contents, which is the
+/// whole reason this is not `fs::write`.
+///
+/// ```
+/// # use std::fs;
+/// let dir = std::env::temp_dir().join("choir-fs-doctest-write-atomic");
+/// fs::create_dir_all(&dir)?;
+/// let path = dir.join("policy");
+///
+/// choir_fs::atomic_file::write_atomic(&path, "first\n")?;
+/// assert_eq!(fs::read_to_string(&path)?, "first\n");
+///
+/// // Replacing is one rename, not a truncate-then-write.
+/// choir_fs::atomic_file::write_atomic(&path, "second\n")?;
+/// assert_eq!(fs::read_to_string(&path)?, "second\n");
+///
+/// // Nothing is left behind in the directory the temp file was written to.
+/// let strays: Vec<_> = fs::read_dir(&dir)?
+///     .filter_map(Result::ok)
+///     .filter(|e| e.file_name() != "policy")
+///     .collect();
+/// assert!(strays.is_empty(), "temp file survived the rename");
+/// # fs::remove_dir_all(&dir)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// Any `io::Error` from creating, writing, syncing or renaming the
+/// replacement file, and `InvalidInput` when `path` has no parent
+/// directory to write the replacement into.
 pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     write_atomic_impl(path, contents, false)
 }

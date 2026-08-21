@@ -45,6 +45,10 @@
 //! because a redirect is the standard way past exactly this check, and a
 //! non-loopback target must be `https`, since a bearer secret in clear
 //! over the internet is the same as no secret.
+//!
+//! The operator's guide to configuring them:
+//!
+#![doc = include_str!("../../../docs/operating/webhooks.md")]
 
 use std::io::Write;
 use std::net::{IpAddr, ToSocketAddrs};

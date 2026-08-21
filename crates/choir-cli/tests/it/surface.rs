@@ -73,21 +73,58 @@ fn every_generated_artifact_is_current() {
     );
 }
 
+/// Each claim that used to be asserted against the README, checked
+/// against the document it moved to.
+///
+/// The assertions did not get weaker when the README was split; they got
+/// addressed. A string checked against "some file in the repository"
+/// would pass while the sentence sat on a page no reader of that topic
+/// opens, which is the failure a documentation split actually has.
 #[test]
-fn readme_keeps_the_primary_path_and_complete_gate() {
-    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("README.md");
-    for required in [
-        "The signed-operation API is the primary agent path",
-        "git push` remains the compatibility",
-        "choir-mcp http://127.0.0.1:8417 --auth-file",
-        "configured invocations must supply both `<repo-root>` and `<port>`",
-        "trusted keys, channel bindings, push-certificate signers",
-        "--review-retention <count>",
-        "total_authoritative_view",
-        "#### The `choir` CLI",
+fn each_claim_stayed_with_its_topic() {
+    let root = repo_root();
+    for (rel, required) in [
+        // The primary-path statement belongs beside the surface it is
+        // about, not beside the install instructions.
+        (
+            "docs/using/cli.md",
+            "The signed-operation API is the primary agent path",
+        ),
+        ("docs/using/cli.md", "git push` remains the compatibility"),
+        (
+            "docs/using/cli.md",
+            "choir-mcp http://127.0.0.1:8417 --auth-file",
+        ),
+        // Heading level, not just presence: the generated block sits
+        // under a `##` on this page and under nothing in the README, so
+        // a renderer change that re-flattened it would go unnoticed.
+        ("docs/using/cli.md", "### The `choir` CLI"),
+        (
+            "docs/operating/running-a-node.md",
+            "configured invocations must supply both `<repo-root>` and `<port>`",
+        ),
+        (
+            "docs/operating/running-a-node.md",
+            "trusted keys, channel bindings, push-certificate signers",
+        ),
+        (
+            "docs/operating/running-a-node.md",
+            "--review-retention <count>",
+        ),
+        ("docs/using/workflow.md", "total_authoritative_view"),
     ] {
-        assert!(readme.contains(required), "README.md omits `{required}`");
+        let doc =
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        assert!(doc.contains(required), "{rel} omits `{required}`");
     }
+}
+
+/// What the README itself still owes a first-time reader.
+#[test]
+fn readme_keeps_getting_started_and_the_complete_gate() {
+    let root = repo_root();
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
+
     let gate = readme
         .split_once("Full release gate:\n\n```bash\n")
         .and_then(|(_, rest)| rest.split_once("\n```").map(|(gate, _)| gate))
@@ -96,6 +133,224 @@ fn readme_keeps_the_primary_path_and_complete_gate() {
         gate.lines().any(|line| line == "./gate"),
         "README.md must point at the fail-closed gate rather than duplicate a partial command list"
     );
+
+    // The README's job after the split is to hand the reader off. A
+    // README that stops naming the index is one that has quietly become
+    // the documentation again.
+    assert!(
+        readme.contains("docs/README.md"),
+        "README.md must point at the documentation index"
+    );
+
+    // Every page under docs/ is reachable from the README or from the
+    // index, and the index is reachable from the README. Reachability is
+    // the property; a page nobody links is a page nobody reads.
+    let index = std::fs::read_to_string(root.join("docs/README.md")).expect("docs/README.md");
+    let mut unlinked = Vec::new();
+    for entry in walk_docs(&root.join("docs")) {
+        let rel = entry
+            .strip_prefix(&root)
+            .expect("doc stays under the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == "docs/README.md" {
+            continue;
+        }
+        // The index links relative to itself, the README relative to the
+        // root; accept either spelling of the same page.
+        let from_index = rel.trim_start_matches("docs/");
+        if !index.contains(from_index) && !readme.contains(&rel) {
+            unlinked.push(rel);
+        }
+    }
+    assert!(
+        unlinked.is_empty(),
+        "documentation pages nothing links to: {unlinked:?}"
+    );
+}
+
+/// GitHub's heading-slug rule, which is what a `#fragment` in these
+/// files is written against.
+///
+/// Lowercase, drop every character that is not alphanumeric, a hyphen or
+/// an underscore, and turn spaces into hyphens. Runs of hyphens are
+/// *kept*, not collapsed: `(`--journal`)` slugs to `---journal`, and a
+/// checker that collapsed them would call a working link broken.
+fn slug(heading: &str) -> String {
+    let mut out = String::new();
+    for ch in heading.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if ch == ' ' {
+            out.push('-');
+        }
+    }
+    out
+}
+
+/// The slug of every heading in one document, skipping code fences.
+fn heading_slugs(doc: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut inside = false;
+    for line in doc.lines() {
+        if line.starts_with("```") {
+            inside = !inside;
+            continue;
+        }
+        if inside || !line.starts_with('#') {
+            continue;
+        }
+        let text = line.trim_start_matches('#').trim();
+        if !text.is_empty() {
+            out.insert(slug(text));
+        }
+    }
+    out
+}
+
+/// Every `#fragment` link points at a heading that exists.
+///
+/// [`assert_local_links_resolve`] drops the fragment before checking, so
+/// it cannot see this, and a same-page anchor has no file part for it to
+/// check at all. Splitting the README into pages broke exactly two links
+/// this way: the D36 credential section and the D31 SSH section referred
+/// to each other as same-page anchors, and after the split each anchor
+/// named a heading that had moved to the other file. Both still rendered
+/// as links, and both went nowhere.
+#[test]
+fn every_doc_anchor_names_a_real_heading() {
+    let root = repo_root();
+    let mut docs: Vec<std::path::PathBuf> = walk_docs(&root.join("docs"));
+    docs.push(root.join("README.md"));
+
+    let mut broken = Vec::new();
+    for path in &docs {
+        let doc = std::fs::read_to_string(path).expect("read doc");
+        let rel = path
+            .strip_prefix(&root)
+            .expect("doc stays under the repository")
+            .display()
+            .to_string();
+        let mut rest = doc.as_str();
+        while let Some(open) = rest.find("](") {
+            rest = &rest[open + 2..];
+            let Some(close) = rest.find(')') else { break };
+            let raw = &rest[..close];
+            rest = &rest[close + 1..];
+            let Some((target, fragment)) = raw.split_once('#') else {
+                continue;
+            };
+            if fragment.is_empty()
+                || target.starts_with("http://")
+                || target.starts_with("https://")
+            {
+                continue;
+            }
+            // An empty target is this same document.
+            let owner = if target.is_empty() {
+                path.clone()
+            } else {
+                path.parent().expect("document parent").join(target)
+            };
+            let Ok(owner_doc) = std::fs::read_to_string(&owner) else {
+                // A missing file is assert_local_links_resolve's finding,
+                // not this one; reporting it twice helps nobody.
+                continue;
+            };
+            if !heading_slugs(&owner_doc).contains(fragment) {
+                broken.push(format!("{rel} -> {raw}"));
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "links whose `#fragment` names no heading in the file it points at: {broken:?}"
+    );
+}
+
+/// Every code fence under `docs/` names its language.
+///
+/// These pages are included into rustdoc with `#![doc = include_str!]`,
+/// and rustdoc reads an *untagged* fence as Rust. Five of them arrived
+/// that way when this material moved out of the README, where nothing
+/// compiled it, and `cargo doc` refused the workspace.
+///
+/// That refusal is not the case this test covers. A fence full of ACL
+/// columns fails to parse and is caught; a fence whose contents happen
+/// to parse as Rust becomes a **silent doctest**, compiled and run by
+/// the gate, and the first thing anyone learns about it is a failure
+/// somewhere that has nothing to do with the change that caused it.
+#[test]
+fn every_doc_code_fence_names_its_language() {
+    let root = repo_root();
+    let mut untagged = Vec::new();
+    for path in walk_docs(&root.join("docs")) {
+        let doc = std::fs::read_to_string(&path).expect("read doc");
+        let rel = path
+            .strip_prefix(&root)
+            .expect("doc stays under the repository")
+            .display()
+            .to_string();
+        let mut inside = false;
+        for (n, line) in doc.lines().enumerate() {
+            if !line.starts_with("```") {
+                continue;
+            }
+            if inside {
+                inside = false;
+            } else {
+                inside = true;
+                if line.trim_end().len() == 3 {
+                    untagged.push(format!("{rel}:{}", n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        untagged.is_empty(),
+        "untagged code fences rustdoc will read as Rust: {untagged:?}\n\
+         tag each one (```text, ```bash, ```json), or ```rust if it is meant to compile"
+    );
+}
+
+/// Every `.md` under `docs/`, recursively.
+fn walk_docs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk_docs(&path));
+        } else if path.extension().is_some_and(|e| e == "md") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The cheat-sheet names commands that exist.
+///
+/// [`surface::DAY_ONE`] is a list of names rather than a field on each
+/// command, so nothing in the type system stops a rename from turning an
+/// entry into a row that renders as nothing at all.
+#[test]
+fn every_day_one_command_exists() {
+    for name in surface::DAY_ONE {
+        assert!(
+            surface::COMMANDS.iter().any(|c| &c.name == name),
+            "DAY_ONE names `{name}`, which is not a command"
+        );
+    }
+    let sheet = surface::readme_cheatsheet();
+    for name in surface::DAY_ONE {
+        assert!(
+            sheet.contains(&format!("`choir {name}`")),
+            "the cheat-sheet dropped `{name}`"
+        );
+    }
 }
 
 #[test]
@@ -162,11 +417,25 @@ fn local_markdown_links_resolve() {
     for rel in [
         "README.md",
         "SYNC.md",
+        "DECISIONS.md",
+        "ERRORS.md",
         "crates/choir-bridge/PERMISSIONS.md",
         "scripts/flip/RUNBOOK.md",
         "templates/README.md",
     ] {
         assert_local_links_resolve(&root, rel);
+    }
+    // Enumerated rather than listed, so a page added under `docs/` is
+    // covered the moment it exists. The list above cannot do that: those
+    // files live in five different directories and there is no rule that
+    // finds them.
+    for path in walk_docs(&root.join("docs")) {
+        let rel = path
+            .strip_prefix(&root)
+            .expect("doc stays under the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_local_links_resolve(&root, &rel);
     }
 }
 

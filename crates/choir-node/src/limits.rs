@@ -54,6 +54,10 @@
 //! assert!(limiter.check("bob", Class::Api).is_none());
 //! assert!(limiter.check("alice", Class::Git).is_none());
 //! ```
+//!
+//! The operator's guide to the ceilings this module enforces:
+//!
+#![doc = include_str!("../../../docs/operating/limits.md")]
 
 use std::collections::HashMap;
 use std::io::Write;

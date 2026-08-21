@@ -43,6 +43,11 @@
 //! assert!(lines[0].contains("\"window_resize\""));
 //! assert!(lines[0].contains("\"cause\":\"combined build failed\""));
 //! ```
+//!
+//! The operator's guide to this journal and the other records the
+//! node keeps:
+//!
+#![doc = include_str!("../../../docs/operating/observability.md")]
 
 use std::io::Write;
 use std::sync::mpsc;

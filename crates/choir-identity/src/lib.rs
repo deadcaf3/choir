@@ -34,6 +34,13 @@
 //! key.sign_entry(&mut entry);
 //! assert_eq!(registry.verify_entry(&entry).unwrap(), key.actor_id());
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is L8, one ed25519 key per actor and the signatures over log entries.
+//!
+//! It builds on [`choir_hash`] and [`choir_oplog`].
 
 use choir_hash::ContentHash;
 use choir_oplog::{OpEntry, Witness};

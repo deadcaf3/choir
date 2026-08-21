@@ -6,6 +6,13 @@
 //! push all concurrent edits of a shared file through the merge pipeline.
 //! Prints the gate report: provisioning percentiles, decision-latency
 //! percentiles, and merge outcomes (clean vs first-class conflict).
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is the Phase-0 gate binary: provisioning and decision-latency percentiles, and merge outcomes.
+//!
+//! It builds on [`choir_merge`], [`choir_oplog`] and [`choir_sequencer`].
 
 use choir_merge::{MergeOutcome, Pipeline};
 use choir_oplog::MemLog;

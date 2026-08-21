@@ -14,6 +14,18 @@
 //! assert!(usage.contains("\nreview\n"));
 //! assert!(usage.contains("verdict"));
 //! ```
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is the `choir` binary, and the surface table every generated document is rendered from.
+//!
+//! It builds on [`choir_fs`], [`choir_hash`], [`choir_identity`], [`choir_node`], [`choir_oplog`] and [`choir_view`].
+//!
+//! The complete surface, rendered from the table in
+//! [`surface`] and included here so the two cannot disagree:
+//!
+#![doc = include_str!("../../../docs/using/cli.md")]
 
 /// Regenerating the readable half of an ACL file (D46).
 pub mod acl;

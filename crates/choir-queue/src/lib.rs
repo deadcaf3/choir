@@ -14,6 +14,13 @@
 //! CI is a caller-supplied verdict function behind [`CiRunner`] (the CI
 //! executor seam, D18); tests use synthetic verdicts, production wires the
 //! spindle/Firecracker executor.
+//!
+//! # Where this sits
+//!
+//! `docs/architecture.md` is the map of the whole workspace.
+//! This crate is L2, the speculative merge queue (D5).
+//!
+//! It builds on [`choir_hash`], [`choir_merge`], [`choir_oplog`], [`choir_sequencer`], [`choir_store`] and [`choir_view`].
 
 pub mod blast;
 pub mod corpus;
