@@ -14,10 +14,16 @@
 //! by gating its cause. `tests/alloc_budget.rs` makes the same argument
 //! about allocations and is the pattern this follows.
 //!
-//! **The numbers are a ratchet.** Each is set just above what the page
-//! measures today. Anything that lowers one should lower it in the same
-//! commit; if one ever needs raising, that is the finding and not a
-//! maintenance chore.
+//! **The numbers are a ratchet, and it holds in both directions.** Each
+//! page carries the count it measures today and the budget just above
+//! it, and a page outside that window fails either way. Above is the
+//! obvious finding: the page got more expensive. Below is the one that
+//! caught a hole in this file — a mutation deleting the counter's
+//! `fetch_add` left every page reading zero spawns, and a one-sided
+//! budget passed all of them while measuring nothing at all. So a drop
+//! is a finding too: either the page really did get cheaper, in which
+//! case lower both numbers in the same commit and say what did it, or
+//! the counter stopped counting and this file went quietly hollow.
 //!
 //! Its own binary because the counter is process-global, and the merged
 //! harness runs its modules on parallel threads — the same reason
@@ -118,29 +124,38 @@ fn a_page_render_stays_inside_its_git_spawn_budget() {
     }
 
     println!("== Phase-1 git-spawn budget ==");
-    let mut over = Vec::new();
-    for (path, budget) in [
+    let mut outside = Vec::new();
+    for (path, measured, budget) in [
         // The repository front page: resolve, default branch, tree
         // listing, refs, commit count, readme, and one walk for the
         // listing's dates. The walk is one call for the whole listing --
         // it was one per row until the read measurement found it.
-        ("/r/agents/one/", 10u64),
+        ("/r/agents/one/", 9u64, 10u64),
         // A forty-file directory, at three. It is *cheaper* than the
         // root, which carries refs, a commit count and a readme that a
         // subdirectory does not -- and it does not grow with the number
         // of files, because the dates are one walk. A per-row query put
         // this over forty, which is what this number exists to stop
         // coming back.
-        ("/r/agents/one/tree/main/src", 4),
+        ("/r/agents/one/tree/main/src", 3, 4),
     ] {
         let used = spawns(&base, path);
-        println!("{path}: {used} spawns (budget {budget})");
+        println!("{path}: {used} spawns (measured {measured}, budget {budget})");
         if used > budget {
-            over.push(format!("{path} spent {used}, budget {budget}"));
+            outside.push(format!(
+                "{path} spent {used} git spawns, over its budget of {budget} -- \
+                 the page got more expensive, and spawns are what the read \
+                 latency is made of"
+            ));
+        }
+        if used < measured {
+            outside.push(format!(
+                "{path} spent {used} git spawns, under the {measured} it is \
+                 recorded as costing -- either it genuinely got cheaper, and \
+                 both numbers move in this commit, or the counter stopped \
+                 counting and this file is no longer measuring anything"
+            ));
         }
     }
-    assert!(
-        over.is_empty(),
-        "a page grew its git spawns, and spawns are what the read latency is made of: {over:?}"
-    );
+    assert!(outside.is_empty(), "{outside:#?}");
 }
