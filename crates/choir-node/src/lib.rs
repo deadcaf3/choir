@@ -1471,6 +1471,43 @@ impl Node {
                 // half is generated and committed; the capabilities are
                 // read off the live node, because a deployment's gates
                 // are not a fact a committed file can carry honestly.
+                // Search, for a caller that is not a browser (D62). Ahead
+                // of the platform API for the same reason credentials
+                // are: it reads git and needs no sequencer, so a node
+                // serving nothing but repositories can still answer
+                // "where is this". The grant closure is the browser's,
+                // built here rather than passed down, because the two
+                // surfaces answering differently about what a reader may
+                // see is the one bug this endpoint could introduce.
+                if request.url().split('?').next().unwrap_or("") == "/api/search" {
+                    let url = request.url().to_string();
+                    let readable = |repo: &str| match acl.as_deref() {
+                        Some(table) => table.allows_repo(&user, repo, acl::Level::Read),
+                        None => true,
+                    };
+                    let (status, body) = browse::api_search(
+                        &root,
+                        &readable,
+                        browse::raw_param(&url, "repo"),
+                        browse::param(&url, "rev").as_deref(),
+                        browse::param(&url, "q").unwrap_or_default().as_str(),
+                        browse::param(&url, "in").as_deref(),
+                        browse::param(&url, "limit").as_deref(),
+                    );
+                    let bytes = body.len() as u64;
+                    let response = tiny_http::Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .expect("static header"),
+                        );
+                    let outcome = served(request, response, status, bytes);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
                 if request.url().split('?').next().unwrap_or("") == "/api/schema" {
                     let body = schema_with_capabilities(
                         accounts.is_some(),

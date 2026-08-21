@@ -194,4 +194,20 @@ class Choir:
         Takes no arguments.
         """
         return self._request("GET", "/api/schema")
+
+    def choir_search(self, **arguments):
+        """Search repository contents, file names or commit messages.
+        Node-wide by default: every repository your credential may read,
+        each at its own HEAD, which is why `rev` is accepted only
+        alongside a single `repo`. A repository you were not granted is
+        absent from the results and, asked for by name, is answered
+        exactly as one that does not exist. Unindexed -- one `git grep`
+        per repository -- so `limit` bounds what comes back while
+        `matches` still counts everything found, and `truncated` says
+        which happened. The same search the browser pages run, so the two
+        cannot disagree about what a match is
+
+        Arguments become the query string: q, in, repo, rev, limit.
+        """
+        return self._request("GET", "/api/search", query=arguments)
 # --- /generated ---

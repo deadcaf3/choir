@@ -42,6 +42,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
 - `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]` — report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
 - `choir checks <api> <git-oid>` — every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+- `choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]` — find a term across every repository you may read; the term is literal, not a pattern
 - `choir reviews <api> <reviewer>` — your pending review queue
 - `choir triage <api>` — every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
 - `choir state <api> <channel>` — your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk

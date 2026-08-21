@@ -654,10 +654,16 @@ fn mcp_tools_cover_public_operations_once_in_table_order() {
     // command line in the generated shell library. The count is
     // hardcoded so that adding a tool is a decision somebody writes
     // down, which is exactly what it forced here.
+    //
+    // Ten since `/api/search`, which is the first tool that is not a
+    // platform operation at all: it reads git and needs no sequencer.
+    // It is here rather than left to the browser because the reader
+    // this platform is built for cannot open one, and a code host its
+    // primary reader cannot search is a code host with a hole in it.
     assert_eq!(
         actual.len(),
-        9,
-        "only the nine public platform operations are tools"
+        10,
+        "only the ten public read and platform operations are tools"
     );
     for (tool, endpoint) in tools
         .iter()

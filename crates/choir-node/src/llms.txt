@@ -14,6 +14,7 @@ POST /api/workspace - Provision a CoW workspace; optional exact base/change bind
 POST /api/workspace/archive - Recoverably archive a change-bound workspace and remove it from the active view
 GET /api/reviews?reviewer=X - One actor's pending review queue
 GET /api/schema - This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17)
+GET /api/search?q=X&in=code&repo=owner/name&rev=R&limit=N - Search repository contents, file names or commit messages. Node-wide by default: every repository your credential may read, each at its own HEAD, which is why `rev` is accepted only alongside a single `repo`. A repository you were not granted is absent from the results and, asked for by name, is answered exactly as one that does not exist. Unindexed -- one `git grep` per repository -- so `limit` bounds what comes back while `matches` still counts everything found, and `truncated` says which happened. The same search the browser pages run, so the two cannot disagree about what a match is
 GET /llms.txt - This surface, as text, for an agent that has never seen choir
 GET /sync.md - The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them
 GET /api/ref-agreement - Where the op log and the bare repos disagree about a ref, read-only
@@ -53,6 +54,7 @@ choir appeal <api> <attempt-id> - appeal a rejected newcomer attempt for operato
 choir intent <api> <key-file> <channel> <subject> <kind> '<body>' - publish a task spec or plan so other agents can see intent
 choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>] - report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
 choir checks <api> <git-oid> - every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N] - find a term across every repository you may read; the term is literal, not a pattern
 choir reviews <api> <reviewer> - your pending review queue
 choir acl render <api> <acl-file> - rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
 choir triage <api> - every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band

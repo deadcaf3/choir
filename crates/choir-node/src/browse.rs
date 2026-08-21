@@ -170,6 +170,17 @@ impl Scope {
         }
     }
 
+    /// Parses an `in=` value strictly, for a caller that can be told it
+    /// was wrong.
+    ///
+    /// [`Scope::parse`] guesses because a URL a reader typed has no way
+    /// to receive an explanation; an API request does, and answering a
+    /// misspelled `in=cod` with file names would be a wrong answer
+    /// wearing the shape of a right one.
+    fn from_slug(raw: &str) -> Option<Scope> {
+        Scope::ALL.into_iter().find(|one| one.slug() == raw)
+    }
+
     /// Every scope, in the order the tabs present them.
     const ALL: [Scope; 3] = [Scope::Files, Scope::Code, Scope::Commits];
 }
@@ -351,19 +362,27 @@ pub(crate) fn route(url: &str) -> Option<Page> {
 /// error, because a malformed query is a reader who edited a URL, and the
 /// honest answer is the unfiltered page rather than a refusal.
 pub(crate) fn param(url: &str, key: &str) -> Option<String> {
+    // `decode` refuses control characters and invalid UTF-8, which is
+    // exactly the rule wanted here: these terms reach a subprocess
+    // argument and a rendered page.
+    let value = decode(&raw_param(url, key)?.replace('+', "%20"))?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// One query-string parameter, still encoded.
+///
+/// Split out of [`param`] because a repository name is the one parameter
+/// whose value legitimately carries a `/`, which `decode` refuses by
+/// design: a decoded slash invents a path segment the parser already
+/// walked past. Extracting the pair and decoding it are therefore two
+/// steps, and this is the first of them.
+pub(crate) fn raw_param<'u>(url: &'u str, key: &str) -> Option<&'u str> {
     let query = url.split_once('?')?.1;
     let query = query.split('#').next().unwrap_or(query);
     query.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=')?;
-        if name != key {
-            return None;
-        }
-        // `decode` refuses control characters and invalid UTF-8, which is
-        // exactly the rule wanted here: these terms reach a subprocess
-        // argument and a rendered page.
-        let value = decode(&value.replace('+', "%20"))?;
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
+        (name == key).then_some(value)
     })
 }
 
@@ -783,19 +802,14 @@ fn bare(root: &Path, repo: &str) -> PathBuf {
     root.join(format!("{repo}.git"))
 }
 
-/// The repository index, filtered to what the reader may see.
+/// Every repository on the node this reader may read, sorted.
 ///
-/// Each row carries its open-review count as an inline chip: the status
-/// lives on the list, because a page a reader has to remember to visit
-/// is a page nobody visits. The count comes from the same platform view
-/// the review pages render, so the two cannot disagree.
-fn index(
-    root: &Path,
-    readable: &dyn Fn(&str) -> bool,
-    platform: Option<&crate::platform::Platform>,
-    q: &str,
-    chrome: Chrome<'_>,
-) -> Rendered {
+/// Extracted from the index page because the search API asks the same
+/// question, and two walks that agree today are a coincidence with a
+/// test on it. The grant check happens here rather than at either
+/// caller, so no caller can enumerate what it may not read by
+/// forgetting to filter.
+fn repositories(root: &Path, readable: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut repos: Vec<String> = Vec::new();
     if let Ok(owners) = std::fs::read_dir(root) {
         for owner in owners.flatten() {
@@ -820,6 +834,23 @@ fn index(
         }
     }
     repos.sort();
+    repos
+}
+
+/// The repository index, filtered to what the reader may see.
+///
+/// Each row carries its open-review count as an inline chip: the status
+/// lives on the list, because a page a reader has to remember to visit
+/// is a page nobody visits. The count comes from the same platform view
+/// the review pages render, so the two cannot disagree.
+fn index(
+    root: &Path,
+    readable: &dyn Fn(&str) -> bool,
+    platform: Option<&crate::platform::Platform>,
+    q: &str,
+    chrome: Chrome<'_>,
+) -> Rendered {
+    let repos = repositories(root, readable);
     // The filter runs after the grant check, never before it: a reader
     // must never be able to learn that a repository exists by searching
     // for it. `shown` is a subset of what this reader could already list.
@@ -924,6 +955,192 @@ fn url_query(raw: &str) -> String {
         }
     }
     out
+}
+
+/// A `repo=` value, decoded and checked, or `None` when it is not a
+/// repository name.
+///
+/// The two halves are decoded separately, so `%2F` cannot smuggle in a
+/// third segment, and each is held to the same `provision::safe_segment`
+/// the browse routes apply -- because this is where the name becomes a
+/// filesystem path, and a rule enforced at one of two entrances is not a
+/// rule.
+///
+/// It returns `None` rather than the caller's parameter parsing doing
+/// so, which is the whole point: a `repo=` that fails to parse must stay
+/// *present*. Parsed at the query-string layer, `repo=../../etc` came
+/// back as "no repo= given" and the request silently widened into a
+/// node-wide search -- an answer about everything to a question about
+/// one thing.
+fn repo_name(raw: &str) -> Option<String> {
+    let (owner, name) = raw.split_once('/')?;
+    let (owner, name) = (decode(owner)?, decode(name)?);
+    (crate::provision::safe_segment(&owner) && crate::provision::safe_segment(&name))
+        .then(|| format!("{owner}/{name}"))
+}
+
+/// The same search, as JSON, over every repository the caller may read
+/// (D62).
+///
+/// This exists because the search that shipped was a page and only a
+/// page, on a platform whose primary reader is an agent: the one caller
+/// most likely to want "where is this symbol" had no way to ask. It runs
+/// the same three functions the page runs, against the same resolved
+/// oid, so the two can never disagree about what a match is.
+///
+/// Two deliberate differences from the page:
+///
+/// - **One scope, not three.** The page runs all three because its tabs
+///   carry counts and a reader who lands on an empty tab concludes the
+///   search is broken. An API caller named the scope it wanted, and
+///   node-wide that difference is `3n` git invocations rather than `n`.
+/// - **A bad `in=` is a refusal**, where the page falls back to the
+///   cheapest scope. See [`Scope::from_slug`].
+///
+/// The cost is one `git grep` per readable repository, unindexed and
+/// unbounded in the number of repositories. That is the honest shape of
+/// the thing today; an index is what answers a measurement that says it
+/// is too slow, and no such measurement exists yet.
+///
+/// Returns `(status, body)`. A repository named in `repo` that the
+/// caller may not read is answered exactly as one that does not exist,
+/// so a caller cannot learn that a repository exists by searching for
+/// it.
+pub(crate) fn api_search(
+    root: &Path,
+    readable: &dyn Fn(&str) -> bool,
+    repo: Option<&str>,
+    rev: Option<&str>,
+    q: &str,
+    scope: Option<&str>,
+    limit: Option<&str>,
+) -> (u16, String) {
+    let refusal = |why: &str| (400, serde_json::json!({ "error": why }).to_string() + "\n");
+    if q.is_empty() {
+        return refusal("q is required and cannot be empty");
+    }
+    let scope = match scope {
+        None => Scope::Code,
+        Some(raw) => match Scope::from_slug(raw) {
+            Some(one) => one,
+            None => return refusal("in must be one of files, code, commits"),
+        },
+    };
+    let limit = match limit {
+        None => SEARCH_HITS,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if (1..=SEARCH_HITS).contains(&n) => n,
+            _ => return refusal("limit must be a whole number from 1 to 200"),
+        },
+    };
+
+    // Named repository or every readable one. `repositories` applies the
+    // grant, so the node-wide arm cannot over-report; the named arm
+    // checks the same predicate itself.
+    let names: Vec<String> = match repo {
+        Some(raw) => {
+            let absent = || {
+                (
+                    404,
+                    serde_json::json!({ "error": "no such repository" }).to_string() + "\n",
+                )
+            };
+            let Some(one) = repo_name(raw) else {
+                return absent();
+            };
+            if !readable(&one) || !bare(root, &one).join("HEAD").is_file() {
+                return absent();
+            }
+            vec![one]
+        }
+        None => repositories(root, readable),
+    };
+    // A revision only means something against one named repository.
+    // Node-wide, each repository is searched at its own `HEAD`, because
+    // `main` is not a ref every repository has and refusing the whole
+    // request over one of them would be worse than searching what the
+    // caller meant.
+    if repo.is_none() && rev.is_some() {
+        return refusal("rev applies to a single repo= and not to a node-wide search");
+    }
+    let rev = rev.unwrap_or("HEAD");
+
+    let mut rows = Vec::new();
+    let mut total = 0usize;
+    let mut shown = 0usize;
+    let mut truncated = false;
+    for name in &names {
+        let dir = bare(root, name);
+        let Ok(oid) = resolve(&dir, rev) else {
+            // An empty repository, or a rev this one does not carry. It
+            // is reported with no matches rather than dropped, so the
+            // count of repositories searched stays honest.
+            rows.push(serde_json::json!({
+                "repo": name,
+                "oid": serde_json::Value::Null,
+                "matches": [],
+            }));
+            continue;
+        };
+        let hits = Hits::find(&dir, &oid, q);
+        let matches: Vec<serde_json::Value> = match scope {
+            Scope::Files => hits
+                .files
+                .iter()
+                .map(|path| serde_json::json!(path))
+                .collect(),
+            Scope::Code => hits
+                .code
+                .iter()
+                .map(|(path, line, text)| {
+                    serde_json::json!({
+                        "path": path,
+                        "line": line.parse::<u64>().unwrap_or_default(),
+                        "text": text,
+                    })
+                })
+                .collect(),
+            Scope::Commits => hits
+                .commits
+                .iter()
+                .map(|(oid, author, time, subject, _body)| {
+                    serde_json::json!({
+                        "oid": oid,
+                        "author": author,
+                        "time": time.parse::<i64>().unwrap_or_default(),
+                        "subject": subject,
+                    })
+                })
+                .collect(),
+        };
+        total += matches.len();
+        // The budget is spent in repository order and what it cannot pay
+        // for is dropped, but `total` counts every match found, so a
+        // caller is told how much it is not seeing rather than being
+        // shown a short list that looks complete.
+        let kept = matches.len().min(limit - shown);
+        shown += kept;
+        if kept < matches.len() {
+            truncated = true;
+        }
+        rows.push(serde_json::json!({
+            "repo": name,
+            "oid": oid,
+            "matches": matches[..kept],
+        }));
+    }
+
+    let body = serde_json::json!({
+        "query": q,
+        "in": scope.slug(),
+        "rev": rev,
+        "repositories": names.len(),
+        "matches": total,
+        "limit": limit,
+        "truncated": truncated,
+        "results": rows,
+    });
+    (200, body.to_string() + "\n")
 }
 
 /// One repository, searched.

@@ -2268,6 +2268,40 @@ fn main() {
             }
             check_exit(&subject, &resp);
         }
+        ["search", api, term, rest @ ..] => {
+            // The flags are optional and the node validates every one of
+            // them, so they are forwarded rather than re-checked here: a
+            // second copy of "in must be one of files, code, commits"
+            // is a second copy that can drift from the first.
+            let mut arguments = serde_json::Map::new();
+            arguments.insert("q".into(), serde_json::json!(term));
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                let field = match *arg {
+                    "--in" => "in",
+                    "--repo" => "repo",
+                    "--rev" => "rev",
+                    "--limit" => "limit",
+                    _ => usage(),
+                };
+                let Some(value) = it.next() else { usage() };
+                // `limit` is a number in the schema and a string on the
+                // command line. Sent as a string it would fail schema
+                // validation before it ever reached the node, which
+                // would report a type error about an argument the caller
+                // spelled correctly.
+                let value = match field {
+                    "limit" => match value.parse::<u64>() {
+                        Ok(n) => serde_json::json!(n),
+                        Err(_) => usage(),
+                    },
+                    _ => serde_json::json!(value),
+                };
+                arguments.insert(field.to_string(), value);
+            }
+            let (status, resp) = http(api, auth, "choir_search", arguments.into());
+            finish(status, &resp);
+        }
         ["reviews", api, reviewer] => {
             let (status, resp) = http(
                 api,

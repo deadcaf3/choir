@@ -225,6 +225,12 @@ choir_checks() {
 	choir_run checks "$@"
 }
 
+# choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]
+#   find a term across every repository you may read; the term is literal, not a pattern
+choir_search() {
+	choir_run search "$@"
+}
+
 # choir reviews <api> <reviewer>
 #   your pending review queue
 choir_reviews() {

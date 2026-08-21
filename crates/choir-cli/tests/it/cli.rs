@@ -637,3 +637,79 @@ fn cli_reads_auth_from_file_without_exposing_it() {
 
     node.unblock();
 }
+
+/// `choir search` end to end: the built binary, a real node, a real
+/// push, and the term found in the file it was written into.
+///
+/// The command forwards its flags rather than validating them, so what
+/// this proves and the endpoint's own tests do not is that the forwarding
+/// arrives: an `--in` the CLI dropped on the floor would leave every one
+/// of those tests green.
+#[test]
+fn cli_searches_a_pushed_repository() {
+    let work = std::env::temp_dir().join(format!("choir-cli-search-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.create_repo("agents/one.git").unwrap();
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+    let api = format!("http://127.0.0.1:{port}");
+
+    let clone = work.join("clone");
+    let url = format!("{api}/agents/one.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    std::fs::write(clone.join("sluice.rs"), "// the sluice is open\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "open the sluice"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+
+    let out = choir(&["search", &api, "sluice"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = json(&out);
+    assert_eq!(body["in"], "code", "the default scope reached the node");
+    assert_eq!(body["matches"], 1, "{body}");
+    assert_eq!(body["results"][0]["repo"], "agents/one", "{body}");
+    assert_eq!(
+        body["results"][0]["matches"][0]["path"], "sluice.rs",
+        "{body}"
+    );
+
+    // A flag the CLI must actually forward. `files` matches the name and
+    // not the line, so a dropped `--in` answers with the code hit above
+    // and looks like a pass.
+    let out = choir(&["search", &api, "sluice", "--in", "files"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = json(&out);
+    assert_eq!(body["in"], "files", "{body}");
+    assert_eq!(body["results"][0]["matches"][0], "sluice.rs", "{body}");
+
+    // The node's refusal reaches the caller as the node wrote it, rather
+    // than as a second copy of the rule kept in the CLI.
+    let out = choir(&["search", &api, "sluice", "--in", "nowhere"]);
+    assert!(!out.status.success());
+    let said =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("in must be one of"), "{said}");
+
+    node.unblock();
+}

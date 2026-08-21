@@ -281,6 +281,19 @@ const REVIEWS_MCP_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
+const SEARCH_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "q": { "type": "string", "description": "Literal term, not a pattern; matching is case-insensitive" },
+    "in": { "type": "string", "enum": ["files", "code", "commits"], "description": "What to look through; defaults to code" },
+    "repo": { "type": "string", "description": "One repository as owner/name; omit to search every repository you may read" },
+    "rev": { "type": "string", "description": "Revision to search, for a single repo= only; defaults to HEAD" },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Matches returned; defaults to 200. `matches` counts everything found either way" }
+  },
+  "required": ["q"],
+  "additionalProperties": false
+}"#;
+
 const APPEAL_MCP_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
@@ -479,6 +492,14 @@ pub const COMMANDS: &[Command] = &[
         group: "checks",
     },
     Command {
+        name: "search",
+        args: "<api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]",
+        summary: "find a term across every repository you may read; the term is literal, \
+                  not a pattern",
+        agent_facing: true,
+        group: "reading the node",
+    },
+    Command {
         name: "reviews",
         args: "<api> <reviewer>",
         summary: "your pending review queue",
@@ -667,6 +688,26 @@ pub const ENDPOINTS: &[Endpoint] = &[
             name: "choir_schema",
             input_schema: EMPTY_MCP_SCHEMA,
             arguments: McpArguments::Empty,
+        }),
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/search?q=X&in=code&repo=owner/name&rev=R&limit=N",
+        purpose: "Search repository contents, file names or commit messages. \
+                  Node-wide by default: every repository your credential may read, each at its own \
+                  HEAD, which is why `rev` is accepted only alongside a single `repo`. \
+                  A repository you were not granted is absent from the results and, asked for by \
+                  name, is answered exactly as one that does not exist. \
+                  Unindexed -- one `git grep` per repository -- so `limit` bounds what comes back \
+                  while `matches` still counts everything found, and `truncated` says which \
+                  happened. The same search the browser pages run, so the two cannot disagree \
+                  about what a match is",
+        mcp: Some(McpTool {
+            name: "choir_search",
+            input_schema: SEARCH_MCP_SCHEMA,
+            arguments: McpArguments::Query {
+                parameters: &["q", "in", "repo", "rev", "limit"],
+            },
         }),
     },
     Endpoint {
