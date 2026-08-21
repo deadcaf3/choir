@@ -452,6 +452,24 @@ cargo run -p choir-cli -- repair ~/.choir/repos/.choir/ops.jsonl --verify
 
 Damage anywhere but the tail is **refused, not patched**. Cutting the file back past a mid-log break would drop records already acknowledged to clients, so the tool prints restore-from-backup steps and exits `1`. Refusing also means quarantining nothing: there is no suffix there it would be safe to remove.
 
+### Taking a node with you (`--export`, D61)
+
+```bash
+cargo run -p choir-node -- --export ~/.choir/repos /tmp/choir-export
+cargo run -p choir-node -- --verify-export /tmp/choir-export
+cargo run -p choir-node -- --import /tmp/choir-export /srv/new-root
+```
+
+No network, no ssh, no interpreter, and it works on the machine the node is on. What comes out is a directory holding `ops.jsonl`, one `repos/<owner>/<name>.git.bundle` per repository, and a `manifest.json` carrying its own `format_version`. A repository nobody has pushed to is listed without a bundle rather than dropped, because git refuses to write a zero-ref bundle and losing the repository on every move would be the worse answer.
+
+An export is a claim with two halves that can disagree, and `--verify-export` settles it: it folds the log into a view and requires every ref the view names to be in that repository's bundle at the same oid. The check runs in one direction. A bundle may carry refs the log does not name -- that is a push landing while the export ran, and it is counted and reported as *ahead* rather than hidden -- but a log naming a commit no bundle holds is refused, because restoring that produces a node whose view points at objects it does not have, and startup reconciliation answers it by retracting, in signed ops, exactly the refs being restored.
+
+**No secret is ever in an export.** Four names are copied out of `.choir`, and then the finished directory is walked again and refused if it holds anything named `auth` or ending `.key` or `.pem` -- so the guarantee is a property of the output rather than of the care taken writing it. The node's signing key stays with the node; `docs/runbook-restore.md` covers what its absence means. Policy files are absent too, and the manifest says so in a field: `--acl-file` and its siblings name paths anywhere on the host, so a root does not know where they are.
+
+`--import` verifies first, then refuses a root that already holds a log or any repository the manifest names, because the thing being written over is the fallback. It places files and stops there: it writes no hook and no git config, since the daemon adopts a repository it finds under its root and a second copy of that rule would drift. It also does not claim the result works. A restored node that serves is not a restored node; what settles it is one that accepts a write, and the secrets that boot needs are deliberately not in an export. `docs/runbook-restore.md` covers them.
+
+This is not `scripts/pull_backup.sh` and does not replace it. That script is disaster recovery for one deployment, over ssh, from a fixed remote path, and it refuses to run where the log lives. This is the format tool the plan's one-way-door rule asks for.
+
 ---
 
 ## Use the node

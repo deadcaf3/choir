@@ -48,6 +48,7 @@ mod ownership;
 mod partial_clone;
 mod passkeys;
 mod policy_hardening;
+mod portable;
 mod provenance;
 mod quotas;
 mod reconcile_refs;

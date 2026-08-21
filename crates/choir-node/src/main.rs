@@ -107,9 +107,33 @@
 //! registered key to a file `sshd` is pointed at once — generated, so
 //! hand edits are lost — using the `choir-ssh` beside this binary unless
 //! `--ssh-shim` names another.
+//!
+//! Two invocations do not serve anything. `--verify-log <op-log>`
+//! refuses an unsupported format version, a broken chain or a torn
+//! tail. `--export <repo-root> <dir>` writes a portable copy of a
+//! node -- the log, a git bundle per repository, and a versioned
+//! manifest, with no secret and no network. `--verify-export <dir>`
+//! settles what one claims, and `--import <dir> <repo-root>` places one
+//! into a fresh root. See [`choir_node::portable`].
 
 use choir_node::platform::ReviewRetention;
 use choir_node::{AuthTable, Node, Platform};
+
+/// Renders an export report as the one line both `--export` and
+/// `--verify-export` print, so the two are comparable by eye.
+fn describe(report: &choir_node::portable::Report) -> String {
+    format!(
+        "{} records through {}, {} bundles, {} refs matched{}",
+        report.records,
+        report.head.as_deref().unwrap_or("an empty log"),
+        report.bundles,
+        report.refs,
+        match report.ahead {
+            0 => String::new(),
+            n => format!(", {n} ahead of the log"),
+        }
+    )
+}
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -155,6 +179,45 @@ fn main() -> std::io::Result<()> {
                 .as_ref()
                 .map_or_else(|| "empty".to_string(), choir_hash::ContentHash::to_hex)
         );
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "--export") {
+        let (Some(root), Some(dest), 3) = (args.get(1), args.get(2), args.len()) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: choir-node --export <repo-root> <export-dir>",
+            ));
+        };
+        let report =
+            choir_node::portable::export(std::path::Path::new(root), std::path::Path::new(dest))
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        eprintln!("exported {} to {dest}: {}", root, describe(&report));
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "--import") {
+        let (Some(dir), Some(root), 3) = (args.get(1), args.get(2), args.len()) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: choir-node --import <export-dir> <repo-root>",
+            ));
+        };
+        let report =
+            choir_node::portable::import(std::path::Path::new(dir), std::path::Path::new(root))
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        eprintln!("imported {dir} into {root}: {}", describe(&report));
+        eprintln!("the secrets a boot needs are not in an export: see docs/runbook-restore.md");
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "--verify-export") {
+        let (Some(dir), 2) = (args.get(1), args.len()) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: choir-node --verify-export <export-dir>",
+            ));
+        };
+        let report = choir_node::portable::verify(std::path::Path::new(dir))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        eprintln!("verified {dir}: {}", describe(&report));
         return Ok(());
     }
     let root = args
