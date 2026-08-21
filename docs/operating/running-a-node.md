@@ -56,7 +56,7 @@ Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (require
 | File | Format |
 |:--|:--|
 | `--auth-file` | `user:token` per line; authentication only, pair with `--acl-file` |
-| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `write` < `own`, and `auditor` on `@node` |
+| `--acl-file` | `<user> <repo\|*\|@node> <level>` per line; levels `read` < `propose` < `write` < `own`, and `auditor` on `@node` |
 | `--keys-file` | `<64-hex>` or `<channel> <64-hex>` (bound key) |
 | `--reviewers-file` | channel name per line; re-read on each draw |
 | `--protected-refs` | `owner/repo.git:refs/heads/main` (trailing `*` ok) |

@@ -4122,6 +4122,85 @@ impl Platform {
     }
 }
 
+/// Refuses a ref update that the pusher's grant does not reach (D60).
+///
+/// The other half of [`crate::acl::Level::Propose`], and the half that
+/// has a refname to look at. [`crate::acl::git_requirement`] admits the
+/// push at `propose` because git sends the ref list only after the
+/// server has agreed to receive the pack, so there is nothing to check
+/// at that boundary. The refname first exists here, when the
+/// `pre-receive` hook reports it.
+///
+/// Checked against the **merged** table rather than
+/// [`Platform::acl_now`]. That reader exists so `own` cannot be
+/// self-issued (D42); `write` carries no such rule, and a grant issued
+/// by self-service (D36) is as real as one the operator typed. Reading
+/// the file alone here would refuse a legitimate pusher whose grant came
+/// from an invite.
+///
+/// Refuses before anything is submitted, which is the rule
+/// [`Platform::git_update`] already follows for a proposal ref it cannot
+/// parse: git applies no ref until the hook exits zero, so a refusal at
+/// this point leaves no op in the log and never enters the compensating
+/// retraction pass that `Node::create_repo` documents.
+///
+/// `None` whenever the question does not arise: a body this does not
+/// understand, or a pusher who holds `write` and is therefore not
+/// limited to proposals.
+pub(crate) fn proposal_denial(acl: &crate::acl::Acl, body: &[u8]) -> Option<crate::acl::Denial> {
+    let json: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let field = |key: &str| {
+        json.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let (repo, refname, user) = (field("repo"), field("refname"), field("user"));
+    if repo.is_empty() || refname.is_empty() {
+        return None;
+    }
+    if acl.allows_repo(user, repo, crate::acl::Level::Write) {
+        return None;
+    }
+    let refuse = |reason: String| {
+        Some(crate::acl::Denial {
+            status: 403,
+            reason,
+        })
+    };
+    let Some(rest) = refname.strip_prefix("refs/for/") else {
+        return refuse(format!(
+            "`{user}` may propose to {repo} but not write {refname}; \
+             push to refs/for/<branch>/{user}/<topic> to open a review instead"
+        ));
+    };
+    // Under their own name, so two proposers cannot reach one ref. A
+    // `propose` grant is the level given to somebody the repository does
+    // not trust, and several of them hold it at once: without this,
+    // whoever pushes second silently takes over the first one's proposal,
+    // or deletes it.
+    //
+    // Read off the raw segments rather than `MagicRef`'s topic, because
+    // that topic is joined with dashes and therefore lossy -- `a/b` and
+    // `a-b` reach the same review id, and a rule about who owns a ref
+    // must not be decided by a form that has already merged two names.
+    //
+    // A ref under `refs/for/` that this refuses is answered here rather
+    // than by `git_update`'s own "a topic is what makes this proposal
+    // yours": for this pusher, naming themselves is the missing part, and
+    // the message that says so is the more useful of the two. A `write`
+    // holder never reaches here and still gets the other one.
+    let mut segments = rest.split('/').filter(|s| !s.is_empty());
+    let (branch, owner) = (segments.next(), segments.next());
+    if owner != Some(user) {
+        let branch = branch.unwrap_or("<branch>");
+        return refuse(format!(
+            "`{user}` may propose to {repo} only under their own name; \
+             push to refs/for/{branch}/{user}/<topic>"
+        ));
+    }
+    None
+}
+
 impl Platform {
     /// Routes one git ref update (from a repo's `update` hook) through
     /// the sequencer: CAS against the view, node-signed, totally ordered

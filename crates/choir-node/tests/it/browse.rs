@@ -2543,8 +2543,9 @@ fn contribute_page_prints_commands_a_newcomer_can_paste() {
     // The git-only path, naming this repository's own default branch
     // rather than an assumed `main`.
     assert!(
-        body.contains("git push origin HEAD:refs/for/main/my-topic"),
-        "page omits the magic refspec: {body}"
+        body.contains("git push origin HEAD:refs/for/main/your-name/my-topic"),
+        "page omits the magic refspec, or omits the name segment a \
+         `propose` holder is held to (D60): {body}"
     );
 
     // Reachable, not just addressable: the repository page links it.

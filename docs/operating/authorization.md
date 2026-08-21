@@ -25,9 +25,12 @@ bob        owner/demo       read
 bob        owner/notes      write
 carol      *                read
 dave       @node            auditor
+erin       owner/demo       propose
 ```
 
-`read` clones and fetches; `write` adds push, workspace provisioning, and submitting ops that touch that repository; `own` adds authorizing a landing on a protected ref (D42, below). There is no `admin`: the only repository-scoped administrative action that exists is the landing gate, and `own` is it.
+`read` clones and fetches; `propose` adds opening a review, and nothing else; `write` adds pushing any other ref, workspace provisioning, and submitting ops that touch that repository; `own` adds authorizing a landing on a protected ref (D42, below). There is no `admin`: the only repository-scoped administrative action that exists is the landing gate, and `own` is it.
+
+**`propose` is how a repository takes a contribution from somebody it does not trust with its branches (D60).** It admits exactly one thing, a push to `refs/for/<branch>/<user>/<topic>`, which opens a review (D53); every other ref is refused with a message naming that spelling. The pusher's own name is a required segment, and it is what keeps two `propose` holders apart: several people hold that grant at once, so without it whoever pushed second would take over or delete the first one's proposal. A `write` holder is not held to the rule, having every ref already. Until it existed this was not expressible, because opening a review is a push and `write` reaches every unprotected ref, so inviting an outsider to propose meant handing them the repository. The grant is checked twice, and it has to be: the smart-HTTP boundary sees no refname, since git sends the ref list only after the server agrees to receive the pack, so the push is admitted there and the refs are judged when the `pre-receive` hook reports them. Nothing is applied in between. Both transports get it, because the SSH shim borrows the HTTP mapping rather than restating it.
 
 The operator's own credential usually wants two lines, since neither covers the other:
 

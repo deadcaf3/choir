@@ -58,11 +58,25 @@ test.
    system unit only after review. The generated node binds to `127.0.0.1`,
    enables the read-only browser boundary, request and decision logging,
    limits, quotas, readiness disk floor, and systemd hardening.
-5. Render the TLS proxy with `scripts/flip/render_beta_nginx.sh`. Review it with
-   `nginx -t` before installation. It redirects HTTP to HTTPS, sets HSTS and
-   security headers, applies pre-auth request and connection limits, preserves
-   `Authorization`, uses a 1 MiB default body ceiling, and gives Git a separate
-   512 MiB streaming route with request buffering disabled.
+5. Render the TLS proxy with `scripts/flip/render_beta_nginx.sh <domain>
+   <node-port> <tls-cert> <tls-key>`. Review it with `nginx -t` before
+   installation. It redirects HTTP to HTTPS, sets HSTS and security headers,
+   preserves `Authorization`, uses a 1 MiB default body ceiling, and gives Git
+   a separate 512 MiB streaming route with request buffering disabled.
+
+   It handles no client address (D59): no access log, no error log, no
+   per-address limit zone, and `X-Forwarded-For` cleared rather than appended.
+   Pre-auth rate limiting is therefore the node's own node-wide ceiling alone.
+   Do not add a per-address zone to restore per-client fairness, and do not
+   restore the access log to diagnose an incident; the node's `--request-log`
+   is the record to read, and it carries the authenticated user rather than an
+   address.
+
+   Prove that after installation rather than assuming it. `nginx -t` checks
+   syntax and cannot show where a request error would be written. Make one
+   deliberately failing request over TLS, then confirm no file under the proxy's
+   log directory gained a line naming an address. Repeat it once for a failed
+   TLS handshake, which is logged on a different path from a failed request.
 
 The host firewall must expose only 80 and 443 through the beta allowlist during
 pre-launch. The node port must not be reachable on any non-loopback interface.

@@ -19,7 +19,12 @@
 //! carol      @node            auditor
 //! ```
 //!
-//! Three levels, `read` < `write` < `own`. `own` arrived with D42, which
+//! Four levels, `read` < `propose` < `write` < `own`. `propose` arrived
+//! with D60 and is the one that lets a repository take contributions
+//! from someone who is not trusted with its branches: it admits a push
+//! to `refs/for/<branch>/<user>/<topic>`, where the pusher's own name is
+//! what keeps two of them apart, and refuses every other ref. `own`
+//! arrived with D42, which
 //! is the first repository-scoped administrative action to exist: on a
 //! protected ref an owner's assent authorizes the landing, and `write`
 //! alone does not. Before that there was deliberately no `admin`, because
@@ -82,8 +87,36 @@ pub enum Level {
     /// Clone and fetch a repository; read the node-scoped endpoints.
     /// Spelled `read` on a repository and `auditor` on `@node`.
     Read,
-    /// Everything [`Level::Read`] allows, plus push, provision a
-    /// workspace, and submit ops.
+    /// Everything [`Level::Read`] allows, plus opening a proposal: a
+    /// push to `refs/for/<branch>/<user>/<topic>` (D53) and no other
+    /// ref. Spelled `propose` (D60).
+    ///
+    /// The pusher's own name is a required segment, and that is what
+    /// keeps two holders of this level apart. Several people hold
+    /// `propose` at once, by construction -- it is the grant given to
+    /// contributors a repository does not trust -- so without it whoever
+    /// pushed second would take over or delete the first one's proposal,
+    /// and the log would record the takeover as an ordinary update by an
+    /// authorized pusher. A `write` holder is not held to the rule,
+    /// because a `write` holder can already reach every ref anyway.
+    ///
+    /// This is the grant for a contributor the operator does not trust
+    /// with the repository's branches, which until it existed was not
+    /// expressible: opening a review needed `write`, and `write` also
+    /// reaches every unprotected ref. Taking a contribution from a
+    /// stranger meant handing them the repository.
+    ///
+    /// **It is enforced in two places because it has to be.** The
+    /// smart-HTTP boundary admits the push at this level, and cannot do
+    /// better: git sends the ref list only after the server agrees to
+    /// receive the pack, so no refname exists when [`git_requirement`]
+    /// runs. The refname first exists when the `pre-receive` hook
+    /// reports it, and that is where a proposal-only grant is held to
+    /// proposals. Nothing is applied in between -- git applies no ref
+    /// until the hook exits zero.
+    Propose,
+    /// Everything [`Level::Propose`] allows, plus pushing any other ref,
+    /// provisioning a workspace, and submitting ops.
     Write,
     /// Everything [`Level::Write`] allows, plus authorizing a landing on
     /// a protected ref of this repository (D42). Spelled `own`.
@@ -240,6 +273,7 @@ impl Acl {
                         };
                         let level = match level {
                             Level::Read => "r",
+                            Level::Propose => "p",
                             Level::Write => "w",
                             Level::Own => "o",
                         };
@@ -374,6 +408,13 @@ fn parse_level(scope: &Scope, level: &str) -> Result<Level, String> {
             Err("`auditor` is a node-wide role; on a repository write `read`".to_string())
         }
         (_, "read") => Ok(Level::Read),
+        // `propose` names a right over one repository's review surface.
+        // `@node` is the log and the attestation, which hold no reviews,
+        // so the spelling is refused there rather than quietly granted.
+        (Scope::Node, "propose") => {
+            Err("`propose` is a repository grant; `@node` takes `auditor` or `write`".to_string())
+        }
+        (_, "propose") => Ok(Level::Propose),
         // `own` names an owner *of a repository*. `@node` is the log and
         // the attestation, which no repository owns, so the spelling is
         // refused there rather than quietly granted over everything.
@@ -385,7 +426,7 @@ fn parse_level(scope: &Scope, level: &str) -> Result<Level, String> {
             "`{other}` is not a level; write `auditor` or `write`"
         )),
         (_, other) => Err(format!(
-            "`{other}` is not a level; write `read`, `write` or `own`"
+            "`{other}` is not a level; write `read`, `propose`, `write` or `own`"
         )),
     }
 }
@@ -417,14 +458,18 @@ pub fn git_requirement(method: &str, url: &str) -> Option<(String, Level)> {
         .unwrap_or("")
         .trim_start_matches('/');
     let level = match (method, tail) {
-        ("POST", "git-receive-pack") => Level::Write,
+        // `propose`, not `write`: no refname exists yet (see
+        // [`Level::Propose`]). A pusher who reaches here holding only
+        // `propose` has their refs checked when the hook reports them,
+        // and git applies none of them before that.
+        ("POST", "git-receive-pack") => Level::Propose,
         ("POST", "git-upload-pack") => Level::Read,
         // The ref advertisement is the first request of both directions,
         // and the service parameter is the only thing distinguishing a
         // clone from a push.
         ("GET", t) if t.starts_with("info/refs") => {
             if query.split('&').any(|p| p == "service=git-receive-pack") {
-                Level::Write
+                Level::Propose
             } else {
                 Level::Read
             }
@@ -936,6 +981,38 @@ mod tests {
             .map(|(name, _)| *name)
     }
 
+    /// D60. The level is only useful if it sits *between* read and
+    /// write, and the enum's own note says a variant declared out of
+    /// strength order silently changes every existing `>=` check. So the
+    /// ordering is asserted directly rather than inferred from behaviour.
+    #[test]
+    fn propose_sits_between_read_and_write() {
+        assert!(Level::Read < Level::Propose);
+        assert!(Level::Propose < Level::Write);
+        assert!(Level::Write < Level::Own);
+
+        let acl = Acl::parse("carol  owner/p  propose\n").expect("propose parses");
+        assert!(
+            acl.allows_repo("carol", "owner/p", Level::Read),
+            "propose must imply read"
+        );
+        assert!(acl.allows_repo("carol", "owner/p", Level::Propose));
+        assert!(!acl.allows_repo("carol", "owner/p", Level::Write));
+        assert!(!acl.allows_repo("carol", "owner/p", Level::Own));
+    }
+
+    /// `@node` is the log and the attestation, which hold no reviews, so
+    /// the spelling is refused there rather than quietly granted over
+    /// everything -- the same rule `own` follows.
+    #[test]
+    fn propose_is_not_a_node_wide_spelling() {
+        let error = Acl::parse("carol  @node  propose\n").expect_err("`@node propose` must refuse");
+        assert!(
+            error.contains("repository grant"),
+            "unhelpful refusal: {error}"
+        );
+    }
+
     #[test]
     fn the_grammar_accepts_the_documented_file_and_nothing_else() {
         let acl = Acl::parse(
@@ -1060,13 +1137,16 @@ mod tests {
             (
                 "GET",
                 "/o/r.git/info/refs?service=git-receive-pack",
-                Some(Level::Write),
+                Some(Level::Propose),
             ),
             ("GET", "/o/r.git/info/refs", Some(Level::Read)),
             ("GET", "/o/r.git/HEAD", Some(Level::Read)),
             ("GET", "/o/r.git/objects/info/packs", Some(Level::Read)),
             ("POST", "/o/r.git/git-upload-pack", Some(Level::Read)),
-            ("POST", "/o/r.git/git-receive-pack", Some(Level::Write)),
+            // `propose`, not `write`, since D60: this boundary has no
+            // refname to judge, so it admits the push and the hook
+            // decides which refs the grant actually reaches.
+            ("POST", "/o/r.git/git-receive-pack", Some(Level::Propose)),
             // Not a repository path, and not a smart-HTTP operation:
             // both refused rather than handed to the CGI.
             ("GET", "/not-a-repo/file", None),
@@ -1089,12 +1169,25 @@ mod tests {
     /// A push whose advertisement was read-gated would fail late and
     /// confusingly. This is the arm that gets that right, so it is worth
     /// its own assertion rather than one row in the table above.
+    ///
+    /// Both directions since D60, because the level moved down and a
+    /// one-sided assertion would no longer notice it moving further: a
+    /// `read` grant is still refused, and a `propose` grant is admitted.
     #[test]
-    fn a_push_advertisement_needs_write_not_read() {
-        let acl = Acl::parse("bob o/r read").expect("parses");
+    fn a_push_advertisement_needs_propose_not_read() {
         let (repo, level) =
             git_requirement("GET", "/o/r.git/info/refs?service=git-receive-pack").expect("maps");
-        assert!(acl.check("bob", &Scope::Repo(repo), level).is_some());
+
+        let reader = Acl::parse("bob o/r read").expect("parses");
+        assert!(reader
+            .check("bob", &Scope::Repo(repo.clone()), level)
+            .is_some());
+
+        let proposer = Acl::parse("carol o/r propose").expect("parses");
+        assert!(
+            proposer.check("carol", &Scope::Repo(repo), level).is_none(),
+            "a propose grant must reach the advertisement, or the level is unusable"
+        );
     }
 
     #[test]
