@@ -73,7 +73,14 @@ restore() {
 }
 trap 'restore; exit 130' INT TERM
 
+# `findings` are mutations the tests missed; `void` are mutations that
+# produced no evidence at all (script errored, matched nothing, or did
+# not compile). Both fail the run: rule 2 calls a no-op mutation a
+# failure, and until now that failure was a printed line with a green
+# exit code, which is exactly the kind of check that quietly stops
+# checking.
 findings=0
+void=0
 ran=0
 
 for m in "$DIR"/*.py; do
@@ -83,6 +90,7 @@ for m in "$DIR"/*.py; do
 
   if ! python3 "$m"; then
     echo "$name: MUTATION SCRIPT ERRORED"
+    void=$((void+1))
     continue
   fi
 
@@ -90,6 +98,7 @@ for m in "$DIR"/*.py; do
   CHANGED=$(git status --porcelain | awk '{print $2}')
   if [ -z "$CHANGED" ]; then
     echo "$name: NO EDIT LANDED (the mutation matched nothing)"
+    void=$((void+1))
     continue
   fi
 
@@ -101,6 +110,7 @@ for m in "$DIR"/*.py; do
   # Rule 4.
   if grep -q "could not compile" "$LOG/$name.log"; then
     echo "$name: did not compile (proves nothing)  [${el}s]"
+    void=$((void+1))
   elif [ "$code" -eq 0 ]; then
     echo "$name: NOT CAUGHT  <-- finding  [${el}s]"
     findings=$((findings+1))
@@ -115,6 +125,6 @@ for m in "$DIR"/*.py; do
   [ -z "$leftover" ] || { echo "$name: NOT RESTORED: $leftover" >&2; exit 1; }
 done
 
-echo "--- $ran mutation(s), $findings not caught ---"
+echo "--- $ran mutation(s), $findings not caught, $void proved nothing ---"
 git status --porcelain
-[ "$findings" -eq 0 ]
+[ "$findings" -eq 0 ] && [ "$void" -eq 0 ]
