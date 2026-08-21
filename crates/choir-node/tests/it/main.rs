@@ -50,6 +50,7 @@ mod partial_clone;
 mod passkeys;
 mod policy_hardening;
 mod portable;
+mod profile;
 mod provenance;
 mod quotas;
 mod reconcile_refs;

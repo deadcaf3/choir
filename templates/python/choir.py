@@ -210,4 +210,20 @@ class Choir:
         Arguments become the query string: q, in, repo, rev, limit.
         """
         return self._request("GET", "/api/search", query=arguments)
+
+    def choir_profile(self, **arguments):
+        """One actor's standing, counted out of the view you may already
+        see: the keys bound to them and how many ops ago, changes they
+        own, reviews they were assigned and the verdicts they gave,
+        approvals slashed, checks they reported. It is a reading of
+        `/api/view` and never a wider one -- two callers with different
+        grants get different numbers about the same actor, which is the
+        point. `vouches` is present and null: D24 wants key age, vouches,
+        scoped grants and bonds for Sybil resistance, and only key age is
+        persisted today, so the input is reported rather than a score
+        invented from it
+
+        Arguments become the query string: channel.
+        """
+        return self._request("GET", "/api/profile", query=arguments)
 # --- /generated ---

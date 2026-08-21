@@ -281,6 +281,15 @@ const REVIEWS_MCP_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
+const PROFILE_MCP_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "channel": { "type": "string", "description": "The name an actor signs as" }
+  },
+  "required": ["channel"],
+  "additionalProperties": false
+}"#;
+
 const SEARCH_MCP_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
@@ -490,6 +499,14 @@ pub const COMMANDS: &[Command] = &[
                   1 failed or unreported, 3 still running",
         agent_facing: true,
         group: "checks",
+    },
+    Command {
+        name: "profile",
+        args: "<api> <channel>",
+        summary: "what the log records about one actor: keys and their age, changes owned, \
+                  verdicts given, checks reported",
+        agent_facing: true,
+        group: "reading the node",
     },
     Command {
         name: "search",
@@ -707,6 +724,25 @@ pub const ENDPOINTS: &[Endpoint] = &[
             input_schema: SEARCH_MCP_SCHEMA,
             arguments: McpArguments::Query {
                 parameters: &["q", "in", "repo", "rev", "limit"],
+            },
+        }),
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/profile?channel=X",
+        purpose: "One actor's standing, counted out of the view you may already see: the keys \
+                  bound to them and how many ops ago, changes they own, reviews they were \
+                  assigned and the verdicts they gave, approvals slashed, checks they \
+                  reported. It is a reading of `/api/view` and never a wider one -- two callers \
+                  with different grants get different numbers about the same actor, which is \
+                  the point. `vouches` is present and null: D24 wants key age, vouches, scoped \
+                  grants and bonds for Sybil resistance, and only key age is persisted today, \
+                  so the input is reported rather than a score invented from it",
+        mcp: Some(McpTool {
+            name: "choir_profile",
+            input_schema: PROFILE_MCP_SCHEMA,
+            arguments: McpArguments::Query {
+                parameters: &["channel"],
             },
         }),
     },

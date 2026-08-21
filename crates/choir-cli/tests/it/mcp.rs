@@ -228,7 +228,9 @@ fn modern_discovery_is_stateless_and_tool_order_is_cache_stable() {
             // was. It reads git rather than the sequencer, so it is the
             // first tool here that is not a platform operation, and it
             // goes last so that adding it moves nothing above it.
-            "choir_search"
+            "choir_search",
+            // D63, appended for the same reason again.
+            "choir_profile"
         ]
     );
 }

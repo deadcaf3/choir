@@ -2268,6 +2268,15 @@ fn main() {
             }
             check_exit(&subject, &resp);
         }
+        ["profile", api, channel] => {
+            let (status, resp) = http(
+                api,
+                auth,
+                "choir_profile",
+                serde_json::json!({ "channel": channel }),
+            );
+            finish(status, &resp);
+        }
         ["search", api, term, rest @ ..] => {
             // The flags are optional and the node validates every one of
             // them, so they are forwarded rather than re-checked here: a

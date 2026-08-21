@@ -37,6 +37,7 @@ pub mod limits;
 pub mod platform;
 pub mod portable;
 mod prepare;
+pub mod profile;
 pub mod provision;
 pub mod quota;
 mod readme;
@@ -1508,6 +1509,58 @@ impl Node {
                     access.finish(log, &user, &outcome);
                     return;
                 }
+                // One actor's standing (D63). It reads the view rather
+                // than git, so unlike search it needs the sequencer --
+                // but it takes the *filtered* view, the same body this
+                // caller would get from `/api/view`, which is what keeps
+                // it from disclosing a change or review the ACL withheld.
+                if request.url().split('?').next().unwrap_or("") == "/api/profile" {
+                    let url = request.url().to_string();
+                    let channel = browse::param(&url, "channel").unwrap_or_default();
+                    let (status, body) = match (platform.as_deref(), channel.is_empty()) {
+                        (_, true) => (
+                            400,
+                            serde_json::json!({ "error": "channel is required" }).to_string()
+                                + "\n",
+                        ),
+                        (None, _) => (
+                            503,
+                            serde_json::json!({
+                                "error": "this node runs no sequencer, so it holds no view to \
+                                          derive a profile from"
+                            })
+                            .to_string()
+                                + "\n",
+                        ),
+                        (Some(platform), false) => {
+                            let seen = visible_view(platform, acl.as_deref(), &user);
+                            match serde_json::from_str::<serde_json::Value>(&seen) {
+                                Ok(view) => (200, profile::of(&view, &channel).to_string() + "\n"),
+                                Err(error) => (
+                                    500,
+                                    serde_json::json!({
+                                        "error": format!("the view did not parse: {error}")
+                                    })
+                                    .to_string()
+                                        + "\n",
+                                ),
+                            }
+                        }
+                    };
+                    let bytes = body.len() as u64;
+                    let response = tiny_http::Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .expect("static header"),
+                        );
+                    let outcome = served(request, response, status, bytes);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
                 if request.url().split('?').next().unwrap_or("") == "/api/schema" {
                     let body = schema_with_capabilities(
                         accounts.is_some(),
@@ -1577,6 +1630,41 @@ impl Node {
                         acl.as_deref(),
                         request,
                     );
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                // One actor's standing, as a page (D63). The reader who
+                // wants this is looking at a verdict and asking who gave
+                // it, so it is a link from a review rather than a
+                // document they were going to fetch as JSON.
+                if let Some(rest) = request
+                    .url()
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or("")
+                    .strip_prefix("/p/")
+                {
+                    let channel = browse::decode_channel(rest);
+                    let chrome = reader_chrome(&request);
+                    let rendered = match (platform.as_deref(), channel) {
+                        (Some(platform), Some(channel)) => {
+                            let seen = visible_view(platform, acl.as_deref(), &user);
+                            match serde_json::from_str::<serde_json::Value>(&seen) {
+                                Ok(view) => browse::profile_page(
+                                    &channel,
+                                    &profile::of(&view, &channel),
+                                    chrome,
+                                ),
+                                Err(_) => browse::no_such_actor(chrome),
+                            }
+                        }
+                        // A name that is not a channel and a node with no
+                        // view answer the same way, for the same reason
+                        // an unreadable repository does: a reader is
+                        // never told which of the two it was.
+                        _ => browse::no_such_actor(chrome),
+                    };
+                    let outcome = respond_page(request, rendered.status, rendered.html, None);
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -3016,6 +3104,20 @@ struct BrowseContext<'a> {
     /// (D36). A page that tells a newcomer to redeem an invite on a node
     /// that issues none is sending them to a command that cannot work.
     self_service: bool,
+}
+
+/// The `/api/view` body this caller may see.
+///
+/// One reading, used by `/api/profile` and by the profile page, because
+/// the ACL narrowing lives here and a second copy of it is a second
+/// thing to keep right -- the first time the two disagreed, one of the
+/// two surfaces would be disclosing more than the other.
+fn visible_view(platform: &Platform, acl: Option<&acl::Acl>, user: &str) -> String {
+    let raw = platform.handle_api("GET", "/api/view", &[]).1;
+    match acl {
+        Some(table) => acl::filter_response(table, user, "/api/view", &raw),
+        None => raw,
+    }
 }
 
 fn handle_browse(

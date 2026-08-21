@@ -662,8 +662,8 @@ fn mcp_tools_cover_public_operations_once_in_table_order() {
     // primary reader cannot search is a code host with a hole in it.
     assert_eq!(
         actual.len(),
-        10,
-        "only the ten public read and platform operations are tools"
+        11,
+        "only the eleven public read and platform operations are tools"
     );
     for (tool, endpoint) in tools
         .iter()

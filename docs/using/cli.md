@@ -34,6 +34,7 @@ The signed-operation API is the primary agent path: it carries actor identity an
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
 | `GET /api/schema` | This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17) |
 | `GET /api/search?q=X&in=code&repo=owner/name&rev=R&limit=N` | Search repository contents, file names or commit messages. Node-wide by default: every repository your credential may read, each at its own HEAD, which is why `rev` is accepted only alongside a single `repo`. A repository you were not granted is absent from the results and, asked for by name, is answered exactly as one that does not exist. Unindexed -- one `git grep` per repository -- so `limit` bounds what comes back while `matches` still counts everything found, and `truncated` says which happened. The same search the browser pages run, so the two cannot disagree about what a match is |
+| `GET /api/profile?channel=X` | One actor's standing, counted out of the view you may already see: the keys bound to them and how many ops ago, changes they own, reviews they were assigned and the verdicts they gave, approvals slashed, checks they reported. It is a reading of `/api/view` and never a wider one -- two callers with different grants get different numbers about the same actor, which is the point. `vouches` is present and null: D24 wants key age, vouches, scoped grants and bonds for Sybil resistance, and only key age is persisted today, so the input is reported rather than a score invented from it |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
@@ -110,6 +111,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag
 - `choir appeal <api> <attempt-id>`  
   appeal a rejected newcomer attempt for operator adjudication; never grants privilege
+- `choir profile <api> <channel>`  
+  what the log records about one actor: keys and their age, changes owned, verdicts given, checks reported
 - `choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]`  
   find a term across every repository you may read; the term is literal, not a pattern
 - `choir triage <api>`  

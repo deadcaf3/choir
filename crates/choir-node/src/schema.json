@@ -147,6 +147,12 @@
     },
     {
       "agent_facing": true,
+      "args": "<api> <channel>",
+      "name": "profile",
+      "summary": "what the log records about one actor: keys and their age, changes owned, verdicts given, checks reported"
+    },
+    {
+      "agent_facing": true,
       "args": "<api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]",
       "name": "search",
       "summary": "find a term across every repository you may read; the term is literal, not a pattern"
@@ -680,6 +686,30 @@
         "repo",
         "rev",
         "limit"
+      ]
+    },
+    {
+      "agent_facing": true,
+      "documented_as": "/api/profile?channel=X",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "The name an actor signs as",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "choir_profile",
+      "path": "/api/profile",
+      "purpose": "One actor's standing, counted out of the view you may already see: the keys bound to them and how many ops ago, changes they own, reviews they were assigned and the verdicts they gave, approvals slashed, checks they reported. It is a reading of `/api/view` and never a wider one -- two callers with different grants get different numbers about the same actor, which is the point. `vouches` is present and null: D24 wants key age, vouches, scoped grants and bonds for Sybil resistance, and only key age is persisted today, so the input is reported rather than a score invented from it",
+      "query_parameters": [
+        "channel"
       ]
     },
     {

@@ -2928,9 +2928,16 @@ fn review(
             let slashed = state["slashes"]
                 .get(who)
                 .and_then(serde_json::Value::as_str);
-            h.push_str("<tr><td class=\"mono\">");
+            // The reviewer's name links to what this node records about
+            // them (D63). This is the page the question "who is this and
+            // why should their approval count" is asked from, so it is
+            // the page the answer has to be one click from; a profile
+            // nobody can reach from a verdict is a profile nobody reads.
+            h.push_str("<tr><td class=\"mono\"><a href=\"/p/");
+            h.push_str(&esc(&url_path(who)));
+            h.push_str("\">");
             h.push_str(&esc(&crate::ui::person(who, &roster)));
-            h.push_str("</td><td>");
+            h.push_str("</a></td><td>");
             match verdict["verdict"].as_str() {
                 Some("Approve") => h.push_str("<b class=\"tag ok\">approve</b>"),
                 Some("RequestChanges") => h.push_str("<b class=\"tag danger\">changes</b>"),
@@ -3247,6 +3254,182 @@ fn unavailable(repo: &str, chrome: Chrome<'_>) -> Rendered {
 /// The alternative — letting a missing repository fall through to the
 /// pages that read it — is how git's own "not a git repository:
 /// '/srv/…'" ended up on a `404` a stranger could ask for.
+/// A channel name out of a `/p/` path, or `None` when it is not one.
+///
+/// A channel is `owner/name` in some deployments and one segment in
+/// others, so the whole remainder is taken and only decoded -- but it is
+/// decoded per segment, which is what keeps a `%2f` from inventing a
+/// boundary, and it is length-capped because it is about to be compared
+/// against every key in the view.
+pub(crate) fn decode_channel(rest: &str) -> Option<String> {
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() || rest.len() > 128 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for segment in rest.split('/') {
+        out.push(decode(segment)?);
+    }
+    Some(out.join("/"))
+}
+
+/// The page for a name this node has nothing to say about.
+///
+/// Separate from [`no_such_repository`] because the two are different
+/// questions with different fixes, and shared with the malformed-name
+/// case on purpose: a reader is never told which of the two they hit.
+pub(crate) fn no_such_actor(chrome: Chrome<'_>) -> Rendered {
+    let chrome = Chrome { here: "", ..chrome };
+    Rendered {
+        status: 404,
+        etag: None,
+        html: crate::ui::refusal(
+            "No actor here",
+            404,
+            &crate::ui::Refusal {
+                code: "no_such_actor",
+                error: "This node has nothing recorded under that name, or nothing this \
+                        credential may see. The two look identical from here, on purpose.",
+                expected: Some("the name an actor signs as"),
+                actual: None,
+                next: "Open a review and follow the link on a verdict — every name on a \
+                       review page is one this node can tell you about.",
+            },
+            &[],
+            chrome,
+        ),
+    }
+}
+
+/// One actor's standing as a page (D63).
+///
+/// Takes the profile document rather than building it, so the page and
+/// `/api/profile` are the same reading of the same view. Two surfaces
+/// counting separately is how they come to disagree, and here a
+/// disagreement would be a disclosure: the ACL narrowing lives in the
+/// view this was derived from, not in either renderer.
+///
+/// It is deliberately a table of inputs and not a verdict. The question
+/// a reader brings is "should I trust this reviewer", and the honest
+/// answer today is four numbers and their units -- a score would imply
+/// D24's other three inputs exist.
+pub(crate) fn profile_page(
+    channel: &str,
+    profile: &serde_json::Value,
+    chrome: Chrome<'_>,
+) -> Rendered {
+    let n = |path: &[&str]| -> u64 {
+        let mut at = profile;
+        for step in path {
+            at = &at[*step];
+        }
+        at.as_u64().unwrap_or_default()
+    };
+    let known = profile["known"].as_bool().unwrap_or_default();
+
+    let mut h = shell(channel, Bar::index(chrome));
+    h.push_str("<header class=\"top\"><h1>");
+    h.push_str(&esc(channel));
+    h.push_str("</h1><div class=\"sub\">");
+    if known {
+        h.push_str("<span class=\"pill\">known to this node</span>");
+    } else {
+        h.push_str("<span class=\"pill\">no record</span>");
+    }
+    h.push_str("</div></header><main id=\"main\">");
+
+    if !known {
+        h.push_str(
+            "<section><p class=\"empty\">This node holds no key, change, review or check \
+             for that name. That is not the same as an actor who has done nothing: a name \
+             you cannot see the records of looks identical from here.</p></section>",
+        );
+        return Rendered {
+            status: 200,
+            etag: None,
+            html: close(h),
+        };
+    }
+
+    h.push_str("<section><h2>keys</h2>");
+    match profile["keys"].as_array() {
+        Some(keys) if !keys.is_empty() => {
+            h.push_str("<table><thead><tr><th>key</th><th>operator</th><th>bound at</th>");
+            h.push_str("<th>ops since</th><th>state</th></tr></thead><tbody>");
+            for key in keys {
+                h.push_str("<tr><td><code>");
+                h.push_str(&esc(key["key"].as_str().unwrap_or("?")));
+                h.push_str("</code></td><td>");
+                h.push_str(&esc(key["operator"].as_str().unwrap_or("?")));
+                h.push_str("</td><td>");
+                h.push_str(&key["bound_at"].as_u64().unwrap_or_default().to_string());
+                h.push_str("</td><td>");
+                h.push_str(
+                    &key["ops_since_binding"]
+                        .as_u64()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                h.push_str("</td><td>");
+                if key["revoked"].is_null() {
+                    h.push_str("<b class=\"tag ok\">live</b>");
+                } else {
+                    h.push_str("<b class=\"tag bad\">revoked</b>");
+                }
+                h.push_str("</td></tr>");
+            }
+            h.push_str("</tbody></table>");
+            // The unit, said once, where the number is. "Ops since" is
+            // meaningless without it and misleading with the wrong one:
+            // a node idle for a month and a node that took a thousand
+            // pushes in an hour are not comparable on a clock.
+            h.push_str(
+                "<p class=\"lede\">Age is counted in sequenced ops, the only clock the log \
+                 has. It orders keys by standing in a way a replay reproduces exactly.</p>",
+            );
+        }
+        _ => h.push_str("<p class=\"empty\">No key bound to this name, or none you may see.</p>"),
+    }
+    h.push_str("</section>");
+
+    h.push_str("<section><h2>record</h2><table><tbody>");
+    for (label, value) in [
+        ("changes owned", n(&["changes", "owned"])),
+        ("reviews assigned", n(&["reviews", "assigned"])),
+        ("approved", n(&["reviews", "approved"])),
+        ("changes requested", n(&["reviews", "changes_requested"])),
+        ("approvals slashed", n(&["reviews", "slashed"])),
+        ("comments written", n(&["reviews", "comments"])),
+        ("checks reported", n(&["checks", "reported"])),
+        ("checks failed", n(&["checks", "failed"])),
+    ] {
+        h.push_str("<tr><td>");
+        h.push_str(label);
+        h.push_str("</td><td>");
+        h.push_str(&value.to_string());
+        h.push_str("</td></tr>");
+    }
+    h.push_str("</tbody></table>");
+    h.push_str(
+        "<p class=\"lede\">Counted from the view this credential may read, so another \
+         reader may see different numbers for the same actor.</p>",
+    );
+    h.push_str("</section>");
+
+    h.push_str(
+        "<section><h2>vouches</h2><p class=\"empty\">None. Nothing on this node \
+         records one actor vouching for another, so there are none to show and no trust \
+         score to compute from them. D24 wants key age, vouches, scoped grants and bonds; \
+         only the first is persisted, and it is in the table above.</p></section>",
+    );
+
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
+}
+
 pub(crate) fn no_such_repository(chrome: Chrome<'_>) -> Rendered {
     // The reader's address is dropped here, and dropping it is the
     // property rather than a tidy-up. This page is rendered both for a

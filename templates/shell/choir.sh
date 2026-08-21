@@ -225,6 +225,12 @@ choir_checks() {
 	choir_run checks "$@"
 }
 
+# choir profile <api> <channel>
+#   what the log records about one actor: keys and their age, changes owned, verdicts given, checks reported
+choir_profile() {
+	choir_run profile "$@"
+}
+
 # choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]
 #   find a term across every repository you may read; the term is literal, not a pattern
 choir_search() {
