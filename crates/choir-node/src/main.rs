@@ -135,7 +135,38 @@ fn describe(report: &choir_node::portable::Report) -> String {
     )
 }
 
-fn main() -> std::io::Result<()> {
+/// Renders a refusal as a sentence and leaves with a nonzero status.
+///
+/// `fn main() -> io::Result<()>` prints a returned error with `Debug`,
+/// so every mistyped flag in this binary came out as
+/// `Error: Custom { kind: InvalidInput, error: "..." }` — the message
+/// intact and wrapped in the name of the type that carried it. D58 made
+/// this the rule for `choir-cli` and never reached the daemon, which is
+/// the only reason it survived: a reader who mistypes a flag is told
+/// what to fix, not which enum variant holds the telling.
+///
+/// The status stays 1, unchanged. `scripts/restore_from_backup.sh` and
+/// `scripts/pull_backup.sh` branch on nonzero and not on a value, so
+/// splitting usage out to 2 would be a behaviour change nobody asked
+/// for. `Node::serve_forever` still leaves 75 for a supervisor on a
+/// durability failure, from inside the library and past this function
+/// entirely.
+fn main() {
+    if let Err(error) = run() {
+        // A usage line already opens with the binary's name, because it
+        // is meant to be copied; prefixing it would print that name
+        // twice in one sentence.
+        let text = error.to_string();
+        if text.starts_with("usage:") {
+            eprintln!("{text}");
+        } else {
+            eprintln!("choir-node: {text}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--verify-log") {
         let path = args.get(1).ok_or_else(|| {

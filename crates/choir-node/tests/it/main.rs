@@ -33,6 +33,7 @@ mod graft_attack;
 mod handles;
 mod hooks;
 mod identity_pinning;
+mod invocation;
 mod join;
 mod journal;
 mod key_binding;
