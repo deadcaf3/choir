@@ -560,7 +560,25 @@ fn safe_oid(oid: &str) -> Option<String> {
 ///
 /// Bytes rather than a `String` because a blob is arbitrary content:
 /// deciding it is text is the caller's job, after looking at it.
+/// How many times this process has shelled out to git.
+///
+/// A page's cost is dominated by process spawns — around 10 ms each on
+/// the development machine — so the spawn count is what drives the read
+/// latency Phase 1 puts a ceiling on. It is counted rather than timed
+/// for the reason `tests/alloc_budget.rs` counts allocations: wall-clock
+/// on a shared laptop is too noisy to gate on, and the same page
+/// measured p99 94 ms and p99 246 ms an hour apart with identical code.
+/// The count does not move with the weather.
+///
+/// Always on, not `#[cfg(test)]`. A counter compiled out of the binary
+/// being shipped is a counter measuring a different binary, and one
+/// relaxed add on a path that is about to spawn a process is not a cost
+/// worth reasoning about.
+pub(crate) static GIT_INVOCATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    GIT_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let out = std::process::Command::new("git")
         // `core.quotePath` defaults to *on*, which makes every path
         // outside ASCII come back as a C-quoted octal string:
@@ -1618,6 +1636,93 @@ fn branches_and_tags(dir: &Path) -> (Vec<String>, Vec<String>) {
 /// is tens of rows, not thousands, and the alternative — one walk with a
 /// commit budget — silently leaves blank cells on exactly the old, stable
 /// files a reader is most likely to be looking for.
+/// How far back one walk looks before falling back to per-path queries.
+///
+/// A listing's rows are almost always touched by recent commits, so a
+/// bounded walk answers nearly all of them; the cap is what keeps a
+/// repository with a hundred thousand commits from paying for all of
+/// them to render one page.
+const TOUCH_WALK: usize = 400;
+
+/// Last-touch for every row of a listing, in one `git log` walk.
+///
+/// This used to be one `git log -1` per row, which is a subprocess per
+/// row: a forty-file directory spawned forty-one of them and took ~79 ms
+/// of a page that Phase 1 asks to serve inside 100 ms, on loopback,
+/// before any network exists. The measurement that found it is
+/// `tests/phase1_reads.rs`.
+///
+/// One walk attributes each path to the newest commit touching it.
+/// Anything the walk does not reach — a file untouched in the last
+/// [`TOUCH_WALK`] commits — falls back to the per-path query, so the
+/// answer is the same one the slow version gave and only the cost
+/// changed. `last_touches_agree_with_the_per_path_query` is that claim.
+fn last_touches(
+    dir: &Path,
+    oid: &str,
+    rows: &[String],
+) -> std::collections::BTreeMap<String, (String, i64)> {
+    let mut found: std::collections::BTreeMap<String, (String, i64)> =
+        std::collections::BTreeMap::new();
+    if rows.is_empty() {
+        return found;
+    }
+    let depth = format!("-{TOUCH_WALK}");
+    // `\x01` opens a record so commit headers can be told from the file
+    // names that follow them; `%at%x00%s` is the same pair the per-path
+    // query parses, so the two cannot disagree about what they read.
+    let walk = |extra: &[&str]| -> Result<String, String> {
+        let mut args = vec!["log", &depth, "--format=%x01%at%x00%s", "--name-only"];
+        args.extend_from_slice(extra);
+        args.push(oid);
+        git_text(dir, &args)
+    };
+    let Ok(text) = walk(&["--diff-merges=first-parent"]).or_else(|_| walk(&[])) else {
+        return found;
+    };
+
+    let mut current: Option<(String, i64)> = None;
+    for line in text.lines() {
+        if let Some(header) = line.strip_prefix('\x01') {
+            current = header.split_once('\0').and_then(|(at, subject)| {
+                Some((subject.to_string(), at.trim().parse::<i64>().ok()?))
+            });
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let Some(touched) = current.as_ref() else {
+            continue;
+        };
+        // A commit names files; a row may be a directory. The first row
+        // this file sits under is the one it dates, and only the first
+        // commit to mention a row counts, because the walk is newest
+        // first.
+        for row in rows {
+            let hit = line == row || line.starts_with(&format!("{row}/"));
+            if hit && !found.contains_key(row) {
+                found.insert(row.clone(), touched.clone());
+            }
+        }
+        if found.len() == rows.len() {
+            break;
+        }
+    }
+
+    // Whatever the walk could not reach, asked for directly. Rare by
+    // construction, and the reason this is a speed-up rather than a
+    // change of answer.
+    for row in rows {
+        if !found.contains_key(row) {
+            if let Some(touch) = last_touch(dir, oid, row) {
+                found.insert(row.clone(), touch);
+            }
+        }
+    }
+    found
+}
+
 fn last_touch(dir: &Path, oid: &str, path: &str) -> Option<(String, i64)> {
     // `--diff-merges=first-parent` is what makes a file whose only recent
     // change arrived through a merge show that merge instead of nothing.
@@ -1897,9 +2002,14 @@ fn tree(
         }
     } else {
         let now = now_secs();
+        // One walk for the whole listing rather than one query per row.
+        // See [`last_touches`]: this loop used to spawn a subprocess per
+        // file, which is most of what a directory page cost.
+        let names: Vec<String> = rows.iter().map(|(_, name, _)| name.clone()).collect();
+        let touches = last_touches(dir, &oid, &names);
         h.push_str("<table class=\"listing\"><tbody>");
         for (is_dir, name, size) in rows {
-            let touched = last_touch(dir, &oid, &name);
+            let touched = touches.get(&name).cloned();
             // `ls-tree` prints the full path from the root; the link
             // needs that, the listing wants only the last segment.
             let leaf = name.rsplit('/').next().unwrap_or(&name);
@@ -4569,5 +4679,89 @@ mod tests {
             h.contains("id=\"verdict\" hidden"),
             "the controls are not hidden by default"
         );
+    }
+
+    /// The batched walk answers what the per-path query answers.
+    ///
+    /// This is the whole licence for the batching: it was introduced to
+    /// make a directory page fit inside Phase 1's read budget, and a
+    /// faster function that dates files differently is not an
+    /// optimization, it is a regression nobody would notice — a listing
+    /// with slightly wrong dates looks exactly like a listing.
+    ///
+    /// The fixture deliberately includes a file touched by an older
+    /// commit and a directory whose newest change is below it, because
+    /// those are the two cases where a walk and a path query can part
+    /// company.
+    #[test]
+    fn last_touches_agree_with_the_per_path_query() {
+        let work = std::env::temp_dir().join(format!("choir-touch-agree-{}", std::process::id()));
+        std::fs::remove_dir_all(&work).ok();
+        std::fs::create_dir_all(&work).expect("temp root");
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .current_dir(&work)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git runs")
+        };
+        assert!(git(&["init", "-q"]).status.success());
+
+        // Three commits, so the rows are dated by different ones.
+        std::fs::write(work.join("old.txt"), "first\n").unwrap();
+        std::fs::create_dir_all(work.join("nested")).unwrap();
+        std::fs::write(work.join("nested/deep.txt"), "first\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-q", "-m", "the older commit"])
+            .status
+            .success());
+
+        std::fs::write(work.join("nested/deep.txt"), "second\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-q", "-m", "touch only what is nested"])
+            .status
+            .success());
+
+        std::fs::write(work.join("new.txt"), "third\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-q", "-m", "the newest commit"])
+            .status
+            .success());
+
+        // The git directory, not the work tree: these helpers address a
+        // repository the way the daemon does, which is bare.
+        let repo = work.join(".git");
+        let oid = resolve(&repo, "HEAD").expect("HEAD resolves");
+        let rows: Vec<String> = vec!["old.txt".into(), "nested".into(), "new.txt".into()];
+        let batched = last_touches(&repo, &oid, &rows);
+        for row in &rows {
+            assert_eq!(
+                batched.get(row).cloned(),
+                last_touch(&repo, &oid, row),
+                "the walk and the per-path query disagree about {row}"
+            );
+        }
+        // And the fixture really does separate them, or the agreement
+        // above would be three copies of one answer.
+        assert_eq!(
+            batched["old.txt"].0, "the older commit",
+            "the fixture did not produce distinct dates: {batched:?}"
+        );
+        assert_eq!(batched["nested"].0, "touch only what is nested");
+        assert_eq!(batched["new.txt"].0, "the newest commit");
+
+        std::fs::remove_dir_all(&work).ok();
     }
 }

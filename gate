@@ -155,7 +155,13 @@ collect() {
 # debug and a release build. A test that cheap costs nothing to keep in,
 # and every test kept in is one the fast lane does not have to be trusted
 # about.
-SLOW="alloc_budget retention_cost throughput"
+# The Phase-1 target measurements (D64) belong here for the reason
+# stated below rather than for their runtime: they assert
+# release-profile ceilings. Run under the debug allocator alongside a
+# fully parallel suite, the repository front page measured p99 627 ms
+# against a ceiling that release clears with room -- a healthy build
+# failing on the profile it was never measured in.
+SLOW="alloc_budget retention_cost throughput phase1_reads phase1_clones phase1_spawns"
 
 # Debug-build tests that assert a wall-clock ceiling. They run in the
 # quiet phase in BOTH lanes: hooks_isolation's 2 s admission ceiling has
@@ -212,7 +218,9 @@ t_measure()   {
   cargo test -p choir-node --release --no-run --test retention_cost \
     && cargo build --release -p choir-spike \
     && cargo test -p choir-node --release --no-fail-fast \
-         --test alloc_budget --test throughput
+         --test alloc_budget --test throughput \
+         --test phase1_spawns --test phase1_clones --test phase1_reads \
+    && cargo test -p choir-queue --release --no-fail-fast --test phase1
 }
 # The quiet-phase half: the one measurement whose assertion is a
 # wall-clock ratio and has failed healthy code under suite contention.

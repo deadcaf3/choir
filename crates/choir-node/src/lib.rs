@@ -35,6 +35,16 @@ pub mod hooks;
 mod join_page;
 pub mod limits;
 pub mod platform;
+/// How many times this process has shelled out to git while serving.
+///
+/// Exposed so a test can budget it. A page's read latency is mostly its
+/// process spawns, and the count is the half of that which does not move
+/// with machine load -- see `tests/phase1_spawns.rs`.
+#[must_use]
+pub fn git_invocations() -> u64 {
+    browse::GIT_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub mod portable;
 mod prepare;
 pub mod profile;
