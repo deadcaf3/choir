@@ -1,5 +1,20 @@
 name: CI
 
+# The sub-minute answer to every push: `./gate quick`, the lane that
+# never invokes the compiler. Everything here is a gate stage, not a
+# workflow step -- the workflow's whole job is to put four tools on the
+# PATH and run it, so what CI checks and what a checkout checks cannot
+# drift apart.
+#
+# What quick covers: the internal/-tracked guard, formatting, the book
+# (the only check on SUMMARY.md, because `create-missing` is off), and
+# the RustSec audit of Cargo.lock. What it deliberately does not:
+# compile or test. This suite's test execution alone runs for minutes,
+# and project law is that the full gate ran locally before every
+# commit; nightly.yml re-checks that claim on Linux within a day, and
+# `./gate quick` prints "nothing was compiled and no tests ran" on
+# every green run so the trade is never mistaken for coverage.
+
 on:
   pull_request:
   push:
@@ -9,113 +24,88 @@ permissions:
   contents: read
 
 # A pull request that gets a second push does not need the first push's
-# gate to finish; a push to `main` does, because that run is the record
+# run to finish; a push to `main` does, because that run is the record
 # of whether that commit was good.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Pinned in one place. The toolchain is pinned because a gate that
-  # passes on whatever rustc happened to ship today is not a gate,
-  # cargo-audit is pinned because it is the thing deciding what counts
-  # as a vulnerability, and mdbook is pinned because it is a renderer
-  # whose failures are the gate's only check on `docs/SUMMARY.md`.
+  # The same pins the other workflows use. The toolchain is pinned
+  # because a check that passes on whatever rustc shipped today is not
+  # a check; cargo-audit is pinned because it decides what counts as a
+  # vulnerability; mdbook is pinned because it is the renderer whose
+  # refusal is the only check on `docs/SUMMARY.md`.
   RUST_VERSION: 1.97.1
   CARGO_AUDIT_VERSION: 0.22.2
   MDBOOK_VERSION: 0.5.4
-  # The gate is not a terminal here, but Actions renders colour, so it
-  # prints a readable run rather than a wall of grey.
   FORCE_COLOR: 1
 
 jobs:
-  gate:
-    name: release gate
+  quick:
+    name: quick gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Warm, the whole job fits inside a minute. The allowance is for the
+    # rare cold run that rebuilds mdbook or cargo-audit from source
+    # after a version bump; anything else that overruns this deserves
+    # to be killed rather than waited on.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      # The gate's object-database scan reads its needles from
-      # `internal/scan-needles`, which is not in a clone, so the gate
-      # announces a skip here and **CI has no privacy guard at all**
-      # unless it is this one.
-      #
-      # `internal/` is the unpublished half of this repository: the
-      # blueprint, the reasoning behind every row of DECISIONS.md, the
-      # governance notes. It is kept out by a bare `.gitignore` entry
-      # with no allowlist, which one `git add -f` defeats without
-      # comment. This is the check that notices.
-      #
-      # It prints a count and not the paths. A guard against leaking
-      # private file names must not leak them into a build log to say
-      # so; `git ls-files internal` locally says which.
-      - name: Nothing under internal/ is tracked
-        run: |
-          tracked=$(git ls-files -- internal | wc -l | tr -d ' ')
-          if [ "$tracked" != 0 ]; then
-            echo "$tracked path(s) under internal/ are tracked; internal/ is never published" >&2
-            echo "run 'git ls-files internal' locally to see which" >&2
-            exit 1
-          fi
-
-      - name: Pin the toolchain
-        run: |
-          rustup toolchain install "$RUST_VERSION" \
-            --profile minimal --component rustfmt --component clippy
-          rustup override set "$RUST_VERSION"
-
-      # Every run used to compile the whole workspace, four times over,
-      # from nothing. Keyed on the lockfile so a dependency change gets a
-      # cold build and nothing else does; `restore-keys` still gives a
-      # partial hit when the lockfile moves, which is the common case.
-      #
-      # actions/cache rather than a third-party cache action on purpose:
-      # this step runs with the repository checked out and a token in the
-      # environment, and it is not the place to widen the set of people
-      # who can change what runs here.
-      - name: Cache the build
+      # Restoring the toolchain is faster than downloading it, and it
+      # changes only when the pin does. rustup discovers a toolchain by
+      # its directory, so the install below is a no-op on a warm cache;
+      # `update-hashes` rides along so rustup knows it is current. If a
+      # restored toolchain were ever re-downloaded anyway, the cost is
+      # ~40 s, not a wrong answer.
+      - name: Cache the toolchain
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-
+            ~/.rustup/toolchains/${{ env.RUST_VERSION }}-x86_64-unknown-linux-gnu
+            ~/.rustup/update-hashes
+          key: rustup-${{ runner.os }}-${{ env.RUST_VERSION }}
 
-      # cargo-audit was compiled from source on every single run. It
-      # changes only when the pin above does.
-      - name: Cache cargo-audit
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+          rustup override set "$RUST_VERSION"
 
-      # Without mdbook on PATH the gate prints "no mdbook" and moves on,
-      # by design -- a contributor lacking the tool still gets a green
-      # run. CI is not a contributor. The book stage is the only thing
-      # that catches a `SUMMARY.md` entry naming a file that does not
-      # exist, because `create-missing` is off, and a permanent skip is
-      # exactly the "check that quietly stopped checking" the gate's own
-      # header calls this project's recurring failure.
+      # actions/cache rather than a third-party cache action on
+      # purpose: these steps run with the repository checked out and a
+      # token in the environment, and this is not the place to widen
+      # the set of people who can change what runs here.
       - name: Cache mdbook
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/mdbook
           key: mdbook-${{ runner.os }}-${{ env.MDBOOK_VERSION }}
 
-      - name: Install cargo-audit and mdbook
+      - name: Cache cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      # The advisory database is a git clone that cargo-audit refreshes
+      # on every run; restoring the last run's copy turns that refresh
+      # into a delta fetch. The key carries the run id so every run
+      # saves a fresh entry, and `restore-keys` hands the next run the
+      # newest one.
+      - name: Cache the advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-db
+          key: advisory-db-${{ github.run_id }}
+          restore-keys: advisory-db-
+
+      - name: Install mdbook and cargo-audit
         run: |
-          command -v cargo-audit >/dev/null \
-            || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
           command -v mdbook >/dev/null \
             || cargo install mdbook --version "$MDBOOK_VERSION" --locked
+          command -v cargo-audit >/dev/null \
+            || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
 
-      - name: Release gate
-        run: ./gate
-
-      - name: RustSec audit
-        run: cargo audit
+      - name: Quick gate
+        run: ./gate quick

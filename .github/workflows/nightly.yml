@@ -1,0 +1,89 @@
+name: Nightly gate
+
+# The comprehensive lane, on a schedule instead of on every push:
+# `./gate fast` compiles the workspace and executes every
+# non-measurement suite, which is minutes of work no pull request
+# should wait on (ci.yml explains the split). A merge is re-checked on
+# Linux within a day rather than before it lands -- that is the trade
+# the sub-minute CI budget buys, and this workflow is its other half.
+#
+# The measurement binaries stay out of CI in every lane, on purpose:
+# their assertions are release-profile ceilings measured on a quiet
+# machine, and a shared runner is neither quiet nor the machine the
+# ceilings were calibrated on. The fast lane's own header says it is
+# not a substitute for the full gate; the full gate stays local, where
+# the measurements mean something.
+#
+# The dispatch trigger is for checking `main` now rather than tonight
+# -- before tagging a release, or after a merge worth not sleeping on.
+# If outside contributors arrive, the cheapest upgrade is adding a
+# `pull_request` trigger here and living with the minutes.
+
+on:
+  schedule:
+    - cron: '41 17 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never two at once, never cancelled: a scheduled run that dies to a
+# dispatch loses the one record that day had.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: 1.97.1
+  MDBOOK_VERSION: 0.5.4
+  FORCE_COLOR: 1
+  # The build is thrown away when the job ends; incremental artifacts
+  # would only bloat the cache that carries it to tomorrow.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  gate:
+    name: fast-lane gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal --component rustfmt --component clippy
+          rustup override set "$RUST_VERSION"
+
+      # Keyed on the lockfile so a dependency change gets a cold build
+      # and nothing else does; `restore-keys` still gives a partial hit
+      # when the lockfile moves. actions/cache rather than a
+      # third-party action for the reason ci.yml states.
+      - name: Cache the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: nightly-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            nightly-${{ runner.os }}-${{ env.RUST_VERSION }}-
+
+      # Without mdbook on PATH the gate announces a skip and moves on,
+      # which is right for a contributor and wrong for CI: a permanent
+      # skip is a check that quietly stopped checking.
+      - name: Cache mdbook
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/mdbook
+          key: mdbook-${{ runner.os }}-${{ env.MDBOOK_VERSION }}
+
+      - name: Install mdbook
+        run: |
+          command -v mdbook >/dev/null \
+            || cargo install mdbook --version "$MDBOOK_VERSION" --locked
+
+      - name: Fast-lane gate
+        run: ./gate fast
