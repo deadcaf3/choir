@@ -282,12 +282,26 @@ struct DifferentialConfig {
     state: PathBuf,
 }
 
+/// Where a round's check verdict comes from when it is not the forge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CiConfig {
+    /// Versioned command file: the argv, declared environment, and
+    /// timeout the train is checked with. The same format the
+    /// differential detector reads, because it is the same question —
+    /// "what does an operator want run against a tree".
+    command: PathBuf,
+    /// Helper to speak the D18 protocol to, or `None` to run the
+    /// command as a child of this process.
+    runner: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueueArgs {
     positional: Vec<String>,
     land: bool,
     watch: Option<u64>,
     differential: Option<DifferentialConfig>,
+    ci: Option<CiConfig>,
 }
 
 fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
@@ -296,6 +310,8 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
     let mut runner = None;
     let mut command = None;
     let mut state = None;
+    let mut ci_command = None;
+    let mut ci_runner = None;
     let mut positional = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -327,6 +343,18 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
                 }
                 command = Some(next_path(it.next(), "--differential-command")?);
             }
+            "--ci-command" => {
+                if ci_command.is_some() {
+                    return Err("--ci-command may be supplied only once".to_string());
+                }
+                ci_command = Some(next_path(it.next(), "--ci-command")?);
+            }
+            "--ci-runner" => {
+                if ci_runner.is_some() {
+                    return Err("--ci-runner may be supplied only once".to_string());
+                }
+                ci_runner = Some(next_path(it.next(), "--ci-runner")?);
+            }
             "--differential-state" => {
                 if state.is_some() {
                     return Err("--differential-state may be supplied only once".to_string());
@@ -352,11 +380,22 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
             );
         }
     };
+    // A runner with no command would hand a helper nothing to run and
+    // report an outage, which reads as our fault rather than as the
+    // invocation error it is.
+    let ci = match (ci_command, ci_runner) {
+        (None, None) => None,
+        (Some(command), runner) => Some(CiConfig { command, runner }),
+        (None, Some(_)) => {
+            return Err("--ci-runner needs --ci-command to have something to run".to_string());
+        }
+    };
     Ok(QueueArgs {
         positional,
         land,
         watch,
         differential,
+        ci,
     })
 }
 
@@ -370,12 +409,20 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
 ///
 /// **Decision inputs are structured only** (risk #16, Rule of Two): the
 /// train is built from PR numbers and git oids, the verdict comes from CI
-/// `status`/`conclusion` enums, and landing is gated on that verdict plus
-/// the caller's `land` argument. No pull-request title, body, branch
+/// `status`/`conclusion` enums or from a [`choir_queue::executor::Verdict`],
+/// and landing is gated on that verdict plus the caller's `land`
+/// argument. No pull-request title, body, branch
 /// name, author, commit message, or check-run text reaches any
 /// conditional here. `land` is passed in from a per-invocation `--land`
 /// flag and has no configuration default, so a bridge started without it
-/// cannot be talked into landing anything.
+/// cannot be talked into landing anything. The executor's own strings
+/// are held to the same rule: a `Verdict::Errored` detail is printed for
+/// an operator and never interpolated into a commit status or read by a
+/// branch, so what a helper says cannot become what the bridge does.
+///
+/// With `ci`, the check signal is ours (D18) instead of the forge's:
+/// nothing speculative is pushed, no `choir/train` branch appears on the
+/// remote, and the verdict comes from the executor the operator named.
 fn queue_round(
     app_id: &str,
     pem: &Path,
@@ -383,7 +430,16 @@ fn queue_round(
     workdir: &Path,
     land: bool,
     differential: Option<&DifferentialConfig>,
+    ci: Option<&CiConfig>,
 ) -> Result<(), String> {
+    // Loaded before anything is fetched or pushed: a command file with a
+    // typo in it should cost an error message, not a train on the remote.
+    let ci_spec = match ci {
+        Some(config) => Some(choir_queue::differential_ledger::load_command(
+            &config.command,
+        )?),
+        None => None,
+    };
     let token = github::app_jwt(app_id, pem).and_then(|jwt| github::installation_token(&jwt))?;
     let base_branch = github::default_branch(&token, repo)?;
     let prs = github::list_open_prs(&token, repo)?;
@@ -444,7 +500,17 @@ fn queue_round(
     }
     if train.tip == base {
         println!("queue: no PR merged cleanly; train == base, skipping CI");
+    } else if ci.is_some() {
+        println!(
+            "queue: train {} built locally ({} PRs considered)",
+            train.tip,
+            prs.len()
+        );
     } else {
+        // Only the forge path needs this: the branch exists so that
+        // someone else's runners see the train. Checking it here means
+        // the speculative merge of every open PR never leaves the
+        // machine.
         git(
             &[
                 "push",
@@ -461,12 +527,40 @@ fn queue_round(
         );
     }
 
-    let verdict = if train.tip == base {
+    // The two signal sources converge here, into the three things the
+    // rest of the round needs: whether to land, and what to tell each
+    // PR. Landing consults `green` and nothing else, so neither source
+    // gets its own landing rule.
+    let (green, state, desc): (bool, &str, &str) = if train.tip == base {
         // Nothing new to test; base is presumed already checked.
-        github::Verdict::Success
+        (true, "success", "speculative train green")
+    } else if let (Some(config), Some(spec)) = (ci, ci_spec.as_ref()) {
+        let mut executor = build_executor(config)?;
+        match choir_bridge::queue::run_train_ci(workdir, &train.tip, spec, executor.as_mut()) {
+            Ok(verdict) => {
+                println!("queue: train CI: {verdict}");
+                match verdict {
+                    choir_queue::executor::Verdict::Passed => {
+                        (true, "success", "speculative train green")
+                    }
+                    choir_queue::executor::Verdict::Failed { .. } => {
+                        (false, "failure", "train CI failed")
+                    }
+                    // An outage and a deadline are statements about us,
+                    // so they are `error` rather than `failure`: telling
+                    // an author their change is red because our provider
+                    // fell over is the exact confusion D18 exists to end.
+                    _ => (false, "error", "train CI could not run"),
+                }
+            }
+            Err(error) => {
+                eprintln!("queue: train CI could not run: {error}");
+                (false, "error", "train CI could not run")
+            }
+        }
     } else {
         let deadline = std::time::Instant::now() + CI_TIMEOUT;
-        loop {
+        let verdict = loop {
             let v = github::check_verdict(&token, repo, &train.tip)?;
             match v {
                 github::Verdict::Success | github::Verdict::Failure => break v,
@@ -477,6 +571,12 @@ fn queue_round(
                     std::thread::sleep(CI_POLL);
                 }
             }
+        };
+        match verdict {
+            github::Verdict::Success => (true, "success", "speculative train green"),
+            github::Verdict::Failure => (false, "failure", "train CI failed"),
+            github::Verdict::Pending => (false, "error", "train CI timed out"),
+            github::Verdict::NoRuns => (false, "error", "no CI signal on train"),
         }
     };
 
@@ -493,19 +593,25 @@ fn queue_round(
         } else if !entry.merged {
             ("failure", entry.note.as_str())
         } else {
-            match verdict {
-                github::Verdict::Success => ("success", "speculative train green"),
-                github::Verdict::Failure => ("failure", "train CI failed"),
-                github::Verdict::Pending => ("error", "train CI timed out"),
-                github::Verdict::NoRuns => ("error", "no CI signal on train"),
-            }
+            (state, desc)
         };
         github::post_status(&token, repo, &sha, "choir/queue", state, desc)?;
         println!("queue: PR #{}: {state} ({desc})", entry.id);
     }
-    if land && train.tip != base && verdict == github::Verdict::Success {
+    if land && train.tip != base && green {
         choir_bridge::queue::land(workdir, &url, &train.tip, &base_branch)?;
         println!("queue: landed train {} -> {base_branch}", train.tip);
+        if ci.is_some() {
+            // Our executor tested exactly the commit that landed, and
+            // the land is a fast-forward, so the base tip is the tree
+            // that passed. There is no second, independent run for this
+            // watch to observe. The cost is real and stated rather than
+            // hidden: a nondeterministic failure the pre-land run missed
+            // now lands, where the forge path's second look would
+            // sometimes have caught it.
+            println!("queue: local CI tested the landed commit; no post-land watch");
+            return Ok(());
+        }
         // Immediately after the push the aggregated verdict is still the
         // pre-land green, so an early Success is only trusted once a new
         // run has been seen Pending; otherwise watch the full window.
@@ -551,6 +657,32 @@ fn queue_round(
         }
     }
     Ok(())
+}
+
+/// The executor a round checks its train with (D18).
+///
+/// Default is `LocalRunner`, which runs the command as a child of this
+/// process: no isolation beyond what the OS gives a subprocess, and
+/// therefore appropriate only where the PRs are trusted. `--ci-runner`
+/// points at a helper instead, which is where a sandbox or a microVM
+/// goes — the bridge cannot tell the two apart and does not need to.
+///
+/// # Errors
+///
+/// The runner path is not UTF-8, so it cannot be sent as the argv the
+/// protocol carries.
+fn build_executor(config: &CiConfig) -> Result<Box<dyn choir_queue::executor::CiExecutor>, String> {
+    match &config.runner {
+        None => Ok(Box::new(choir_queue::local::LocalRunner::new())),
+        Some(path) => {
+            let program = path
+                .to_str()
+                .ok_or_else(|| format!("--ci-runner path {path:?} is not UTF-8"))?;
+            Ok(Box::new(choir_queue::remote::ProtocolRunner::new(vec![
+                program.to_string(),
+            ])))
+        }
+    }
 }
 
 /// Loads the 32-byte actor key at `path`, creating it (0600) if absent.
@@ -940,7 +1072,7 @@ fn main() {
             [a, b, c, d] => [a, b, c, d],
             _ => {
                 eprintln!(
-                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>] [--differential-runner <path> --differential-command <path> --differential-state <dir>]"
+                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>] [--ci-command <file> [--ci-runner <path>]] [--differential-runner <path> --differential-command <path> --differential-state <dir>]"
                 );
                 std::process::exit(2);
             }
@@ -953,6 +1085,7 @@ fn main() {
                 Path::new(workdir),
                 queue_args.land,
                 queue_args.differential.as_ref(),
+                queue_args.ci.as_ref(),
             ) {
                 Ok(()) => {}
                 // In watch mode a failed round (network, rate limit) is
@@ -1021,6 +1154,32 @@ mod tests {
 
         assert_eq!(body["channel"], "operator/bridge");
         assert_eq!(body["workspace"], body["channel"]);
+    }
+
+    /// `--ci-runner` alone would hand a helper no command, and the
+    /// round would report an outage: our fault, for what is actually an
+    /// invocation error. Refused at parse time instead.
+    #[test]
+    fn a_ci_runner_needs_a_command_to_run() {
+        let base = ["1", "key", "owner/repo", "work"].map(str::to_string);
+        let mut both = base.to_vec();
+        both.extend(["--ci-command", "ci.json", "--ci-runner", "vm"].map(str::to_string));
+        let parsed = parse_queue_args(&both).expect("command and runner together");
+        let ci = parsed.ci.expect("ci mode is on");
+        assert_eq!(ci.command, PathBuf::from("ci.json"));
+        assert_eq!(ci.runner, Some(PathBuf::from("vm")));
+
+        let mut command_only = base.to_vec();
+        command_only.extend(["--ci-command", "ci.json"].map(str::to_string));
+        let parsed = parse_queue_args(&command_only).expect("a command with no runner is local");
+        assert_eq!(parsed.ci.expect("ci mode is on").runner, None);
+
+        let mut runner_only = base.to_vec();
+        runner_only.extend(["--ci-runner", "vm"].map(str::to_string));
+        assert!(parse_queue_args(&runner_only).is_err());
+
+        // And no CI flags at all is the forge path, unchanged.
+        assert_eq!(parse_queue_args(&base).expect("bare queue").ci, None);
     }
 
     #[test]

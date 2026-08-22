@@ -1,17 +1,28 @@
 //! Queue-as-bot v0 (DECISIONS.md D21, queue stage): speculative merge
-//! trains with the host forge's CI as the check signal.
+//! trains, checked either by the host forge's CI or by our own (D18).
 //!
 //! v0 is verdict-only: it builds a train commit (base tip + each open
-//! PR merged in submission order, conflicts excluded), publishes it as
-//! the `choir/train` branch so the forge's CI runs on it, then reports
-//! a per-PR verdict as a commit status. It never moves the protected
-//! branch — landing the train is the next stage.
+//! PR merged in submission order, conflicts excluded), gets a verdict
+//! on it, then reports a per-PR verdict as a commit status. It never
+//! moves the protected branch on its own — landing the train is a
+//! separate, explicitly requested step.
+//!
+//! The check signal has two shapes. The forge one publishes the train
+//! as the `choir/train` branch and polls the forge's check API, which
+//! means the speculative merge of every open PR is pushed to a public
+//! remote and tested by someone else's runners. [`run_train_ci`] is the
+//! other: it hands the train to a [`choir_queue::executor::CiExecutor`],
+//! so the same train is checked here, on a provider we chose, and
+//! nothing speculative leaves the machine.
 //!
 //! Everything in this module is local git; the forge API glue lives in
 //! [`crate::github`] so the train mechanics stay testable offline.
 
+use choir_queue::differential_ledger::{effective_environment, CommandSpec};
+use choir_queue::executor::{CiExecutor, Job, Verdict, PROTOCOL};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 static DIFFERENTIAL_RUN_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -530,6 +541,82 @@ pub fn run_differential(
     match (result, cleanup) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// Checks one train commit with a [`CiExecutor`] instead of asking the
+/// host forge (D18).
+///
+/// The forge path and this one answer the same question by opposite
+/// means. Asking the forge requires publishing the speculative merge of
+/// every open PR to a remote and trusting whatever ran there; this
+/// checks the train in the worktree that just built it, with an
+/// operator-declared command, on a provider the operator picked. What
+/// comes back is a [`Verdict`] rather than a bool, so the caller can
+/// still tell "the train is bad" from "we could not find out" — the
+/// distinction the whole seam exists for, and one the forge's
+/// `status`/`conclusion` enums also make and the bool did not.
+///
+/// `repo` is checked out at `tip` first, forcibly: the train build owns
+/// this worktree and left it detached at the train it built, but an
+/// advisory differential run between the two may have moved it.
+///
+/// The job is content-addressed by `tip` under git's own codec, so the
+/// subject a cache keys on and the subject a `RecordCheck` names are
+/// the commit itself rather than a queue-local id. `may_write_cache`
+/// stays false: a train holds unreviewed code from every open PR, which
+/// is exactly the untrusted case the flag is for.
+///
+/// # Errors
+///
+/// Git could not resolve or check out `tip`, the executor could not be
+/// reached, or it answered with something other than one verdict for
+/// the one job. All three mean we did not find out, never that the
+/// train is bad — a caller must not land on this and must not blame a
+/// change for it.
+pub fn run_train_ci(
+    repo: &Path,
+    tip: &str,
+    spec: &CommandSpec,
+    ci: &mut dyn CiExecutor,
+) -> Result<Verdict, String> {
+    let oid = git(
+        repo,
+        &["rev-parse", "--verify", &format!("{tip}^{{commit}}")],
+    )?
+    .trim()
+    .to_string();
+    let subject = choir_hash::ContentHash::from_git_oid(&oid)
+        .ok_or_else(|| format!("train tip {oid} is not a git object id"))?;
+    git(repo, &["checkout", "-q", "--detach", "--force", &oid])?;
+
+    let mut command = Vec::with_capacity(spec.args.len() + 1);
+    command.push(spec.program.clone());
+    command.extend(spec.args.iter().cloned());
+    let mut job = Job::new(subject, command);
+    job.label = "train".to_string();
+    job.environment = effective_environment(&spec.env);
+    job.directory = Some(repo.to_path_buf());
+    if let Some(seconds) = spec.timeout_seconds {
+        job.deadline = Duration::from_secs(seconds);
+    }
+
+    // The handshake before the work, so a provider speaking another
+    // protocol is refused rather than believed.
+    let info = ci.info().map_err(|error| error.to_string())?;
+    if info.protocol != PROTOCOL {
+        return Err(format!(
+            "executor `{}` speaks protocol {} and this build speaks {PROTOCOL}",
+            info.name, info.protocol
+        ));
+    }
+    let verdicts = ci.run(&[job]).map_err(|error| error.to_string())?;
+    match verdicts.len() {
+        1 => Ok(verdicts.into_iter().next().expect("length checked")),
+        n => Err(format!(
+            "executor `{}` answered {n} times for one job",
+            info.name
+        )),
     }
 }
 

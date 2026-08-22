@@ -229,6 +229,7 @@ dependencies = [
  "choir-identity",
  "choir-node",
  "choir-oplog",
+ "choir-queue",
  "choir-view",
  "serde_json",
 ]

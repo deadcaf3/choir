@@ -469,3 +469,163 @@ fn harvestable_merges_walks_first_parent_history_newest_first() {
     );
     std::fs::remove_dir_all(work).ok();
 }
+
+// ---- The train checked by our own CI (D18) ----------------------------
+
+/// Writes a command file in the format [`load_command`] reads, so these
+/// tests go through the same loader the bridge does rather than
+/// building a `CommandSpec` the file format could no longer produce.
+fn command_file(dir: &Path, script: &str) -> choir_queue::differential_ledger::CommandSpec {
+    let path = dir.join("ci-command.json");
+    let body = serde_json::json!({
+        "format_version": 1,
+        "program": "/bin/sh",
+        "args": ["-c", script],
+        "env": {},
+        "timeout_seconds": 60,
+    });
+    std::fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+    choir_queue::differential_ledger::load_command(&path).expect("the command file loads")
+}
+
+/// Builds the two-PR train the fixture supports and returns its tip.
+fn train_of(dir: &Path) -> String {
+    let base = rev(dir, "main");
+    let train = build_train(
+        dir,
+        &base,
+        &[(1, "pr-1".to_string()), (2, "pr-2".to_string())],
+    )
+    .expect("train builds");
+    assert_eq!(train.entries.len(), 2, "both PRs should merge cleanly");
+    train.tip
+}
+
+/// The job runs against the *merged* tree, which is the whole point of
+/// a speculative train and the one thing a directory-blind executor
+/// cannot do.
+///
+/// `a.txt` comes from PR 1 and `b.txt` from PR 2, so a command wanting
+/// both passes only on the train. The same command on `main` fails,
+/// which is what rules out an executor that passes everything.
+#[test]
+fn the_train_is_checked_against_the_merged_tree() {
+    use choir_queue::executor::Verdict;
+
+    let dir = tempdir("ci-merged-tree");
+    fixture(&dir);
+    let tip = train_of(&dir);
+    let spec = command_file(&dir, "test -e a.txt && test -e b.txt");
+    let mut ci = choir_queue::local::LocalRunner::new();
+
+    assert_eq!(
+        choir_bridge::queue::run_train_ci(&dir, &tip, &spec, &mut ci).expect("the executor ran"),
+        Verdict::Passed,
+        "the job did not see both PRs, so it did not run on the train"
+    );
+
+    let base = rev(&dir, "main");
+    assert!(
+        matches!(
+            choir_bridge::queue::run_train_ci(&dir, &base, &spec, &mut ci)
+                .expect("the executor ran"),
+            Verdict::Failed { .. }
+        ),
+        "the same command passed on base, so it was not the tree deciding"
+    );
+}
+
+/// The subject is the commit under test, under git's own codec, and the
+/// job carries the directory rather than hoping for a cwd. Asserted by
+/// capturing the job, because every other assertion here would still
+/// pass if the bridge sent a hash of something else.
+#[test]
+fn the_job_names_the_commit_and_the_checkout() {
+    use choir_queue::executor::{Job, Synthetic, Verdict};
+    use std::sync::{Arc, Mutex};
+
+    let dir = tempdir("ci-job-shape");
+    fixture(&dir);
+    let tip = train_of(&dir);
+    let spec = command_file(&dir, "true");
+
+    let seen: Arc<Mutex<Option<Job>>> = Arc::new(Mutex::new(None));
+    let captured = Arc::clone(&seen);
+    let mut ci = Synthetic::new(move |job: &Job| {
+        *captured.lock().expect("no panic held the lock") = Some(job.clone());
+        Verdict::Passed
+    });
+    choir_bridge::queue::run_train_ci(&dir, &tip, &spec, &mut ci).expect("the executor ran");
+
+    let job = seen.lock().unwrap().clone().expect("one job was sent");
+    assert_eq!(
+        job.subject.git_oid().as_deref(),
+        Some(tip.as_str()),
+        "the job was addressed by something other than the commit it tests"
+    );
+    assert_eq!(
+        job.directory.as_deref(),
+        Some(dir.as_path()),
+        "the job did not name the checkout it was built in"
+    );
+    assert_eq!(
+        job.command,
+        vec!["/bin/sh".to_string(), "-c".into(), "true".into()]
+    );
+    assert!(
+        !job.may_write_cache,
+        "a train of unreviewed PRs was allowed to write the shared cache"
+    );
+}
+
+/// A provider fault is not a red train. It reaches the caller as
+/// `Errored`, which does not evict and is not conclusive, rather than
+/// being flattened into a failure on the way through.
+#[test]
+fn a_provider_fault_is_not_a_failed_train() {
+    use choir_queue::executor::{Job, Synthetic, Verdict};
+
+    let dir = tempdir("ci-provider-fault");
+    fixture(&dir);
+    let tip = train_of(&dir);
+    let spec = command_file(&dir, "true");
+    let mut ci = Synthetic::new(|_: &Job| Verdict::Errored {
+        provider: "firecracker".into(),
+        detail: "the vm did not boot".into(),
+    });
+
+    let verdict =
+        choir_bridge::queue::run_train_ci(&dir, &tip, &spec, &mut ci).expect("the executor ran");
+    assert!(matches!(verdict, Verdict::Errored { .. }), "{verdict:?}");
+    assert!(!verdict.evicts(), "our outage rejected everyone's work");
+    assert!(!verdict.is_conclusive());
+}
+
+/// An executor speaking another protocol is refused before it can
+/// answer, so a verdict that means something else than it appears to
+/// never reaches the landing decision.
+#[test]
+fn an_executor_speaking_another_protocol_is_refused() {
+    use choir_queue::executor::{CiExecutor, ExecutorError, ExecutorInfo, Job, Verdict, PROTOCOL};
+
+    struct FromTheFuture;
+    impl CiExecutor for FromTheFuture {
+        fn info(&mut self) -> Result<ExecutorInfo, ExecutorError> {
+            Ok(ExecutorInfo {
+                name: "future".to_string(),
+                protocol: PROTOCOL + 1,
+            })
+        }
+        fn run(&mut self, jobs: &[Job]) -> Result<Vec<Verdict>, ExecutorError> {
+            panic!("{} jobs reached an executor we do not speak to", jobs.len());
+        }
+    }
+
+    let dir = tempdir("ci-protocol");
+    fixture(&dir);
+    let tip = train_of(&dir);
+    let spec = command_file(&dir, "true");
+    let error = choir_bridge::queue::run_train_ci(&dir, &tip, &spec, &mut FromTheFuture)
+        .expect_err("a protocol mismatch is refused");
+    assert!(error.contains("protocol"), "{error}");
+}

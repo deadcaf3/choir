@@ -9,6 +9,7 @@ authors.workspace = true
 choir-fs = { path = "../choir-fs" }
 choir-hash = { path = "../choir-hash" }
 choir-identity = { path = "../choir-identity" }
+choir-queue = { path = "../choir-queue" }
 choir-view = { path = "../choir-view" }
 serde_json = "1"
 
