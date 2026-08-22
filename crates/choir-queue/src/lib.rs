@@ -34,6 +34,7 @@ pub mod envelope;
 pub mod executor;
 pub mod git;
 pub mod identity;
+pub mod landing;
 pub mod local;
 pub mod memory;
 pub mod remote;
@@ -145,40 +146,6 @@ pub struct QueueReport {
     pub unreported_checks: Vec<String>,
 }
 
-/// Records one landing: the workspace now holds this merged state.
-///
-/// A `ViewOp`, not the merged bytes. The queue used to submit the file
-/// content itself as an opaque payload, which nothing downstream could
-/// fold -- and once check reports joined the same log, `View::materialize`
-/// could not read *any* of it, because one undecodable entry stops the
-/// fold. That was invisible for as long as this queue was wired to
-/// nothing.
-///
-/// `prev` is `None` because a change lands at most once: the identity
-/// set in [`MergeQueue::drain`] refuses a resubmission of anything
-/// already landed, so the workspace this names does not exist yet.
-///
-/// The commit id is the [`Speculator::subject`] of the merged state,
-/// which is deliberately the same hash [`JobTemplate::job_for`] gave
-/// the job that tested it. That is what makes a check answerable about
-/// a workspace head rather than about a number only this queue knows,
-/// and it is why the subject comes from the speculator instead of
-/// being hashed here: a git state named by anything but its oid is
-/// unresolvable to every client that could act on it.
-fn land(
-    handle: &choir_sequencer::SequencerHandle,
-    workspace: &str,
-    commit: choir_hash::ContentHash,
-) {
-    let op = choir_view::ViewOp::new(choir_view::OpKind::SetWorkspaceHead {
-        workspace: workspace.to_string(),
-        commit,
-        prev: None,
-    });
-    let payload = serde_json::to_vec(&op).expect("a ViewOp serializes");
-    handle.submit(workspace, payload);
-}
-
 /// Submits one check report, returning the sequencer's refusal if any.
 ///
 /// Unsigned, like every other op this queue submits: the queue is an
@@ -224,6 +191,11 @@ pub struct MergeQueue {
     journal: Box<dyn choir_sequencer::journal::Journal>,
     /// What to run for each candidate state (D18).
     template: JobTemplate,
+    /// How a landing is written into the log (D68). The in-memory
+    /// workspace landing is the default; a caller whose log is the
+    /// source of truth installs one that moves the thing the change
+    /// was proposed to.
+    landing: Box<dyn landing::Landing>,
     /// Who reports check results, when anybody does. `None` is the
     /// default and means the queue keeps its verdicts to itself.
     reporter: Option<CheckReporter>,
@@ -372,6 +344,7 @@ impl MergeQueue {
             landed: std::collections::BTreeSet::new(),
             journal: Box::new(choir_sequencer::journal::NullJournal),
             template: JobTemplate::default(),
+            landing: Box::new(landing::WorkspaceLanding),
         }
     }
 
@@ -380,6 +353,46 @@ impl MergeQueue {
     /// having no command.
     pub fn set_job_template(&mut self, template: JobTemplate) {
         self.template = template;
+    }
+
+    /// Installs how a landing is recorded (D68).
+    ///
+    /// The default records a workspace head over whatever log the
+    /// sequencer holds, which is right for a caller mirroring a
+    /// canonical upstream. A caller whose own log decides -- a node --
+    /// installs one that moves the ref the change was proposed to, and
+    /// signs it, because the daemon's policy refuses an unsigned op.
+    pub fn set_landing(&mut self, landing: Box<dyn landing::Landing>) {
+        self.landing = landing;
+    }
+
+    /// Lands `prefix` in order, stopping at the first refusal.
+    ///
+    /// Returns the refusal, leaving everything not landed in `prefix`
+    /// with the refused change at its front. The caller requeues them:
+    /// a landing the log would not take means the base the rest of the
+    /// train was speculating on is not the base the log has, so the
+    /// round is void rather than the change being at fault.
+    fn land_prefix(
+        &mut self,
+        handle: &choir_sequencer::SequencerHandle,
+        prefix: &mut Vec<(Change, String)>,
+        merged: &mut Vec<u64>,
+        cause: &str,
+    ) -> Option<String> {
+        while !prefix.is_empty() {
+            let (change, state) = prefix.remove(0);
+            let subject = self.speculator.subject(&state);
+            if let Err(why) = self.landing.record(handle, &change, subject) {
+                prefix.insert(0, (change, state));
+                return Some(format!("landing refused: {why}"));
+            }
+            self.base = state;
+            self.landed.insert(self.speculator.identity(&change));
+            merged.push(change.id);
+            self.resize(self.window + 1, cause);
+        }
+        None
     }
 
     /// Installs a resolution memory (item B): a conflict whose triple it
@@ -624,15 +637,15 @@ impl MergeQueue {
                 .position(|v| !matches!(v, executor::Verdict::Passed));
             if let Some(i) = stop_at {
                 if !verdicts[i].evicts() {
-                    provider_error = Some(verdicts[i].to_string());
-                    for (change, state) in train.drain(..i) {
-                        self.base = state.clone();
-                        self.landed.insert(self.speculator.identity(&change));
-                        land(&handle, &change.workspace, self.speculator.subject(&state));
-                        merged.push(change.id);
-                        self.resize(self.window + 1, "green prefix landed");
-                    }
+                    let mut prefix: Vec<(Change, String)> = train.drain(..i).collect();
+                    provider_error = Some(
+                        self.land_prefix(&handle, &mut prefix, &mut merged, "green prefix landed")
+                            .unwrap_or_else(|| verdicts[i].to_string()),
+                    );
                     for (change, _) in train.into_iter().rev() {
+                        self.queue.push_front(change);
+                    }
+                    for (change, _) in prefix.into_iter().rev() {
                         self.queue.push_front(change);
                     }
                     break;
@@ -643,23 +656,35 @@ impl MergeQueue {
             match failure_at {
                 None => {
                     // Whole train is green: merge it all.
-                    for (change, state) in train {
-                        self.base = state.clone();
-                        self.landed.insert(self.speculator.identity(&change));
-                        land(&handle, &change.workspace, self.speculator.subject(&state));
-                        merged.push(change.id);
-                        self.resize(self.window + 1, "train landed clean");
+                    let mut prefix = train;
+                    if let Some(why) =
+                        self.land_prefix(&handle, &mut prefix, &mut merged, "train landed clean")
+                    {
+                        provider_error = Some(why);
+                        for (change, _) in prefix.into_iter().rev() {
+                            self.queue.push_front(change);
+                        }
+                        break;
                     }
                 }
                 Some(i) => {
                     // Merge the green prefix, reject the failure, requeue the
                     // rest for retesting against a state without the failure.
-                    for (change, state) in train.drain(..i) {
-                        self.base = state.clone();
-                        self.landed.insert(self.speculator.identity(&change));
-                        land(&handle, &change.workspace, self.speculator.subject(&state));
-                        merged.push(change.id);
-                        self.resize(self.window + 1, "green prefix landed");
+                    let mut prefix: Vec<(Change, String)> = train.drain(..i).collect();
+                    if let Some(why) =
+                        self.land_prefix(&handle, &mut prefix, &mut merged, "green prefix landed")
+                    {
+                        // The round is void, so nobody is blamed for it --
+                        // including the change CI failed on, which was
+                        // tested against a state the log has not accepted.
+                        provider_error = Some(why);
+                        for (change, _) in train.into_iter().rev() {
+                            self.queue.push_front(change);
+                        }
+                        for (change, _) in prefix.into_iter().rev() {
+                            self.queue.push_front(change);
+                        }
+                        break;
                     }
                     let (failed, _) = train.remove(0);
                     let failed_id = failed.id;
