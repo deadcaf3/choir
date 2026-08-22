@@ -168,9 +168,12 @@ fn record_check(
         reporter: reporter.channel.clone(),
         target_ref: reporter.target_ref.clone(),
     });
-    let payload = serde_json::to_vec(&op).expect("a ViewOp serializes");
+    let (payload, sig) = match &reporter.seal {
+        Some(seal) => seal(&reporter.channel, &op),
+        None => (serde_json::to_vec(&op).expect("a ViewOp serializes"), None),
+    };
     handle
-        .try_submit(&reporter.channel, payload, None)
+        .try_submit(&reporter.channel, payload, sig)
         .map(|_| ())
 }
 
@@ -208,7 +211,7 @@ pub struct MergeQueue {
 /// under which a check is reported belongs to whoever is running it,
 /// and inventing a channel name here would put an unattributable
 /// reporter in a signed, ordered record.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CheckReporter {
     /// The channel the check is reported under.
     pub channel: String,
@@ -221,6 +224,39 @@ pub struct CheckReporter {
     /// repository, so an unbound check is readable only by node-wide
     /// readers -- correct, and useless to the repository it is about.
     pub target_ref: Option<String>,
+    /// How a report is turned into what this log will accept (D68).
+    ///
+    /// `None` submits the op's own bytes unsigned, which is right for a
+    /// queue whose sequencer admits them. A daemon's policy does not:
+    /// it demands a signature, and with `--require-scope` a scope
+    /// naming its log and a recent head. Both live in the payload, so
+    /// this seals the whole submission rather than only signing it --
+    /// a signer alone would sign bytes the policy then rejected for
+    /// their scope, and the refusal would read as a key problem.
+    pub seal: Option<Seal>,
+}
+
+/// Turns a report op into the payload and signature a log will accept.
+///
+/// Shared rather than owned because the queue clones its reporter per
+/// verdict, and `Arc` is what lets one node key back every clone
+/// without the key itself being copied.
+pub type Seal = std::sync::Arc<
+    dyn Fn(&str, &choir_view::ViewOp) -> (Vec<u8>, Option<choir_oplog::Witness>) + Send + Sync,
+>;
+
+impl std::fmt::Debug for CheckReporter {
+    /// Hand-written because [`Seal`] is a function and has no useful
+    /// debug form. It is reported as present or absent, which is the
+    /// part a reader chasing a refused report needs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckReporter")
+            .field("channel", &self.channel)
+            .field("name", &self.name)
+            .field("target_ref", &self.target_ref)
+            .field("sealed", &self.seal.is_some())
+            .finish()
+    }
 }
 
 /// How the queue turns a speculative state into a [`executor::Job`].

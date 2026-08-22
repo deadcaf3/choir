@@ -387,6 +387,7 @@ fn reporter() -> choir_queue::CheckReporter {
         channel: "ci".into(),
         name: "ci/build".into(),
         target_ref: Some("agents/demo.git:refs/heads/main".into()),
+        seal: None,
     }
 }
 

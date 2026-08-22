@@ -33,6 +33,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 struct Fixture {
     work: std::path::PathBuf,
     node: std::sync::Arc<Node>,
+    port: u16,
     clone: std::path::PathBuf,
     /// A worktree of the served bare repo, which is what the queue must
     /// speculate in so its merge commits land in the node's own object
@@ -99,6 +100,7 @@ fn fixture(tag: &str) -> Fixture {
     Fixture {
         work,
         node,
+        port,
         clone,
         workdir,
     }
@@ -128,6 +130,14 @@ fn propose(f: &Fixture, topic: &str, file: &str, body: &str) -> String {
         String::from_utf8_lossy(&pushed.stderr)
     );
     head
+}
+
+fn view(port: u16) -> serde_json::Value {
+    let out = std::process::Command::new("curl")
+        .args(["-s", &format!("http://127.0.0.1:{port}/api/view")])
+        .output()
+        .expect("curl runs");
+    serde_json::from_slice(&out.stdout).expect("view json")
 }
 
 fn always_green() -> Synthetic {
@@ -263,5 +273,72 @@ fn a_landing_that_lost_the_race_stalls_the_round() {
         landed,
         "the branch moved anyway"
     );
+    std::fs::remove_dir_all(&f.work).ok();
+}
+
+/// The round's verdicts reach the log as checks the node signed (D49).
+///
+/// This is the reporter's first production caller. Asserted through the
+/// served view rather than through the report, because a reporter that
+/// built perfect ops and had every one of them refused would leave a
+/// report that looks exactly like this one -- which is what
+/// `unreported_checks` exists to say, and why it is checked first.
+#[test]
+fn the_round_reports_its_checks_under_the_node_key() {
+    let f = fixture("checks");
+    propose(&f, "one", "a.txt", "a\n");
+    propose(&f, "two", "b.txt", "b\n");
+    let platform = f.node.platform().expect("the platform is enabled");
+
+    let report = platform
+        .run_proposal_queue(REPO, "main", &f.workdir, &mut always_green(), template())
+        .expect("the round runs");
+    assert_eq!(
+        report.unreported_checks,
+        Vec::<String>::new(),
+        "the node refused its own reports"
+    );
+
+    let view = view(f.port);
+    let checks = view["checks"]
+        .as_object()
+        .expect("the view has a checks map");
+    // The view flattens checks to `<subject>:<name>`, so the name is
+    // read off the key rather than out of the value.
+    let ours: Vec<_> = checks
+        .iter()
+        .filter_map(|(key, check)| {
+            let (subject, name) = key.rsplit_once(':')?;
+            (name == "ci/queue").then_some((subject, check))
+        })
+        .collect();
+    assert_eq!(
+        ours.len(),
+        2,
+        "one check per change was expected, got: {:?}",
+        checks.keys().collect::<Vec<_>>()
+    );
+    for (subject, check) in ours {
+        assert_eq!(check["status"], "Passed", "{subject}: {check}");
+        assert_eq!(
+            check["target_ref"], "agents/demo.git:refs/heads/main",
+            "a check nobody can find the repository of: {subject}"
+        );
+        assert_eq!(
+            check["reporter"], "node/queue",
+            "the check was reported under somebody else's name: {check}"
+        );
+        // The subject is the speculative commit CI ran against, and this
+        // repository has it: a check about a tree nobody can resolve is
+        // a check nobody can act on. A `ContentHash` is codec-prefixed,
+        // and it is the oid after the prefix that git answers about.
+        let oid = subject.rsplit('-').next().expect("a codec-prefixed hash");
+        let kind = git(&f.workdir, &["cat-file", "-t", oid]);
+        assert_eq!(
+            String::from_utf8_lossy(&kind.stdout).trim(),
+            "commit",
+            "the check subject {subject} is not a commit this node holds"
+        );
+    }
     std::fs::remove_dir_all(&f.work).ok();
 }

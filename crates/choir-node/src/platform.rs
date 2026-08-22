@@ -3996,6 +3996,36 @@ impl Platform {
         )
     }
 
+    /// A check reporter that this node signs and scopes (D49, D68).
+    ///
+    /// The reason `set_check_reporter` was off by default and composed
+    /// into nothing: the identity a check is reported under belongs to
+    /// whoever runs the queue, and a bridge has no node-side identity to
+    /// use. A node does -- its own key -- and its landings are in a log
+    /// that is kept rather than thrown away, so a report against them is
+    /// answerable later.
+    #[must_use]
+    pub fn check_reporter(
+        &self,
+        name: String,
+        target_ref: Option<String>,
+    ) -> choir_queue::CheckReporter {
+        let key = Arc::clone(&self.node_key);
+        let entries = Arc::clone(&self.entries);
+        let node = self.node_key.actor_id();
+        choir_queue::CheckReporter {
+            channel: crate::queue::QUEUE_CHANNEL.to_string(),
+            name,
+            target_ref,
+            seal: Some(Arc::new(move |channel: &str, op: &ViewOp| {
+                let head = entries.lock().expect("entries lock").head_hash();
+                let payload = op.clone().in_scope(node.clone(), head).to_payload();
+                let sig = key.sign_submission(channel, &payload);
+                (payload, Some(sig))
+            })),
+        }
+    }
+
     /// Runs one speculative round over this node's own log (D5, D68).
     ///
     /// `workdir` must be a **worktree of the repository this node
@@ -4032,6 +4062,12 @@ impl Platform {
         );
         queue.set_job_template(template);
         queue.set_landing(Box::new(self.ref_landing(round.target_ref(), &round.base)));
+        // Every verdict the round reaches is recorded (D49). The subject
+        // is the speculative commit CI actually ran against, so a check
+        // is answerable about a tree rather than about a round number.
+        queue.set_check_reporter(
+            self.check_reporter("ci/queue".to_string(), Some(round.target_ref())),
+        );
         for change in round.changes() {
             queue.submit(change);
         }
