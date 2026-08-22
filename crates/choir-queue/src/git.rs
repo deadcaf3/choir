@@ -104,15 +104,17 @@ impl Speculator for GitSpeculator {
     /// argument exists for the text implementation, which has no way to
     /// find it.
     fn step(&mut self, _base: &str, onto: &str, proposed: &str) -> Step {
+        // `--force` is load-bearing and not belt-and-braces: it is what
+        // clears a `MERGE_HEAD` an earlier run left behind. Without it
+        // git refuses the next merge with "you have not concluded your
+        // merge" -- the same nonzero exit a conflict gets -- and
+        // somebody else's debris would be reported as this author's
+        // conflict. Verified rather than assumed; an explicit `merge
+        // --abort` here was removed after a mutation showed it changed
+        // nothing.
         if let Err(why) = git(&self.repo, &["checkout", "-q", "--detach", "--force", onto]) {
             return Step::Unavailable(format!("cannot detach at {onto}: {why}"));
         }
-        // A clean worktree is not enough: a previous conflicted merge
-        // leaves MERGE_HEAD behind even after `--force`, and the next
-        // merge then refuses with "you have not concluded your merge".
-        // That refusal is indistinguishable from a conflict at the exit
-        // code, so it would be reported as the next author's conflict.
-        let _ = git(&self.repo, &["merge", "--abort"]);
         let message = format!("choir queue: speculative merge of {proposed}");
         match git(
             &self.repo,
@@ -168,11 +170,14 @@ impl Speculator for GitSpeculator {
         // Deliberately the same normalization
         // [`choir_merge::normalized_diff`] performs for text, reached
         // with git's own diff: keep the added and removed lines and the
-        // path they belong to, drop everything positional. `-U0` is
-        // what removes the context, and context is not incidental here
-        // -- a three-line file rebased onto a change to its last line
-        // has different context for the same edit, so keeping it would
-        // make identity fail exactly when a rebase is what happened.
+        // path they belong to, drop everything positional. Dropping
+        // context is not incidental -- a three-line file rebased onto a
+        // change to its last line has different context for the same
+        // edit, so keeping it would break identity in exactly the case
+        // identity exists for. The filter is what enforces that, since
+        // a context line starts with a space; `-U0` only stops git
+        // producing bytes we would discard, and a mutation removing it
+        // is correctly invisible.
         //
         // Computed from our own bytes rather than by piping into `git
         // patch-id`: the diff is already in hand, and a second process

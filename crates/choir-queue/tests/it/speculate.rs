@@ -259,6 +259,81 @@ fn a_git_state_is_named_by_its_oid_and_nothing_else() {
 }
 
 #[test]
+fn a_merge_someone_left_half_finished_is_cleaned_up_not_reported() {
+    // A conflicted merge leaves `MERGE_HEAD` behind, and git then
+    // refuses the *next* merge with the same nonzero exit a conflict
+    // gets. A long-running caller that died mid-merge -- or crashed --
+    // would otherwise come back and report the debris as the next
+    // author's conflict.
+    let repo = fixture_repo("debris");
+    let f = git_fixtures(&repo);
+    git(&repo, &["checkout", "-q", "--detach", &f.first.proposed]);
+    let out = Command::new("git")
+        .arg("-c")
+        .arg("user.name=fixture")
+        .arg("-c")
+        .arg("user.email=fixture@choir.invalid")
+        .args([
+            "merge",
+            "--no-ff",
+            "-m",
+            "left half done",
+            &f.rival.proposed,
+        ])
+        .current_dir(&repo)
+        .output()
+        .expect("git runs");
+    assert!(!out.status.success(), "the fixture merge must conflict");
+    assert!(
+        repo.join(".git/MERGE_HEAD").exists(),
+        "the fixture must leave the debris this test is about"
+    );
+
+    let mut s = GitSpeculator::new(repo.clone());
+    assert!(
+        matches!(
+            s.step(&f.second.base, &f.base, &f.second.proposed),
+            Step::Advanced(_)
+        ),
+        "somebody else's unfinished merge is not this change's conflict"
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn the_same_edit_to_a_different_file_is_a_different_change() {
+    // Identity is what makes the queue refuse a resubmission as already
+    // landed, so an identity blind to the path would refuse a second
+    // author who happened to write the same line somewhere else.
+    let repo = fixture_repo("paths");
+    std::fs::write(repo.join("g.txt"), BASE).expect("the second fixture file is writable");
+    git(&repo, &["add", "g.txt"]);
+    git(&repo, &["commit", "-q", "-m", "two files"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+
+    std::fs::write(repo.join("f.txt"), FIRST).expect("f is writable");
+    let in_f = commit_all(&repo, "edit f");
+    git(&repo, &["checkout", "-q", "--detach", &base]);
+    std::fs::write(repo.join("g.txt"), FIRST).expect("g is writable");
+    let in_g = commit_all(&repo, "edit g");
+
+    let s = GitSpeculator::new(repo.clone());
+    assert_ne!(
+        s.identity(&change(1, &base, &in_f)),
+        s.identity(&change(2, &base, &in_g)),
+        "the same line written to two files is two changes"
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// Commits whatever is in the worktree, returning the new commit id.
+fn commit_all(dir: &Path, message: &str) -> String {
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", message]);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+#[test]
 fn a_verified_base_is_a_commit_and_an_unverified_one_says_so() {
     let repo = fixture_repo("verify");
     let base = git(&repo, &["rev-parse", "HEAD"]);
