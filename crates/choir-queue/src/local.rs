@@ -68,14 +68,22 @@ fn run_one(job: &Job) -> Verdict {
             detail: "job has no command".to_string(),
         };
     };
-    let spawned = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .env_clear()
         .envs(&job.environment)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    if let Some(dir) = &job.directory {
+        // A directory that does not exist makes the spawn fail, which
+        // lands in the `Err` arm below as `Errored` — correct, and the
+        // reason this is not checked separately here. It is our
+        // misconfiguration, not the change's fault.
+        command.current_dir(dir);
+    }
+    let spawned = command.spawn();
     let mut child = match spawned {
         Ok(c) => c,
         // A command that does not exist is our problem, not the

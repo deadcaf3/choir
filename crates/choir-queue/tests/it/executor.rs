@@ -43,6 +43,11 @@ struct Fixtures {
     erroring: Job,
     /// A job that outlives its deadline.
     slow: Job,
+    /// A job that passes only if the executor ran it in
+    /// `Job::directory`, and fails otherwise. `None` for a backend with
+    /// no directory to honor, which is the same admission the module
+    /// doc makes about what a synthetic pass proves.
+    in_directory: Option<Job>,
 }
 
 fn tree(name: &str) -> ContentHash {
@@ -121,6 +126,28 @@ fn conformance(ci: &mut dyn CiExecutor, f: Fixtures) {
     assert_eq!(out[0], Verdict::Passed);
     assert!(matches!(out[1], Verdict::Failed { .. }));
     assert_eq!(out[2], Verdict::Passed);
+
+    // 8. A provider that can run on a caller's checkout runs it in the
+    //    directory the job names. The probe passes only from inside
+    //    that directory, so an executor that ignores the field returns
+    //    `Failed` -- a well-formed verdict about the wrong tree, which
+    //    is the failure mode that made this worth a protocol bump.
+    if let Some(job) = f.in_directory {
+        assert_eq!(
+            ci.run(std::slice::from_ref(&job)).expect("directory job")[0],
+            Verdict::Passed,
+            "the job did not run in the directory it named"
+        );
+    }
+}
+
+/// A directory holding the marker `probe` looks for, distinct per
+/// caller because the three conformance runs share a process.
+fn probe_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("choir-ci-directory-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the probe directory");
+    std::fs::write(dir.join("choir-directory-marker"), b"here").expect("write the marker");
+    dir
 }
 
 fn shell(subject: &str, script: &str) -> Job {
@@ -145,8 +172,17 @@ fn the_local_runner_conforms() {
                 vec!["/nonexistent/choir-not-a-command".into()],
             ),
             slow,
+            in_directory: Some(in_dir(probe_dir("local"))),
         },
     );
+}
+
+/// The probe: exits zero only from a directory holding the marker, so
+/// the verdict *is* the assertion about where the job ran.
+fn in_dir(dir: std::path::PathBuf) -> Job {
+    let mut job = shell("directory", "test -e choir-directory-marker");
+    job.directory = Some(dir);
+    job
 }
 
 #[test]
@@ -172,6 +208,11 @@ fn the_synthetic_executor_conforms() {
             failing: labelled("fail"),
             erroring: labelled("error"),
             slow: labelled("slow"),
+            // A synthetic executor runs nothing, so there is no
+            // directory for it to honor and nothing to learn from
+            // asking. Skipping is honest; a fixture answering from the
+            // label table would be the suite testing itself.
+            in_directory: None,
         },
     );
 }
@@ -377,9 +418,31 @@ fn an_argument_boundary_cannot_be_forged_with_a_separator() {
     // And the argv/environment boundary itself.
     let mut arg_side = Job::new(tree.clone(), vec!["x".into()]);
     arg_side.environment.clear();
-    let mut env_side = Job::new(tree, vec![]);
+    let mut env_side = Job::new(tree.clone(), vec![]);
     env_side.environment.insert("x".into(), String::new());
     assert_ne!(arg_side.cache_key(), env_side.cache_key());
+
+    // The working directory is observable to the command, so it is in
+    // the key. Three cases, because the interesting one is the third:
+    // "no directory" must not collide with "the empty directory", which
+    // is what a plain length-prefixed field would have done.
+    let mut here = Job::new(tree.clone(), vec!["build".into()]);
+    here.directory = Some(std::path::PathBuf::from("/a"));
+    let mut there = Job::new(tree.clone(), vec!["build".into()]);
+    there.directory = Some(std::path::PathBuf::from("/b"));
+    let anywhere = Job::new(tree.clone(), vec!["build".into()]);
+    let mut empty = Job::new(tree, vec!["build".into()]);
+    empty.directory = Some(std::path::PathBuf::new());
+    assert_ne!(
+        here.cache_key(),
+        there.cache_key(),
+        "two checkouts of the same tree at different paths share a cache key"
+    );
+    assert_ne!(
+        anywhere.cache_key(),
+        empty.cache_key(),
+        "`None` and an empty path are the same preimage"
+    );
 }
 
 /// The third backend, and the one that carries the seam somewhere the
@@ -404,6 +467,7 @@ fn the_protocol_runner_conforms() {
                 vec!["/nonexistent/choir-not-a-command".into()],
             ),
             slow,
+            in_directory: Some(in_dir(probe_dir("remote"))),
         },
     );
 }
@@ -415,6 +479,14 @@ fn helper() -> choir_queue::remote::ProtocolRunner {
 
 /// One `sh -c` helper that writes canned lines and exits, for the
 /// protocol failures a well-behaved helper never produces.
+/// A well-formed greeting at whatever `PROTOCOL` is today, for the
+/// canned helpers below. Computed rather than pasted, because a stale
+/// literal turns each of those into a handshake-refusal test that still
+/// passes under its own name.
+fn hello(name: &str) -> String {
+    format!(r#"{{"name":"{name}","protocol":{PROTOCOL}}}"#)
+}
+
 fn canned(script: &str) -> choir_queue::remote::ProtocolRunner {
     choir_queue::remote::ProtocolRunner::new(vec![
         "/bin/sh".into(),
@@ -434,10 +506,11 @@ fn a_job_survives_the_round_trip_intact() {
     job.label = "change 7".into();
     job.environment.insert("RUSTFLAGS".into(), "-O".into());
     job.environment.insert("EMPTY".into(), String::new());
+    job.directory = Some(std::path::PathBuf::from("/tmp/choir-train"));
     job.deadline = Duration::from_millis(1234);
     job.may_write_cache = true;
 
-    let wire = choir_queue::remote::job_to_json(&job);
+    let wire = choir_queue::remote::job_to_json(&job).expect("the job serializes");
     let back = choir_queue::remote::job_from_json(&wire).expect("the line parses");
     assert_eq!(back, job, "a field was lost or changed crossing the wire");
 
@@ -482,7 +555,10 @@ fn an_unknown_verdict_is_refused_rather_than_guessed() {
     let why = choir_queue::remote::verdict_from_json(&unknown).expect_err("must not parse");
     assert!(why.contains("probably_fine"), "unhelpful refusal: {why}");
 
-    let mut ci = canned(r#"printf '{"name":"x","protocol":1}\n{"verdict":"probably_fine}\n'"#);
+    let mut ci = canned(&format!(
+        r#"printf '{}\n{{"verdict":"probably_fine}}\n'"#,
+        hello("x")
+    ));
     let out = ci.run(&[shell("pass", "exit 0")]);
     assert!(
         matches!(out, Err(ExecutorError::Protocol(_))),
@@ -533,7 +609,10 @@ fn a_silent_helper_is_unavailable() {
 /// alternative, a short list, is refused wholesale by the queue.
 #[test]
 fn a_helper_that_dies_mid_batch_errors_only_the_jobs_it_left() {
-    let mut ci = canned(r#"printf '{"name":"flaky","protocol":1}\n{"verdict":"passed"}\n'"#);
+    let mut ci = canned(&format!(
+        r#"printf '{}\n{{"verdict":"passed"}}\n'"#,
+        hello("flaky")
+    ));
     let jobs = [
         shell("a", "exit 0"),
         shell("b", "exit 0"),
@@ -556,7 +635,10 @@ fn a_helper_that_dies_mid_batch_errors_only_the_jobs_it_left() {
 /// halfway lands the work it approved and ejects nobody.
 #[test]
 fn a_half_dead_helper_lands_the_prefix_and_rejects_nothing() {
-    let mut ci = canned(r#"printf '{"name":"flaky","protocol":1}\n{"verdict":"passed"}\n'"#);
+    let mut ci = canned(&format!(
+        r#"printf '{}\n{{"verdict":"passed"}}\n'"#,
+        hello("flaky")
+    ));
     // 30 lines of base so three changes edit disjoint regions and the
     // merge itself is never what stops the train.
     let base: String = (0..30).map(|i| format!("line {i}\n")).collect();

@@ -32,6 +32,7 @@
 
 use choir_hash::ContentHash;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Wire-protocol version a provider must echo before receiving work.
@@ -39,7 +40,14 @@ use std::time::Duration;
 /// A provider built against a different schema is refused at the
 /// handshake rather than discovered through a verdict that means
 /// something else than it appears to.
-pub const PROTOCOL: u32 = 1;
+///
+/// Version 2 added [`Job::directory`]. That is why the number moved for
+/// what looks like an additive field: a version-1 helper does not know
+/// the key, so it runs the job in whatever directory it happens to be
+/// in and returns a verdict that is well-formed, index-aligned, and
+/// about the wrong tree. The handshake exists for exactly the changes
+/// a silent default would survive.
+pub const PROTOCOL: u32 = 2;
 
 /// Default wall-clock ceiling for one job.
 pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(600);
@@ -65,6 +73,17 @@ pub struct Job {
     /// process, so a job's result cannot depend on the environment of
     /// whoever happened to run the queue.
     pub environment: BTreeMap<String, String>,
+    /// Where the command runs.
+    ///
+    /// `None` leaves the choice to the provider, which is what a
+    /// self-provisioning executor wants: a microVM materializes
+    /// [`Job::subject`] itself and the host has no path to name. A
+    /// provider that runs on this machine has nothing to materialize
+    /// from, so a caller with a checkout on disk -- the merge train,
+    /// the forge bridge -- names it here. Without this field the seam
+    /// could only run commands that are correct from any directory,
+    /// which is no build command at all.
+    pub directory: Option<PathBuf>,
     /// Wall-clock ceiling. Exceeding it is [`Verdict::TimedOut`], which
     /// is a provider outcome and not a statement about the change.
     pub deadline: Duration,
@@ -92,6 +111,7 @@ impl Job {
             label: String::new(),
             command,
             environment: BTreeMap::new(),
+            directory: None,
             deadline: DEFAULT_DEADLINE,
             may_write_cache: false,
         }
@@ -100,10 +120,19 @@ impl Job {
     /// Content address of the work, for a shared cache to key on.
     ///
     /// Covers what determines the output — the tree, the command, the
-    /// environment — and deliberately not `deadline` or
+    /// environment, the directory — and deliberately not `deadline` or
     /// `may_write_cache`, which govern *how* the job may run rather
     /// than what it computes. Two jobs that differ only in how long
     /// they are allowed to take are the same question.
+    ///
+    /// [`Job::directory`] is in the key and [`Job::label`] is not,
+    /// which is the same test applied twice: a label is not observable
+    /// to the command, and the working directory is. Toolchains write
+    /// absolute paths into what they build — rustc puts them in debug
+    /// info — so two identical trees checked out at different paths can
+    /// produce artifacts that differ. One key over both of them is the
+    /// false sharing [`Job::may_write_cache`] exists to bound, arrived
+    /// at from the honest direction instead of the malicious one.
     #[must_use]
     pub fn cache_key(&self) -> ContentHash {
         let mut bytes = Vec::new();
@@ -116,6 +145,16 @@ impl Job {
         for (k, v) in &self.environment {
             push_field(&mut bytes, k.as_bytes());
             push_field(&mut bytes, v.as_bytes());
+        }
+        // A count rather than a plain field, so that "no directory" and
+        // "the empty directory" are different preimages instead of the
+        // same zero-length one.
+        match &self.directory {
+            None => push_len(&mut bytes, 0),
+            Some(dir) => {
+                push_len(&mut bytes, 1);
+                push_field(&mut bytes, dir.as_os_str().as_encoded_bytes());
+            }
         }
         ContentHash::blake3(&bytes)
     }

@@ -29,10 +29,10 @@
 //! batch ends.
 //!
 //! ```text
-//! host   -> {"protocol":1,"jobs":2}
-//! helper -> {"name":"choir-ci-local","protocol":1}
-//! host   -> {"subject":"...","label":"1","command":["true"],...}
-//! host   -> {"subject":"...","label":"2","command":["false"],...}
+//! host   -> {"protocol":2,"jobs":2}
+//! helper -> {"name":"choir-ci-local","protocol":2}
+//! host   -> {"subject":"...","label":"1","command":["true"],"directory":null,...}
+//! host   -> {"subject":"...","label":"2","command":["false"],"directory":"/w",...}
 //! helper -> {"verdict":"passed"}
 //! helper -> {"verdict":"failed","exit_code":1}
 //! ```
@@ -55,16 +55,33 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// Renders one job as the line a helper reads.
-#[must_use]
-pub fn job_to_json(job: &Job) -> serde_json::Value {
-    serde_json::json!({
+///
+/// # Errors
+///
+/// The job names a directory that is not UTF-8, which JSON cannot
+/// carry. Refused rather than lossily converted: a helper that runs the
+/// job in a path spelled differently returns a verdict about a
+/// different tree, and it would be index-aligned and therefore believed.
+pub fn job_to_json(job: &Job) -> Result<serde_json::Value, String> {
+    let directory = match &job.directory {
+        None => serde_json::Value::Null,
+        Some(dir) => serde_json::Value::String(
+            dir.to_str()
+                .ok_or_else(|| {
+                    format!("job directory {dir:?} is not UTF-8 and cannot be sent as JSON")
+                })?
+                .to_string(),
+        ),
+    };
+    Ok(serde_json::json!({
         "subject": job.subject.to_hex(),
         "label": job.label,
         "command": job.command,
         "environment": job.environment,
+        "directory": directory,
         "deadline_ms": u64::try_from(job.deadline.as_millis()).unwrap_or(u64::MAX),
         "may_write_cache": job.may_write_cache,
-    })
+    }))
 }
 
 /// Parses one job line, the inverse of [`job_to_json`].
@@ -102,6 +119,9 @@ pub fn job_from_json(value: &serde_json::Value) -> Result<Job, String> {
             map.insert(k.clone(), v.to_string());
         }
         job.environment = map;
+    }
+    if let Some(dir) = value["directory"].as_str() {
+        job.directory = Some(std::path::PathBuf::from(dir));
     }
     if let Some(ms) = value["deadline_ms"].as_u64() {
         job.deadline = Duration::from_millis(ms);
@@ -194,7 +214,11 @@ impl ProtocolRunner {
         // stdin, and two processes each blocked on the other's full
         // buffer is a hang with no error and no timeout attached to it.
         let hello = serde_json::json!({ "protocol": PROTOCOL, "jobs": jobs.len() });
-        let lines: Vec<String> = jobs.iter().map(|j| job_to_json(j).to_string()).collect();
+        let lines: Vec<String> = jobs
+            .iter()
+            .map(|j| job_to_json(j).map(|v| v.to_string()))
+            .collect::<Result<Vec<String>, String>>()
+            .map_err(ExecutorError::Protocol)?;
         let writer = std::thread::spawn(move || {
             let _ = writeln!(stdin, "{hello}");
             for line in lines {
