@@ -50,11 +50,52 @@ LANE=${1:-full}
 # the typo `./gate quikc` silently doing twenty minutes of work is how a
 # lane stops being trusted.
 case $LANE in
-  full | fast | quick) ;;
+  full | fast | quick | touched) ;;
   *)
-    echo "usage: ./gate [fast|quick]   (no argument runs every check)" >&2
+    echo "usage: ./gate [touched|fast|quick]   (no argument runs every check)" >&2
     exit 2 ;;
 esac
+
+# ----------------------------------------------------------- politeness
+# This gate used to take the whole machine and give none of it back.
+# Phase 2 launches six cargo invocations at once and each one defaults to
+# one build job per core, so an 8-core laptop was asked for up to 48
+# concurrent rustc processes. Alone that merely thrashes; beside another
+# project's build it turned a 40 s stage into 4m14s, and the machine
+# stopped being usable for anything else while the gate ran.
+#
+# Two fixes, both deliberately unconditional rather than adaptive. A gate
+# that behaves differently depending on the load it happened to sample is
+# a gate whose timings cannot be compared between runs.
+#
+#   `nice`  -- the gate yields to whatever else is running. It is never
+#              the urgent job: nobody is waiting on it the way they wait
+#              on an editor or a test they just typed.
+#   `-j`    -- phase 2's fan-out gets a third of the cores each, so the
+#              total lands near one job per core instead of six times it.
+#
+# Re-exec rather than prefixing each invocation, so every child inherits
+# it including the ones started by cargo. Test mode is exempt: it runs no
+# cargo at all, and forking a second shell for nothing would only make
+# the gate's own tests slower.
+if [ "${CHOIR_GATE_TEST_MODE:-}" != 1 ] && [ -z "${CHOIR_GATE_NICED:-}" ] \
+   && command -v nice >/dev/null 2>&1; then
+  CHOIR_GATE_NICED=1
+  export CHOIR_GATE_NICED
+  exec nice -n 10 sh "$0" "$@"
+fi
+
+CORES=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+# Only the lanes that actually overlap invocations. The touched lane runs
+# one thing at a time and should have the whole machine for the few
+# seconds it needs it.
+if [ "$LANE" = full ] || [ "$LANE" = fast ]; then
+  if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+    CARGO_BUILD_JOBS=$((CORES / 3))
+    [ "$CARGO_BUILD_JOBS" -lt 1 ] && CARGO_BUILD_JOBS=1
+    export CARGO_BUILD_JOBS
+  fi
+fi
 # One log directory per checkout, not per machine. Two gates running at
 # once — a worktree's and the main checkout's — used to share this
 # directory, and the second run's `rm` of the status files handed the
@@ -190,6 +231,39 @@ SLOW="alloc_budget retention_cost throughput phase1_reads phase1_clones phase1_s
 # drain ceiling and concurrency a p99 latency ceiling.
 ISOLATED="hooks_isolation"
 
+# ---------------------------------------------------------- touched lane
+# Which crates this working tree has actually changed, as `-p` arguments.
+#
+# Both halves matter: `git diff HEAD` sees edits to tracked files, and
+# `ls-files --others` sees a new file that has never been added -- which
+# is how a whole new module reads until it is staged, and exactly the
+# thing an edit loop most wants tested.
+PKGS=
+touched_pkgs() {
+  { git diff --name-only HEAD 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null
+  } | sed -n 's|^crates/\([^/]*\)/.*|-p \1|p' | sort -u | tr '\n' ' '
+}
+
+# A build input outside `crates/` that no `-p` selection can cover.
+touched_root() {
+  { git diff --name-only HEAD 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null
+  } | grep -E '^(Cargo\.toml|Cargo\.lock|rust-toolchain.*)$' | tr '\n' ' '
+}
+
+count_of() {
+  awk '/^test result:/ {
+    for (i = 1; i <= NF; i++) {
+      if ($i == "passed;") p += $(i-1);
+      if ($i == "failed;") f += $(i-1);
+    }
+  } END { if (f) printf "%d ok, %d failed", p, f; else printf "%d ok", p }' "$1"
+}
+
+t_touched() { cargo test $PKGS --no-fail-fast; }
+c_touched() { cargo clippy $PKGS --all-targets -- -D warnings; }
+
 fast_targets() {
   for f in crates/choir-node/tests/*.rs; do
     name=$(basename "$f" .rs)
@@ -300,7 +374,7 @@ printf '\n  %schoir%s %s%s gate%s\n\n' "$B" "$Z" "$D" "$LANE" "$Z"
 # it holds no build lock and has no reason to wait its turn. Started here
 # and collected at the end, it costs the gate nothing instead of ~26 s.
 SCAN_PID=
-if [ "$LANE" != fast ]; then
+if [ "$LANE" != fast ] && [ "$LANE" != touched ]; then
   if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || [ -f "$NEEDLES" ]; then
     job scan scan scan_needles &
     SCAN_PID=$!
@@ -315,7 +389,7 @@ fi
 # -- and announced when the binary is absent, the same rule the book
 # follows.
 AUDIT_PID=
-if [ "$LANE" != fast ]; then
+if [ "$LANE" != fast ] && [ "$LANE" != touched ]; then
   if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || command -v cargo-audit >/dev/null 2>&1; then
     job audit audit cargo audit &
     AUDIT_PID=$!
@@ -341,7 +415,29 @@ end $? ""
 # The quick lane's cargo involvement ends at `cargo fmt`: no build, no
 # tests, no clippy, no rustdoc. Sixty seconds is its budget, and this
 # suite's test execution alone runs for minutes.
-if [ "$LANE" != quick ]; then
+if [ "$LANE" = touched ]; then
+
+# The touched lane: the changed crates, their tests, their lints, and
+# nothing else. It is the edit loop's rung and it is NOT a smaller full
+# lane -- it does not test the crates that depend on the ones it ran, it
+# builds no release profile, and it renders no docs. What it buys is the
+# difference between 46 s and 4 minutes, which is the difference between
+# running the suite on every edit and running it when you remember to.
+PKGS=$(touched_pkgs)
+ROOT_CHANGED=$(touched_root)
+if [ -z "$PKGS" ]; then
+  printf '  %s-  %-10s %s%s\n' "$D" touched "nothing under crates/" "$Z"
+else
+  begin touched
+  run touched tests t_touched
+  end $? "$(count_of "$LOG/touched.log")"
+
+  begin clippy
+  run clippy clippy c_touched
+  end $? ""
+fi
+
+elif [ "$LANE" != quick ]; then
 
 # Phase 1: one serial build of every debug test target, under the lock.
 # Its failure key is `tests` — a test that does not compile is a failed
@@ -349,15 +445,6 @@ if [ "$LANE" != quick ]; then
 begin build
 run build tests build_debug
 end $? ""
-
-count_of() {
-  awk '/^test result:/ {
-    for (i = 1; i <= NF; i++) {
-      if ($i == "passed;") p += $(i-1);
-      if ($i == "failed;") f += $(i-1);
-    }
-  } END { if (f) printf "%d ok, %d failed", p, f; else printf "%d ok", p }' "$1"
-}
 
 # Phase 2: the overlap. Everything is prebuilt, so the test invocations
 # clear the lock in about a second of freshness checking each and then
@@ -416,7 +503,9 @@ fi
 # Skipped, announced, when mdbook is absent -- the same rule the object
 # scan follows. A contributor without the tool still gets a green gate,
 # and nobody gets a silent pass: the line says which it was.
-if command -v mdbook >/dev/null 2>&1 || [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
+if [ "$LANE" = touched ]; then
+  :
+elif command -v mdbook >/dev/null 2>&1 || [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ]; then
   begin book
   run book book mdbook build
   end $? ""
@@ -451,14 +540,14 @@ end $FRESH "$([ $FRESH -eq 0 ] || echo 'tree changed')"
 
 if [ -n "$AUDIT_PID" ]; then
   collect "$AUDIT_PID" audit audit 'echo'
-elif [ "$LANE" != fast ]; then
+elif [ "$LANE" != fast ] && [ "$LANE" != touched ]; then
   printf '  %s-  %-10s %s%s\n' "$D" audit "no cargo-audit" "$Z"
 fi
 
 if [ -n "$SCAN_PID" ]; then
   collect "$SCAN_PID" scan scan \
     'sed -n "s/^scanning \([0-9]*\) objects.*/\1 objects/p" "$LOG/scan.log"'
-elif [ "$LANE" != fast ]; then
+elif [ "$LANE" != fast ] && [ "$LANE" != touched ]; then
   printf '  %s-  %-10s %s%s\n' "$D" scan "no $NEEDLES" "$Z"
 fi
 
@@ -490,6 +579,14 @@ done
 TOTAL=$(($(date +%s) - STARTED))
 if [ -z "$FAILED" ]; then
   printf '\n  %sgreen%s in %s\n\n' "$G" "$Z" "$(secs $TOTAL)"
+  if [ "$LANE" = touched ]; then
+    printf '  %stouched lane: %s%s\n' "$Y" "${PKGS:-no crates}" "$Z"
+    printf '  %stheir dependents were not tested; ./gate fast before you commit%s\n\n' \
+      "$Y" "$Z"
+    [ -n "${ROOT_CHANGED:-}" ] && printf \
+      '  %s%s changed, which no -p selection covers: run ./gate fast%s\n\n' \
+      "$Y" "$ROOT_CHANGED" "$Z"
+  fi
   [ "$LANE" = fast ] && printf '  %sfast lane: run ./gate at least every third commit%s\n\n' "$Y" "$Z"
   [ "$LANE" = quick ] && printf '  %squick lane: nothing was compiled and no tests ran%s\n\n' "$Y" "$Z"
   exit 0

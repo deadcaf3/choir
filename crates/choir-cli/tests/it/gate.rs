@@ -112,6 +112,44 @@ fn fast_lane_skips_the_network_and_the_scan() {
     }
 }
 
+/// The touched lane runs the edit loop's two stages and skips every
+/// stage that makes it slow: no doctests, no rustdoc, no book, no
+/// release measurements, no network, no object scan.
+///
+/// Asserted by injecting a failure into each skipped stage and
+/// requiring the lane to stay green, which is the only way to tell
+/// "skipped" from "ran and happened to pass".
+#[test]
+fn touched_lane_runs_the_edit_loop_and_nothing_else() {
+    assert!(
+        run(Some("touched"), None).status.success(),
+        "the synthetic all-green touched lane must pass"
+    );
+    for stage in [
+        "audit",
+        "scan",
+        "book",
+        "rustdoc",
+        "doctests",
+        "measure",
+        "retention",
+    ] {
+        assert!(
+            run(Some("touched"), Some(stage)).status.success(),
+            "the touched lane ran {stage}, which it promises to skip"
+        );
+    }
+    // And it still gates the two it does run. `tracked` and `format`
+    // come before any lane branch, so they are the floor every lane
+    // stands on.
+    for stage in ["tracked", "format"] {
+        assert!(
+            !run(Some("touched"), Some(stage)).status.success(),
+            "the touched lane let a failing {stage} through"
+        );
+    }
+}
+
 #[test]
 fn an_unknown_lane_refuses_to_run() {
     let output = run(Some("quikc"), None);
