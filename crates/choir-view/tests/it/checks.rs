@@ -164,10 +164,53 @@ fn status_parsing_is_exact() {
         CheckStatus::Passed,
         CheckStatus::Failed,
         CheckStatus::Running,
+        CheckStatus::Errored,
     ] {
         assert_eq!(CheckStatus::parse(status.as_str()), Some(status));
     }
     assert_eq!(CheckStatus::parse("PASSED"), None);
     assert_eq!(CheckStatus::parse("pass"), None);
     assert_eq!(CheckStatus::parse(""), None);
+}
+
+/// The four-way ranking, asserted as the pairs that decide it rather
+/// than as a sorted list, because a sorted list passes when two ranks
+/// are swapped and the comparison is written from the same order.
+///
+/// `Errored` above `Running` is the D18 claim in the read path: a check
+/// that could not run will not go green by being waited on, so a
+/// summary of `Running` sends the caller to wait for an outcome that
+/// has already failed to arrive once. `Errored` below `Failed` is the
+/// same claim pointed the other way: a real red build must not be
+/// hidden behind our own outage.
+#[test]
+fn an_errored_check_outranks_a_running_one_and_yields_to_a_failure() {
+    let subject = subject();
+
+    let mut view = View::default();
+    view.apply(&report("build", CheckStatus::Errored, "ci"))
+        .expect("lands");
+    view.apply(&report("lint", CheckStatus::Running, "ci"))
+        .expect("lands");
+    assert_eq!(
+        view.checks_verdict(&subject),
+        Some(CheckStatus::Errored),
+        "a check that cannot run was reported as one worth waiting for"
+    );
+
+    view.apply(&report("docs", CheckStatus::Failed, "ci"))
+        .expect("lands");
+    assert_eq!(
+        view.checks_verdict(&subject),
+        Some(CheckStatus::Failed),
+        "a red build was hidden behind our own outage"
+    );
+
+    // And on its own it is not green, which is the assertion that would
+    // survive if the variant were ever folded back into `Passed`.
+    let mut alone = View::default();
+    alone
+        .apply(&report("build", CheckStatus::Errored, "ci"))
+        .expect("lands");
+    assert_eq!(alone.checks_verdict(&subject), Some(CheckStatus::Errored));
 }

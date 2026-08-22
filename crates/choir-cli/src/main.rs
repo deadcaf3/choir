@@ -22,7 +22,7 @@
 //! choir revoke <api> <node-key-file> <key-hex> '<reason>'
 //! choir appeal <api> <attempt-id>
 //! choir intent <api> <key-file> <channel> <subject> <kind> '<body>'
-//! choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]
+//! choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running|errored [evidence] [--ref <repo:ref>]
 //! choir checks <api> <git-oid>
 //! choir reviews <api> <reviewer>
 //! choir acl render <api> <acl-file>
@@ -36,7 +36,9 @@
 //!
 //! Exit codes: 0 = the node accepted, 1 = the node rejected (the JSON
 //! error body is printed), 2 = usage error. `choir checks` adds 3 = the
-//! answer is not decided yet; see [`check_exit`].
+//! answer is not decided yet and 4 = a check could not be run at all,
+//! which is our fault rather than the commit's and wants a re-run
+//! rather than a rewrite; see [`check_exit`].
 
 use choir_hash::ContentHash;
 use choir_identity::{ActorKey, Registry};
@@ -1052,8 +1054,11 @@ fn check_exit(subject: &ContentHash, body: &str) -> ! {
             .and_then(serde_json::Value::as_str)
             .map(str::to_lowercase)
     };
-    // Failed outranks Running for the reason `View::checks_verdict`
-    // gives: only one of the two can still turn green.
+    // Ranked the way `View::checks_verdict` ranks, and for its reasons:
+    // failed, then errored, then running. Each rank has its own exit
+    // code because each implies a different next command -- 1 fix it,
+    // 4 re-run it, 3 wait -- and a script that only asks whether the
+    // code is zero is unaffected by the new one.
     let (verdict, code) = if rows.is_empty() {
         ("unreported", 1)
     } else if rows
@@ -1061,6 +1066,11 @@ fn check_exit(subject: &ContentHash, body: &str) -> ! {
         .any(|v| status_of(v).as_deref() == Some("failed"))
     {
         ("failed", 1)
+    } else if rows
+        .values()
+        .any(|v| status_of(v).as_deref() == Some("errored"))
+    {
+        ("errored", 4)
     } else if rows
         .values()
         .any(|v| status_of(v).as_deref() == Some("running"))

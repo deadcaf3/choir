@@ -231,14 +231,14 @@ choir_intent() {
 	choir_run intent "$@"
 }
 
-# choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]
+# choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running|errored [evidence] [--ref <repo:ref>]
 #   report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
 choir_check() {
 	choir_run check "$@"
 }
 
 # choir checks <api> <git-oid>
-#   every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+#   every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running, 4 could not be run
 choir_checks() {
 	choir_run checks "$@"
 }

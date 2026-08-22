@@ -1226,11 +1226,18 @@ pub enum Verdict {
 
 /// What an automated check found about a commit (D49).
 ///
-/// Three states and not two. "Not finished" is a real answer and the one
-/// a caller most needs to distinguish, because the action it implies —
-/// wait — differs from both pass and fail. Collapsing it into failure
-/// makes every in-flight check look like a broken build; collapsing it
-/// into success is worse.
+/// Four states and not two. Each one implies a different action, which
+/// is the only reason a state earns a variant. "Not finished" is a real
+/// answer and the one a caller most needs to distinguish, because the
+/// action it implies -- wait -- differs from both pass and fail.
+/// Collapsing it into failure makes every in-flight check look like a
+/// broken build; collapsing it into success is worse.
+///
+/// `Errored` is the durable half of D18's central claim: a provider
+/// fault is not a statement about the commit. `choir-queue` already
+/// refuses to evict a change on one, but until this variant existed the
+/// fault could be recorded nowhere, so a re-run was the only way anyone
+/// downstream learned it had happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckStatus {
     /// The check ran and was satisfied.
@@ -1239,6 +1246,14 @@ pub enum CheckStatus {
     Failed,
     /// The check has started and has not reported an outcome.
     Running,
+    /// The check could not be run, so it says nothing about the commit.
+    ///
+    /// A VM that failed to boot, a runner that vanished, a job over its
+    /// deadline. The distinction from [`CheckStatus::Failed`] is not
+    /// cosmetic: `Failed` is evidence about the commit and blocks it on
+    /// its merits, while `Errored` is evidence about us, and the action
+    /// it implies is a re-run rather than a rewrite.
+    Errored,
 }
 
 impl CheckStatus {
@@ -1249,6 +1264,7 @@ impl CheckStatus {
             CheckStatus::Passed => "passed",
             CheckStatus::Failed => "failed",
             CheckStatus::Running => "running",
+            CheckStatus::Errored => "errored",
         }
     }
 
@@ -1264,6 +1280,7 @@ impl CheckStatus {
             "passed" => Some(CheckStatus::Passed),
             "failed" => Some(CheckStatus::Failed),
             "running" => Some(CheckStatus::Running),
+            "errored" => Some(CheckStatus::Errored),
             _ => None,
         }
     }
@@ -2639,11 +2656,23 @@ impl View {
 
     /// The one answer for `subject`, or `None` when nothing reported.
     ///
+    /// Ranked by what the caller must do about it, worst first:
+    /// `Failed`, then `Errored`, then `Running`, then `Passed`.
+    ///
     /// A failure outranks a run still in flight. Both are "not green",
     /// but only one of them can still become green, and a caller
     /// deciding whether to wait needs that distinction to point the
     /// right way: told `Running` while a sibling check has already
     /// failed, it waits for an outcome that cannot arrive.
+    ///
+    /// `Errored` outranks `Running` for exactly that reason and no
+    /// other. A check that could not run will not become green by being
+    /// waited on -- somebody has to re-run it -- so reporting `Running`
+    /// beside it sends the caller to wait for an outcome that has
+    /// already failed to arrive once. It sits below `Failed` because it
+    /// is not evidence about the commit, and a summary that hid a real
+    /// red build behind our own outage would be the D18 conflation
+    /// again, pointed the other way.
     #[must_use]
     pub fn checks_verdict(&self, subject: &ContentHash) -> Option<CheckStatus> {
         let states = self.checks_for(subject);
@@ -2652,6 +2681,9 @@ impl View {
         }
         if states.iter().any(|(_, s)| s.status == CheckStatus::Failed) {
             return Some(CheckStatus::Failed);
+        }
+        if states.iter().any(|(_, s)| s.status == CheckStatus::Errored) {
+            return Some(CheckStatus::Errored);
         }
         if states.iter().any(|(_, s)| s.status == CheckStatus::Running) {
             return Some(CheckStatus::Running);

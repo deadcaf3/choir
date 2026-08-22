@@ -1,12 +1,13 @@
-//! The exit-code trichotomy for `choir checks` (D49).
+//! The exit codes for `choir checks` (D49, extended by D18).
 //!
 //! The rest of this binary answers with two codes, 0 accepted and 1
 //! rejected, which is right for a command that submits something. A
-//! command that asks "may I land this" has three answers, and two of
-//! them are not "no": land it, do not land it, and not yet. An agent
-//! that cannot tell the third from the second either gives up on work
-//! that was about to go green, or busy-waits on a build that already
-//! failed.
+//! command that asks "may I land this" has four answers, and three of
+//! them are not "no": land it, do not land it, not yet, and could not
+//! be run. An agent that cannot tell the third from the second either
+//! gives up on work that was about to go green, or busy-waits on a
+//! build that already failed. One that cannot tell the fourth from the
+//! third waits forever on a check that never started.
 //!
 //! Driven through the real binary against a real node, because the
 //! contract under test is the process exit status and nothing below the
@@ -120,6 +121,31 @@ fn checks_answers_land_do_not_land_and_not_yet() {
         3,
         "the report must still list every check: {body}"
     );
+
+    // A check that could not run. Exit 4, its own code, because the
+    // follow-up differs from every other answer: not fix it (1), not
+    // wait for it (3), but run it again. It outranks the running check
+    // beside it for the reason a failure does -- waiting will not make
+    // a check that never started report -- and yields to the failure,
+    // which is about the commit rather than about us.
+    report("ci/lint", "errored");
+    report("ci/docs", "errored");
+    report("ci/build", "errored");
+    let out = choir(&["checks", &api, oid]);
+    assert_eq!(
+        code(&out),
+        4,
+        "a check that could not run must have its own code"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(body["verdict"], "errored", "{body}");
+
+    report("ci/docs", "running");
+    let out = choir(&["checks", &api, oid]);
+    assert_eq!(code(&out), 4, "errored must outrank running");
+    report("ci/docs", "failed");
+    let out = choir(&["checks", &api, oid]);
+    assert_eq!(code(&out), 1, "a failure must outrank errored");
 
     // Usage errors stay 2 and are not confused with any of the above.
     let out = choir(&["check", &api, key_file, "ci/runner", oid, "n", "PASSED"]);

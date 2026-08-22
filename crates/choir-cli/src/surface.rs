@@ -512,7 +512,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "check",
-        args: "<api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]",
+        args: "<api> <key-file> <channel> <git-oid> <name> passed|failed|running|errored [evidence] [--ref <repo:ref>]",
         summary: "report one automated check's outcome on a commit; any runner or a person \
                   can report by signing, and the node never runs the check",
         agent_facing: true,
@@ -522,7 +522,7 @@ pub const COMMANDS: &[Command] = &[
         name: "checks",
         args: "<api> <git-oid>",
         summary: "every check reported on a commit, and one verdict; exits 0 passed, \
-                  1 failed or unreported, 3 still running",
+                  1 failed or unreported, 3 still running, 4 could not be run",
         agent_facing: true,
         group: "checks",
     },

@@ -98,10 +98,10 @@ The signed-operation API is the primary agent path: it carries actor identity an
 
 **checks**
 
-- `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running [evidence] [--ref <repo:ref>]`  
+- `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running|errored [evidence] [--ref <repo:ref>]`  
   report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
 - `choir checks <api> <git-oid>`  
-  every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running
+  every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running, 4 could not be run
 
 **trust**
 
