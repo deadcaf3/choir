@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use choir_oplog::MemLog;
+use choir_queue::executor::{Synthetic, Verdict};
 use choir_queue::memory::ResolutionMemory;
 use choir_queue::{Change, MergeQueue, Rejection, DEFAULT_WINDOW};
 use choir_sequencer::Sequencer;
@@ -24,7 +25,10 @@ fn stale_change() -> Change {
     }
 }
 
-fn drain(queue: &mut MergeQueue, ci: &mut dyn choir_queue::CiRunner) -> choir_queue::QueueReport {
+fn drain(
+    queue: &mut MergeQueue,
+    ci: &mut dyn choir_queue::executor::CiExecutor,
+) -> choir_queue::QueueReport {
     let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
     let report = queue.drain(ci, &sequencer);
     sequencer.shutdown();
@@ -111,7 +115,7 @@ fn second_run_replays_the_remembered_triple_without_the_pipeline() {
         proposed: "b\nf\n".into(),
         depends: vec![],
     });
-    let report = drain(&mut queue, &mut |c: &Change, _: &str| c.id != 2);
+    let report = drain(&mut queue, &mut Synthetic::failing_labels(&["2"]));
     assert_eq!(report.merged, Vec::<u64>::new());
     assert!(report.rejected.contains(&(1, Rejection::Conflict)));
     assert!(report.rejected.contains(&(2, Rejection::CiFailure)));
@@ -133,16 +137,28 @@ fn second_run_replays_the_remembered_triple_without_the_pipeline() {
     let mut queue = MergeQueue::new("b\n");
     queue.set_memory(memory);
     queue.submit(stale_change());
-    let mut ci_runs_seen = 0usize;
-    let report = drain(&mut queue, &mut |_: &Change, state: &str| {
-        ci_runs_seen += 1;
-        assert_eq!(state, "rx\n", "CI must judge the replayed state");
-        true
-    });
+    let ci_runs_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&ci_runs_seen);
+    let report = drain(
+        &mut queue,
+        &mut Synthetic::new(move |job| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                job.subject,
+                choir_hash::ContentHash::blake3(b"rx\n"),
+                "CI must judge the replayed state"
+            );
+            Verdict::Passed
+        }),
+    );
     assert_eq!(report.merged, vec![1]);
     assert_eq!(report.replayed, vec![1]);
     assert_eq!(report.merge_invocations, 0, "the pipeline must not run");
-    assert_eq!(ci_runs_seen, 1, "the replay is a candidate: CI still runs");
+    assert_eq!(
+        ci_runs_seen.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the replay is a candidate: CI still runs"
+    );
     assert_eq!(report.final_state, "rx\n");
 }
 
@@ -153,7 +169,10 @@ fn a_replayed_resolution_that_fails_ci_does_not_land() {
     let mut queue = MergeQueue::new("b\n");
     queue.set_memory(remembered_resolution());
     queue.submit(stale_change());
-    let report = drain(&mut queue, &mut |_: &Change, _: &str| false);
+    let report = drain(
+        &mut queue,
+        &mut Synthetic::new(|_| Verdict::Failed { exit_code: Some(1) }),
+    );
     assert_eq!(report.merged, Vec::<u64>::new());
     assert_eq!(report.rejected, vec![(1, Rejection::CiFailure)]);
     assert_eq!(
@@ -171,7 +190,7 @@ fn a_different_triple_misses_the_memory() {
     let mut queue = MergeQueue::new("c\n");
     queue.set_memory(remembered_resolution());
     queue.submit(stale_change());
-    let report = drain(&mut queue, &mut |_: &Change, _: &str| true);
+    let report = drain(&mut queue, &mut Synthetic::passing());
     assert!(
         report.replayed.is_empty(),
         "no recall for a different left side"

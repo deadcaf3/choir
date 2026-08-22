@@ -4,6 +4,7 @@
 //! the window is not halved. With no declarations the legacy
 //! halve-and-retest path is untouched — `queue.rs` still proves it.
 
+use choir_queue::executor::Synthetic;
 use choir_queue::{run_batch, Change, Rejection, DEFAULT_WINDOW};
 
 /// 160 lines of base so per-change edits land in disjoint regions.
@@ -35,7 +36,7 @@ fn a_failing_build_ejects_its_dependents_and_lands_the_independent_change() {
         change(3, vec![]),  // C: independent
         change(4, vec![2]), // D: depends on B, transitively on A
     ];
-    let (report, ops) = run_batch(&base(), changes, &mut |c: &Change, _: &str| c.id != 1);
+    let (report, ops) = run_batch(&base(), changes, &mut Synthetic::failing_labels(&["1"]));
 
     assert_eq!(report.merged, vec![3], "only the independent change lands");
     assert_eq!(ops, 1);
@@ -73,7 +74,7 @@ fn a_queued_dependent_behind_the_window_is_also_ejected() {
     changes.extend((5..5 + (DEFAULT_WINDOW as u64 - 1)).map(|id| change(id, vec![])));
     // ...so the dependent waits beyond it.
     changes.push(change(2, vec![1]));
-    let (report, _) = run_batch(&base(), changes, &mut |c: &Change, _: &str| c.id != 1);
+    let (report, _) = run_batch(&base(), changes, &mut Synthetic::failing_labels(&["1"]));
 
     assert!(report
         .rejected

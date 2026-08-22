@@ -4,6 +4,7 @@
 
 use choir_merge::{MergeOutcome, MergeStrategy, Pipeline};
 use choir_oplog::MemLog;
+use choir_queue::executor::Synthetic;
 use choir_queue::{Change, MergeQueue, Rejection};
 use choir_sequencer::Sequencer;
 
@@ -49,7 +50,7 @@ fn reverting_resolution_is_evicted_without_blocking_the_train() {
         queue.submit(change);
     }
     let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
-    let report = queue.drain(&mut |_: &Change, _: &str| true, &sequencer);
+    let report = queue.drain(&mut Synthetic::passing(), &sequencer);
     let ops = sequencer.shutdown().len();
 
     assert_eq!(report.merged, vec![0]);
@@ -83,7 +84,7 @@ fn honest_resolutions_pass_the_safety_gate() {
     let (report, ops) = choir_queue::run_batch(
         &base(),
         (0..15).map(disjoint_change).collect(),
-        &mut |_: &Change, _: &str| true,
+        &mut Synthetic::passing(),
     );
     assert!(
         report.rejected.is_empty(),

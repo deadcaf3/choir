@@ -10,6 +10,7 @@ mod depends;
 mod differential;
 mod differential_runner;
 mod envelope;
+mod executor;
 mod identity;
 mod memory;
 mod queue;

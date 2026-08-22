@@ -1,7 +1,10 @@
 //! Speculative merge-queue behavior (DECISIONS.md D5): green-keeping, first-class
 //! conflict eviction, TCP window dynamics, retest-behind-failure.
 
-use choir_queue::{run_batch, Change, Rejection, DEFAULT_WINDOW};
+use choir_oplog::MemLog;
+use choir_queue::executor::{CiExecutor, ExecutorError, Job, Synthetic, Verdict};
+use choir_queue::{run_batch, Change, MergeQueue, Rejection, DEFAULT_WINDOW};
+use choir_sequencer::Sequencer;
 
 /// 160 lines of base so up to 50 per-change edits land in disjoint regions.
 fn base() -> String {
@@ -24,7 +27,7 @@ fn disjoint_change(id: u64) -> Change {
 #[test]
 fn all_green_train_merges_everything_in_order() {
     let changes: Vec<Change> = (0..15).map(disjoint_change).collect();
-    let (report, ops) = run_batch(&base(), changes, &mut |_: &Change, _: &str| true);
+    let (report, ops) = run_batch(&base(), changes, &mut Synthetic::passing());
 
     assert_eq!(report.merged, (0..15).collect::<Vec<u64>>());
     assert!(report.rejected.is_empty());
@@ -44,7 +47,7 @@ fn all_green_train_merges_everything_in_order() {
 fn ci_failure_halves_window_and_retests_behind() {
     let changes: Vec<Change> = (0..10).map(disjoint_change).collect();
     // Change 4 always fails CI; everything else passes.
-    let mut ci = |c: &Change, _: &str| c.id != 4;
+    let mut ci = Synthetic::failing_labels(&["4"]);
     let (report, ops) = run_batch(&base(), changes, &mut ci);
 
     assert_eq!(report.merged, vec![0, 1, 2, 3, 5, 6, 7, 8, 9]);
@@ -77,7 +80,7 @@ fn conflicting_change_evicted_first_class_without_blocking() {
         },
     );
 
-    let (report, ops) = run_batch(&base(), changes, &mut |_: &Change, _: &str| true);
+    let (report, ops) = run_batch(&base(), changes, &mut Synthetic::passing());
 
     assert_eq!(report.rejected, vec![(99, Rejection::Conflict)]);
     assert_eq!(
@@ -94,7 +97,13 @@ fn conflicting_change_evicted_first_class_without_blocking() {
 fn fifty_in_flight_with_flaky_ci_keeps_main_green() {
     // Phase-1 target rehearsal: 50 in-flight changes, ~1 in 8 fails CI.
     let changes: Vec<Change> = (0..50).map(disjoint_change).collect();
-    let mut ci = |c: &Change, _: &str| c.id % 8 != 7;
+    let mut ci = Synthetic::new(|job| {
+        if job.label.parse::<u64>().is_ok_and(|id| id % 8 == 7) {
+            Verdict::Failed { exit_code: Some(1) }
+        } else {
+            Verdict::Passed
+        }
+    });
     let (report, ops) = run_batch(&base(), changes, &mut ci);
 
     let expected_fail: Vec<u64> = (0..50).filter(|id| id % 8 == 7).collect();
@@ -148,7 +157,7 @@ fn every_window_move_is_journalled_with_its_cause() {
     for c in (0..10).map(disjoint_change) {
         queue.submit(c);
     }
-    let mut ci = |c: &Change, _: &str| c.id != 4;
+    let mut ci = Synthetic::failing_labels(&["4"]);
     let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
     let report = queue.drain(&mut ci, &sequencer);
     assert_eq!(report.rejected, vec![(4, Rejection::CiFailure)]);
@@ -181,4 +190,144 @@ fn every_window_move_is_journalled_with_its_cause() {
             "a growing window was attributed to a failure"
         );
     }
+}
+
+/// An executor that answers the whole call with an error.
+struct Unreachable;
+
+impl CiExecutor for Unreachable {
+    fn info(&mut self) -> Result<choir_queue::executor::ExecutorInfo, ExecutorError> {
+        Err(ExecutorError::Unavailable("no route to executor".into()))
+    }
+    fn run(&mut self, _jobs: &[Job]) -> Result<Vec<Verdict>, ExecutorError> {
+        Err(ExecutorError::Unavailable("no route to executor".into()))
+    }
+}
+
+/// An executor that returns fewer verdicts than it was given jobs.
+struct Miscounts;
+
+impl CiExecutor for Miscounts {
+    fn info(&mut self) -> Result<choir_queue::executor::ExecutorInfo, ExecutorError> {
+        Ok(choir_queue::executor::ExecutorInfo {
+            name: "miscounts".into(),
+            protocol: choir_queue::executor::PROTOCOL,
+        })
+    }
+    fn run(&mut self, jobs: &[Job]) -> Result<Vec<Verdict>, ExecutorError> {
+        Ok(vec![Verdict::Passed; jobs.len().saturating_sub(1)])
+    }
+}
+
+fn queue_of(n: u64) -> (MergeQueue, Sequencer) {
+    let mut queue = MergeQueue::new(&base());
+    for c in (0..n).map(disjoint_change) {
+        queue.submit(c);
+    }
+    (queue, Sequencer::spawn(Box::new(MemLog::new())))
+}
+
+/// The central claim of D18's seam: a provider fault is not evidence
+/// about a change, so it ejects nobody.
+///
+/// The bool seam could not tell this from a test failure, and the queue
+/// ejects on a test failure -- permanently, taking every change that
+/// transitively depends on the ejected one. A VM that failed to boot
+/// therefore rejected an agent's correct work.
+#[test]
+fn a_provider_fault_ejects_nothing_and_stalls_the_train() {
+    let (mut queue, sequencer) = queue_of(10);
+    let mut ci = Synthetic::new(|job| {
+        if job.label == "4" {
+            Verdict::Errored {
+                provider: "test".into(),
+                detail: "the vm did not boot".into(),
+            }
+        } else {
+            Verdict::Passed
+        }
+    });
+    let report = queue.drain(&mut ci, &sequencer);
+
+    assert!(
+        report.rejected.is_empty(),
+        "a provider fault rejected a change: {:?}",
+        report.rejected
+    );
+    assert!(
+        report.provider_error.is_some(),
+        "the stall must say why it stopped"
+    );
+    assert_eq!(
+        report.merged,
+        vec![0, 1, 2, 3],
+        "the green prefix ahead of the fault should still land"
+    );
+    assert!(
+        queue.len() >= 6,
+        "everything from the faulting change on must be back in the queue, found {}",
+        queue.len()
+    );
+}
+
+/// The window is the response to changes that fail. None of these did,
+/// so halving it would punish the queue for our own outage.
+#[test]
+fn a_provider_fault_does_not_halve_the_window() {
+    let (mut queue, sequencer) = queue_of(4);
+    let mut ci = Synthetic::new(|_| Verdict::TimedOut);
+    let report = queue.drain(&mut ci, &sequencer);
+
+    assert!(
+        report.merged.is_empty(),
+        "nothing passed, so nothing may land"
+    );
+    assert!(report.rejected.is_empty(), "a timeout must not reject");
+    assert!(
+        !report
+            .window_trace
+            .iter()
+            .any(|w| *w < choir_queue::DEFAULT_WINDOW),
+        "the window shrank on a provider fault: {:?}",
+        report.window_trace
+    );
+}
+
+/// An executor that cannot be reached at all lands nothing, rejects
+/// nothing, and leaves the queue intact for the next drain.
+#[test]
+fn an_unreachable_executor_leaves_the_queue_whole() {
+    let (mut queue, sequencer) = queue_of(5);
+    let report = queue.drain(&mut Unreachable, &sequencer);
+
+    assert!(report.merged.is_empty());
+    assert!(report.rejected.is_empty());
+    assert_eq!(
+        queue.len(),
+        5,
+        "an outage must not consume the queue, found {}",
+        queue.len()
+    );
+    let why = report.provider_error.expect("an outage must be reported");
+    assert!(why.contains("unavailable"), "unhelpful stall reason: {why}");
+}
+
+/// Index alignment is the batch call's whole contract. A provider that
+/// returns the wrong number of verdicts has attributed one change's
+/// result to another, so none of them may be used.
+#[test]
+fn a_verdict_count_mismatch_is_refused_rather_than_zipped() {
+    let (mut queue, sequencer) = queue_of(3);
+    let report = queue.drain(&mut Miscounts, &sequencer);
+
+    assert!(
+        report.merged.is_empty(),
+        "verdicts that could not be attributed were used anyway"
+    );
+    assert!(report.rejected.is_empty());
+    let why = report.provider_error.expect("a miscount must be reported");
+    assert!(
+        why.contains("verdicts"),
+        "the reason should name the miscount: {why}"
+    );
 }

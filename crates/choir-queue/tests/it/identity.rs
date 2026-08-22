@@ -4,6 +4,7 @@
 //! already landed instead of re-merging or duplicating it.
 
 use choir_oplog::MemLog;
+use choir_queue::executor::Synthetic;
 use choir_queue::identity::change_identity;
 use choir_queue::{run_batch, Change, MergeQueue, Rejection};
 use choir_sequencer::Sequencer;
@@ -90,12 +91,12 @@ fn a_rewritten_resubmission_is_detected_as_already_landed() {
     // Someone else's change lands first, moving the tip.
     queue.submit(change_on(3, &base()));
     let with_other = queue
-        .drain(&mut |_: &Change, _: &str| true, &sequencer)
+        .drain(&mut Synthetic::passing(), &sequencer)
         .final_state;
 
     // Then this change lands, authored against the original base.
     queue.submit(change_on(2, &base()));
-    let first = queue.drain(&mut |_: &Change, _: &str| true, &sequencer);
+    let first = queue.drain(&mut Synthetic::passing(), &sequencer);
     assert_eq!(first.merged, vec![2]);
     let landed_state = first.final_state;
 
@@ -108,7 +109,7 @@ fn a_rewritten_resubmission_is_detected_as_already_landed() {
     resubmission.workspace = "ws-rebased".into();
     assert_ne!(resubmission.base, base(), "the resubmission is rebased");
     queue.submit(resubmission);
-    let second = queue.drain(&mut |_: &Change, _: &str| true, &sequencer);
+    let second = queue.drain(&mut Synthetic::passing(), &sequencer);
     sequencer.shutdown();
 
     assert_eq!(second.merged, Vec::<u64>::new(), "it must not land twice");
@@ -126,7 +127,7 @@ fn a_seeded_identity_is_refused_on_arrival() {
     queue.mark_landed(change_identity(&known));
     queue.submit(known);
     let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
-    let report = queue.drain(&mut |_: &Change, _: &str| true, &sequencer);
+    let report = queue.drain(&mut Synthetic::passing(), &sequencer);
     sequencer.shutdown();
     assert_eq!(report.rejected, vec![(4, Rejection::AlreadyLanded)]);
     assert_eq!(report.merge_invocations, 0);
@@ -139,7 +140,7 @@ fn an_unseen_change_still_lands() {
     let (report, ops) = run_batch(
         &base(),
         vec![change_on(5, &base())],
-        &mut |_: &Change, _: &str| true,
+        &mut Synthetic::passing(),
     );
     assert_eq!(report.merged, vec![5]);
     assert_eq!(ops, 1);

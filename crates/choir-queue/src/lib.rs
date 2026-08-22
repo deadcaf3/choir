@@ -11,9 +11,13 @@
 //! resolved and never blocks the changes behind it, which are retested
 //! against a speculative state without it.
 //!
-//! CI is a caller-supplied verdict function behind [`CiRunner`] (the CI
-//! executor seam, D18); tests use synthetic verdicts, production wires the
-//! spindle/Firecracker executor.
+//! CI runs behind [`executor::CiExecutor`] (the CI executor seam, D18).
+//! A verdict is four cases rather than a bool, because the queue's
+//! response to a test failure and to a provider fault must differ: only
+//! [`executor::Verdict::Failed`] ejects a change, and ejection takes
+//! everything that transitively depends on it. Tests use
+//! [`executor::Synthetic`]; [`local::LocalRunner`] runs real
+//! subprocesses; production wires the spindle/Firecracker executor.
 //!
 //! # Where this sits
 //!
@@ -27,7 +31,9 @@ pub mod corpus;
 pub mod differential;
 pub mod differential_ledger;
 pub mod envelope;
+pub mod executor;
 pub mod identity;
+pub mod local;
 pub mod memory;
 
 use choir_merge::{safety, MergeOutcome, Pipeline};
@@ -94,18 +100,6 @@ pub enum Rejection {
     AlreadyLanded,
 }
 
-/// The CI executor seam (D18): pass/fail verdict for a candidate state.
-pub trait CiRunner {
-    /// Runs CI for `change` applied on `speculative_state`; true = pass.
-    fn verdict(&mut self, change: &Change, speculative_state: &str) -> bool;
-}
-
-impl<F: FnMut(&Change, &str) -> bool> CiRunner for F {
-    fn verdict(&mut self, change: &Change, speculative_state: &str) -> bool {
-        self(change, speculative_state)
-    }
-}
-
 /// Outcome of draining a queue.
 #[derive(Debug)]
 pub struct QueueReport {
@@ -127,6 +121,15 @@ pub struct QueueReport {
     /// Every one of them still ran CI: replay produces a candidate,
     /// never a landing.
     pub replayed: Vec<u64>,
+    /// Why the drain stopped early without blaming a change (D18).
+    ///
+    /// Set when the executor produced no verdict, or an inconclusive
+    /// one: a provider that could not be reached, a batch whose
+    /// verdict count did not match its jobs, a job that errored or
+    /// timed out. Everything not landed is back in the queue, in
+    /// order, and nothing was rejected on account of it -- which is the
+    /// distinction the old `bool` seam could not make.
+    pub provider_error: Option<String>,
 }
 
 /// Single-shard speculative merge queue over one file.
@@ -141,6 +144,46 @@ pub struct MergeQueue {
     /// reads it back, and a journal that dropped every record would
     /// change no landing decision.
     journal: Box<dyn choir_sequencer::journal::Journal>,
+    /// What to run for each candidate state (D18).
+    template: JobTemplate,
+}
+
+/// How the queue turns a speculative state into a [`executor::Job`].
+///
+/// The queue knows which tree to test; it does not know what "test"
+/// means for a repository, and inventing a default command would make
+/// the wrong one silent. The default template has no command, which
+/// every real executor answers with [`executor::Verdict::Errored`] --
+/// loud, and never mistaken for a change that failed.
+#[derive(Debug, Clone, Default)]
+pub struct JobTemplate {
+    /// The command, as argv.
+    pub command: Vec<String>,
+    /// Exactly what the child sees.
+    pub environment: std::collections::BTreeMap<String, String>,
+    /// Wall-clock ceiling per job. `None` uses
+    /// [`executor::DEFAULT_DEADLINE`].
+    pub deadline: Option<std::time::Duration>,
+    /// Whether these jobs may write a shared build cache.
+    pub may_write_cache: bool,
+}
+
+impl JobTemplate {
+    /// The job testing `change` applied on `state`.
+    #[must_use]
+    pub fn job_for(&self, change: &Change, state: &str) -> executor::Job {
+        let mut job = executor::Job::new(
+            choir_hash::ContentHash::blake3(state.as_bytes()),
+            self.command.clone(),
+        );
+        job.label = change.id.to_string();
+        job.environment = self.environment.clone();
+        job.may_write_cache = self.may_write_cache;
+        if let Some(d) = self.deadline {
+            job.deadline = d;
+        }
+        job
+    }
 }
 
 impl MergeQueue {
@@ -186,7 +229,15 @@ impl MergeQueue {
             memory: memory::ResolutionMemory::new(),
             landed: std::collections::BTreeSet::new(),
             journal: Box::new(choir_sequencer::journal::NullJournal),
+            template: JobTemplate::default(),
         }
+    }
+
+    /// Installs the job template (D18): what to run for each candidate
+    /// state. Without one, every job is refused by the executor for
+    /// having no command.
+    pub fn set_job_template(&mut self, template: JobTemplate) {
+        self.template = template;
     }
 
     /// Installs a resolution memory (item B): a conflict whose triple it
@@ -224,13 +275,18 @@ impl MergeQueue {
     ///
     /// Every merged change is recorded through the single-writer `sequencer`
     /// (payload = the merged state), preserving the platform's total order.
-    pub fn drain(&mut self, ci: &mut dyn CiRunner, sequencer: &Sequencer) -> QueueReport {
+    pub fn drain(
+        &mut self,
+        ci: &mut dyn executor::CiExecutor,
+        sequencer: &Sequencer,
+    ) -> QueueReport {
         let mut merged = Vec::new();
         let mut rejected = Vec::new();
         let mut window_trace = Vec::new();
         let mut ci_runs = 0usize;
         let mut merge_invocations = 0usize;
         let mut replayed = Vec::new();
+        let mut provider_error: Option<String> = None;
         let handle = sequencer.handle();
 
         while !self.queue.is_empty() {
@@ -302,16 +358,73 @@ impl MergeQueue {
             }
             rejected.extend(train_rejects);
 
-            // "Assume-pass": CI for every train member launches in parallel
-            // against its speculative state, so every member costs a run even
-            // when an earlier member fails (its result is then discarded).
-            let mut failure_at: Option<usize> = None;
-            for (i, (change, state)) in train.iter().enumerate() {
-                ci_runs += 1;
-                if !ci.verdict(change, state) && failure_at.is_none() {
-                    failure_at = Some(i);
+            // "Assume-pass": CI for every train member runs against its own
+            // speculative state, so every member costs a run even when an
+            // earlier member fails (its result is then discarded). The whole
+            // train goes to the executor in one call, which is what lets a
+            // provider be concurrent -- the one-job-at-a-time signature this
+            // replaced made the parallelism this cost model assumes
+            // impossible to implement, at any window size (D18).
+            let jobs: Vec<executor::Job> = train
+                .iter()
+                .map(|(change, state)| self.template.job_for(change, state))
+                .collect();
+            ci_runs += jobs.len();
+            let verdicts = match ci.run(&jobs) {
+                Ok(v) if v.len() == jobs.len() => v,
+                // Index alignment is the whole contract of the batch call.
+                // A provider that returns a different count has attributed
+                // somebody's result to somebody else, and no verdict in the
+                // batch can be trusted.
+                Ok(v) => {
+                    provider_error = Some(format!(
+                        "executor returned {} verdicts for {} jobs",
+                        v.len(),
+                        jobs.len()
+                    ));
+                    Vec::new()
+                }
+                Err(e) => {
+                    provider_error = Some(e.to_string());
+                    Vec::new()
+                }
+            };
+            if provider_error.is_some() {
+                // No verdicts at all, so nothing here is evidence about any
+                // change. Requeue the whole train in order and stop. The
+                // window is deliberately not halved: halving is the response
+                // to changes that fail, and none of these did.
+                for (change, _) in train.into_iter().rev() {
+                    self.queue.push_front(change);
+                }
+                break;
+            }
+
+            // The first member that did not pass. Only a `Failed` may evict:
+            // ejection is permanent for the change *and* everything that
+            // transitively depends on it, so it is reserved for a verdict
+            // that is actually about the change's content. An inconclusive
+            // one stalls the train instead.
+            let stop_at = verdicts
+                .iter()
+                .position(|v| !matches!(v, executor::Verdict::Passed));
+            if let Some(i) = stop_at {
+                if !verdicts[i].evicts() {
+                    provider_error = Some(verdicts[i].to_string());
+                    for (change, state) in train.drain(..i) {
+                        self.base = state.clone();
+                        self.landed.insert(identity::change_identity(&change));
+                        handle.submit(&change.workspace, state.into_bytes());
+                        merged.push(change.id);
+                        self.resize(self.window + 1, "green prefix landed");
+                    }
+                    for (change, _) in train.into_iter().rev() {
+                        self.queue.push_front(change);
+                    }
+                    break;
                 }
             }
+            let failure_at = stop_at;
 
             match failure_at {
                 None => {
@@ -411,13 +524,18 @@ impl MergeQueue {
             ci_runs,
             merge_invocations,
             replayed,
+            provider_error,
         }
     }
 }
 
 /// Convenience: drain `changes` through a fresh queue + sequencer and return
 /// the report plus the sequencer's op count (which must equal merged count).
-pub fn run_batch(base: &str, changes: Vec<Change>, ci: &mut dyn CiRunner) -> (QueueReport, u64) {
+pub fn run_batch(
+    base: &str,
+    changes: Vec<Change>,
+    ci: &mut dyn executor::CiExecutor,
+) -> (QueueReport, u64) {
     let mut queue = MergeQueue::new(base);
     for c in changes {
         queue.submit(c);

@@ -29,6 +29,7 @@
 //! cargo test -p choir-queue --release --test phase1 -- --nocapture
 //! ```
 
+use choir_queue::executor::Synthetic;
 use choir_queue::{run_batch, Change, Rejection};
 use std::time::{Duration, Instant};
 
@@ -66,7 +67,7 @@ fn disjoint_change(id: u64) -> Change {
 #[test]
 fn green_keeping_holds_at_fifty_in_flight() {
     let changes: Vec<Change> = (0..IN_FLIGHT).map(disjoint_change).collect();
-    let (report, ops) = run_batch(&base(), changes, &mut |_: &Change, _: &str| true);
+    let (report, ops) = run_batch(&base(), changes, &mut Synthetic::passing());
     assert_eq!(
         report.merged.len() as u64,
         IN_FLIGHT,
@@ -88,9 +89,11 @@ fn green_keeping_holds_at_fifty_in_flight() {
     // reader clones stays green, and a failure costs only its author.
     let red = [7u64, 23, 44];
     let changes: Vec<Change> = (0..IN_FLIGHT).map(disjoint_change).collect();
-    let (report, ops) = run_batch(&base(), changes, &mut |change: &Change, _: &str| {
-        !red.contains(&change.id)
-    });
+    let (report, ops) = run_batch(
+        &base(),
+        changes,
+        &mut Synthetic::failing_labels(&["7", "23", "44"]),
+    );
     assert_eq!(
         report.merged.len() as u64,
         IN_FLIGHT - red.len() as u64,
@@ -168,11 +171,11 @@ fn the_queue_leaves_ci_almost_all_of_the_five_per_second_budget() {
     // state that a sustained rate never pays again, and reporting it as
     // the sustained cost would understate the headroom.
     let warm: Vec<Change> = (0..IN_FLIGHT).map(disjoint_change).collect();
-    let _ = run_batch(&base(), warm, &mut |_: &Change, _: &str| true);
+    let _ = run_batch(&base(), warm, &mut Synthetic::passing());
 
     let changes: Vec<Change> = (0..IN_FLIGHT).map(disjoint_change).collect();
     let started = Instant::now();
-    let (report, _) = run_batch(&base(), changes, &mut |_: &Change, _: &str| true);
+    let (report, _) = run_batch(&base(), changes, &mut Synthetic::passing());
     let elapsed = started.elapsed();
     assert_eq!(
         report.merged.len() as u64,
