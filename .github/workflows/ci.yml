@@ -8,13 +8,22 @@ on:
 permissions:
   contents: read
 
+# A pull request that gets a second push does not need the first push's
+# gate to finish; a push to `main` does, because that run is the record
+# of whether that commit was good.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Pinned in one place. The toolchain is pinned because a gate that
-  # passes on whatever rustc happened to ship today is not a gate, and
+  # passes on whatever rustc happened to ship today is not a gate,
   # cargo-audit is pinned because it is the thing deciding what counts
-  # as a vulnerability.
+  # as a vulnerability, and mdbook is pinned because it is a renderer
+  # whose failures are the gate's only check on `docs/SUMMARY.md`.
   RUST_VERSION: 1.97.1
   CARGO_AUDIT_VERSION: 0.22.2
+  MDBOOK_VERSION: 0.5.4
   # The gate is not a terminal here, but Actions renders colour, so it
   # prints a readable run rather than a wall of grey.
   FORCE_COLOR: 1
@@ -26,6 +35,29 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      # The gate's object-database scan reads its needles from
+      # `internal/scan-needles`, which is not in a clone, so the gate
+      # announces a skip here and **CI has no privacy guard at all**
+      # unless it is this one.
+      #
+      # `internal/` is the unpublished half of this repository: the
+      # blueprint, the reasoning behind every row of DECISIONS.md, the
+      # governance notes. It is kept out by a bare `.gitignore` entry
+      # with no allowlist, which one `git add -f` defeats without
+      # comment. This is the check that notices.
+      #
+      # It prints a count and not the paths. A guard against leaking
+      # private file names must not leak them into a build log to say
+      # so; `git ls-files internal` locally says which.
+      - name: Nothing under internal/ is tracked
+        run: |
+          tracked=$(git ls-files -- internal | wc -l | tr -d ' ')
+          if [ "$tracked" != 0 ]; then
+            echo "$tracked path(s) under internal/ are tracked; internal/ is never published" >&2
+            echo "run 'git ls-files internal' locally to see which" >&2
+            exit 1
+          fi
 
       - name: Pin the toolchain
         run: |
@@ -62,10 +94,25 @@ jobs:
           path: ~/.cargo/bin/cargo-audit
           key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
 
-      - name: Install cargo-audit
+      # Without mdbook on PATH the gate prints "no mdbook" and moves on,
+      # by design -- a contributor lacking the tool still gets a green
+      # run. CI is not a contributor. The book stage is the only thing
+      # that catches a `SUMMARY.md` entry naming a file that does not
+      # exist, because `create-missing` is off, and a permanent skip is
+      # exactly the "check that quietly stopped checking" the gate's own
+      # header calls this project's recurring failure.
+      - name: Cache mdbook
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/mdbook
+          key: mdbook-${{ runner.os }}-${{ env.MDBOOK_VERSION }}
+
+      - name: Install cargo-audit and mdbook
         run: |
           command -v cargo-audit >/dev/null \
             || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+          command -v mdbook >/dev/null \
+            || cargo install mdbook --version "$MDBOOK_VERSION" --locked
 
       - name: Release gate
         run: ./gate
