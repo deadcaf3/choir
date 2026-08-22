@@ -49,6 +49,7 @@ pub mod portable;
 mod prepare;
 pub mod profile;
 pub mod provision;
+pub mod queue;
 pub mod quota;
 mod readme;
 pub mod reject;
@@ -521,6 +522,13 @@ impl Node {
             platform.attach_accounts(store.clone());
         }
         self.platform = Some(std::sync::Arc::new(platform));
+    }
+
+    /// The platform this node serves, or `None` if the platform API was
+    /// never enabled.
+    #[must_use]
+    pub fn platform(&self) -> Option<&Platform> {
+        self.platform.as_deref()
     }
 
     /// Brings the bare repos back into agreement with the view before the

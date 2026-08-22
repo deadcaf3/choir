@@ -43,6 +43,7 @@ mod landing_record;
 mod magic_refspec;
 mod newcomer_config;
 mod newcomer_harm;
+mod node_queue;
 mod noscript;
 mod observability;
 mod ownership;

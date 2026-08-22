@@ -299,6 +299,7 @@ dependencies = [
  "choir-hash",
  "choir-identity",
  "choir-oplog",
+ "choir-queue",
  "choir-sequencer",
  "choir-view",
  "pulldown-cmark",

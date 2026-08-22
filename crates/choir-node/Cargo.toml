@@ -10,6 +10,7 @@ choir-fs = { path = "../choir-fs" }
 choir-hash = { path = "../choir-hash" }
 choir-identity = { path = "../choir-identity" }
 choir-oplog = { path = "../choir-oplog" }
+choir-queue = { path = "../choir-queue" }
 choir-sequencer = { path = "../choir-sequencer" }
 choir-view = { path = "../choir-view" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
@@ -20,3 +21,4 @@ tiny_http = { version = "0.12", features = ["ssl-openssl"] }
 workspace = true
 
 [dev-dependencies]
+choir-queue = { path = "../choir-queue" }

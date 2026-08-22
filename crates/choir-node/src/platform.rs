@@ -3398,7 +3398,7 @@ pub struct Platform {
     /// pushes. Attribution: a verified push certificate names the
     /// pusher's key (`key/<principal>`); otherwise the basic-auth user
     /// (`git/<user>`).
-    node_key: ActorKey,
+    node_key: Arc<ActorKey>,
     entries: Arc<Mutex<LogWindow>>,
     /// Operator-curated file of eligible reviewer names, one per line.
     /// Read fresh on every draw, so editing it takes effect at once.
@@ -3670,7 +3670,7 @@ impl Platform {
             lag_log: None,
             lag_log_error: Mutex::new((None, 0)),
             view,
-            node_key,
+            node_key: Arc::new(node_key),
             entries,
             reviewer_pool: None,
             reviewer_conflict_graph: None,
@@ -3961,6 +3961,95 @@ impl Platform {
     pub fn scope_now(&self) -> (ContentHash, Option<ContentHash>) {
         let head = self.entries.lock().expect("entries lock").head_hash();
         (self.node_key.actor_id(), head)
+    }
+
+    /// The round of proposals aimed at `branch` of `repo` (D68).
+    ///
+    /// `None` when the branch does not exist. A round with no proposals
+    /// is `Some` with an empty list: "nobody has proposed anything" and
+    /// "there is nothing to propose to" are different answers, and only
+    /// the second is a misconfiguration.
+    #[must_use]
+    pub fn proposal_round(&self, repo: &str, branch: &str) -> Option<crate::queue::ProposalRound> {
+        let view = self.view.lock().expect("view lock");
+        crate::queue::ProposalRound::from_view(&view, repo, branch)
+    }
+
+    /// A landing that moves `refname` from `base`, signed by this node.
+    ///
+    /// The scope is read per landing rather than captured here, because
+    /// a round appends as it goes; see [`crate::queue::ScopeSource`].
+    #[must_use]
+    pub fn ref_landing(&self, refname: String, base: &str) -> crate::queue::RefLanding {
+        let entries = Arc::clone(&self.entries);
+        let node = self.node_key.actor_id();
+        crate::queue::RefLanding::new(
+            Arc::clone(&self.node_key),
+            refname,
+            base,
+            Box::new(move || {
+                (
+                    node.clone(),
+                    entries.lock().expect("entries lock").head_hash(),
+                )
+            }),
+        )
+    }
+
+    /// Runs one speculative round over this node's own log (D5, D68).
+    ///
+    /// `workdir` must be a **worktree of the repository this node
+    /// serves**, made with `git worktree add --detach` against the bare
+    /// repo, and owned outright by the queue: every speculative merge
+    /// detaches it and forces it to a candidate state, so a tree
+    /// anybody else is working in is the wrong argument.
+    ///
+    /// A worktree and not an independent clone, and this is not a
+    /// preference. A landing names the merge commit the speculator
+    /// built. An independent clone writes that commit into its own
+    /// object store, where the served repository cannot see it, so the
+    /// log would name a commit git does not have --- which
+    /// [`Platform::reconcile_git_refs`] correctly reads as the view
+    /// being wrong and compensates back to git's value, silently
+    /// undoing every landing in the round. A worktree shares the object
+    /// store, so the commit is already there when the op is submitted.
+    ///
+    /// `None` when the branch does not exist. Otherwise the report says
+    /// what landed, in order, and every landing in it is an op in this
+    /// node's log rather than a number the round kept to itself.
+    pub fn run_proposal_queue(
+        &self,
+        repo: &str,
+        branch: &str,
+        workdir: &std::path::Path,
+        ci: &mut dyn choir_queue::executor::CiExecutor,
+        template: choir_queue::JobTemplate,
+    ) -> Option<choir_queue::QueueReport> {
+        let round = self.proposal_round(repo, branch)?;
+        let mut queue = choir_queue::MergeQueue::with_speculator(
+            &round.base,
+            Box::new(choir_queue::git::GitSpeculator::new(workdir.to_path_buf())),
+        );
+        queue.set_job_template(template);
+        queue.set_landing(Box::new(self.ref_landing(round.target_ref(), &round.base)));
+        for change in round.changes() {
+            queue.submit(change);
+        }
+        Some(self.drain_queue(&mut queue, ci))
+    }
+
+    /// Drains a caller-built queue through this node's sequencer.
+    ///
+    /// The escape hatch under [`Platform::run_proposal_queue`], for a
+    /// caller whose round is not simply "every proposal on this
+    /// branch". The sequencer is the point: a landing recorded through
+    /// anything else is not in the log this node serves.
+    pub fn drain_queue(
+        &self,
+        queue: &mut choir_queue::MergeQueue,
+        ci: &mut dyn choir_queue::executor::CiExecutor,
+    ) -> choir_queue::QueueReport {
+        queue.drain(ci, &self._sequencer)
     }
 
     /// Points the platform at the JSON-lines file its op log persists to,
