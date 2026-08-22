@@ -10,8 +10,8 @@ name: CI
 # (the only check on SUMMARY.md, because `create-missing` is off), and
 # the RustSec audit of Cargo.lock. What it deliberately does not:
 # compile or test. This suite's test execution alone runs for minutes,
-# and project law is that the full gate ran locally before every
-# commit; nightly.yml re-checks that claim on Linux within a day, and
+# and project law is that the full gate ran locally within the last
+# three commits; nightly.yml re-checks main on Linux within a day, and
 # `./gate quick` prints "nothing was compiled and no tests ran" on
 # every green run so the trade is never mistaken for coverage.
 

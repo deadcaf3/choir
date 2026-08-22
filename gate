@@ -9,10 +9,10 @@
 #                 every push inside a minute; it compiles nothing, runs
 #                 no tests, and says so when green.
 #
-# The fast lane is **not a substitute for the full one**, and the rule it
-# depends on is that the full lane runs before every commit. This
-# project's recurring failure is a check that quietly stops checking, and
-# "the slow tests are opt-in now" is how that starts.
+# The fast lane is **not a substitute for the full one**, and the rule
+# it depends on is that the full lane runs at least every third commit.
+# This project's recurring failure is a check that quietly stops
+# checking, and "the slow tests are opt-in now" is how that starts.
 #
 # It fails closed: any stage failing exits nonzero, and the exit code of
 # every command is read directly rather than through a pipe, because
@@ -490,7 +490,7 @@ done
 TOTAL=$(($(date +%s) - STARTED))
 if [ -z "$FAILED" ]; then
   printf '\n  %sgreen%s in %s\n\n' "$G" "$Z" "$(secs $TOTAL)"
-  [ "$LANE" = fast ] && printf '  %sfast lane: run ./gate before committing%s\n\n' "$Y" "$Z"
+  [ "$LANE" = fast ] && printf '  %sfast lane: run ./gate at least every third commit%s\n\n' "$Y" "$Z"
   [ "$LANE" = quick ] && printf '  %squick lane: nothing was compiled and no tests ran%s\n\n' "$Y" "$Z"
   exit 0
 fi
