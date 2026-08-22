@@ -928,3 +928,129 @@ fn only_a_change_at_fault_is_asked_to_do_something() {
         assert!(!report.description.is_empty());
     }
 }
+
+/// What a queued job is allowed to touch, asserted on the jobs
+/// themselves rather than on the round they produced.
+///
+/// Three properties, and every one of them is invisible to an outcome
+/// list. A train of unreviewed changes may not write a shared build
+/// cache -- speculative content reaching a cache other builds read is
+/// the CREEP shape, and a merge queue is exactly where an attacker
+/// reaches it. No job names a directory, because every member of a
+/// batch is tested against a *different* speculative state and one
+/// shared directory would test the last of them repeatedly. And the
+/// subject is the git oid of that state, which is what makes a check
+/// answerable about a commit rather than about a number only this
+/// queue knows.
+#[test]
+fn a_queued_job_is_cacheless_treeless_and_named_by_its_commit() {
+    use choir_queue::executor::{Job, Synthetic, Verdict};
+    use std::sync::{Arc, Mutex};
+
+    let (repo, _checkouts) = queue_fixture("spec-job-shape");
+    let base = rev(&repo, "main");
+    let spec = command_file(&repo, "exit 0");
+
+    let seen: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&seen);
+    let mut ci = Synthetic::new(move |job: &Job| {
+        captured
+            .lock()
+            .expect("no panic held the lock")
+            .push(job.clone());
+        Verdict::Passed
+    });
+    let round = choir_bridge::queue::run_queue(
+        &repo,
+        &base,
+        &[(1, "pr-1".to_string()), (2, "pr-2".to_string())],
+        &spec,
+        &mut ci,
+    )
+    .expect("the round runs");
+    assert_eq!(
+        round.outcomes,
+        vec![
+            (1, choir_bridge::queue::PrOutcome::Landed),
+            (2, choir_bridge::queue::PrOutcome::Landed),
+        ],
+        "the fixture is supposed to be a clean round (stalled: {:?})",
+        round.stalled
+    );
+
+    let jobs = seen.lock().expect("no panic held the lock").clone();
+    assert_eq!(jobs.len(), 2, "one job per change: {jobs:?}");
+    for job in &jobs {
+        assert!(
+            !job.may_write_cache,
+            "a speculative change was allowed to write the shared cache: {job:?}"
+        );
+        assert!(
+            job.directory.is_none(),
+            "the batch was pinned to one directory, so it tested one state twice: {job:?}"
+        );
+        let oid = job
+            .subject
+            .git_oid()
+            .expect("the job is addressed by a git oid");
+        // And the oid is a commit this repository actually holds:
+        // `git_oid` alone would accept a well-formed hash of something
+        // no client could resolve.
+        let kind = std::process::Command::new("git")
+            .args(["cat-file", "-t", &oid])
+            .current_dir(&repo)
+            .output()
+            .expect("git runs");
+        assert_eq!(
+            String::from_utf8_lossy(&kind.stdout).trim(),
+            "commit",
+            "the subject {oid} is not a commit in the repository under test"
+        );
+    }
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// A base the repository does not have is the node's fault, and reads
+/// as one stall rather than as every change in the round going red on
+/// its author.
+///
+/// Without the check the base is taken on trust, every change is merged
+/// onto a state that does not exist, and the resulting failures are
+/// reported against the people who opened the pull requests. So the
+/// assertion is not only that the round refuses: it is that no change
+/// was ever judged, which is what an outcome list cannot show.
+#[test]
+fn a_base_that_is_not_a_commit_stalls_before_any_change_is_judged() {
+    use choir_queue::executor::{Job, Synthetic, Verdict};
+    use std::sync::{Arc, Mutex};
+
+    let (repo, _checkouts) = queue_fixture("spec-bad-base");
+    let spec = command_file(&repo, "exit 0");
+    let absent = "0000000000000000000000000000000000000000";
+
+    let judged: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&judged);
+    let mut ci = Synthetic::new(move |_: &Job| {
+        *counted.lock().expect("no panic held the lock") += 1;
+        Verdict::Passed
+    });
+    let error = choir_bridge::queue::run_queue(
+        &repo,
+        absent,
+        &[(1, "pr-1".to_string()), (2, "pr-2".to_string())],
+        &spec,
+        &mut ci,
+    )
+    .expect_err("a base that is not a commit is refused");
+
+    assert!(
+        error.contains(absent),
+        "the refusal does not name the base it could not resolve: {error}"
+    );
+    assert_eq!(
+        *judged.lock().expect("no panic held the lock"),
+        0,
+        "changes were tested against a base the repository does not have"
+    );
+    std::fs::remove_dir_all(&repo).ok();
+}
