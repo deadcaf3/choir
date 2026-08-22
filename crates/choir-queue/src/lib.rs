@@ -32,14 +32,17 @@ pub mod differential;
 pub mod differential_ledger;
 pub mod envelope;
 pub mod executor;
+pub mod git;
 pub mod identity;
 pub mod local;
 pub mod memory;
 pub mod remote;
+pub mod speculate;
 
-use choir_merge::{safety, MergeOutcome, Pipeline};
+use choir_merge::Pipeline;
 use choir_oplog::MemLog;
 use choir_sequencer::Sequencer;
+use speculate::{Speculator, Step};
 
 /// Default initial speculation window (a documented default).
 pub const DEFAULT_WINDOW: usize = 20;
@@ -154,14 +157,21 @@ pub struct QueueReport {
 /// set in [`MergeQueue::drain`] refuses a resubmission of anything
 /// already landed, so the workspace this names does not exist yet.
 ///
-/// The commit id is the content hash of the merged state, which is
-/// deliberately the same hash [`JobTemplate::job_for`] gives the job
-/// that tested it. That is what makes a check answerable about a
-/// workspace head rather than about a number only this queue knows.
-fn land(handle: &choir_sequencer::SequencerHandle, workspace: &str, state: &str) {
+/// The commit id is the [`Speculator::subject`] of the merged state,
+/// which is deliberately the same hash [`JobTemplate::job_for`] gave
+/// the job that tested it. That is what makes a check answerable about
+/// a workspace head rather than about a number only this queue knows,
+/// and it is why the subject comes from the speculator instead of
+/// being hashed here: a git state named by anything but its oid is
+/// unresolvable to every client that could act on it.
+fn land(
+    handle: &choir_sequencer::SequencerHandle,
+    workspace: &str,
+    commit: choir_hash::ContentHash,
+) {
     let op = choir_view::ViewOp::new(choir_view::OpKind::SetWorkspaceHead {
         workspace: workspace.to_string(),
-        commit: choir_hash::ContentHash::blake3(state.as_bytes()),
+        commit,
         prev: None,
     });
     let payload = serde_json::to_vec(&op).expect("a ViewOp serializes");
@@ -199,7 +209,10 @@ fn record_check(
 /// Single-shard speculative merge queue over one file.
 pub struct MergeQueue {
     base: String,
-    pipeline: Pipeline,
+    /// How a change is put on top of a state (D5). The text
+    /// implementation is the default; a caller holding a repository
+    /// installs the git one.
+    speculator: Box<dyn Speculator>,
     window: usize,
     queue: std::collections::VecDeque<Change>,
     memory: memory::ResolutionMemory,
@@ -258,13 +271,14 @@ pub struct JobTemplate {
 }
 
 impl JobTemplate {
-    /// The job testing `change` applied on `state`.
+    /// The job testing `change` applied on the state named by `subject`.
+    ///
+    /// The subject is supplied rather than computed because only the
+    /// [`Speculator`] knows how its states are named; see
+    /// [`Speculator::subject`].
     #[must_use]
-    pub fn job_for(&self, change: &Change, state: &str) -> executor::Job {
-        let mut job = executor::Job::new(
-            choir_hash::ContentHash::blake3(state.as_bytes()),
-            self.command.clone(),
-        );
+    pub fn job_for(&self, change: &Change, subject: choir_hash::ContentHash) -> executor::Job {
+        let mut job = executor::Job::new(subject, self.command.clone());
         job.label = change.id.to_string();
         job.environment = self.environment.clone();
         job.may_write_cache = self.may_write_cache;
@@ -322,12 +336,24 @@ impl MergeQueue {
 
     /// Creates a queue with a caller-supplied strategy pipeline — the D4/D19
     /// widening seam (structured or LLM slots appended by the caller). Every
-    /// resolution is still safety-checked in [`MergeQueue::drain`], which is
-    /// what makes the non-deterministic slots admissible at all.
+    /// resolution is still safety-checked by
+    /// [`speculate::TextSpeculator`], which is what makes the
+    /// non-deterministic slots admissible at all.
     pub fn with_pipeline(base: &str, pipeline: Pipeline) -> Self {
+        Self::with_speculator(base, Box::new(speculate::TextSpeculator::new(pipeline)))
+    }
+
+    /// Creates a queue over `base` whose merges, change identities and
+    /// job subjects come from `speculator` (D5).
+    ///
+    /// This is the constructor a caller holding a repository wants:
+    /// `base` is then a commit id rather than a file body, and every
+    /// state the queue moves around is one too. The queue's policy is
+    /// unchanged, which is the point — it was never about text.
+    pub fn with_speculator(base: &str, speculator: Box<dyn Speculator>) -> Self {
         Self {
             base: base.to_string(),
-            pipeline,
+            speculator,
             window: DEFAULT_WINDOW,
             reporter: None,
             queue: std::collections::VecDeque::new(),
@@ -421,7 +447,7 @@ impl MergeQueue {
                 // already-landed change — the same position-independent
                 // edit, however rebased — is refused before any merge
                 // work, so the train neither re-merges nor duplicates it.
-                if self.landed.contains(&identity::change_identity(&change)) {
+                if self.landed.contains(&self.speculator.identity(&change)) {
                     train_rejects.push((change.id, Rejection::AlreadyLanded));
                     continue;
                 }
@@ -442,40 +468,53 @@ impl MergeQueue {
                     continue;
                 }
                 merge_invocations += 1;
-                let resolution = self
-                    .pipeline
-                    .merge(&change.base, &speculative, &change.proposed);
-                match resolution.outcome {
-                    MergeOutcome::Resolved(next) => {
-                        // Merge-safety invariant:
-                        // a resolution may only apply edits the change
-                        // proposed. A strategy that quietly reverts work
-                        // already in the speculative state is evicted like
-                        // a conflict, before CI ever sees it.
-                        match safety::check(&change.base, &speculative, &change.proposed, &next) {
-                            safety::SafetyVerdict::Upholds => {
-                                speculative = next.clone();
-                                train.push((change, next));
-                            }
-                            safety::SafetyVerdict::Violation(violation) => {
-                                train_rejects.push((
-                                    change.id,
-                                    Rejection::SafetyViolation {
-                                        strategy: resolution.strategy,
-                                        violation,
-                                    },
-                                ));
-                            }
-                        }
+                match self
+                    .speculator
+                    .step(&change.base, &speculative, &change.proposed)
+                {
+                    Step::Advanced(next) => {
+                        speculative = next.clone();
+                        train.push((change, next));
                     }
-                    MergeOutcome::Conflict { .. } => {
+                    Step::Conflict => {
                         // First-class conflict: evict, do not block the train.
                         train_rejects.push((change.id, Rejection::Conflict));
                     }
-                    MergeOutcome::Unavailable(_) => unreachable!(),
+                    Step::Unsafe {
+                        strategy,
+                        violation,
+                    } => {
+                        train_rejects.push((
+                            change.id,
+                            Rejection::SafetyViolation {
+                                strategy,
+                                violation,
+                            },
+                        ));
+                    }
+                    Step::Unavailable(why) => {
+                        // Our fault, not this change's. It goes back at
+                        // the head of the queue ahead of the train
+                        // members below, so the order the caller
+                        // submitted survives the stall.
+                        provider_error =
+                            Some(format!("speculator `{}`: {why}", self.speculator.name()));
+                        self.queue.push_front(change);
+                        break;
+                    }
                 }
             }
             rejected.extend(train_rejects);
+            if provider_error.is_some() {
+                // Nothing here was tested, so nothing here is evidence.
+                // The window is not halved for the same reason it is
+                // not halved on a provider fault: halving answers
+                // changes that failed, and none of these did.
+                for (change, _) in train.into_iter().rev() {
+                    self.queue.push_front(change);
+                }
+                break;
+            }
 
             // "Assume-pass": CI for every train member runs against its own
             // speculative state, so every member costs a run even when an
@@ -486,7 +525,10 @@ impl MergeQueue {
             // impossible to implement, at any window size (D18).
             let jobs: Vec<executor::Job> = train
                 .iter()
-                .map(|(change, state)| self.template.job_for(change, state))
+                .map(|(change, state)| {
+                    self.template
+                        .job_for(change, self.speculator.subject(state))
+                })
                 .collect();
             ci_runs += jobs.len();
             let verdicts = match ci.run(&jobs) {
@@ -557,8 +599,8 @@ impl MergeQueue {
                     provider_error = Some(verdicts[i].to_string());
                     for (change, state) in train.drain(..i) {
                         self.base = state.clone();
-                        self.landed.insert(identity::change_identity(&change));
-                        land(&handle, &change.workspace, &state);
+                        self.landed.insert(self.speculator.identity(&change));
+                        land(&handle, &change.workspace, self.speculator.subject(&state));
                         merged.push(change.id);
                         self.resize(self.window + 1, "green prefix landed");
                     }
@@ -575,8 +617,8 @@ impl MergeQueue {
                     // Whole train is green: merge it all.
                     for (change, state) in train {
                         self.base = state.clone();
-                        self.landed.insert(identity::change_identity(&change));
-                        land(&handle, &change.workspace, &state);
+                        self.landed.insert(self.speculator.identity(&change));
+                        land(&handle, &change.workspace, self.speculator.subject(&state));
                         merged.push(change.id);
                         self.resize(self.window + 1, "train landed clean");
                     }
@@ -586,8 +628,8 @@ impl MergeQueue {
                     // rest for retesting against a state without the failure.
                     for (change, state) in train.drain(..i) {
                         self.base = state.clone();
-                        self.landed.insert(identity::change_identity(&change));
-                        land(&handle, &change.workspace, &state);
+                        self.landed.insert(self.speculator.identity(&change));
+                        land(&handle, &change.workspace, self.speculator.subject(&state));
                         merged.push(change.id);
                         self.resize(self.window + 1, "green prefix landed");
                     }

@@ -15,3 +15,4 @@ mod identity;
 mod memory;
 mod queue;
 mod safety;
+mod speculate;
