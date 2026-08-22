@@ -1170,10 +1170,6 @@ pub fn run_queue(
         // written from a state nobody approved is the CREEP shape, and
         // the queue is exactly where an attacker would reach it.
         may_write_cache: false,
-        // Left for the executor to fill: every train member has a
-        // different tree, and this one names the tree by its own commit
-        // id, which is a thing a provider can materialize.
-        directory: None,
     });
 
     for (id, head) in prs {
