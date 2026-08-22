@@ -362,3 +362,191 @@ fn a_verdict_count_mismatch_is_refused_rather_than_zipped() {
         "the window moved on a batch whose verdicts were all discarded"
     );
 }
+
+/// Reading the checks the queue recorded back out of the log it wrote
+/// them to, which is the only way to assert what a later reader sees.
+fn checks_in(log: &dyn choir_oplog::OpLog) -> Vec<(String, String, String)> {
+    let view = choir_view::View::materialize(log).expect("the log folds");
+    let mut out: Vec<(String, String, String)> = view
+        .checks
+        .iter()
+        .map(|(key, state)| {
+            (
+                key.clone(),
+                state.status.as_str().to_string(),
+                state.evidence.clone(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn reporter() -> choir_queue::CheckReporter {
+    choir_queue::CheckReporter {
+        channel: "ci".into(),
+        name: "ci/build".into(),
+        target_ref: Some("agents/demo.git:refs/heads/main".into()),
+    }
+}
+
+/// Off unless asked. The queue is a library and the identity a check is
+/// reported under belongs to whoever runs it, so a default channel name
+/// would put an unattributable reporter into an ordered record.
+#[test]
+fn a_queue_with_no_reporter_writes_no_checks() {
+    let mut queue = MergeQueue::new(&base());
+    for c in (0..3).map(disjoint_change) {
+        queue.submit(c);
+    }
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let report = queue.drain(&mut Synthetic::passing(), &sequencer);
+    let log = sequencer.shutdown();
+
+    assert_eq!(report.merged.len(), 3);
+    assert!(report.unreported_checks.is_empty());
+    // Nothing to read: the queue never opened a reporter, so the
+    // absence of checks below is the absence of a *writer*, not of a
+    // result -- which is the ambiguity the "record everything" rule
+    // exists to keep out of a log that does have a reporter.
+    assert!(checks_in(log.as_ref()).is_empty());
+}
+
+/// Every verdict, not only the interesting ones. The map from `Verdict`
+/// to `CheckStatus` is total, so recording some and dropping the rest
+/// would leave a reader unable to tell "it passed" from "nobody was
+/// reporting".
+#[test]
+fn the_queue_records_a_pass_and_a_failure_alike() {
+    let mut queue = MergeQueue::new(&base());
+    queue.set_check_reporter(reporter());
+    for c in (0..6).map(disjoint_change) {
+        queue.submit(c);
+    }
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let mut ci = Synthetic::failing_labels(&["4"]);
+    let report = queue.drain(&mut ci, &sequencer);
+    let log = sequencer.shutdown();
+
+    assert_eq!(report.rejected, vec![(4, Rejection::CiFailure)]);
+    assert!(
+        report.unreported_checks.is_empty(),
+        "the sequencer refused a report: {:?}",
+        report.unreported_checks
+    );
+
+    let checks = checks_in(log.as_ref());
+    let statuses: Vec<&str> = checks.iter().map(|(_, s, _)| s.as_str()).collect();
+    assert!(
+        statuses.contains(&"passed"),
+        "a green run went unrecorded: {checks:?}"
+    );
+    assert!(
+        statuses.contains(&"failed"),
+        "the failure went unrecorded: {checks:?}"
+    );
+    assert!(
+        !statuses.contains(&"errored"),
+        "nothing errored, so nothing may say so: {checks:?}"
+    );
+}
+
+/// The record is the executor's answer, not the queue's response to it.
+///
+/// A timeout is recorded `errored` even though the queue's reaction to
+/// it -- stall, evict nobody -- looks nothing like a failure. Writing
+/// the reaction instead of the answer would make the log agree with the
+/// queue by construction and be worth nothing as evidence.
+#[test]
+fn a_timeout_is_recorded_as_errored_not_failed() {
+    let mut queue = MergeQueue::new(&base());
+    queue.set_check_reporter(reporter());
+    for c in (0..3).map(disjoint_change) {
+        queue.submit(c);
+    }
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let report = queue.drain(&mut Synthetic::new(|_| Verdict::TimedOut), &sequencer);
+    let log = sequencer.shutdown();
+
+    assert!(report.rejected.is_empty(), "a timeout must not reject");
+    let checks = checks_in(log.as_ref());
+    assert!(!checks.is_empty(), "the fault was recorded nowhere");
+    for (key, status, _) in &checks {
+        assert_eq!(
+            status, "errored",
+            "a provider outcome was recorded as a verdict about the commit: {key}"
+        );
+    }
+}
+
+/// An outage judged nobody, and says so about everybody.
+///
+/// This is the case the whole D18 chain was for: `provider_error` lived
+/// in one report for the length of one drain, so a change whose CI
+/// never ran left no trace at all. Every job in the refused batch now
+/// carries the same reason.
+#[test]
+fn an_outage_records_the_reason_against_every_subject_it_touched() {
+    let mut queue = MergeQueue::new(&base());
+    queue.set_check_reporter(reporter());
+    for c in (0..4).map(disjoint_change) {
+        queue.submit(c);
+    }
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let report = queue.drain(&mut Unreachable, &sequencer);
+    let log = sequencer.shutdown();
+
+    assert!(report.merged.is_empty());
+    assert!(report.rejected.is_empty());
+
+    let checks = checks_in(log.as_ref());
+    assert_eq!(
+        checks.len(),
+        4,
+        "every subject in the refused batch needs a record: {checks:?}"
+    );
+    for (_, status, evidence) in &checks {
+        assert_eq!(status, "errored");
+        assert!(
+            evidence.contains("unavailable"),
+            "the record must carry why, not just that: {evidence}"
+        );
+    }
+}
+
+/// The payoff, and the thing this log could not express until the
+/// landing became a `ViewOp`: the workspace head and the check name the
+/// same commit, so a reader holding a head can ask what CI found about
+/// it. Before, the head was opaque bytes and the check was about a hash
+/// nothing else in the log mentioned.
+#[test]
+fn a_landed_head_is_the_subject_its_check_names() {
+    let mut queue = MergeQueue::new(&base());
+    queue.set_check_reporter(reporter());
+    for c in (0..3).map(disjoint_change) {
+        queue.submit(c);
+    }
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let report = queue.drain(&mut Synthetic::passing(), &sequencer);
+    let log = sequencer.shutdown();
+    assert_eq!(report.merged, vec![0, 1, 2]);
+
+    let view = choir_view::View::materialize(log.as_ref()).expect("the log folds");
+    let head = view
+        .workspaces
+        .get("ws-2")
+        .expect("the last change landed somewhere");
+    assert_eq!(
+        view.checks_verdict(head),
+        Some(choir_view::CheckStatus::Passed),
+        "the head and the check disagree about which commit was tested"
+    );
+
+    // And the same question about a state nobody tested has no answer,
+    // so the assertion above is about this subject rather than about
+    // `checks_verdict` returning something for anything.
+    assert_eq!(
+        view.checks_verdict(&choir_hash::ContentHash::blake3(b"never built")),
+        None
+    );
+}

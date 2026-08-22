@@ -176,6 +176,22 @@ impl Verdict {
         matches!(self, Verdict::Failed { .. })
     }
 
+    /// The durable form of this verdict (D49).
+    ///
+    /// Total, and the mapping is the seam's claim restated: a deadline
+    /// is a provider outcome, so `TimedOut` records as `Errored` rather
+    /// than as a check the commit failed. Nothing here produces
+    /// `CheckStatus::Running` -- a `Verdict` is by definition an
+    /// executor that has finished answering.
+    #[must_use]
+    pub fn as_check_status(&self) -> choir_view::CheckStatus {
+        match self {
+            Verdict::Passed => choir_view::CheckStatus::Passed,
+            Verdict::Failed { .. } => choir_view::CheckStatus::Failed,
+            Verdict::Errored { .. } | Verdict::TimedOut => choir_view::CheckStatus::Errored,
+        }
+    }
+
     /// Whether the executor answered the question it was asked.
     ///
     /// `Passed` and `Failed` are answers. `Errored` and `TimedOut` are

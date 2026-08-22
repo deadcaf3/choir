@@ -35,6 +35,7 @@ pub mod executor;
 pub mod identity;
 pub mod local;
 pub mod memory;
+pub mod remote;
 
 use choir_merge::{safety, MergeOutcome, Pipeline};
 use choir_oplog::MemLog;
@@ -130,6 +131,69 @@ pub struct QueueReport {
     /// order, and nothing was rejected on account of it -- which is the
     /// distinction the old `bool` seam could not make.
     pub provider_error: Option<String>,
+    /// Check reports the sequencer refused, verbatim (D49).
+    ///
+    /// Empty unless [`MergeQueue::set_check_reporter`] was called. A
+    /// refused report is not a landing decision -- the merge already
+    /// happened or did not on the verdict itself -- but silence about
+    /// it would leave the log missing checks with nothing saying so,
+    /// which is the shape of a bug nobody finds.
+    pub unreported_checks: Vec<String>,
+}
+
+/// Records one landing: the workspace now holds this merged state.
+///
+/// A `ViewOp`, not the merged bytes. The queue used to submit the file
+/// content itself as an opaque payload, which nothing downstream could
+/// fold -- and once check reports joined the same log, `View::materialize`
+/// could not read *any* of it, because one undecodable entry stops the
+/// fold. That was invisible for as long as this queue was wired to
+/// nothing.
+///
+/// `prev` is `None` because a change lands at most once: the identity
+/// set in [`MergeQueue::drain`] refuses a resubmission of anything
+/// already landed, so the workspace this names does not exist yet.
+///
+/// The commit id is the content hash of the merged state, which is
+/// deliberately the same hash [`JobTemplate::job_for`] gives the job
+/// that tested it. That is what makes a check answerable about a
+/// workspace head rather than about a number only this queue knows.
+fn land(handle: &choir_sequencer::SequencerHandle, workspace: &str, state: &str) {
+    let op = choir_view::ViewOp::new(choir_view::OpKind::SetWorkspaceHead {
+        workspace: workspace.to_string(),
+        commit: choir_hash::ContentHash::blake3(state.as_bytes()),
+        prev: None,
+    });
+    let payload = serde_json::to_vec(&op).expect("a ViewOp serializes");
+    handle.submit(workspace, payload);
+}
+
+/// Submits one check report, returning the sequencer's refusal if any.
+///
+/// Unsigned, like every other op this queue submits: the queue is an
+/// in-process component of whoever runs it, not a network client with
+/// an identity of its own. A daemon whose policy demands a signature
+/// will refuse these, and that refusal is reported rather than
+/// swallowed -- see [`QueueReport::unreported_checks`].
+fn record_check(
+    handle: &choir_sequencer::SequencerHandle,
+    reporter: &CheckReporter,
+    job: &executor::Job,
+    status: choir_view::CheckStatus,
+    evidence: &str,
+) -> Result<(), String> {
+    let op = choir_view::ViewOp::new(choir_view::OpKind::RecordCheck {
+        subject: job.subject.clone(),
+        name: reporter.name.clone(),
+        status,
+        evidence: evidence.to_string(),
+        reporter: reporter.channel.clone(),
+        target_ref: reporter.target_ref.clone(),
+    });
+    let payload = serde_json::to_vec(&op).expect("a ViewOp serializes");
+    handle
+        .try_submit(&reporter.channel, payload, None)
+        .map(|_| ())
 }
 
 /// Single-shard speculative merge queue over one file.
@@ -146,6 +210,31 @@ pub struct MergeQueue {
     journal: Box<dyn choir_sequencer::journal::Journal>,
     /// What to run for each candidate state (D18).
     template: JobTemplate,
+    /// Who reports check results, when anybody does. `None` is the
+    /// default and means the queue keeps its verdicts to itself.
+    reporter: Option<CheckReporter>,
+}
+
+/// How the queue writes what CI found into the log (D49).
+///
+/// Off by default, and opt-in for the same reason
+/// [`MergeQueue::set_journal`] is: the queue is a library, the identity
+/// under which a check is reported belongs to whoever is running it,
+/// and inventing a channel name here would put an unattributable
+/// reporter in a signed, ordered record.
+#[derive(Debug, Clone)]
+pub struct CheckReporter {
+    /// The channel the check is reported under.
+    pub channel: String,
+    /// The check's name, e.g. `"ci/build"`.
+    pub name: String,
+    /// The ref these subjects are proposed to land on, in the view's
+    /// `<repo>:<refname>` form.
+    ///
+    /// `None` leaves the check node-wide. A commit id names no
+    /// repository, so an unbound check is readable only by node-wide
+    /// readers -- correct, and useless to the repository it is about.
+    pub target_ref: Option<String>,
 }
 
 /// How the queue turns a speculative state into a [`executor::Job`].
@@ -211,6 +300,21 @@ impl MergeQueue {
         self.journal = journal;
     }
 
+    /// Records every verdict CI returns as a [`choir_view::OpKind::RecordCheck`] op.
+    ///
+    /// Every verdict, not only the faults. The map from
+    /// [`executor::Verdict`] to [`choir_view::CheckStatus`] is total, so recording
+    /// some and dropping the rest would put an arbitrary hole in the
+    /// log: a reader finding no check could not tell "it passed" from
+    /// "nobody was reporting". The subject is the speculative tree the
+    /// job actually ran against, which means one change tested at two
+    /// train positions reports against two subjects -- correct, because
+    /// they are two different questions, and the second is the one that
+    /// landed.
+    pub fn set_check_reporter(&mut self, reporter: CheckReporter) {
+        self.reporter = Some(reporter);
+    }
+
     /// Creates a queue over `base` content with the default window.
     pub fn new(base: &str) -> Self {
         Self::with_pipeline(base, Pipeline::default_v1())
@@ -225,6 +329,7 @@ impl MergeQueue {
             base: base.to_string(),
             pipeline,
             window: DEFAULT_WINDOW,
+            reporter: None,
             queue: std::collections::VecDeque::new(),
             memory: memory::ResolutionMemory::new(),
             landed: std::collections::BTreeSet::new(),
@@ -300,6 +405,7 @@ impl MergeQueue {
         let mut merge_invocations = 0usize;
         let mut replayed = Vec::new();
         let mut provider_error: Option<String> = None;
+        let mut unreported_checks: Vec<String> = Vec::new();
         let handle = sequencer.handle();
 
         while !self.queue.is_empty() {
@@ -402,6 +508,31 @@ impl MergeQueue {
                     Vec::new()
                 }
             };
+            // What CI said, written down before the queue acts on it:
+            // the record is the executor's answer, not the queue's
+            // response to it. An outage judged nobody, so every job in
+            // the batch gets the same `Errored` for the same reason --
+            // a reader asking what happened to their change gets an
+            // answer instead of an absence.
+            if let Some(rep) = self.reporter.clone() {
+                let reports: Vec<(choir_view::CheckStatus, String)> = match &provider_error {
+                    Some(why) => std::iter::repeat_n(
+                        (choir_view::CheckStatus::Errored, why.clone()),
+                        jobs.len(),
+                    )
+                    .collect(),
+                    None => verdicts
+                        .iter()
+                        .map(|v| (v.as_check_status(), v.to_string()))
+                        .collect(),
+                };
+                for (job, (status, evidence)) in jobs.iter().zip(reports) {
+                    if let Err(why) = record_check(&handle, &rep, job, status, &evidence) {
+                        unreported_checks.push(why);
+                    }
+                }
+            }
+
             if provider_error.is_some() {
                 // No verdicts at all, so nothing here is evidence about any
                 // change. Requeue the whole train in order and stop. The
@@ -427,7 +558,7 @@ impl MergeQueue {
                     for (change, state) in train.drain(..i) {
                         self.base = state.clone();
                         self.landed.insert(identity::change_identity(&change));
-                        handle.submit(&change.workspace, state.into_bytes());
+                        land(&handle, &change.workspace, &state);
                         merged.push(change.id);
                         self.resize(self.window + 1, "green prefix landed");
                     }
@@ -445,7 +576,7 @@ impl MergeQueue {
                     for (change, state) in train {
                         self.base = state.clone();
                         self.landed.insert(identity::change_identity(&change));
-                        handle.submit(&change.workspace, state.into_bytes());
+                        land(&handle, &change.workspace, &state);
                         merged.push(change.id);
                         self.resize(self.window + 1, "train landed clean");
                     }
@@ -456,7 +587,7 @@ impl MergeQueue {
                     for (change, state) in train.drain(..i) {
                         self.base = state.clone();
                         self.landed.insert(identity::change_identity(&change));
-                        handle.submit(&change.workspace, state.into_bytes());
+                        land(&handle, &change.workspace, &state);
                         merged.push(change.id);
                         self.resize(self.window + 1, "green prefix landed");
                     }
@@ -538,6 +669,7 @@ impl MergeQueue {
             merge_invocations,
             replayed,
             provider_error,
+            unreported_checks,
         }
     }
 }

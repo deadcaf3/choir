@@ -5,19 +5,28 @@
 //! which is how it stayed plausible for a year while being unable to
 //! carry a real executor.
 //!
-//! Two backends run the suite, and they prove different amounts. Read
-//! that honestly:
+//! Three backends run the suite, and they prove different amounts.
+//! Read that honestly:
 //!
 //! - [`LocalRunner`] runs real child processes, so its pass is evidence
 //!   about exit codes, deadlines, and start failures.
 //! - [`Synthetic`] returns what it is told, so its pass proves only the
 //!   *protocol* surface: the handshake, the empty batch, and index
 //!   alignment. It cannot corroborate the verdict mapping, and saying so
-//!   here is cheaper than someone later reading "2 backends pass" as
+//!   here is cheaper than someone later reading "3 backends pass" as
 //!   more than it is.
+//! - `ProtocolRunner` against `choir-ci-local` is `LocalRunner` behind a
+//!   pipe, so it proves the two agree across a process boundary. It is
+//!   the strongest of the three for that one question and says nothing
+//!   the others do not about the rest.
 //!
-//! A microVM executor is the third call to `conformance`, and the reason
-//! this file exists before it does.
+//! A microVM executor is a fourth helper behind the same protocol, and
+//! cannot be built here: Firecracker and Cloud Hypervisor both need
+//! KVM, which is Linux-only, so it would be the untested single
+//! implementation this suite exists to forbid. The process boundary is
+//! the part of it that *can* be gated on this machine, and it is the
+//! part that carries the risk -- serialization, alignment, and a far
+//! side that stops talking.
 
 use choir_hash::ContentHash;
 use choir_queue::executor::{CiExecutor, ExecutorError, Job, Synthetic, Verdict, PROTOCOL};
@@ -371,4 +380,206 @@ fn an_argument_boundary_cannot_be_forged_with_a_separator() {
     let mut env_side = Job::new(tree, vec![]);
     env_side.environment.insert("x".into(), String::new());
     assert_ne!(arg_side.cache_key(), env_side.cache_key());
+}
+
+/// The third backend, and the one that carries the seam somewhere the
+/// other two cannot go: the same `LocalRunner`, behind a pipe.
+///
+/// Every assertion in `conformance` is about the executor's answers,
+/// and none of them mentions processes, so running them through
+/// `choir-ci-local` compares in-process execution against
+/// out-of-process execution directly. A difference is a defect in the
+/// wire format, not a story about how pipes are different.
+#[test]
+fn the_protocol_runner_conforms() {
+    let mut slow = shell("slow", "sleep 30");
+    slow.deadline = Duration::from_millis(100);
+    conformance(
+        &mut helper(),
+        Fixtures {
+            passing: shell("pass", "exit 0"),
+            failing: shell("fail", "exit 3"),
+            erroring: Job::new(
+                tree("error"),
+                vec!["/nonexistent/choir-not-a-command".into()],
+            ),
+            slow,
+        },
+    );
+}
+
+/// A runner pointed at the reference helper.
+fn helper() -> choir_queue::remote::ProtocolRunner {
+    choir_queue::remote::ProtocolRunner::new(vec![env!("CARGO_BIN_EXE_choir-ci-local").to_string()])
+}
+
+/// One `sh -c` helper that writes canned lines and exits, for the
+/// protocol failures a well-behaved helper never produces.
+fn canned(script: &str) -> choir_queue::remote::ProtocolRunner {
+    choir_queue::remote::ProtocolRunner::new(vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        // Read and discard the host's lines so it is never the writer
+        // that fails first, which would test the wrong thing.
+        format!("{script}; cat >/dev/null"),
+    ])
+}
+
+/// Everything a job carries has to survive the wire, or a remote
+/// executor silently tests something other than what was asked and
+/// returns an aligned, believed verdict about it.
+#[test]
+fn a_job_survives_the_round_trip_intact() {
+    let mut job = Job::new(tree("round trip"), vec!["cargo".into(), "test".into()]);
+    job.label = "change 7".into();
+    job.environment.insert("RUSTFLAGS".into(), "-O".into());
+    job.environment.insert("EMPTY".into(), String::new());
+    job.deadline = Duration::from_millis(1234);
+    job.may_write_cache = true;
+
+    let wire = choir_queue::remote::job_to_json(&job);
+    let back = choir_queue::remote::job_from_json(&wire).expect("the line parses");
+    assert_eq!(back, job, "a field was lost or changed crossing the wire");
+
+    // And the cache key survives it, which is the property that decides
+    // whether a remote cache hits on work this process already did.
+    assert_eq!(back.cache_key(), job.cache_key());
+}
+
+/// Same for verdicts, including the payloads that make two of them
+/// distinguishable at all.
+#[test]
+fn every_verdict_survives_the_round_trip() {
+    for verdict in [
+        Verdict::Passed,
+        Verdict::Failed { exit_code: Some(3) },
+        Verdict::Failed { exit_code: None },
+        Verdict::Errored {
+            provider: "firecracker".into(),
+            detail: "the vm did not boot".into(),
+        },
+        Verdict::TimedOut,
+    ] {
+        let wire = choir_queue::remote::verdict_to_json(&verdict);
+        let back = choir_queue::remote::verdict_from_json(&wire).expect("the line parses");
+        assert_eq!(back, verdict);
+        assert_eq!(
+            back.evicts(),
+            verdict.evicts(),
+            "the wire changed whether this verdict may eject a change"
+        );
+    }
+}
+
+/// A verdict this build does not understand is refused, never coerced.
+///
+/// Both neighbours are wrong in a way that matters: `Passed` lands
+/// untested work, and `Failed` ejects a change -- permanently, with its
+/// dependents -- on account of our own inability to read a line.
+#[test]
+fn an_unknown_verdict_is_refused_rather_than_guessed() {
+    let unknown = serde_json::json!({ "verdict": "probably_fine" });
+    let why = choir_queue::remote::verdict_from_json(&unknown).expect_err("must not parse");
+    assert!(why.contains("probably_fine"), "unhelpful refusal: {why}");
+
+    let mut ci = canned(r#"printf '{"name":"x","protocol":1}\n{"verdict":"probably_fine}\n'"#);
+    let out = ci.run(&[shell("pass", "exit 0")]);
+    assert!(
+        matches!(out, Err(ExecutorError::Protocol(_))),
+        "an unreadable verdict was not a protocol error: {out:?}"
+    );
+}
+
+/// A helper speaking another version is refused at the handshake,
+/// before it is handed a batch it would answer wrongly.
+#[test]
+fn a_version_mismatch_is_refused_at_the_handshake() {
+    let mut ci = canned(r#"printf '{"name":"future","protocol":99}\n'"#);
+    match ci.info() {
+        Err(ExecutorError::Protocol(why)) => {
+            assert!(
+                why.contains("99"),
+                "the refusal must name the version: {why}"
+            );
+        }
+        other => panic!("a version mismatch was not refused: {other:?}"),
+    }
+}
+
+/// A helper that never speaks is unavailable, not a protocol fault.
+///
+/// The distinction is the one the queue acts on: both stall the train,
+/// but only one of them is worth reporting as our outage rather than
+/// as a build we cannot talk to.
+#[test]
+fn a_silent_helper_is_unavailable() {
+    let mut ci = canned("exit 0");
+    assert!(
+        matches!(ci.info(), Err(ExecutorError::Unavailable(_))),
+        "a helper that said nothing was not reported as unavailable"
+    );
+
+    let mut missing =
+        choir_queue::remote::ProtocolRunner::new(vec!["/nonexistent/choir-helper".into()]);
+    assert!(matches!(missing.info(), Err(ExecutorError::Unavailable(_))));
+}
+
+/// The failure only a process boundary has: the far side dies with the
+/// batch half answered.
+///
+/// The answers it did give are about the jobs it gave them for, and
+/// throwing them away would waste real work -- so the tail is filled
+/// with `Errored`, which keeps the indices aligned and is true. The
+/// alternative, a short list, is refused wholesale by the queue.
+#[test]
+fn a_helper_that_dies_mid_batch_errors_only_the_jobs_it_left() {
+    let mut ci = canned(r#"printf '{"name":"flaky","protocol":1}\n{"verdict":"passed"}\n'"#);
+    let jobs = [
+        shell("a", "exit 0"),
+        shell("b", "exit 0"),
+        shell("c", "exit 0"),
+    ];
+    let out = ci.run(&jobs).expect("a short answer is not an error");
+
+    assert_eq!(out.len(), jobs.len(), "the batch lost its alignment");
+    assert_eq!(out[0], Verdict::Passed, "a real answer was discarded");
+    for verdict in &out[1..] {
+        assert!(
+            matches!(verdict, Verdict::Errored { .. }),
+            "an unanswered job got a verdict about the commit: {verdict:?}"
+        );
+        assert!(!verdict.evicts(), "a dead helper ejected a change");
+    }
+}
+
+/// The whole point, restated as a queue outcome: a helper that dies
+/// halfway lands the work it approved and ejects nobody.
+#[test]
+fn a_half_dead_helper_lands_the_prefix_and_rejects_nothing() {
+    let mut ci = canned(r#"printf '{"name":"flaky","protocol":1}\n{"verdict":"passed"}\n'"#);
+    // 30 lines of base so three changes edit disjoint regions and the
+    // merge itself is never what stops the train.
+    let base: String = (0..30).map(|i| format!("line {i}\n")).collect();
+    let changes: Vec<choir_queue::Change> = (0..3)
+        .map(|id: u64| {
+            let mut lines: Vec<String> = base.lines().map(String::from).collect();
+            lines[(3 * id) as usize] = format!("edited by {id}");
+            choir_queue::Change {
+                id,
+                workspace: format!("ws-{id}"),
+                base: base.clone(),
+                proposed: lines.join("\n") + "\n",
+                depends: vec![],
+            }
+        })
+        .collect();
+    let (report, _) = choir_queue::run_batch(&base, changes, &mut ci);
+
+    assert_eq!(report.merged, vec![0], "the approved change did not land");
+    assert!(
+        report.rejected.is_empty(),
+        "a dead helper rejected work: {:?}",
+        report.rejected
+    );
+    assert!(report.provider_error.is_some(), "the stall said nothing");
 }
