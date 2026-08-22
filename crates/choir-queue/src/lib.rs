@@ -269,6 +269,19 @@ impl MergeQueue {
         self.queue.is_empty()
     }
 
+    /// The current speculation window.
+    ///
+    /// Exposed because [`QueueReport::window_trace`] cannot answer for
+    /// it in every case: a drain that stops on a provider fault breaks
+    /// out before writing the trace, so a test reading only the report
+    /// asserts over an empty vector and passes whatever the window did.
+    /// One did, until a mutation that halved the window on a fault was
+    /// not caught.
+    #[must_use]
+    pub fn window(&self) -> usize {
+        self.window
+    }
+
     /// Drains the queue: speculatively merges up to `window` changes, runs CI
     /// on each against its speculative state, merges the passing prefix, and
     /// halves the window + retests behind on any failure.

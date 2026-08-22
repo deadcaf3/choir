@@ -272,9 +272,17 @@ fn a_provider_fault_ejects_nothing_and_stalls_the_train() {
 
 /// The window is the response to changes that fail. None of these did,
 /// so halving it would punish the queue for our own outage.
+///
+/// The first version of this test asked `window_trace`, which cannot
+/// answer: a provider fault breaks out of the drain before the trace is
+/// written, so the assertion ran over an empty vector and passed no
+/// matter what the window did. A mutation that halved the window on a
+/// fault survived it. Ask the queue directly, and prove the consequence
+/// as well -- a halved window would need two passes to clear a queue the
+/// full one clears in one.
 #[test]
 fn a_provider_fault_does_not_halve_the_window() {
-    let (mut queue, sequencer) = queue_of(4);
+    let (mut queue, sequencer) = queue_of(DEFAULT_WINDOW as u64);
     let mut ci = Synthetic::new(|_| Verdict::TimedOut);
     let report = queue.drain(&mut ci, &sequencer);
 
@@ -283,13 +291,26 @@ fn a_provider_fault_does_not_halve_the_window() {
         "nothing passed, so nothing may land"
     );
     assert!(report.rejected.is_empty(), "a timeout must not reject");
-    assert!(
-        !report
-            .window_trace
-            .iter()
-            .any(|w| *w < choir_queue::DEFAULT_WINDOW),
-        "the window shrank on a provider fault: {:?}",
-        report.window_trace
+    assert_eq!(
+        queue.window(),
+        DEFAULT_WINDOW,
+        "the window moved on a provider fault"
+    );
+
+    // And the consequence, so this does not rest on one getter: with the
+    // window intact every change fits in a single pass, which is one
+    // entry in the trace. Halved, it would take two.
+    let recovered = queue.drain(&mut Synthetic::passing(), &sequencer);
+    assert_eq!(
+        recovered.merged.len(),
+        DEFAULT_WINDOW,
+        "the requeued changes did not all come back"
+    );
+    assert_eq!(
+        recovered.window_trace.len(),
+        1,
+        "the whole queue did not fit in one pass, so the window had shrunk: {:?}",
+        recovered.window_trace
     );
 }
 
@@ -310,6 +331,11 @@ fn an_unreachable_executor_leaves_the_queue_whole() {
     );
     let why = report.provider_error.expect("an outage must be reported");
     assert!(why.contains("unavailable"), "unhelpful stall reason: {why}");
+    assert_eq!(
+        queue.window(),
+        DEFAULT_WINDOW,
+        "the window moved on an outage that judged nothing"
+    );
 }
 
 /// Index alignment is the batch call's whole contract. A provider that
@@ -329,5 +355,10 @@ fn a_verdict_count_mismatch_is_refused_rather_than_zipped() {
     assert!(
         why.contains("verdicts"),
         "the reason should name the miscount: {why}"
+    );
+    assert_eq!(
+        queue.window(),
+        DEFAULT_WINDOW,
+        "the window moved on a batch whose verdicts were all discarded"
     );
 }
