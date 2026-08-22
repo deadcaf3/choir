@@ -38,6 +38,7 @@ pub mod local;
 pub mod memory;
 pub mod remote;
 pub mod speculate;
+pub mod worktree;
 
 use choir_merge::Pipeline;
 use choir_oplog::MemLog;

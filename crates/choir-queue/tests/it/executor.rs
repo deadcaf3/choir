@@ -5,7 +5,7 @@
 //! which is how it stayed plausible for a year while being unable to
 //! carry a real executor.
 //!
-//! Three backends run the suite, and they prove different amounts.
+//! Four backends run the suite, and they prove different amounts.
 //! Read that honestly:
 //!
 //! - [`LocalRunner`] runs real child processes, so its pass is evidence
@@ -17,8 +17,13 @@
 //!   more than it is.
 //! - `ProtocolRunner` against `choir-ci-local` is `LocalRunner` behind a
 //!   pipe, so it proves the two agree across a process boundary. It is
-//!   the strongest of the three for that one question and says nothing
+//!   the strongest of the four for that one question and says nothing
 //!   the others do not about the rest.
+//! - `WorktreeRunner` materializes each job's subject as a git worktree
+//!   before running it, so its pass is evidence that provisioning per
+//!   job keeps the alignment and the four verdicts intact -- including
+//!   the case only it has, a subject that cannot be checked out, which
+//!   is `Errored` and evicts nobody.
 //!
 //! A microVM executor is a fourth helper behind the same protocol, and
 //! cannot be built here: Firecracker and Cloud Hypervisor both need
@@ -31,6 +36,7 @@
 use choir_hash::ContentHash;
 use choir_queue::executor::{CiExecutor, ExecutorError, Job, Synthetic, Verdict, PROTOCOL};
 use choir_queue::local::LocalRunner;
+use choir_queue::worktree::WorktreeRunner;
 use std::time::Duration;
 
 /// Jobs meaningful to one backend. A backend supplies its own, because
@@ -183,6 +189,143 @@ fn in_dir(dir: std::path::PathBuf) -> Job {
     let mut job = shell("directory", "test -e choir-directory-marker");
     job.directory = Some(dir);
     job
+}
+
+/// A repository with two commits, each holding a different `marker`.
+///
+/// The marker is what makes a verdict evidence about *which* tree ran:
+/// a job that only exits zero can pass in anybody's checkout.
+fn fixture_repo(tag: &str) -> (std::path::PathBuf, String, String) {
+    let dir = std::env::temp_dir().join(format!("choir-ci-worktree-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the fixture repository");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.name=fixture")
+            .arg("-c")
+            .arg("user.email=fixture@choir.invalid")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    run(&["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("marker"), "one").expect("write the first marker");
+    run(&["add", "marker"]);
+    run(&["commit", "-q", "-m", "one"]);
+    let one = run(&["rev-parse", "HEAD"]);
+    std::fs::write(dir.join("marker"), "two").expect("write the second marker");
+    run(&["commit", "-q", "-am", "two"]);
+    let two = run(&["rev-parse", "HEAD"]);
+    (dir, one, two)
+}
+
+/// A job addressed by a commit id rather than by a name.
+fn at_commit(oid: &str, script: &str) -> Job {
+    Job::new(
+        ContentHash::from_git_oid(oid).expect("the fixture oid is an oid"),
+        vec!["/bin/sh".into(), "-c".into(), script.into()],
+    )
+}
+
+#[test]
+fn the_worktree_runner_conforms() {
+    let (repo, one, _two) = fixture_repo("conformance");
+    let root = std::env::temp_dir().join(format!(
+        "choir-ci-checkouts-conformance-{}",
+        std::process::id()
+    ));
+    let mut slow = at_commit(&one, "sleep 30");
+    slow.deadline = Duration::from_millis(100);
+    conformance(
+        &mut WorktreeRunner::new(repo.clone(), root.clone()),
+        Fixtures {
+            passing: at_commit(&one, "exit 0"),
+            failing: at_commit(&one, "exit 3"),
+            // Well-formed and absent, so the failure is at checkout --
+            // which is the fault shape this backend adds and the one it
+            // must not report as a verdict about the change.
+            erroring: at_commit(&"f".repeat(40), "exit 0"),
+            slow,
+            in_directory: Some(in_dir(probe_dir("worktree"))),
+        },
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn every_job_in_a_batch_is_tested_against_its_own_tree() {
+    // The defect this backend exists to prevent: one checkout shared by
+    // a batch tests the last state N times and answers under N
+    // different subjects, well-formed and wrong.
+    let (repo, one, two) = fixture_repo("per-job");
+    let root =
+        std::env::temp_dir().join(format!("choir-ci-checkouts-per-job-{}", std::process::id()));
+    let mut ci = WorktreeRunner::new(repo.clone(), root.clone());
+    let verdicts = ci
+        .run(&[
+            at_commit(&one, "test \"$(cat marker)\" = one"),
+            at_commit(&two, "test \"$(cat marker)\" = two"),
+        ])
+        .expect("the batch runs");
+    assert_eq!(
+        verdicts,
+        vec![Verdict::Passed, Verdict::Passed],
+        "each job must see the tree its own subject names"
+    );
+
+    // And the checkouts do not accumulate: a bridge polling a forge
+    // runs this every minute forever.
+    let left: Vec<String> = std::fs::read_dir(&root)
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        left.is_empty(),
+        "every checkout is removed when its batch finishes, left: {left:?}"
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_checkout_a_crashed_run_left_behind_does_not_poison_the_next() {
+    // `worktree add` refuses a path that exists, so debris from a run
+    // that died between the checkout and the cleanup would fault every
+    // later batch at provisioning -- reported as an outage forever,
+    // until somebody cleaned up by hand.
+    let (repo, one, _two) = fixture_repo("debris");
+    let root =
+        std::env::temp_dir().join(format!("choir-ci-checkouts-debris-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    // The name is the contract between `provision` and this test: a
+    // batch of one puts its checkout in slot 0.
+    let stale = root.join(format!("{one}-0"));
+    std::fs::create_dir_all(&stale).expect("create the debris");
+    std::fs::write(stale.join("half-written"), b"from a run that died").expect("write the debris");
+
+    let mut ci = WorktreeRunner::new(repo.clone(), root.clone());
+    assert_eq!(
+        ci.run(std::slice::from_ref(&at_commit(&one, "test -e marker")))
+            .expect("the batch runs"),
+        vec![Verdict::Passed],
+        "the debris must be cleared, not reported as an outage"
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
