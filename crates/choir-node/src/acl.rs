@@ -849,6 +849,22 @@ pub fn api_denial(
                 None => vec![(Scope::Node, Level::Write)],
             }
         }
+        // D68. A round moves a branch on other people's behalf and
+        // spends CI per open proposal, so it sits with whoever owns the
+        // repository. A `write` holder can already move the branch, but
+        // only by pushing their own work to it; asking the queue to
+        // land everybody else's is a different thing to be trusted with.
+        ("POST", "/api/queue/run") => {
+            let repo = json()
+                .as_ref()
+                .and_then(|v| v.get("repo"))
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_repo);
+            match repo {
+                Some(repo) => vec![(Scope::Repo(repo), Level::Own)],
+                None => vec![(Scope::Node, Level::Own)],
+            }
+        }
         ("POST", "/api/submit") => match json() {
             Some(value) => submission_scopes(&value, &review_repo),
             None => vec![(Scope::Node, Level::Write)],

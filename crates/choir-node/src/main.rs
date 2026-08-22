@@ -10,6 +10,7 @@
 //! [--newcomer-audit path --newcomer-adjudications path]
 //! [--review-adjudications path]
 //! [--hooks-file path] [--journal path]
+//! [--ci-command path --queue-tree dir]
 //! [--request-log path [--request-log-max-bytes n]]
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--quota-push-bytes n] [--quota-workspaces n]
@@ -316,6 +317,8 @@ fn run() -> std::io::Result<()> {
         "--batch-limit",
         "--ready-min-free-bytes",
         "--site-repo",
+        "--ci-command",
+        "--queue-tree",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -712,6 +715,29 @@ fn run() -> std::io::Result<()> {
         }
         node.enable_platform(platform);
         eprintln!("platform API enabled ({count} actor keys)");
+
+        // D5/D68. The merge queue, and only when both halves are named:
+        // a CI command with nowhere to run it, or a tree with nothing to
+        // run in it, is a flag that would quietly do nothing.
+        match (flag_value("--ci-command"), flag_value("--queue-tree")) {
+            (Some(command), Some(tree)) => {
+                let spec =
+                    choir_queue::differential_ledger::load_command(std::path::Path::new(&command))
+                        .map_err(std::io::Error::other)?;
+                node.enable_queue(choir_node::queue_api::QueueConfig {
+                    tree: std::path::PathBuf::from(tree),
+                    command: spec,
+                });
+                eprintln!("merge queue enabled (POST /api/queue/run)");
+            }
+            (None, None) => {}
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--ci-command and --queue-tree are needed together",
+                ))
+            }
+        }
     } else if rest.iter().any(|a| a == "--require-scope") {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

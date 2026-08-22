@@ -377,3 +377,85 @@ fn the_round_reports_its_checks_under_the_node_key() {
     }
     std::fs::remove_dir_all(&f.work).ok();
 }
+
+/// The round through the endpoint, which is the only way anybody who is
+/// not this test can start one.
+///
+/// The queue's tree is made by the node here, not by the caller. That is
+/// the whole reason `--queue-tree` names a scratch directory rather than
+/// a checkout: a clone would look identical and silently void every
+/// landing, and the contract cannot be checked once it is wrong.
+#[test]
+fn the_endpoint_runs_a_round_and_makes_its_own_tree() {
+    let f = fixture("endpoint");
+    propose(&f, "one", "a.txt", "a\n");
+    propose(&f, "two", "b.txt", "b\n");
+
+    let script = f.work.join("ci.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "format_version": 1,
+            "program": "/bin/sh",
+            "args": ["-c", "test -e a.txt || test -e b.txt"],
+            "env": {},
+            "timeout_seconds": 60,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let spec = choir_queue::differential_ledger::load_command(&script).expect("the command loads");
+    let tree = f.work.join("queue-scratch");
+
+    let platform = f.node.platform().expect("the platform is enabled");
+    let before = platform.proposal_round(REPO, "main").unwrap().base;
+    let config = choir_node::queue_api::QueueConfig {
+        tree: tree.clone(),
+        command: spec,
+    };
+    let in_flight = choir_node::queue_api::InFlight::default();
+    let (status, body) = choir_node::queue_api::run(
+        &f.work.join("repos"),
+        platform,
+        &config,
+        &in_flight,
+        serde_json::json!({ "repo": REPO, "branch": "main" })
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(status, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["merged"], serde_json::json!([1, 2]), "{body}");
+    assert!(answer["stalled"].is_null(), "{body}");
+
+    // The branch moved, and the node built the tree it needed to move it.
+    let after = platform.proposal_round(REPO, "main").unwrap().base;
+    assert_ne!(after, before, "the branch did not move");
+    assert_eq!(answer["tip"], after, "the answer and the log disagree");
+    assert!(
+        tree.exists(),
+        "the node did not make its own queue tree under {}",
+        tree.display()
+    );
+
+    // A malformed request is refused before anything is built, and a
+    // branch nobody has is a 404 rather than a round over nothing.
+    for (payload, expected) in [
+        (serde_json::json!({ "repo": REPO }), 400),
+        (serde_json::json!({ "repo": REPO, "branch": "nope" }), 404),
+        (
+            serde_json::json!({ "repo": "no/such.git", "branch": "main" }),
+            404,
+        ),
+    ] {
+        let (status, body) = choir_node::queue_api::run(
+            &f.work.join("repos"),
+            platform,
+            &config,
+            &in_flight,
+            payload.to_string().as_bytes(),
+        );
+        assert_eq!(status, expected, "{payload} answered {status}: {body}");
+    }
+    std::fs::remove_dir_all(&f.work).ok();
+}

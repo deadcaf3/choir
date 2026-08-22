@@ -50,6 +50,7 @@ mod prepare;
 pub mod profile;
 pub mod provision;
 pub mod queue;
+pub mod queue_api;
 pub mod quota;
 mod readme;
 pub mod reject;
@@ -210,6 +211,14 @@ pub struct Node {
     port: u16,
     auth: std::sync::Arc<Option<AuthTable>>,
     platform: Option<std::sync::Arc<Platform>>,
+    /// What the merge queue needs before `/api/queue/run` can do
+    /// anything (D68). `None` answers 501: a node with no CI command
+    /// cannot decide whether a candidate is good, and a queue that
+    /// landed everything unchecked would be a worse `git push`.
+    queue: Option<queue_api::QueueConfig>,
+    /// The rounds running right now, so a second request for a target
+    /// already in flight is refused rather than raced.
+    queue_in_flight: std::sync::Arc<queue_api::InFlight>,
     scheme: &'static str,
     /// Loopback secret handed to repo hooks via env so their callback to
     /// `/api/git-update` passes the auth gate without user credentials.
@@ -387,6 +396,8 @@ impl Node {
             port,
             auth: std::sync::Arc::new(auth),
             platform: None,
+            queue: None,
+            queue_in_flight: std::sync::Arc::new(queue_api::InFlight::default()),
             site_repo: None,
             scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
@@ -522,6 +533,17 @@ impl Node {
             platform.attach_accounts(store.clone());
         }
         self.platform = Some(std::sync::Arc::new(platform));
+    }
+
+    /// Enables `POST /api/queue/run` (D5, D68).
+    ///
+    /// Without it the endpoint answers 501. There is deliberately no
+    /// timer: a node that spends CI on its own schedule surprises
+    /// whoever pays for it, and a round only a clock can start is one no
+    /// test can reach without waiting on wall-clock time. An operator's
+    /// cron, a hook, or a person decides the cadence.
+    pub fn enable_queue(&mut self, config: queue_api::QueueConfig) {
+        self.queue = Some(config);
     }
 
     /// The platform this node serves, or `None` if the platform API was
@@ -1118,6 +1140,8 @@ impl Node {
             let root = self.root.clone();
             let auth = self.auth.clone();
             let platform = self.platform.clone();
+            let queue = self.queue.clone();
+            let queue_in_flight = std::sync::Arc::clone(&self.queue_in_flight);
             let ui_cache = std::sync::Arc::clone(&self.ui_cache);
             let acl = self.acl_now();
             let internal_token = self.internal_token.clone();
@@ -1788,6 +1812,8 @@ impl Node {
                             push_acl: acl.as_deref(),
                             workspaces: metered.then_some(quotas.workspaces).flatten(),
                             body_limit: api_body_limit,
+                            queue: queue.as_ref(),
+                            queue_in_flight: &queue_in_flight,
                         },
                         request,
                     );
@@ -3522,6 +3548,8 @@ struct ApiRequestContext<'a> {
     push_acl: Option<&'a acl::Effective>,
     workspaces: Option<std::num::NonZeroU32>,
     body_limit: std::num::NonZeroU64,
+    queue: Option<&'a queue_api::QueueConfig>,
+    queue_in_flight: &'a queue_api::InFlight,
 }
 
 fn handle_api(
@@ -3537,6 +3565,8 @@ fn handle_api(
         push_acl,
         workspaces,
         body_limit,
+        queue,
+        queue_in_flight,
     } = context;
     let (status, body) = match platform {
         Some(p) => {
@@ -3571,6 +3601,22 @@ fn handle_api(
                     denial.status,
                     serde_json::json!({ "error": denial.reason }).to_string(),
                 )
+            } else if (method.as_str(), path.as_str()) == ("POST", "/api/queue/run") {
+                // Routed here rather than inside the platform for the
+                // same reason as `/api/workspace`: it needs the repo
+                // root, which the platform does not hold.
+                match queue {
+                    Some(config) => {
+                        queue_api::run(root, p, config, queue_in_flight, &req_body)
+                    }
+                    None => (
+                        501,
+                        serde_json::json!({
+                            "error": "this node was started without --ci-command, so it runs no queue"
+                        })
+                        .to_string(),
+                    ),
+                }
             } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace") {
                 match workspace_quota_refusal(p, user, workspaces, &req_body) {
                     Some(refusal) => refusal,
