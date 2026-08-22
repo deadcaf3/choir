@@ -108,6 +108,11 @@ fn fixture(tag: &str) -> Fixture {
 
 /// Pushes a proposal touching only `file`, so two of them merge cleanly.
 fn propose(f: &Fixture, topic: &str, file: &str, body: &str) -> String {
+    propose_to(f, "main", topic, file, body)
+}
+
+/// The same, aimed at `branch`.
+fn propose_to(f: &Fixture, branch: &str, topic: &str, file: &str, body: &str) -> String {
     git(&f.clone, &["checkout", "-q", "main"]);
     std::fs::write(f.clone.join(file), body).unwrap();
     git(&f.clone, &["add", "."]);
@@ -121,7 +126,7 @@ fn propose(f: &Fixture, topic: &str, file: &str, body: &str) -> String {
             "push",
             "-q",
             "origin",
-            &format!("HEAD:refs/for/main/alice/{topic}"),
+            &format!("HEAD:refs/for/{branch}/alice/{topic}"),
         ],
     );
     assert!(
@@ -179,6 +184,36 @@ fn a_round_is_the_proposals_in_the_view() {
     // Every change is aimed at the branch as it stands, not at whatever
     // the proposer happened to be on.
     assert!(round.changes().iter().all(|c| c.base == round.base));
+
+    // A proposal aimed somewhere else is not in this round. Without
+    // this the branch segment of `refs/for/<branch>/...` could be
+    // ignored entirely and every assertion above would still hold,
+    // while the queue merged work nobody proposed here.
+    assert!(git(&f.clone, &["push", "-q", "origin", "main:release"])
+        .status
+        .success());
+    let elsewhere = propose_to(&f, "release", "three", "c.txt", "c\n");
+    let round = platform
+        .proposal_round(REPO, "main")
+        .expect("still a round");
+    assert_eq!(
+        round.proposals.len(),
+        2,
+        "a proposal aimed at another branch was swept into this round: {:?}",
+        round.proposals
+    );
+    let other = platform
+        .proposal_round(REPO, "release")
+        .expect("release exists too");
+    assert_eq!(
+        other
+            .proposals
+            .iter()
+            .map(|p| p.head.as_str())
+            .collect::<Vec<_>>(),
+        vec![elsewhere.as_str()],
+        "the other branch's round is not its own proposal"
+    );
 
     // A branch nobody has is not an empty round: it is no round at all.
     assert!(platform.proposal_round(REPO, "nope").is_none());
