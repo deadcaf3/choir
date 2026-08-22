@@ -243,10 +243,12 @@ pub struct Node {
     /// join page offers a key field. Offering one on a node with no ssh
     /// surface collects a key nothing will ever use.
     ssh_enabled: bool,
-    /// The file table and the store's grants, merged, cached against the
-    /// generations of both. Rebuilt when either moves, so authorization
-    /// does not rebuild a table per request.
-    acl_merged: std::sync::RwLock<Option<(u64, u64, std::sync::Arc<acl::Acl>)>>,
+    /// The file table and the store's grants, merged and dated, cached
+    /// against the generations of both and the second it was dated at.
+    /// Rebuilt when any of the three moves, so authorization does not
+    /// rebuild a table per request and cannot serve a grant past its
+    /// deadline (D66).
+    acl_merged: std::sync::RwLock<Option<MergedAcl>>,
     /// Per-user ceilings on push size and workspace count (D37). Both
     /// unset = nothing is ever refused for quota, which is the pre-D37
     /// behaviour.
@@ -273,6 +275,25 @@ struct KeysWatch {
     path: PathBuf,
     mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
 }
+
+/// The `, N expired` half of the ACL startup and reload lines (D66),
+/// or nothing at all when no grant has a deadline in the past.
+///
+/// Said out loud because a deadline that has already passed reads
+/// exactly like a grant that was never written: the holder is refused,
+/// and the file still shows the line. A count is the cheapest thing that
+/// tells those two apart.
+fn expired_note(table: &acl::Acl) -> String {
+    match table.expired(accounts::now_secs()) {
+        0 => String::new(),
+        n => format!(", {n} expired"),
+    }
+}
+
+/// The cached merged table and everything it is only valid for: the ACL
+/// file's epoch, the account store's generation, and the second it was
+/// dated at (D66). All three have to match or it is rebuilt.
+type MergedAcl = (u64, u64, u64, std::sync::Arc<acl::Effective>);
 
 /// A watched ACL file, the mtime last parsed, and the table in force.
 struct AclWatch {
@@ -579,7 +600,11 @@ impl Node {
     /// out everyone including the operator.
     pub fn watch_acl_file(&mut self, path: PathBuf) -> Result<(), String> {
         let table = acl::Acl::load(&path)?;
-        eprintln!("acl enabled ({} grants)", table.len());
+        eprintln!(
+            "acl enabled ({} grants{})",
+            table.len(),
+            expired_note(&table)
+        );
         self.acl_watch = Some(std::sync::Arc::new(AclWatch {
             mtime: std::sync::Mutex::new(std::fs::metadata(&path).and_then(|m| m.modified()).ok()),
             table: std::sync::RwLock::new(std::sync::Arc::new(table)),
@@ -665,7 +690,11 @@ impl Node {
         *last = mtime;
         match acl::Acl::load(&watch.path) {
             Ok(table) => {
-                eprintln!("acl: reloaded ({} grants)", table.len());
+                eprintln!(
+                    "acl: reloaded ({} grants{})",
+                    table.len(),
+                    expired_note(&table)
+                );
                 *watch.table.write().expect("acl write lock") = std::sync::Arc::new(table);
                 watch
                     .epoch
@@ -684,28 +713,37 @@ impl Node {
     /// response filter, the D33 rate-limit exemption — keeps asking one
     /// table one question. The merge is cached against both sources'
     /// generations, so the ordinary request pays two atomic loads.
-    fn acl_now(&self) -> Option<std::sync::Arc<acl::Acl>> {
+    ///
+    /// The cache is keyed on the current second as well (D66), which is
+    /// the whole reason a deadline can be trusted here: a table merged
+    /// once and held would keep answering for a grant that has lapsed,
+    /// and no reload would happen to invalidate it because nothing about
+    /// the file changed. One rebuild per second per node is what that
+    /// costs, over a table of a few dozen rows.
+    fn acl_now(&self) -> Option<std::sync::Arc<acl::Effective>> {
         let watch = self.acl_watch.as_ref()?;
-        let file = std::sync::Arc::clone(&watch.table.read().expect("acl read lock"));
-        let Some(store) = self.accounts.as_ref() else {
-            return Some(file);
-        };
+        let now = crate::accounts::now_secs();
         let epoch = watch.epoch.load(std::sync::atomic::Ordering::Acquire);
-        let generation = store.generation();
-        if let Some((cached_epoch, cached_generation, table)) = self
+        let generation = self.accounts.as_ref().map_or(0, |store| store.generation());
+        if let Some((cached_epoch, cached_generation, cached_now, table)) = self
             .acl_merged
             .read()
             .expect("merged acl read lock")
             .as_ref()
         {
-            if *cached_epoch == epoch && *cached_generation == generation {
+            if *cached_epoch == epoch && *cached_generation == generation && *cached_now == now {
                 return Some(std::sync::Arc::clone(table));
             }
         }
-        let merged = std::sync::Arc::new(file.merged(&store.acl()));
+        let file = std::sync::Arc::clone(&watch.table.read().expect("acl read lock"));
+        let merged = match self.accounts.as_ref() {
+            Some(store) => file.merged(&store.acl()),
+            None => (*file).clone(),
+        };
+        let effective = std::sync::Arc::new(merged.at(now));
         *self.acl_merged.write().expect("merged acl write lock") =
-            Some((epoch, generation, std::sync::Arc::clone(&merged)));
-        Some(merged)
+            Some((epoch, generation, now, std::sync::Arc::clone(&effective)));
+        Some(effective)
     }
 
     /// Port the daemon is listening on.
@@ -2567,7 +2605,7 @@ fn basic_auth(request: &tiny_http::Request) -> Option<(String, String)> {
 /// round trip exists.
 fn handle_prepare(
     user: &str,
-    acl: Option<&acl::Acl>,
+    acl: Option<&acl::Effective>,
     body_limit: std::num::NonZeroU64,
     mut request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
@@ -2697,7 +2735,7 @@ fn handle_accounts(
     store: Option<&accounts::Accounts>,
     user: &str,
     invite: Option<&str>,
-    acl: Option<&acl::Acl>,
+    acl: Option<&acl::Effective>,
     body_limit: std::num::NonZeroU64,
     scheme: &'static str,
     mut request: tiny_http::Request,
@@ -3011,7 +3049,7 @@ fn handle_ui(
     platform: Option<&Platform>,
     cache: &ui::UiCache,
     user: &str,
-    acl: Option<&acl::Acl>,
+    acl: Option<&acl::Effective>,
     request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
     let platform = match platform {
@@ -3111,7 +3149,7 @@ struct BrowseContext<'a> {
     /// The authenticated reader, whose grants decide what renders.
     user: &'a str,
     /// The grant table, or `None` on a node that gates nothing.
-    acl: Option<&'a acl::Acl>,
+    acl: Option<&'a acl::Effective>,
     /// The view, for the pages served from it rather than from disk.
     platform: Option<&'a Platform>,
     /// Whether the browser may offer mutation controls.
@@ -3134,7 +3172,7 @@ struct BrowseContext<'a> {
 /// the ACL narrowing lives here and a second copy of it is a second
 /// thing to keep right -- the first time the two disagreed, one of the
 /// two surfaces would be disclosing more than the other.
-fn visible_view(platform: &Platform, acl: Option<&acl::Acl>, user: &str) -> String {
+fn visible_view(platform: &Platform, acl: Option<&acl::Effective>, user: &str) -> String {
     let raw = platform.handle_api("GET", "/api/view", &[]).1;
     match acl {
         Some(table) => acl::filter_response(table, user, "/api/view", &raw),
@@ -3462,7 +3500,7 @@ struct ApiRequestContext<'a> {
     root: &'a Path,
     base_url: &'a str,
     user: &'a str,
-    acl: Option<&'a acl::Acl>,
+    acl: Option<&'a acl::Effective>,
     /// The same table as `acl`, but supplied for the hook callbacks too,
     /// which deliberately receive `acl: None` (D60).
     ///
@@ -3473,7 +3511,7 @@ struct ApiRequestContext<'a> {
     /// `propose` grant is admitted at the smart-HTTP boundary before any
     /// refname exists. This field carries the table for that one check
     /// and nothing else.
-    push_acl: Option<&'a acl::Acl>,
+    push_acl: Option<&'a acl::Effective>,
     workspaces: Option<std::num::NonZeroU32>,
     body_limit: std::num::NonZeroU64,
 }

@@ -9,15 +9,30 @@
 //!
 //! The grammar is three whitespace-separated columns, `#` comments, blank
 //! lines ignored — the same shape as `--auth-file`, so the operator
-//! learns one file format rather than two:
+//! learns one file format rather than two — and an optional fourth column
+//! carrying a deadline (D66):
 //!
 //! ```text
-//! # <user>   <repo|*|@node>   <level>
+//! # <user>   <repo|*|@node>   <level>   [until=<unix seconds>]
 //! alice      owner/project    own
 //! alice      owner/notes      read
-//! bob        owner/project    write
+//! bob        owner/project    write     until=1788000000
 //! carol      @node            auditor
 //! ```
+//!
+//! **A grant with a deadline stops mattering when the deadline passes,**
+//! and nothing sweeps: the table is dated on every request, so a lapse
+//! takes effect on the next one. It lapses *downward*, not to nothing —
+//! `bob` above keeps whatever weaker grant another line gives him, which
+//! is what makes a time-locked `write` over a permanent `read` a usable
+//! way to lend a privilege rather than an account.
+//!
+//! This is the mechanism D24's T1 response names ("time-locks + bonds
+//! only") and did not have. It is deliberately **not** an answer to T1's
+//! *measurement* problem: a grant lives in this file and in the D36
+//! store, never in the op log, so a replayer still cannot see one. That
+//! is D29's design and [`choir_view::View::validate_submit`] says so —
+//! the ACL grant is the single element replay cannot rederive.
 //!
 //! Four levels, `read` < `propose` < `write` < `own`. `propose` arrived
 //! with D60 and is the one that lets a repository take contributions
@@ -79,7 +94,7 @@ pub enum Scope {
 /// is implied by [`Level::Own`].
 ///
 /// The implication is the derived [`Ord`], which follows declaration
-/// order, and [`Acl::allows`] compares with `>=`. A new level must
+/// order, and [`Effective::allows`] compares with `>=`. A new level must
 /// therefore be declared in strength order or every existing check
 /// silently changes meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,14 +154,48 @@ pub struct Denial {
     pub reason: String,
 }
 
-/// A parsed ACL file: which users hold which grants.
+/// One grant: what it covers, how strong it is, and when it stops (D66).
+///
+/// `until` is unix seconds and `None` means forever, which is every
+/// grant written before D66 and every one written since without the
+/// fourth column. It is absolute rather than a duration because a
+/// duration has to be measured from something, and a file that is read
+/// again on every reload has no issue time to measure from.
+#[derive(Debug, Clone)]
+struct Grant {
+    scope: Scope,
+    level: Level,
+    until: Option<u64>,
+}
+
+impl Grant {
+    /// Whether this grant is still in force at `now`, in unix seconds.
+    ///
+    /// Strict, so the grant is already dead in the second it names rather
+    /// than in the one after. That is the comparison an invite's expiry
+    /// makes in [`crate::accounts`], and the two are the same kind of
+    /// statement about the same timeline; a deadline that meant one
+    /// second more here than there would be a bug nobody could see.
+    fn live_at(&self, now: u64) -> bool {
+        self.until.is_none_or(|until| now < until)
+    }
+}
+
+/// A parsed ACL file: which users hold which grants, and until when.
 ///
 /// Empty means nobody holds anything, which under a configured ACL denies
 /// every request. That is the intended failure mode, and the reason a
 /// malformed file is never partially applied.
+///
+/// **This type answers no authorization question.** It is what the file
+/// says; [`Acl::at`] turns it into the [`Effective`] table that holds at
+/// one instant, and that is the only type with `allows` on it. The split
+/// is the whole D66 mechanism: a grant with a deadline is only safe if
+/// forgetting the deadline is impossible, and here forgetting it does not
+/// compile.
 #[derive(Debug, Default, Clone)]
 pub struct Acl {
-    grants: HashMap<String, Vec<(Scope, Level)>>,
+    grants: HashMap<String, Vec<Grant>>,
 }
 
 impl Acl {
@@ -157,8 +206,13 @@ impl Acl {
     /// Returns a message naming the offending line number. A file with
     /// one bad line does not parse at all: a partially applied ACL would
     /// silently revoke somebody's access.
+    ///
+    /// A deadline already in the past is **not** an error. It parses, and
+    /// then never matches: refusing the file would turn one stale line
+    /// into a node-wide lockout, which is a worse failure than the one it
+    /// would be reporting. [`Acl::expired`] is how the operator sees it.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let mut grants: HashMap<String, Vec<(Scope, Level)>> = HashMap::new();
+        let mut grants: HashMap<String, Vec<Grant>> = HashMap::new();
         for (index, raw) in text.lines().enumerate() {
             let number = index + 1;
             let line = raw.split('#').next().unwrap_or("").trim();
@@ -166,24 +220,85 @@ impl Acl {
                 continue;
             }
             let mut columns = line.split_whitespace();
-            let (Some(user), Some(target), Some(level), None) = (
+            let (Some(user), Some(target), Some(level), deadline, None) = (
+                columns.next(),
                 columns.next(),
                 columns.next(),
                 columns.next(),
                 columns.next(),
             ) else {
                 return Err(format!(
-                    "line {number}: expected three columns, `<user> <repo|*|@node> <read|write>`"
+                    "line {number}: expected three columns, `<user> <repo|*|@node> <read|write>`, \
+                     and optionally a fourth, `until=<unix seconds>`"
                 ));
             };
             let scope = parse_scope(target).map_err(|e| format!("line {number}: {e}"))?;
             let level = parse_level(&scope, level).map_err(|e| format!("line {number}: {e}"))?;
-            grants
-                .entry(user.to_string())
-                .or_default()
-                .push((scope, level));
+            let until = deadline
+                .map(parse_deadline)
+                .transpose()
+                .map_err(|e| format!("line {number}: {e}"))?;
+            grants.entry(user.to_string()).or_default().push(Grant {
+                scope,
+                level,
+                until,
+            });
         }
         Ok(Self { grants })
+    }
+
+    /// Whether `user` is granted anything at [`Scope::Node`] here, at any
+    /// level and whatever its deadline says.
+    ///
+    /// Deliberately **not** an [`Effective`] question. D36 forbids
+    /// self-service from issuing node-wide authority at all, and a
+    /// deadline must never be the thing that enforces that: a grant
+    /// dated into the past would answer "no" today and "yes" to anyone
+    /// who reads the same table with a different clock. The rule is
+    /// about what may be written, so it is asked of what is written.
+    #[must_use]
+    pub fn grants_node(&self, user: &str) -> bool {
+        self.grants
+            .get(user)
+            .is_some_and(|held| held.iter().any(|grant| matches!(grant.scope, Scope::Node)))
+    }
+
+    /// The grants that hold at `now`, in unix seconds — the only table
+    /// that answers an authorization question.
+    ///
+    /// Evaluated per request rather than cached across one, so a caller
+    /// holding this decides every question at a single instant. A grant
+    /// that lapses mid-request therefore lapses at the next request, not
+    /// between two checks of the same one.
+    #[must_use]
+    pub fn at(&self, now: u64) -> Effective {
+        let mut grants: HashMap<String, Vec<(Scope, Level)>> = HashMap::new();
+        for (user, held) in &self.grants {
+            let live: Vec<(Scope, Level)> = held
+                .iter()
+                .filter(|grant| grant.live_at(now))
+                .map(|grant| (grant.scope.clone(), grant.level))
+                .collect();
+            if !live.is_empty() {
+                grants.insert(user.clone(), live);
+            }
+        }
+        Effective { grants }
+    }
+
+    /// How many grants have a deadline that has already passed at `now`.
+    ///
+    /// Reported at startup and on reload so a line that is dead on
+    /// arrival — a typo in the deadline, or a file that outlived what it
+    /// was granting — is visible without an operator diffing behaviour
+    /// against intent.
+    #[must_use]
+    pub fn expired(&self, now: u64) -> usize {
+        self.grants
+            .values()
+            .flatten()
+            .filter(|grant| !grant.live_at(now))
+            .count()
     }
 
     /// Reads and parses the file at `path`.
@@ -210,6 +325,38 @@ impl Acl {
         self.len() == 0
     }
 
+    /// This table plus `other`'s grants, as one table.
+    ///
+    /// The union, never an intersection: the operator's file and the
+    /// self-service store (D36) each answer for the grants they issued,
+    /// and neither can withdraw the other's. Written so that every
+    /// enforcement point keeps consulting exactly one [`Acl`] — the two
+    /// sources are a detail of where grants come from, not a second
+    /// decision anybody has to remember to make.
+    #[must_use]
+    pub fn merged(&self, other: &Self) -> Self {
+        let mut grants = self.grants.clone();
+        for (user, held) in &other.grants {
+            grants.entry(user.clone()).or_default().extend(held.clone());
+        }
+        Self { grants }
+    }
+}
+
+/// The grants that hold right now: an [`Acl`] with every lapsed deadline
+/// already dropped (D66).
+///
+/// Produced only by [`Acl::at`], which is what makes the deadline
+/// impossible to skip — there is no way to reach `allows` holding a
+/// table nobody has dated. Every field of every method below behaves
+/// exactly as it did before D66 for a grant with no deadline, which is
+/// still most of them.
+#[derive(Debug, Default, Clone)]
+pub struct Effective {
+    grants: HashMap<String, Vec<(Scope, Level)>>,
+}
+
+impl Effective {
     /// Whether `user` holds at least `level` over `scope`.
     #[must_use]
     pub fn allows(&self, user: &str, scope: &Scope, level: Level) -> bool {
@@ -288,23 +435,6 @@ impl Acl {
         // express, so the two halves of the key cannot be confused for
         // one another however they are spelled.
         format!("{user}\u{1f}{}", held.join(","))
-    }
-
-    /// This table plus `other`'s grants, as one table.
-    ///
-    /// The union, never an intersection: the operator's file and the
-    /// self-service store (D36) each answer for the grants they issued,
-    /// and neither can withdraw the other's. Written so that every
-    /// enforcement point keeps consulting exactly one [`Acl`] — the two
-    /// sources are a detail of where grants come from, not a second
-    /// decision anybody has to remember to make.
-    #[must_use]
-    pub fn merged(&self, other: &Self) -> Self {
-        let mut grants = self.grants.clone();
-        for (user, held) in &other.grants {
-            grants.entry(user.clone()).or_default().extend(held.clone());
-        }
-        Self { grants }
     }
 
     /// The [`Denial`] for `user` over `scope` at `level`, or `None` when
@@ -392,6 +522,30 @@ fn parse_scope(target: &str) -> Result<Scope, String> {
         ));
     }
     Ok(Scope::Repo(repo))
+}
+
+/// Parses the optional fourth column, `until=<unix seconds>`.
+///
+/// A `key=value` shape rather than a bare number so the column says what
+/// it means in the file itself, and so a fifth thing to say about a grant
+/// does not have to be positional. An unknown key is an error rather than
+/// something ignored: a grant is the wrong place to be generous about
+/// what a line might have meant.
+///
+/// # Errors
+///
+/// Returns a message when the key is not `until`, or when the value is
+/// not a unix-seconds number.
+fn parse_deadline(column: &str) -> Result<u64, String> {
+    let Some(value) = column.strip_prefix("until=") else {
+        let key = column.split('=').next().unwrap_or(column);
+        return Err(format!(
+            "`{key}` is not a grant option; the only fourth column is `until=<unix seconds>`"
+        ));
+    };
+    value.parse().map_err(|_| {
+        format!("`{value}` is not a unix-seconds deadline; `until=` takes a whole number")
+    })
 }
 
 /// Parses the level column, which is spelled differently on `@node`
@@ -658,7 +812,7 @@ fn submission_scopes(
 /// row here — which should fail closed rather than ship unauthorized.
 #[must_use]
 pub fn api_denial(
-    acl: &Acl,
+    acl: &Effective,
     user: &str,
     method: &str,
     path: &str,
@@ -882,7 +1036,7 @@ pub fn disclosure(section: &str) -> Option<Disclosure> {
 /// log head and the binary serving them. A writer needs the head to bind
 /// a scoped submission, and neither says anything about a repository.
 #[must_use]
-pub fn filter_response(acl: &Acl, user: &str, path: &str, body: &str) -> String {
+pub fn filter_response(acl: &Effective, user: &str, path: &str, body: &str) -> String {
     if !(path.starts_with("/api/view") || path.starts_with("/api/reviews")) {
         return body.to_string();
     }
@@ -997,6 +1151,17 @@ fn retain_entries(
 mod tests {
     use super::*;
 
+    /// A fixed instant for every test that says nothing about deadlines,
+    /// so those tests read exactly as they did before D66.
+    const NOW: u64 = 1_700_000_000;
+
+    /// Parses and dates in one step (D66). Tests that are about the
+    /// grammar failing still call [`Acl::parse`] directly, because a file
+    /// that does not parse never reaches a clock.
+    fn parse(text: &str) -> Effective {
+        Acl::parse(text).expect("parses").at(NOW)
+    }
+
     /// The sections gated whole on a node-wide grant.
     fn node_wide_sections() -> impl Iterator<Item = &'static str> {
         SECTIONS
@@ -1015,7 +1180,7 @@ mod tests {
         assert!(Level::Propose < Level::Write);
         assert!(Level::Write < Level::Own);
 
-        let acl = Acl::parse("carol  owner/p  propose\n").expect("propose parses");
+        let acl = parse("carol  owner/p  propose\n");
         assert!(
             acl.allows_repo("carol", "owner/p", Level::Read),
             "propose must imply read"
@@ -1037,8 +1202,138 @@ mod tests {
         );
     }
 
+    /// The parity claim D66 rests on: three columns mean today exactly
+    /// what they meant before the fourth existed, at any instant.
+    #[test]
+    fn a_grant_with_no_deadline_is_the_grant_it_always_was() {
+        let text = "alice owner/p write\nbob @node auditor\n";
+        for now in [0, NOW, u64::MAX] {
+            let acl = Acl::parse(text).expect("parses").at(now);
+            assert!(
+                acl.allows_repo("alice", "owner/p", Level::Write),
+                "a deadline-free grant lapsed at {now}"
+            );
+            assert!(acl.allows("bob", &Scope::Node, Level::Read));
+        }
+        assert_eq!(Acl::parse(text).expect("parses").expired(u64::MAX), 0);
+    }
+
+    /// The boundary, stated on both sides: `until=N` is in force through
+    /// `N - 1` and gone at `N`, which is the comparison an invite makes.
+    #[test]
+    fn a_deadline_ends_the_grant_in_the_second_it_names() {
+        let table = Acl::parse("alice owner/p write until=1000\n").expect("parses");
+        assert!(table.at(999).allows_repo("alice", "owner/p", Level::Write));
+        assert!(!table.at(1000).allows_repo("alice", "owner/p", Level::Write));
+        assert!(!table.at(1001).allows_repo("alice", "owner/p", Level::Write));
+        assert_eq!(table.expired(999), 0);
+        assert_eq!(table.expired(1000), 1);
+    }
+
+    /// A lapse is a downgrade, not a lockout. This is what makes a
+    /// time-locked privilege lendable: the account survives it.
+    #[test]
+    fn a_lapsed_write_falls_back_to_a_permanent_read() {
+        let table =
+            Acl::parse("alice owner/p read\nalice owner/p write until=1000\n").expect("parses");
+        let after = table.at(2000);
+        assert!(
+            after.allows_repo("alice", "owner/p", Level::Read),
+            "the permanent grant went with the expiring one"
+        );
+        assert!(!after.allows_repo("alice", "owner/p", Level::Write));
+        // And the denial is the readable-repository one, not the
+        // does-not-exist one: withholding a level is not withholding the
+        // repository's existence from somebody who can still read it.
+        let denial = after
+            .check("alice", &Scope::Repo("owner/p".into()), Level::Write)
+            .expect("denied");
+        assert_eq!(denial.status, 403);
+    }
+
+    /// An expiring `own` returns the repository to the approval-weight
+    /// rule (D42) rather than leaving it owned by nobody-in-particular.
+    #[test]
+    fn an_expired_owner_is_not_an_owner() {
+        let table = Acl::parse("alice owner/p own until=1000\n").expect("parses");
+        assert!(table.at(999).has_owner("owner/p"));
+        assert!(!table.at(1000).has_owner("owner/p"));
+    }
+
+    /// The page cache is keyed on what the reader may see, so a lapse has
+    /// to move the key or a cached page outlives the grant that filtered
+    /// it.
+    #[test]
+    fn a_lapse_moves_the_cache_key() {
+        let table =
+            Acl::parse("alice owner/p read\nalice owner/q read until=1000\n").expect("parses");
+        assert_ne!(
+            table.at(999).cache_key("alice"),
+            table.at(1000).cache_key("alice"),
+            "a reader who lost a repository kept the key that cached it"
+        );
+        assert_eq!(
+            table.at(1000).cache_key("alice"),
+            Acl::parse("alice owner/p read\n")
+                .expect("parses")
+                .at(1000)
+                .cache_key("alice"),
+            "a lapsed grant left a trace in the key of a reader who no longer holds it"
+        );
+    }
+
+    /// Both sources keep their deadlines through the merge (D36).
+    #[test]
+    fn merging_keeps_each_side_of_the_deadline() {
+        let file = Acl::parse("alice owner/p read\n").expect("parses");
+        let store = Acl::parse("alice owner/q write until=1000\n").expect("parses");
+        let merged = file.merged(&store);
+        assert!(merged.at(999).allows_repo("alice", "owner/q", Level::Write));
+        assert!(!merged
+            .at(1000)
+            .allows_repo("alice", "owner/q", Level::Write));
+        assert!(merged.at(1000).allows_repo("alice", "owner/p", Level::Read));
+    }
+
+    /// D36's rule is about what may be *written*, so an expired node
+    /// grant is still a node grant and still refused.
+    #[test]
+    fn an_expired_node_grant_is_still_a_node_grant() {
+        let table = Acl::parse("mallory @node auditor until=1000\n").expect("parses");
+        assert!(
+            table.grants_node("mallory"),
+            "a deadline in the past made node scope look un-granted"
+        );
+        assert!(!table.at(2000).allows("mallory", &Scope::Node, Level::Read));
+    }
+
+    /// The fourth column is checked, not guessed at: a key that is not
+    /// `until`, a value that is not a number, and a fifth column are all
+    /// refusals naming the line.
+    #[test]
+    fn the_fourth_column_is_only_a_deadline() {
+        for (bad, why) in [
+            ("alice o/r read expires=1000\n", "a key that is not `until`"),
+            ("alice o/r read 1000\n", "a bare number with no key"),
+            ("alice o/r read until=soon\n", "a value that is not seconds"),
+            ("alice o/r read until=-1\n", "a negative deadline"),
+            ("alice o/r read until=1000 extra\n", "a fifth column"),
+        ] {
+            let error = Acl::parse(bad).expect_err(why);
+            assert!(error.starts_with("line 1: "), "{why}: {error}");
+        }
+        // A deadline already in the past is not a parse error: one stale
+        // line must not be a node-wide lockout.
+        let stale = Acl::parse("alice o/r read until=1\n").expect("a past deadline parses");
+        assert_eq!(stale.expired(NOW), 1);
+        assert!(!stale.at(NOW).allows_repo("alice", "o/r", Level::Read));
+    }
+
     #[test]
     fn the_grammar_accepts_the_documented_file_and_nothing_else() {
+        // Counted on the file's own table rather than a dated one: this
+        // test is about the grammar, and `len` is a fact about what was
+        // written, not about what holds now.
         let acl = Acl::parse(
             "# a comment\n\
              alice   owner/project   write\n\
@@ -1076,14 +1371,14 @@ mod tests {
 
     #[test]
     fn both_spellings_of_a_repository_are_one_grant() {
-        let acl = Acl::parse("alice owner/project.git write").expect("parses");
+        let acl = parse("alice owner/project.git write");
         assert!(acl.allows_repo("alice", "owner/project", Level::Write));
         assert!(acl.allows_repo("alice", "owner/project.git", Level::Write));
     }
 
     #[test]
     fn write_implies_read_and_read_does_not_imply_write() {
-        let acl = Acl::parse("alice o/r write\nbob o/r read").expect("parses");
+        let acl = parse("alice o/r write\nbob o/r read");
         assert!(acl.allows_repo("alice", "o/r", Level::Read));
         assert!(acl.allows_repo("bob", "o/r", Level::Read));
         assert!(!acl.allows_repo("bob", "o/r", Level::Write));
@@ -1096,7 +1391,7 @@ mod tests {
     /// check for something weaker.
     #[test]
     fn own_implies_write_and_write_does_not_imply_own() {
-        let acl = Acl::parse("alice o/r own\nbob o/r write").expect("parses");
+        let acl = parse("alice o/r own\nbob o/r write");
         assert!(acl.allows_repo("alice", "o/r", Level::Read));
         assert!(acl.allows_repo("alice", "o/r", Level::Write));
         assert!(acl.allows_repo("alice", "o/r", Level::Own));
@@ -1129,14 +1424,14 @@ mod tests {
     /// to prevent.
     #[test]
     fn the_wildcard_does_not_reach_the_node() {
-        let acl = Acl::parse("bob * write").expect("parses");
+        let acl = parse("bob * write");
         assert!(acl.allows_repo("bob", "anything/at-all", Level::Write));
         assert!(!acl.allows("bob", &Scope::Node, Level::Read));
     }
 
     #[test]
     fn an_unreadable_repository_is_not_found_and_a_readable_one_is_forbidden() {
-        let acl = Acl::parse("bob o/r read").expect("parses");
+        let acl = parse("bob o/r read");
         let unreadable = acl
             .check("bob", &Scope::Repo("o/other".into()), Level::Read)
             .expect("denied");
@@ -1202,12 +1497,12 @@ mod tests {
         let (repo, level) =
             git_requirement("GET", "/o/r.git/info/refs?service=git-receive-pack").expect("maps");
 
-        let reader = Acl::parse("bob o/r read").expect("parses");
+        let reader = parse("bob o/r read");
         assert!(reader
             .check("bob", &Scope::Repo(repo.clone()), level)
             .is_some());
 
-        let proposer = Acl::parse("carol o/r propose").expect("parses");
+        let proposer = parse("carol o/r propose");
         assert!(
             proposer.check("carol", &Scope::Repo(repo), level).is_none(),
             "a propose grant must reach the advertisement, or the level is unusable"
@@ -1345,7 +1640,7 @@ mod tests {
     /// of the four sections that name it.
     #[test]
     fn a_reader_granted_one_repository_sees_only_that_repository() {
-        let acl = Acl::parse("alice owner/mine read").expect("parses");
+        let acl = parse("alice owner/mine read");
         let filtered = filter_response(&acl, "alice", "/api/view", &sample_view());
         let value: serde_json::Value = serde_json::from_str(&filtered).expect("json");
         let keys = |section: &str| -> Vec<String> {
@@ -1376,7 +1671,7 @@ mod tests {
     /// needs to keep working are not gated at all.
     #[test]
     fn the_node_sections_need_the_node_grant_and_the_log_head_never_does() {
-        let repo_only = Acl::parse("alice owner/mine write").expect("parses");
+        let repo_only = parse("alice owner/mine write");
         let narrowed = filter_response(&repo_only, "alice", "/api/view", &sample_view());
         for section in node_wide_sections() {
             assert!(
@@ -1388,7 +1683,7 @@ mod tests {
         // neither says anything about a repository.
         assert!(narrowed.contains("b3-head") && narrowed.contains("\"build\""));
 
-        let auditor = Acl::parse("carol @node auditor").expect("parses");
+        let auditor = parse("carol @node auditor");
         let whole = filter_response(&auditor, "carol", "/api/view", &sample_view());
         for section in node_wide_sections() {
             assert!(
@@ -1408,7 +1703,7 @@ mod tests {
     /// would have withheld.
     #[test]
     fn the_pending_queue_is_filtered_like_the_view() {
-        let acl = Acl::parse("alice owner/mine read").expect("parses");
+        let acl = parse("alice owner/mine read");
         let body = serde_json::json!({
             "pending": {
                 "r-mine": { "target_ref": "owner/mine.git:refs/heads/main", "reviewers": ["x"] },
@@ -1427,9 +1722,9 @@ mod tests {
     /// have invalidated it.
     #[test]
     fn the_cache_key_moves_with_the_reader_and_with_their_grants() {
-        let before = Acl::parse("alice owner/mine read\nbob owner/mine read").expect("parses");
+        let before = parse("alice owner/mine read\nbob owner/mine read");
         assert_ne!(before.cache_key("alice"), before.cache_key("bob"));
-        let after = Acl::parse("alice owner/mine write\nbob owner/mine read").expect("parses");
+        let after = parse("alice owner/mine write\nbob owner/mine read");
         assert_ne!(
             before.cache_key("alice"),
             after.cache_key("alice"),
@@ -1437,8 +1732,8 @@ mod tests {
         );
         // Order in the file is not identity: the same grants written the
         // other way round are the same key.
-        let reordered = Acl::parse("alice owner/b read\nalice owner/a read").expect("parses");
-        let forward = Acl::parse("alice owner/a read\nalice owner/b read").expect("parses");
+        let reordered = parse("alice owner/b read\nalice owner/a read");
+        let forward = parse("alice owner/a read\nalice owner/b read");
         assert_eq!(reordered.cache_key("alice"), forward.cache_key("alice"));
     }
 
@@ -1447,7 +1742,7 @@ mod tests {
     /// the mismatch that produced it.
     #[test]
     fn an_unrecognized_body_or_path_is_left_alone() {
-        let acl = Acl::parse("alice owner/mine read").expect("parses");
+        let acl = parse("alice owner/mine read");
         assert_eq!(
             filter_response(&acl, "alice", "/api/view", "not json"),
             "not json"

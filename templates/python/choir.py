@@ -222,8 +222,12 @@ class Choir:
         between operators, so `ops/agent` reads `ops`), who vouches for
         them and whether each edge points both ways. D24 wants key age,
         vouches, scoped grants and bonds for Sybil resistance; two of the
-        four exist and are reported as inputs, because a score would be a
-        weighting of one against the other that nobody has measured
+        four are reported here as inputs, because a score would be a
+        weighting of one against the other that nobody has measured.
+        Scoped grants exist since D66 and are absent from this reading on
+        purpose: a time-locked grant lives in the node's authorization
+        files rather than in the log, so nothing counted out of the view
+        can see one
 
         Arguments become the query string: channel.
         """

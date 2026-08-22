@@ -16,8 +16,11 @@
 //! D24's Sybil resistance wants key age, vouches, scoped grants and
 //! bonds. Two of the four are persisted now — key age as
 //! [`KeyBinding::bound_at`], and the vouch graph as [`View::vouches`]
-//! (D65) — and this reads both. Scoped grants and bonds still do not
-//! exist, and are still named rather than implied.
+//! (D65) — and this reads both. Bonds do not exist. Scoped grants do,
+//! as of D66, but not in a form this can report: a time-locked grant
+//! lives in the ACL file and the account store, never in the log, so it
+//! is invisible to a reading of the view and stays named here rather
+//! than counted.
 //!
 //! There is deliberately no score. Two inputs are not more scoreable
 //! than one: any weighting of age against vouches is a claim about how

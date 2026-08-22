@@ -755,8 +755,11 @@ pub const ENDPOINTS: &[Endpoint] = &[
                   the point. `vouches` names the operator whose graph it is (a vouch is between \
                   operators, so `ops/agent` reads `ops`), who vouches for them and whether each \
                   edge points both ways. D24 wants key age, vouches, scoped grants and bonds for \
-                  Sybil resistance; two of the four exist and are reported as inputs, because a \
-                  score would be a weighting of one against the other that nobody has measured",
+                  Sybil resistance; two of the four are reported here as inputs, because a \
+                  score would be a weighting of one against the other that nobody has \
+                  measured. Scoped grants exist since D66 and are absent from this reading on \
+                  purpose: a time-locked grant lives in the node's authorization files rather \
+                  than in the log, so nothing counted out of the view can see one",
         mcp: Some(McpTool {
             name: "choir_profile",
             input_schema: PROFILE_MCP_SCHEMA,
@@ -788,7 +791,9 @@ pub const ENDPOINTS: &[Endpoint] = &[
         method: "POST",
         path: "/api/accounts/invite",
         purpose: "Mint a single-use, expiring invite for a new account and the grants it will \
-                  hold; needs a node-wide write grant, and can never issue one",
+                  hold; needs a node-wide write grant, and can never issue one. A grant may \
+                  carry its own deadline, `owner/repo write until=<unix seconds>` (D66); the \
+                  invite's expiry bounds redemption, never what redemption hands over",
         mcp: None,
     },
     Endpoint {

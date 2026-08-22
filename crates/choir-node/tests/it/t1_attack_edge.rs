@@ -1,11 +1,15 @@
 //! D24 T1 attack-edge rehearsal.
 //!
 //! Of D24's four T1 inputs, key age (D24) and the vouch graph (D65) are
-//! persisted; scoped privilege grants and bonds are not, so the numeric
-//! T1 tripwire is still not measurable. This test fixes the boundary
-//! that does exist: operator registration admits a fresh key
-//! immediately, while an existing protected ref still needs one exact
-//! review carrying approval weight from two distinct operators.
+//! persisted; bonds are not, and the scoped grants D66 added are not
+//! *log-visible*, since a time-locked grant lives in the ACL file and
+//! the account store rather than in the log. So the numeric T1 tripwire
+//! is still not measurable, and what changed with D66 is that T1's
+//! pre-committed response ("time-locks + bonds only") now has a
+//! time-lock to reach for. This test fixes the boundary that does exist:
+//! operator registration admits a fresh key immediately, while an
+//! existing protected ref still needs one exact review carrying approval
+//! weight from two distinct operators.
 //!
 //! Persisting a vouch deliberately did not move that boundary, and the
 //! rehearsal now carries a standing vouch so that claim is asserted

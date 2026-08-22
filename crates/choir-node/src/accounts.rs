@@ -25,7 +25,7 @@
 //! [`crate::acl::api_denial`], [`crate::acl::filter_response`], D33's
 //! `@node` exemption and the `choir-ssh` shim all grade an issued
 //! credential without any of them knowing this module exists. The store
-//! can never grant [`Scope::Node`]: node-wide authority stays operator-
+//! can never grant [`crate::acl::Scope::Node`]: node-wide authority stays operator-
 //! authored in the ACL file, so self-service cannot mint itself an
 //! auditor or a rate-limit exemption.
 //!
@@ -47,7 +47,7 @@ use std::sync::RwLock;
 use choir_identity::ActorKey;
 use choir_oplog::ContentHash;
 
-use crate::acl::{Acl, Scope};
+use crate::acl::Acl;
 
 /// Version of the on-disk store. Every persisted struct carries one
 /// (invariant 1); new fields are additive and old files still load.
@@ -1214,14 +1214,20 @@ fn acl_text(state: &State) -> String {
 /// # Errors
 ///
 /// Returns a message when the pair does not parse, or when it names
-/// [`Scope::Node`]: node-wide authority is what D33's rate-limit
+/// [`crate::acl::Scope::Node`]: node-wide authority is what D33's rate-limit
 /// exemption and D29's whole-node reads key on, so it stays operator-
 /// authored in the ACL file and is never self-service.
 pub fn validate_grant(user: &str, grant: &str) -> Result<String, String> {
     let mut columns = grant.split_whitespace();
-    let (Some(target), Some(level), None) = (columns.next(), columns.next(), columns.next()) else {
+    let (Some(target), Some(level), deadline, None) = (
+        columns.next(),
+        columns.next(),
+        columns.next(),
+        columns.next(),
+    ) else {
         return Err(format!(
-            "`{grant}` is not a grant; write `<repo|*> <read|write>`"
+            "`{grant}` is not a grant; write `<repo|*> <read|write>`, optionally followed by \
+             `until=<unix seconds>`"
         ));
     };
     if target == "@node" || target.starts_with('@') {
@@ -1229,16 +1235,19 @@ pub fn validate_grant(user: &str, grant: &str) -> Result<String, String> {
             "`@node` cannot be issued: node-wide authority stays in the ACL file (D36)".to_string(),
         );
     }
-    let table = Acl::parse(&format!("{user} {target} {level}\n"))?;
+    let tail = deadline.map(|d| format!(" {d}")).unwrap_or_default();
+    let table = Acl::parse(&format!("{user} {target} {level}{tail}\n"))?;
     // Belt and braces against a future spelling of the node scope that
     // the check above does not recognize: ask the parsed table rather
-    // than the text.
-    if table.allows(user, &Scope::Node, crate::acl::Level::Read) {
+    // than the text. Asked of the file's own words rather than of a
+    // dated table, so a grant issued with a deadline in the past cannot
+    // pass this check by being expired rather than by being allowed.
+    if table.grants_node(user) {
         return Err(
             "`@node` cannot be issued: node-wide authority stays in the ACL file (D36)".to_string(),
         );
     }
-    Ok(format!("{target} {level}"))
+    Ok(format!("{target} {level}{tail}"))
 }
 
 /// Checks a readable display name (D46).
@@ -1444,7 +1453,12 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Seconds since the Unix epoch, or 0 if the clock is before it.
-fn now_secs() -> u64 {
+///
+/// The one clock authorization reads. An invite's expiry (D36) and a
+/// grant's deadline (D66) are the same kind of statement about the same
+/// timeline, so they are answered by the same function rather than by
+/// two that could drift.
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

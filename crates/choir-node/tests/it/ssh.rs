@@ -396,6 +396,76 @@ fn the_acl_gates_ssh_the_way_it_gates_http() {
     std::fs::remove_dir_all(&work).ok();
 }
 
+/// A deadline is enforced on this transport too (D66).
+///
+/// It gets its own test because the ssh shim is a *third* reader of the
+/// ACL, after the HTTP request path and the ownership gate. The compiler
+/// found it when `allows` moved off the undated type; no list of
+/// enforcement points had it, and nothing else here would notice if it
+/// stopped dating its table. The deadlines are absolute -- 2001 and 2033
+/// -- so nothing sleeps and nothing depends on when this runs.
+#[test]
+fn a_lapsed_grant_does_not_push_over_ssh() {
+    let work = workdir("acl-deadline");
+    let (node, _port, handoff) = node_with_repo(&work);
+    let acl = work.join("acl");
+    std::fs::write(
+        &acl,
+        "lapsed agents/demo read\n\
+         lapsed agents/demo write until=1000000000\n\
+         live   agents/demo write until=2000000000\n",
+    )
+    .unwrap();
+    let root = work.join("repos");
+    let run = |user: &str, command: &str| {
+        let flags = [
+            "--root".to_string(),
+            root.display().to_string(),
+            "--user".to_string(),
+            user.to_string(),
+            "--acl-file".to_string(),
+            acl.display().to_string(),
+            "--handoff".to_string(),
+            handoff.display().to_string(),
+        ];
+        let args: Vec<&str> = flags.iter().map(String::as_str).collect();
+        shim(&args, command)
+    };
+
+    let denied = run("lapsed", "git-receive-pack 'agents/demo.git'");
+    assert!(
+        !denied.status.success(),
+        "a write grant that expired in 2001 pushed over ssh"
+    );
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("no write grant"),
+        "the refusal was not the ACL's: {:?}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+
+    // The permanent read underneath it survives, which is the difference
+    // between lending a privilege and deleting an account.
+    let allowed = run("lapsed", "git-upload-pack 'agents/demo.git'");
+    assert!(
+        allowed.status.success(),
+        "the permanent read went with the lapsed write: {:?}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+
+    // A deadline still ahead is an ordinary write grant. Asserted as
+    // "not refused by the ACL" rather than as success, because what
+    // `receive-pack` does on a closed stdin is git's business.
+    let live = run("live", "git-receive-pack 'agents/demo.git'");
+    assert!(
+        !String::from_utf8_lossy(&live.stderr).contains("no write grant"),
+        "a deadline in 2033 refused a push: {:?}",
+        String::from_utf8_lossy(&live.stderr)
+    );
+
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}
+
 /// A forced command that forgot `--acl-file` still enforces the ACL,
 /// because the daemon named it in the handoff. The alternative is one
 /// mistyped `authorized_keys` line quietly turning into a key that

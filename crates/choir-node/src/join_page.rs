@@ -207,23 +207,35 @@ fn expires_in_words(expires_at: u64, now: u64) -> String {
 /// `agents/demo.git read` is precise and means nothing to somebody who
 /// has never used this node. "read agents/demo" is the same fact in the
 /// reader's language.
-fn grant_in_words(grant: &str) -> String {
+///
+/// A deadline (D66) is said out loud here rather than left in the fourth
+/// column, because the one person who most needs to know that an access
+/// ends is the one being handed it, and this page is the only place they
+/// are ever shown what they were given.
+fn grant_in_words(grant: &str, now: u64) -> String {
     let mut columns = grant.split_whitespace();
     let (Some(target), Some(level)) = (columns.next(), columns.next()) else {
         return grant.to_string();
     };
+    let until = columns
+        .next()
+        .and_then(|column| column.strip_prefix("until="))
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|deadline| format!(", until {}", expires_in_words(deadline, now)))
+        .unwrap_or_default();
     let target = target.strip_suffix(".git").unwrap_or(target);
     let what = if target == "*" {
         "every repository on this node".to_string()
     } else {
         target.to_string()
     };
-    match level {
+    let can = match level {
         "write" => format!("push to {what}"),
         "propose" => format!("propose changes to {what}"),
         "read" => format!("read {what}"),
         other => format!("{other} {what}"),
-    }
+    };
+    format!("{can}{until}")
 }
 
 /// The invite, shown to somebody who holds its secret.
@@ -291,7 +303,7 @@ fn offer(
         h.push_str("<tr><td>");
         h.push_str(if n == 0 { "you may" } else { "" });
         h.push_str("</td><td>");
-        h.push_str(&esc(&grant_in_words(grant)));
+        h.push_str(&esc(&grant_in_words(grant, now)));
         h.push_str("</td></tr>");
     }
     h.push_str("</tbody></table>");
@@ -717,21 +729,50 @@ mod tests {
     /// A grant is a table row in the ACL and a sentence on this page.
     #[test]
     fn grants_are_rendered_in_the_readers_language() {
+        let now = 1_000_000;
         assert_eq!(
-            super::grant_in_words("agents/demo.git write"),
+            super::grant_in_words("agents/demo.git write", now),
             "push to agents/demo"
         );
         assert_eq!(
-            super::grant_in_words("agents/demo read"),
+            super::grant_in_words("agents/demo read", now),
             "read agents/demo"
         );
         assert_eq!(
-            super::grant_in_words("* write"),
+            super::grant_in_words("* write", now),
             "push to every repository on this node"
         );
         // Anything unrecognised is shown as it stands rather than dropped:
         // a grant a reader cannot see is a permission they did not accept.
-        assert_eq!(super::grant_in_words("weird"), "weird");
+        assert_eq!(super::grant_in_words("weird", now), "weird");
+    }
+
+    /// A grant that ends says so here (D66), in the same words the
+    /// invite's own expiry uses. Being handed an access without being
+    /// told it lapses is the failure this rules out.
+    #[test]
+    fn a_grant_that_ends_says_when() {
+        let now = 1_000_000;
+        assert_eq!(
+            super::grant_in_words("agents/demo.git write until=1864000", now),
+            "push to agents/demo, until in about 10 days"
+        );
+        assert_eq!(
+            super::grant_in_words("agents/demo.git write until=1003600", now),
+            "push to agents/demo, until in about 60 minutes"
+        );
+        // Already past, and still shown: the row is the record of what
+        // the issuer chose, not a guess at what is useful today.
+        assert_eq!(
+            super::grant_in_words("agents/demo.git write until=1", now),
+            "push to agents/demo, until expired"
+        );
+        // A fourth column the ACL parser would refuse never reaches a
+        // reader as a half-sentence.
+        assert_eq!(
+            super::grant_in_words("agents/demo.git write nonsense", now),
+            "push to agents/demo"
+        );
     }
 
     /// The ssh key is the reason this parser exists rather than

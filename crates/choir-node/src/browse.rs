@@ -3605,7 +3605,9 @@ pub(crate) fn profile_page(
     h.push_str(
         " other operator(s). A vouch authorizes nothing on its own: no threshold \
                 reads it, and there is no score. D24 wants key age, vouches, scoped grants \
-                and bonds -- the last two are still absent.</p></section>",
+                and bonds. Bonds do not exist; scoped grants do (D66), but they live in the \
+                node's authorization files rather than in the log, so no number here can \
+                count them.</p></section>",
     );
 
     Rendered {

@@ -450,7 +450,11 @@ impl Shim {
             (None, None) => None,
         };
         if let Some(table) = table {
-            if let Some(denial) = table.check(
+            // Dated here rather than at load, the same rule the HTTP
+            // chokepoint follows (D66): a grant with a lapsed deadline
+            // must not reach a check, and ssh gets one process per
+            // connection so there is nothing cached to go stale.
+            if let Some(denial) = table.at(crate::accounts::now_secs()).check(
                 &self.user,
                 &acl::Scope::Repo(acl::normalize_repo(&repo)),
                 level,

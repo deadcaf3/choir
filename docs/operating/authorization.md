@@ -16,16 +16,17 @@ credential reaches every repository, which is the first section below.
 
 ## Per-repository authorization (D29)
 
-`--acl-file` gates each repository per user. Three whitespace-separated columns, `#` comments, and the same append-a-line discipline as the keys file:
+`--acl-file` gates each repository per user. Three whitespace-separated columns, an optional fourth, `#` comments, and the same append-a-line discipline as the keys file:
 
 ```text
-# <user>   <repo|*|@node>   <level>
+# <user>   <repo|*|@node>   <level>    [until=<unix seconds>]
 alice      owner/demo       write
 bob        owner/demo       read
 bob        owner/notes      write
 carol      *                read
 dave       @node            auditor
 erin       owner/demo       propose
+frank      owner/demo       write      until=1788000000
 ```
 
 `read` clones and fetches; `propose` adds opening a review, and nothing else; `write` adds pushing any other ref, workspace provisioning, and submitting ops that touch that repository; `own` adds authorizing a landing on a protected ref (D42, below). There is no `admin`: the only repository-scoped administrative action that exists is the landing gate, and `own` is it.
@@ -42,6 +43,29 @@ myself     @node  write
 `*` covers every repository and never covers `@node`. `@node` is the node itself: `auditor` reads `/api/log` and `/api/ref-agreement`, which are gated rather than filtered because the log is a hash chain and the attestation covers the complete ref state. `@node write` is needed for ops that name no repository, such as key bindings.
 
 Vouching (D65) is the one node-wide op that needs only `@node auditor`. It names no repository, and it reports what its own signer thinks rather than changing anything a repository holds -- the same reasoning that puts a verdict at `read`. Requiring `write` would mean the web of trust could only be written by identities that can already move any ref on the node, which is not a web. The consequence is worth stating plainly: on an ACL-gated node, an agent granted a single repository cannot vouch and cannot see the graph. If you want somebody in it, grant them `@node auditor`, which is read-only.
+
+## A grant that ends (D66)
+
+The fourth column is a deadline in unix seconds, and it is the difference between lending a privilege and handing over an account. `frank` above may push until that second and not after it; nothing sweeps and no restart is needed, because the table is dated on every request.
+
+A deadline **lapses downward, not to nothing**. Give somebody a permanent `read` and a `write` that ends, and when the write ends they are a reader, not a stranger:
+
+```text
+frank      owner/demo       read
+frank      owner/demo       write      until=1788000000
+```
+
+That is the shape worth using. A single expiring grant leaves the holder with a repository that answers `404`, which reads to them like it was deleted.
+
+Three things not to be surprised by:
+
+- **A deadline already in the past is not an error.** The file parses, the line never matches, and the startup and reload lines say `acl enabled (7 grants, 1 expired)` so it is visible rather than silent. Refusing the file would turn one stale line into a node-wide lockout.
+- **The deadline is absolute, not a duration.** The file is re-read on every change and has no issue time to count from, so `until=` is a moment, not a length. `date -v+90d +%s` on macOS, `date -d '+90 days' +%s` on GNU.
+- **It is the node's clock that decides.** A node whose clock is wrong grants or refuses accordingly, exactly as it already does for invite expiry. This is the same trade, not a new one.
+
+`own` may carry a deadline too, and when it lapses the repository has no owner: the landing gate returns to the approval-weight rule (D42), rather than to nobody being able to land.
+
+This is the mechanism D24's T1 tripwire response names -- "time-locks + bonds only" -- and did not have until now. It is deliberately **not** an answer to T1's measurement problem: a grant lives in this file and in the self-service store, never in the op log, so a replayer still cannot see one. That is D29's design, and it is the single element replay cannot rederive.
 
 Fail closed: with the flag set, anything not granted is refused. A repository you cannot read answers `404` rather than `403`, so a denial never confirms that it exists. The flag requires `--auth-file`, since an ACL over anonymous requests would grade everyone the same. A malformed file refuses to start; a malformed *edit* keeps the previous table and complains, so a typo cannot silently revoke access.
 
@@ -156,5 +180,6 @@ That answers, once, with the token to clone with (`https://bob:<TOKEN>@<HOST>/ow
 
 Two rules worth knowing before you rely on it:
 
+- **An issued grant may carry a deadline too**, in the same spelling: `{"grants":["owner/demo write until=1788000000"]}`. The join page says so in words the holder can act on ("push to owner/demo, until in about 90 days"), which is the point -- being handed an access without being told it ends is worse than not being handed it. What an invite's own expiry does *not* do is limit what it issues: the invite is single-use and short-lived, and the grants it hands over last as long as their own fourth column says, or forever without one.
 - **`@node` can never be issued.** Node-wide authority (the auditor role, and the rate-limit exemption that comes with it) stays in the ACL file you write by hand, so self-service cannot escalate itself. The flag needs both `--auth-file` and `--acl-file` for the same reason: a token issued with nothing to grade it against is a token to every repository.
 - **The generated `authorized_keys` is generated.** Point `sshd` at it once (`AuthorizedKeysFile /path/to/repos/.choir/authorized_keys` in `sshd_config`, alongside the account setup in [Git over SSH](transports.md#git-over-ssh-d31)) and never edit it: it is rewritten on every account change, and a hand-added line disappears with the next one.

@@ -2168,7 +2168,7 @@ impl ChoirPolicy {
     /// owners" is precisely the branch that falls back to the weaker
     /// rule: a gate that loses its policy file must not quietly demote
     /// itself to the policy it was configured to replace.
-    fn acl_now(&self) -> Result<Option<crate::acl::Acl>, String> {
+    fn acl_now(&self) -> Result<Option<crate::acl::Effective>, String> {
         let guard = self.acl_file.lock().expect("acl file lock");
         let Some(path) = guard.as_ref() else {
             return Ok(None);
@@ -2182,15 +2182,17 @@ impl ChoirPolicy {
             )
             .encode()
         })?;
-        crate::acl::Acl::parse(&text).map(Some).map_err(|e| {
-            Rejection::new(
-                Code::PolicyUnavailable,
-                format!("acl file unparseable: {e}"),
-                "ask the operator to repair the ACL file; the ownership gate refuses rather \
+        crate::acl::Acl::parse(&text)
+            .map(|table| Some(table.at(crate::accounts::now_secs())))
+            .map_err(|e| {
+                Rejection::new(
+                    Code::PolicyUnavailable,
+                    format!("acl file unparseable: {e}"),
+                    "ask the operator to repair the ACL file; the ownership gate refuses rather \
                  than enforcing a table it only partly understands",
-            )
-            .encode()
-        })
+                )
+                .encode()
+            })
     }
 
     /// The ACL user this submission acts as, when one can be established
@@ -2392,7 +2394,7 @@ impl ChoirPolicy {
     /// So `alice choir/choir.git own` grants the landing answer and never
     /// the approval one, and `alice/reviewer choir/choir.git own` grants
     /// the reverse. Neither is wrong and nothing warns which was meant.
-    /// Granting the wrong spelling still flips [`crate::acl::Acl::has_owner`],
+    /// Granting the wrong spelling still flips [`crate::acl::Effective::has_owner`],
     /// which switches the repository out of the approval-weight rule —
     /// so a mismatched grant does not fall back, it narrows the gate to a
     /// rule the intended actor cannot satisfy.
@@ -2403,7 +2405,7 @@ impl ChoirPolicy {
     #[allow(clippy::too_many_arguments)]
     fn owner_assented(
         &self,
-        acl: &crate::acl::Acl,
+        acl: &crate::acl::Effective,
         repo: &str,
         name: &str,
         commit: &ContentHash,
@@ -2501,7 +2503,7 @@ impl ChoirPolicy {
     /// `(ref, commit)`, which is the pre-D43 push behaviour.
     fn owner_approved(
         &self,
-        acl: &crate::acl::Acl,
+        acl: &crate::acl::Effective,
         repo: &str,
         name: &str,
         commit: &ContentHash,
@@ -4185,7 +4187,10 @@ impl Platform {
 /// `None` whenever the question does not arise: a body this does not
 /// understand, or a pusher who holds `write` and is therefore not
 /// limited to proposals.
-pub(crate) fn proposal_denial(acl: &crate::acl::Acl, body: &[u8]) -> Option<crate::acl::Denial> {
+pub(crate) fn proposal_denial(
+    acl: &crate::acl::Effective,
+    body: &[u8],
+) -> Option<crate::acl::Denial> {
     let json: serde_json::Value = serde_json::from_slice(body).ok()?;
     let field = |key: &str| {
         json.get(key)

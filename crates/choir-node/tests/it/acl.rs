@@ -6,6 +6,12 @@
 //! can show is the part that matters — that a credential granted one
 //! repository cannot reach another one, that read cannot push, and that
 //! the hook callback is not a way around either.
+//!
+//! D66 adds a deadline to a grant, and the served node is the only place
+//! that can show the thing worth showing about it: that the merged table
+//! the request path caches cannot serve a grant past the second it
+//! lapses. The deadlines here are absolute and in the past, so nothing
+//! sleeps and nothing is timing-dependent.
 
 use choir_identity::{ActorKey, Registry};
 use choir_node::{AuthTable, Node, Platform};
@@ -995,4 +1001,122 @@ fn one_proposer_cannot_reach_another_proposers_ref() {
         "carol's proposal moved: {}",
         view["refs"]
     );
+}
+
+/// A grant whose deadline has passed does not authorize, and the weaker
+/// permanent grant beneath it still does (D66).
+///
+/// Driven through the git chokepoint rather than the API, because the
+/// chokepoint reads the *merged, cached* table — the one place a lapse
+/// could be served from a table nobody re-dated.
+#[test]
+fn a_lapsed_grant_stops_authorizing_and_leaves_the_one_beneath_it() {
+    // 2001-09-09 and 2033-05-18. Both absolute, so this test tells the
+    // same story on every machine on every day it runs.
+    let (base, _, work, acl_path) = served(
+        "deadline",
+        "alice  agents/one  write\n\
+         bob    agents/one  read\n\
+         bob    agents/one  write  until=1000000000\n\
+         carol  agents/one  write  until=2000000000\n",
+        &["agents/one.git"],
+    );
+    let host = base.trim_start_matches("http://").to_string();
+    seed(&work, &base, "alice:a", "agents/one.git");
+
+    // bob's write lapsed in 2001; his read did not.
+    let bob = format!("http://bob:b@{host}/agents/one.git");
+    let bobdir = work.join("bob");
+    assert!(
+        git(&work, &["clone", "-q", &bob, bobdir.to_str().unwrap()])
+            .status
+            .success(),
+        "the permanent read went with the lapsed write"
+    );
+    std::fs::write(bobdir.join("b.txt"), "bob\n").unwrap();
+    assert!(git(&bobdir, &["add", "."]).status.success());
+    assert!(git(&bobdir, &["commit", "-q", "-m", "bob"])
+        .status
+        .success());
+    assert!(
+        !git(&bobdir, &["push", "-q", "origin", "HEAD:bob"])
+            .status
+            .success(),
+        "a write grant that expired in 2001 pushed"
+    );
+
+    // carol's runs to 2033, so hers is an ordinary write grant.
+    let carol = format!("http://carol:c@{host}/agents/one.git");
+    let caroldir = work.join("carol");
+    assert!(
+        git(&work, &["clone", "-q", &carol, caroldir.to_str().unwrap()])
+            .status
+            .success()
+    );
+    std::fs::write(caroldir.join("c.txt"), "carol\n").unwrap();
+    assert!(git(&caroldir, &["add", "."]).status.success());
+    assert!(git(&caroldir, &["commit", "-q", "-m", "carol"])
+        .status
+        .success());
+    let push = git(&caroldir, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        push.status.success(),
+        "a live deadline refused a push: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    // And a deadline is not a one-way street for the operator: rewriting
+    // the file gives bob his write back, through the same reload path
+    // any other grant change takes.
+    rewrite(
+        &acl_path,
+        "alice  agents/one  write\n\
+         bob    agents/one  read\n\
+         bob    agents/one  write  until=2000000000\n",
+    );
+    let mut restored = false;
+    for _ in 0..50 {
+        if git(&bobdir, &["push", "-q", "origin", "HEAD:bob"])
+            .status
+            .success()
+        {
+            restored = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(restored, "a rewritten deadline never took effect");
+}
+
+/// The API path reads the same table, so a lapsed node-wide grant closes
+/// the node-wide sections the same way deleting the line would (D66).
+#[test]
+fn a_lapsed_node_grant_closes_the_node_wide_sections() {
+    let (base, _, _, _) = served(
+        "deadline-node",
+        "alice  @node  auditor\n\
+         bob    @node  auditor  until=1000000000\n",
+        &["agents/one.git"],
+    );
+    let url = format!("{base}/api/view");
+
+    let (status, live) = curl(&["-u", "alice:a", &url]);
+    assert_eq!(status, 200);
+    assert!(
+        live["vouches"].is_object(),
+        "an auditor with no deadline lost a node-wide section: {live}"
+    );
+
+    let (status, lapsed) = curl(&["-u", "bob:b", &url]);
+    assert_eq!(status, 200, "the lapsed auditor lost the endpoint itself");
+    for section in ["vouches", "bindings"] {
+        assert!(
+            lapsed[section].is_null(),
+            "a node grant that expired in 2001 still served {section}: {lapsed}"
+        );
+        assert!(
+            !live[section].is_null(),
+            "{section} is not a node-wide section, so it proves nothing here"
+        );
+    }
 }
