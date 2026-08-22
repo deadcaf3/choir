@@ -689,3 +689,242 @@ fn an_unreachable_executor_reads_as_a_provider_fault() {
         "not finding out and running out of time got different answers"
     );
 }
+
+// ---- A verdict per change, through the D5 queue -----------------------
+
+/// The fixture repository plus a throwaway checkout root for the
+/// executor, which must live outside the repository (a worktree added
+/// inside it is untracked files in every job's view).
+fn queue_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    // Tags are prefixed `spec-` at every call site because `tempdir`
+    // deletes what it finds: these modules share a process and run on
+    // parallel threads, so a tag another test already uses is not a
+    // collision that shows up as a name clash but as git dying inside
+    // a directory somebody else just removed.
+    let repo = tempdir(tag);
+    fixture(&repo);
+    let checkouts = std::env::temp_dir().join(format!(
+        "choir-queue-checkouts-{tag}-{}",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&checkouts).ok();
+    (repo, checkouts)
+}
+
+/// The property the train path cannot have: one red change does not
+/// make every open PR red.
+///
+/// `build_train` merges everything and asks CI once, so a failure is
+/// reported against all of them and nothing lands. The queue tests each
+/// change on the state produced by the changes ahead of it, so the
+/// green prefix lands and the blame is specific.
+#[test]
+fn a_red_change_does_not_make_the_ones_ahead_of_it_red() {
+    let (repo, checkouts) = queue_fixture("spec-blame");
+    let base = rev(&repo, "main");
+    // Passes on base + PR 1, fails once PR 2's file is in the tree.
+    let spec = command_file(&repo, "test ! -e b.txt");
+    let mut ci = choir_queue::worktree::WorktreeRunner::new(repo.clone(), checkouts.clone());
+    let round = choir_bridge::queue::run_queue(
+        &repo,
+        &base,
+        &[(1, "pr-1".to_string()), (2, "pr-2".to_string())],
+        &spec,
+        &mut ci,
+    )
+    .expect("the round runs");
+
+    assert_eq!(
+        round.outcomes,
+        vec![
+            (1, choir_bridge::queue::PrOutcome::Landed),
+            (2, choir_bridge::queue::PrOutcome::Failed),
+        ]
+    );
+    assert_eq!(round.stalled, None, "a red build is not a stall");
+    assert_ne!(round.tip, base, "the green prefix landed");
+    // And the tip really is the tree that passed: PR 1's file in, PR
+    // 2's out. Asserting on the outcomes alone would pass for a queue
+    // that reported correctly and landed the wrong commit.
+    let listing = std::process::Command::new("git")
+        .args(["ls-tree", "--name-only", "-r", &round.tip])
+        .current_dir(&repo)
+        .output()
+        .expect("git runs");
+    let names = String::from_utf8_lossy(&listing.stdout);
+    assert!(names.contains("a.txt"), "PR 1 landed: {names}");
+    assert!(!names.contains("b.txt"), "PR 2 did not land: {names}");
+    std::fs::remove_dir_all(&repo).ok();
+    std::fs::remove_dir_all(&checkouts).ok();
+}
+
+/// A conflict is evicted first-class and the change behind it still
+/// lands in the same round (D6).
+#[test]
+fn a_conflict_does_not_block_the_change_behind_it() {
+    let (repo, checkouts) = queue_fixture("spec-conflict");
+    let base = rev(&repo, "main");
+    let spec = command_file(&repo, "exit 0");
+    let mut ci = choir_queue::worktree::WorktreeRunner::new(repo.clone(), checkouts.clone());
+    let round = choir_bridge::queue::run_queue(
+        &repo,
+        &base,
+        &[
+            (1, "pr-1".to_string()),
+            (3, "pr-conflict".to_string()),
+            (2, "pr-2".to_string()),
+        ],
+        &spec,
+        &mut ci,
+    )
+    .expect("the round runs");
+
+    assert_eq!(
+        round.outcomes,
+        vec![
+            (1, choir_bridge::queue::PrOutcome::Landed),
+            (3, choir_bridge::queue::PrOutcome::Conflicted),
+            (2, choir_bridge::queue::PrOutcome::Landed),
+        ],
+        "the conflict is evicted and the queue carries on (stalled: {:?})",
+        round.stalled
+    );
+    std::fs::remove_dir_all(&repo).ok();
+    std::fs::remove_dir_all(&checkouts).ok();
+}
+
+/// An executor that cannot answer stalls the round and blames nobody:
+/// every change is still waiting, and the base has not moved.
+#[test]
+fn an_executor_that_cannot_answer_leaves_every_change_waiting() {
+    struct Dead;
+    impl choir_queue::executor::CiExecutor for Dead {
+        fn info(
+            &mut self,
+        ) -> Result<choir_queue::executor::ExecutorInfo, choir_queue::executor::ExecutorError>
+        {
+            Ok(choir_queue::executor::ExecutorInfo {
+                name: "dead".to_string(),
+                protocol: choir_queue::executor::PROTOCOL,
+            })
+        }
+        fn run(
+            &mut self,
+            _jobs: &[choir_queue::executor::Job],
+        ) -> Result<Vec<choir_queue::executor::Verdict>, choir_queue::executor::ExecutorError>
+        {
+            Err(choir_queue::executor::ExecutorError::Unavailable(
+                "the provider went away".to_string(),
+            ))
+        }
+    }
+
+    let (repo, checkouts) = queue_fixture("spec-stall");
+    let base = rev(&repo, "main");
+    let spec = command_file(&repo, "exit 0");
+    let round = choir_bridge::queue::run_queue(
+        &repo,
+        &base,
+        &[(1, "pr-1".to_string()), (2, "pr-2".to_string())],
+        &spec,
+        &mut Dead,
+    )
+    .expect("a stall is a report, not an error");
+
+    assert_eq!(
+        round.outcomes,
+        vec![
+            (1, choir_bridge::queue::PrOutcome::Waiting),
+            (2, choir_bridge::queue::PrOutcome::Waiting),
+        ],
+        "an outage is a verdict about nobody"
+    );
+    assert_eq!(round.tip, base, "nothing landed");
+    assert!(round
+        .stalled
+        .expect("the round says why it stopped")
+        .contains("the provider went away"));
+    std::fs::remove_dir_all(&repo).ok();
+    std::fs::remove_dir_all(&checkouts).ok();
+}
+
+/// A helper built against another protocol is refused before a batch is
+/// handed to it, so a well-formed answer about the wrong thing never
+/// becomes a landing.
+#[test]
+fn a_queue_refuses_an_executor_from_another_protocol() {
+    struct FromTheFuture;
+    impl choir_queue::executor::CiExecutor for FromTheFuture {
+        fn info(
+            &mut self,
+        ) -> Result<choir_queue::executor::ExecutorInfo, choir_queue::executor::ExecutorError>
+        {
+            Ok(choir_queue::executor::ExecutorInfo {
+                name: "ahead".to_string(),
+                protocol: choir_queue::executor::PROTOCOL + 1,
+            })
+        }
+        fn run(
+            &mut self,
+            jobs: &[choir_queue::executor::Job],
+        ) -> Result<Vec<choir_queue::executor::Verdict>, choir_queue::executor::ExecutorError>
+        {
+            Ok(vec![choir_queue::executor::Verdict::Passed; jobs.len()])
+        }
+    }
+
+    let (repo, checkouts) = queue_fixture("spec-protocol");
+    let base = rev(&repo, "main");
+    let spec = command_file(&repo, "exit 0");
+    let error = choir_bridge::queue::run_queue(
+        &repo,
+        &base,
+        &[(1, "pr-1".to_string())],
+        &spec,
+        &mut FromTheFuture,
+    )
+    .expect_err("a protocol we do not speak is refused");
+    assert!(
+        error.contains("ahead"),
+        "the refusal names the executor: {error}"
+    );
+    std::fs::remove_dir_all(&repo).ok();
+    std::fs::remove_dir_all(&checkouts).ok();
+}
+
+/// The per-change status map, asserted as a correspondence rather than
+/// as a table of literals: a table passes when two rows are swapped and
+/// reads back exactly as it was written.
+#[test]
+fn only_a_change_at_fault_is_asked_to_do_something() {
+    use choir_bridge::queue::{pr_report, PrOutcome};
+    let all = [
+        PrOutcome::Landed,
+        PrOutcome::AlreadyLanded,
+        PrOutcome::Conflicted,
+        PrOutcome::Failed,
+        PrOutcome::Unsafe,
+        PrOutcome::Ejected { on: 7 },
+        PrOutcome::Waiting,
+    ];
+    for outcome in &all {
+        let report = pr_report(outcome);
+        let is_in = matches!(outcome, PrOutcome::Landed | PrOutcome::AlreadyLanded);
+        assert_eq!(
+            report.green, is_in,
+            "green means the change is in: {outcome:?}"
+        );
+        // `failure` is the state that asks an author to act, so it
+        // belongs exactly to the outcomes that are about their change.
+        let their_fault = matches!(
+            outcome,
+            PrOutcome::Conflicted | PrOutcome::Failed | PrOutcome::Unsafe
+        );
+        assert_eq!(
+            report.state == "failure",
+            their_fault,
+            "only a change at fault gets a failure: {outcome:?}"
+        );
+        assert!(!report.description.is_empty());
+    }
+}

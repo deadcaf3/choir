@@ -293,6 +293,15 @@ struct CiConfig {
     /// Helper to speak the D18 protocol to, or `None` to run the
     /// command as a child of this process.
     runner: Option<PathBuf>,
+    /// Check each change on its own speculative state through the D5
+    /// merge queue, instead of checking one train commit once.
+    ///
+    /// It sits here rather than beside it because it is only
+    /// meaningful with a command: the forge answers about a ref, so
+    /// asking it once per train member would be the same answer
+    /// repeated under different names. Being a field of this struct is
+    /// what makes that structural instead of a rule to remember.
+    speculate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +321,7 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
     let mut state = None;
     let mut ci_command = None;
     let mut ci_runner = None;
+    let mut speculate = false;
     let mut positional = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -343,6 +353,7 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
                 }
                 command = Some(next_path(it.next(), "--differential-command")?);
             }
+            "--speculate" => speculate = true,
             "--ci-command" => {
                 if ci_command.is_some() {
                     return Err("--ci-command may be supplied only once".to_string());
@@ -385,11 +396,20 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
     // invocation error it is.
     let ci = match (ci_command, ci_runner) {
         (None, None) => None,
-        (Some(command), runner) => Some(CiConfig { command, runner }),
+        (Some(command), runner) => Some(CiConfig {
+            command,
+            runner,
+            speculate,
+        }),
         (None, Some(_)) => {
             return Err("--ci-runner needs --ci-command to have something to run".to_string());
         }
     };
+    if speculate && ci.is_none() {
+        return Err(
+            "--speculate needs --ci-command: the forge cannot answer per change".to_string(),
+        );
+    }
     Ok(QueueArgs {
         positional,
         land,
@@ -423,6 +443,9 @@ fn parse_queue_args(args: &[String]) -> Result<QueueArgs, String> {
 /// With `ci`, the check signal is ours (D18) instead of the forge's:
 /// nothing speculative is pushed, no `choir/train` branch appears on the
 /// remote, and the verdict comes from the executor the operator named.
+/// With `ci.speculate` on top of that, the round goes through the D5
+/// merge queue instead ([`speculative_round`]) and every change gets
+/// its own verdict rather than sharing the train's.
 fn queue_round(
     app_id: &str,
     pem: &Path,
@@ -474,6 +497,20 @@ fn queue_round(
         .iter()
         .map(|p| (p.number, format!("refs/choirq/pr/{}", p.number)))
         .collect();
+    if let (Some(config), Some(spec)) = (ci.filter(|c| c.speculate), ci_spec.as_ref()) {
+        return speculative_round(
+            &token,
+            repo,
+            workdir,
+            &url,
+            &base,
+            &base_branch,
+            &heads,
+            spec,
+            config,
+            land,
+        );
+    }
     let train = choir_bridge::queue::build_train(workdir, &base, &heads)?;
     if let Some(config) = differential {
         for (entry_id, result) in choir_bridge::queue::run_train_differentials(
@@ -663,6 +700,94 @@ fn queue_round(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// One round through the D5 merge queue: a verdict per change.
+///
+/// The train path asks CI once about one commit, so one red change
+/// makes every open PR red and nothing lands. The queue tests each
+/// change against the state produced by everything ahead of it, lands
+/// the green prefix, blames the change that failed, and narrows the
+/// window. That is the difference D5 is about, and it needs an
+/// executor of ours: the forge answers about a ref, not about a change.
+///
+/// **Decision inputs are structured only** (Rule of Two), as in
+/// [`queue_round`]: PR numbers, git oids, and a
+/// [`choir_bridge::queue::PrOutcome`] decide everything. A stall
+/// reason is a string an executor chose, so it is printed for an
+/// operator and never posted or read by a branch.
+#[allow(clippy::too_many_arguments)]
+fn speculative_round(
+    token: &str,
+    repo: &str,
+    workdir: &Path,
+    url: &str,
+    base: &str,
+    base_branch: &str,
+    heads: &[(u64, String)],
+    spec: &choir_queue::differential_ledger::CommandSpec,
+    config: &CiConfig,
+    land: bool,
+) -> Result<(), String> {
+    // Checkouts go outside the repository on purpose: a worktree added
+    // inside it is untracked files in every job's view of the tree.
+    let checkouts =
+        std::env::temp_dir().join(format!("choir-queue-checkouts-{}", std::process::id()));
+    let mut executor: Box<dyn choir_queue::executor::CiExecutor> = match &config.runner {
+        // The default provider must materialize each subject itself:
+        // every train member is a different tree, so a runner working
+        // in one directory would test the last one repeatedly.
+        None => Box::new(choir_queue::worktree::WorktreeRunner::new(
+            workdir.to_path_buf(),
+            checkouts,
+        )),
+        Some(path) => {
+            let program = path
+                .to_str()
+                .ok_or_else(|| format!("--ci-runner path {path:?} is not UTF-8"))?;
+            Box::new(choir_queue::remote::ProtocolRunner::new(vec![
+                program.to_string()
+            ]))
+        }
+    };
+    let round = choir_bridge::queue::run_queue(workdir, base, heads, spec, executor.as_mut())?;
+    if let Some(why) = &round.stalled {
+        // An operator's line. Nothing here reaches a status or a branch.
+        eprintln!("queue: round stalled: {why}");
+    }
+    println!(
+        "queue: speculative round over {} PRs; tip {}",
+        heads.len(),
+        round.tip
+    );
+
+    for (id, outcome) in &round.outcomes {
+        let report = choir_bridge::queue::pr_report(outcome);
+        let head = heads
+            .iter()
+            .find(|(n, _)| n == id)
+            .map(|(_, r)| r.as_str())
+            .ok_or_else(|| format!("no head for PR #{id}"))?;
+        let sha = git(&["rev-parse", head], Some(workdir))?.trim().to_string();
+        github::post_status(
+            token,
+            repo,
+            &sha,
+            "choir/queue",
+            report.state,
+            report.description,
+        )?;
+        println!("queue: PR #{id}: {} ({})", report.state, report.description);
+    }
+
+    if land && round.tip != base {
+        choir_bridge::queue::land(workdir, url, &round.tip, base_branch)?;
+        println!("queue: landed {} -> {base_branch}", round.tip);
+        // No post-land watch, for the same reason the train path skips
+        // one with a local executor: every landed change was tested on
+        // the state it lands in, and the push is a fast-forward.
     }
     Ok(())
 }
@@ -1080,7 +1205,7 @@ fn main() {
             [a, b, c, d] => [a, b, c, d],
             _ => {
                 eprintln!(
-                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>] [--ci-command <file> [--ci-runner <path>]] [--differential-runner <path> --differential-command <path> --differential-state <dir>]"
+                    "usage: choir-bridge queue <app-id> <pem-path> <owner/repo> <workdir> [--land] [--watch <secs>] [--ci-command <file> [--ci-runner <path>] [--speculate]] [--differential-runner <path> --differential-command <path> --differential-state <dir>]"
                 );
                 std::process::exit(2);
             }
@@ -1167,6 +1292,37 @@ mod tests {
     /// `--ci-runner` alone would hand a helper no command, and the
     /// round would report an outage: our fault, for what is actually an
     /// invocation error. Refused at parse time instead.
+    /// `--speculate` is a per-change verdict, and only an executor we
+    /// drive can produce one. Without a command there is nothing to
+    /// drive, and the round would silently fall back to the train path
+    /// -- the operator asking for one thing and getting another.
+    #[test]
+    fn speculating_needs_a_command_to_speculate_with() {
+        let base = ["1", "key", "owner/repo", "work"].map(str::to_string);
+        let mut alone = base.to_vec();
+        alone.push("--speculate".to_string());
+        assert!(parse_queue_args(&alone).is_err());
+
+        let mut together = base.to_vec();
+        together.extend(["--ci-command", "ci.json", "--speculate"].map(str::to_string));
+        let ci = parse_queue_args(&together)
+            .expect("a command and speculation together")
+            .ci
+            .expect("ci mode is on");
+        assert!(ci.speculate);
+
+        let mut command_only = base.to_vec();
+        command_only.extend(["--ci-command", "ci.json"].map(str::to_string));
+        assert!(
+            !parse_queue_args(&command_only)
+                .expect("a bare command")
+                .ci
+                .expect("ci mode is on")
+                .speculate,
+            "the train path stays the default"
+        );
+    }
+
     #[test]
     fn a_ci_runner_needs_a_command_to_run() {
         let base = ["1", "key", "owner/repo", "work"].map(str::to_string);

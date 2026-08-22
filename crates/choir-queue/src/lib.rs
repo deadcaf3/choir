@@ -269,6 +269,16 @@ pub struct JobTemplate {
     pub deadline: Option<std::time::Duration>,
     /// Whether these jobs may write a shared build cache.
     pub may_write_cache: bool,
+    /// Where the command runs, or `None` to leave it to the provider
+    /// (D18).
+    ///
+    /// `None` is the right default for a train and not merely the
+    /// conservative one: every member is tested against a *different*
+    /// speculative state, so one directory shared by the batch tests
+    /// the last state repeatedly. `None` asks the executor to
+    /// materialize [`executor::Job::subject`] instead, which is what
+    /// [`crate::worktree::WorktreeRunner`] does for a git state.
+    pub directory: Option<std::path::PathBuf>,
 }
 
 impl JobTemplate {
@@ -283,6 +293,7 @@ impl JobTemplate {
         job.label = change.id.to_string();
         job.environment = self.environment.clone();
         job.may_write_cache = self.may_write_cache;
+        job.directory = self.directory.clone();
         if let Some(d) = self.deadline {
             job.deadline = d;
         }
@@ -412,6 +423,23 @@ impl MergeQueue {
     #[must_use]
     pub fn window(&self) -> usize {
         self.window
+    }
+
+    /// Drains through a sequencer over an in-memory log.
+    ///
+    /// For a caller whose repository is not the platform's: the
+    /// sequencer is not optional -- every landing is recorded through
+    /// it, which is what keeps the single-writer order true of a train
+    /// as well as of a push -- but a forge bridge mirrors an upstream
+    /// that is canonical (D21), so the ordering of one round is not a
+    /// claim anybody reads back. Keeping it in memory says that,
+    /// instead of writing a log which would look like a second source
+    /// of truth.
+    pub fn drain_in_memory(&mut self, ci: &mut dyn executor::CiExecutor) -> QueueReport {
+        let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+        let report = self.drain(ci, &sequencer);
+        sequencer.shutdown();
+        report
     }
 
     /// Drains the queue: speculatively merges up to `window` changes, runs CI

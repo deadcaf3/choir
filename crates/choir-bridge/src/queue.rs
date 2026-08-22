@@ -1023,3 +1023,197 @@ pub fn revert_train(
     )?;
     Ok(new_tip)
 }
+
+/// One pull request's fate in a queued round.
+///
+/// The queue answers per change rather than per train, which is the
+/// difference [`run_queue`] buys over [`build_train`]: a red build
+/// blames the change that was red, and the changes ahead of it still
+/// land in the same round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrOutcome {
+    /// Merged, tested green on its own speculative state, and part of
+    /// [`QueuedRound::tip`].
+    Landed,
+    /// Merge conflict: evicted for its author to resolve, first-class,
+    /// without blocking anything behind it (D6).
+    Conflicted,
+    /// CI failed on this change's own speculative state.
+    Failed,
+    /// Ejected because it declared a dependency on a change that
+    /// failed. Not a verdict on this change.
+    Ejected {
+        /// The failing change it depends on.
+        on: u64,
+    },
+    /// Already in by patch identity: the train rewrote or landed this
+    /// edit earlier, so it was recognized rather than re-merged.
+    AlreadyLanded,
+    /// A merge strategy resolved beyond what the change proposed. Git's
+    /// merge cannot produce this; it is here because the map from
+    /// [`choir_queue::Rejection`] must be total, and a case dropped on
+    /// the floor is a PR that gets no status at all.
+    Unsafe,
+    /// The round stopped before reaching this change. Nothing was
+    /// decided about it and it is still waiting.
+    Waiting,
+}
+
+/// Result of one queued round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedRound {
+    /// The state the queue ended on: the commit to land, equal to the
+    /// base when nothing landed.
+    pub tip: String,
+    /// Every pull request the round was given, in submission order.
+    pub outcomes: Vec<(u64, PrOutcome)>,
+    /// Why the round stopped early without blaming anybody: an
+    /// executor that could not answer, or a merge we could not run.
+    /// Distinct from every outcome above, because it is about us.
+    pub stalled: Option<String>,
+}
+
+/// Reads one change's outcome as the status its pull request gets.
+///
+/// Total by construction, and asserted as a correspondence rather than
+/// as a table of literals: `green` exactly where the change is in, and
+/// `failure` -- the state that asks an author to do something --
+/// exactly where the change itself is what went wrong.
+#[must_use]
+pub fn pr_report(outcome: &PrOutcome) -> TrainReport {
+    match outcome {
+        PrOutcome::Landed => TrainReport {
+            green: true,
+            state: "success",
+            description: "merged and green on the speculative train",
+        },
+        PrOutcome::AlreadyLanded => TrainReport {
+            green: true,
+            state: "success",
+            description: "already landed (patch identity)",
+        },
+        PrOutcome::Conflicted => TrainReport {
+            green: false,
+            state: "failure",
+            description: "merge conflict; resolve and resubmit",
+        },
+        PrOutcome::Failed => TrainReport {
+            green: false,
+            state: "failure",
+            description: "train CI failed on this change",
+        },
+        PrOutcome::Unsafe => TrainReport {
+            green: false,
+            state: "failure",
+            description: "merge resolution edited beyond the change",
+        },
+        PrOutcome::Ejected { .. } => TrainReport {
+            green: false,
+            state: "error",
+            description: "ejected: a change it depends on failed",
+        },
+        PrOutcome::Waiting => TrainReport {
+            green: false,
+            state: "error",
+            description: "queue stalled before reaching this change",
+        },
+    }
+}
+
+/// Runs one speculative round through the D5 merge queue.
+///
+/// This is [`build_train`]'s successor and differs from it in what a
+/// verdict is about. `build_train` merges everything and asks CI once,
+/// so one red change makes every PR in the train red. The queue tests
+/// each change against the state produced by everything ahead of it,
+/// which is the "exactly as if they had been tested one at a time"
+/// property D5 exists for: the green prefix lands, the failure is
+/// blamed on the change that failed, and the window narrows.
+///
+/// Nothing speculative leaves the machine and no ref is moved here. The
+/// caller decides whether to land [`QueuedRound::tip`].
+///
+/// # Errors
+///
+/// The base or a pull request head does not resolve, or the executor
+/// speaks a protocol this build does not.
+pub fn run_queue(
+    repo: &Path,
+    base: &str,
+    prs: &[(u64, String)],
+    spec: &CommandSpec,
+    ci: &mut dyn CiExecutor,
+) -> Result<QueuedRound, String> {
+    let info = ci.info().map_err(|error| error.to_string())?;
+    if info.protocol != PROTOCOL {
+        return Err(format!(
+            "executor `{}` speaks protocol {} and this build speaks {PROTOCOL}",
+            info.name, info.protocol
+        ));
+    }
+
+    let speculator = choir_queue::git::GitSpeculator::new(repo.to_path_buf());
+    let base_oid = speculator.verify(base)?;
+    let mut queue = choir_queue::MergeQueue::with_speculator(
+        &base_oid,
+        Box::new(choir_queue::git::GitSpeculator::new(repo.to_path_buf())),
+    );
+
+    let mut command = Vec::with_capacity(spec.args.len() + 1);
+    command.push(spec.program.clone());
+    command.extend(spec.args.iter().cloned());
+    queue.set_job_template(choir_queue::JobTemplate {
+        command,
+        environment: effective_environment(&spec.env),
+        deadline: spec.timeout_seconds.map(Duration::from_secs),
+        // The train is speculative by definition: a shared cache
+        // written from a state nobody approved is the CREEP shape, and
+        // the queue is exactly where an attacker would reach it.
+        may_write_cache: false,
+        // Left for the executor to fill: every train member has a
+        // different tree, and this one names the tree by its own commit
+        // id, which is a thing a provider can materialize.
+        directory: None,
+    });
+
+    for (id, head) in prs {
+        let oid = speculator.verify(head)?;
+        queue.submit(choir_queue::Change {
+            id: *id,
+            workspace: format!("pr/{id}"),
+            base: base_oid.clone(),
+            proposed: oid,
+            depends: Vec::new(),
+        });
+    }
+
+    // In memory, because the forge is canonical here and choir mirrors
+    // it (D21): the landings this records are the queue's own ordering
+    // of a round, not a claim about the repository, and nothing outside
+    // this call reads them.
+    let report = queue.drain_in_memory(ci);
+
+    let mut outcomes: Vec<(u64, PrOutcome)> = Vec::with_capacity(prs.len());
+    for (id, _) in prs {
+        let outcome = if report.merged.contains(id) {
+            PrOutcome::Landed
+        } else if let Some((_, why)) = report.rejected.iter().find(|(r, _)| r == id) {
+            match why {
+                choir_queue::Rejection::Conflict => PrOutcome::Conflicted,
+                choir_queue::Rejection::CiFailure => PrOutcome::Failed,
+                choir_queue::Rejection::SafetyViolation { .. } => PrOutcome::Unsafe,
+                choir_queue::Rejection::DependencyEjection { on } => PrOutcome::Ejected { on: *on },
+                choir_queue::Rejection::AlreadyLanded => PrOutcome::AlreadyLanded,
+            }
+        } else {
+            PrOutcome::Waiting
+        };
+        outcomes.push((*id, outcome));
+    }
+
+    Ok(QueuedRound {
+        tip: report.final_state,
+        outcomes,
+        stalled: report.provider_error,
+    })
+}
