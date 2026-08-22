@@ -629,3 +629,63 @@ fn an_executor_speaking_another_protocol_is_refused() {
         .expect_err("a protocol mismatch is refused");
     assert!(error.contains("protocol"), "{error}");
 }
+
+/// Only a verdict about the change may blame the change.
+///
+/// Asserted as the correspondence rather than as four literals, because
+/// four literals pass when two of them are swapped and the mapping is
+/// read back from the same order. `Verdict::evicts` is the seam's own
+/// name for "this is a statement about the content", and the commit
+/// status has to agree with it exactly: `failure` where it evicts,
+/// `error` where it does not.
+#[test]
+fn only_a_failure_blames_the_change() {
+    use choir_bridge::queue::train_report;
+    use choir_queue::executor::Verdict;
+
+    for verdict in [
+        Verdict::Passed,
+        Verdict::Failed { exit_code: Some(2) },
+        Verdict::Failed { exit_code: None },
+        Verdict::Errored {
+            provider: "firecracker".into(),
+            detail: "the vm did not boot".into(),
+        },
+        Verdict::TimedOut,
+    ] {
+        let report = train_report(&verdict);
+        assert_eq!(
+            report.state == "failure",
+            verdict.evicts(),
+            "{verdict:?} posts {} and evicts() says {}",
+            report.state,
+            verdict.evicts()
+        );
+        assert_eq!(
+            report.green,
+            verdict == Verdict::Passed,
+            "{verdict:?} was allowed to land, or a pass was not"
+        );
+        assert!(
+            !report.description.is_empty(),
+            "{verdict:?} would post an empty status description"
+        );
+    }
+}
+
+/// An executor we could not reach reads to a PR exactly as an executor
+/// that failed to boot a VM: same news, same status, no landing.
+#[test]
+fn an_unreachable_executor_reads_as_a_provider_fault() {
+    use choir_bridge::queue::{train_report, train_unavailable};
+    use choir_queue::executor::Verdict;
+
+    let unavailable = train_unavailable();
+    assert!(!unavailable.green, "a train landed without a verdict");
+    assert_eq!(unavailable.state, "error");
+    assert_eq!(
+        unavailable,
+        train_report(&Verdict::TimedOut),
+        "not finding out and running out of time got different answers"
+    );
+}

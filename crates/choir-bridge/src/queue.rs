@@ -544,6 +544,63 @@ pub fn run_differential(
     }
 }
 
+/// What one train verdict means for the PRs riding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrainReport {
+    /// Whether the train may land. The only input to that decision, so
+    /// that neither check signal gets a landing rule of its own.
+    pub green: bool,
+    /// Commit-status state: `success`, `failure`, or `error`.
+    pub state: &'static str,
+    /// Commit-status description. Fixed strings, never anything an
+    /// executor or a pull request wrote — the Rule of Two applies to
+    /// what we say as well as to what we read.
+    pub description: &'static str,
+}
+
+/// Reads a train's verdict as the report its PRs get (D18, D49).
+///
+/// The four cases collapse to three states, and which two share one is
+/// the whole point. `failure` blames the change, and only
+/// [`Verdict::Failed`] may: an outage or a deadline posts `error`,
+/// because telling an author their work is red when our provider fell
+/// over is the confusion the seam exists to end. `green` is true for
+/// exactly one case, so a train never lands on a verdict that merely
+/// failed to say no.
+#[must_use]
+pub fn train_report(verdict: &Verdict) -> TrainReport {
+    match verdict {
+        Verdict::Passed => TrainReport {
+            green: true,
+            state: "success",
+            description: "speculative train green",
+        },
+        Verdict::Failed { .. } => TrainReport {
+            green: false,
+            state: "failure",
+            description: "train CI failed",
+        },
+        Verdict::Errored { .. } | Verdict::TimedOut => TrainReport {
+            green: false,
+            state: "error",
+            description: "train CI could not run",
+        },
+    }
+}
+
+/// The report for a train we could not get a verdict on at all.
+///
+/// Same shape as a provider fault, because it is one: an executor that
+/// could not be reached and an executor that failed to boot a VM are
+/// the same news to the change riding the train.
+#[must_use]
+pub fn train_unavailable() -> TrainReport {
+    train_report(&Verdict::Errored {
+        provider: String::new(),
+        detail: String::new(),
+    })
+}
+
 /// Checks one train commit with a [`CiExecutor`] instead of asking the
 /// host forge (D18).
 ///

@@ -531,31 +531,21 @@ fn queue_round(
     // rest of the round needs: whether to land, and what to tell each
     // PR. Landing consults `green` and nothing else, so neither source
     // gets its own landing rule.
-    let (green, state, desc): (bool, &str, &str) = if train.tip == base {
+    let report = if train.tip == base {
         // Nothing new to test; base is presumed already checked.
-        (true, "success", "speculative train green")
+        choir_bridge::queue::train_report(&choir_queue::executor::Verdict::Passed)
     } else if let (Some(config), Some(spec)) = (ci, ci_spec.as_ref()) {
         let mut executor = build_executor(config)?;
         match choir_bridge::queue::run_train_ci(workdir, &train.tip, spec, executor.as_mut()) {
             Ok(verdict) => {
                 println!("queue: train CI: {verdict}");
-                match verdict {
-                    choir_queue::executor::Verdict::Passed => {
-                        (true, "success", "speculative train green")
-                    }
-                    choir_queue::executor::Verdict::Failed { .. } => {
-                        (false, "failure", "train CI failed")
-                    }
-                    // An outage and a deadline are statements about us,
-                    // so they are `error` rather than `failure`: telling
-                    // an author their change is red because our provider
-                    // fell over is the exact confusion D18 exists to end.
-                    _ => (false, "error", "train CI could not run"),
-                }
+                choir_bridge::queue::train_report(&verdict)
             }
             Err(error) => {
+                // Printed for an operator, never posted: the detail is a
+                // string the executor chose.
                 eprintln!("queue: train CI could not run: {error}");
-                (false, "error", "train CI could not run")
+                choir_bridge::queue::train_unavailable()
             }
         }
     } else {
@@ -572,11 +562,29 @@ fn queue_round(
                 }
             }
         };
+        // The forge's four cases land on the same three states, by the
+        // same rule: only a real red build blames the change.
         match verdict {
-            github::Verdict::Success => (true, "success", "speculative train green"),
-            github::Verdict::Failure => (false, "failure", "train CI failed"),
-            github::Verdict::Pending => (false, "error", "train CI timed out"),
-            github::Verdict::NoRuns => (false, "error", "no CI signal on train"),
+            github::Verdict::Success => choir_bridge::queue::TrainReport {
+                green: true,
+                state: "success",
+                description: "speculative train green",
+            },
+            github::Verdict::Failure => choir_bridge::queue::TrainReport {
+                green: false,
+                state: "failure",
+                description: "train CI failed",
+            },
+            github::Verdict::Pending => choir_bridge::queue::TrainReport {
+                green: false,
+                state: "error",
+                description: "train CI timed out",
+            },
+            github::Verdict::NoRuns => choir_bridge::queue::TrainReport {
+                green: false,
+                state: "error",
+                description: "no CI signal on train",
+            },
         }
     };
 
@@ -593,12 +601,12 @@ fn queue_round(
         } else if !entry.merged {
             ("failure", entry.note.as_str())
         } else {
-            (state, desc)
+            (report.state, report.description)
         };
         github::post_status(&token, repo, &sha, "choir/queue", state, desc)?;
         println!("queue: PR #{}: {state} ({desc})", entry.id);
     }
-    if land && train.tip != base && green {
+    if land && train.tip != base && report.green {
         choir_bridge::queue::land(workdir, &url, &train.tip, &base_branch)?;
         println!("queue: landed train {} -> {base_branch}", train.tip);
         if ci.is_some() {
