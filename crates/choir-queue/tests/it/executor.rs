@@ -479,6 +479,25 @@ fn helper() -> choir_queue::remote::ProtocolRunner {
 
 /// One `sh -c` helper that writes canned lines and exits, for the
 /// protocol failures a well-behaved helper never produces.
+/// The protocol number is pinned to a literal, which is the one place
+/// in this suite where that is right rather than a change-detector.
+///
+/// Every other assertion computes from the constant, so moving it is
+/// invisible: a mutation setting it back to 1 changed nothing any test
+/// could see. But the number is the whole compatibility claim -- it is
+/// what a helper somewhere else in the world has compiled in, and the
+/// handshake refuses on it. Renumbering silently is the failure this
+/// catches. When the wire format really changes, bump both.
+#[test]
+fn the_protocol_number_is_what_helpers_were_built_against() {
+    assert_eq!(
+        PROTOCOL, 2,
+        "the protocol number moved; a helper built against the old one \
+         will now be refused, so change this only when the wire format \
+         changed and say so in the D18 row"
+    );
+}
+
 /// A well-formed greeting at whatever `PROTOCOL` is today, for the
 /// canned helpers below. Computed rather than pasted, because a stale
 /// literal turns each of those into a handshake-refusal test that still
