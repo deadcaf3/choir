@@ -1760,6 +1760,17 @@ fn view_growth_counts(view: &View) -> serde_json::Value {
     // report one number for an operator with a single vouch and for one
     // every operator on the node stands behind.
     let vouch_edges = view.vouches.values().map(BTreeMap::len).sum::<usize>();
+    // One row per witness and no more, which is the claim worth
+    // measuring: this section is bounded by the witness population, not
+    // by how many snapshots the node has taken.
+    let witnesses = view.witnessed.len();
+    let witnesses_current = view.latest_snapshot.as_ref().map_or(0, |latest| {
+        let id = latest.id();
+        view.witnessed
+            .values()
+            .filter(|state| state.snapshot == id)
+            .count()
+    });
     serde_json::json!({
         "workspaces": view.workspaces.len(),
         "refs": view.refs.len(),
@@ -1772,6 +1783,8 @@ fn view_growth_counts(view: &View) -> serde_json::Value {
         "revoked_bindings": revoked_bindings,
         "vouch_subjects": view.vouches.len(),
         "vouch_edges": vouch_edges,
+        "witnesses": witnesses,
+        "witnesses_current": witnesses_current,
     })
 }
 
@@ -2900,6 +2913,20 @@ impl SubmitPolicy for ChoirPolicy {
         // `ops` are the same operator and either may sign; `rival` may
         // not, and an unchecked `voucher` is precisely a Sybil writing
         // somebody else's endorsements (D65).
+        if let OpKind::CountersignSnapshot { witness, .. } = &op.kind {
+            let operator = reviewer_operator(&sub.channel);
+            if witness != operator {
+                return Err(Rejection::new(
+                    Code::ReviewerMismatch,
+                    "a countersignature's witness must be the operator of the channel it was \
+                     signed on",
+                    "resubmit on a channel belonging to that operator: `choir witness` derives \
+                     the witness from the channel by construction",
+                )
+                .with_states(Some(operator.to_string()), Some(witness.clone()))
+                .encode());
+            }
+        }
         if let OpKind::Vouch { voucher, .. } | OpKind::WithdrawVouch { voucher, .. } = &op.kind {
             let operator = reviewer_operator(&sub.channel);
             if voucher != operator {
@@ -2924,6 +2951,7 @@ impl SubmitPolicy for ChoirPolicy {
                 | OpKind::ViewedReview { .. }
                 | OpKind::Vouch { .. }
                 | OpKind::WithdrawVouch { .. }
+                | OpKind::CountersignSnapshot { .. }
         ) {
             self.channel_is_owned(&actor_id, &sub.channel)?;
         }
@@ -3119,6 +3147,15 @@ impl SubmitPolicy for ChoirPolicy {
                 Code::NodeOnly,
                 "only the node may record ref snapshots",
                 "read the latest snapshot from the view; the node attests its own ref-state",
+            )
+            .encode());
+        }
+        if matches!(op.kind, OpKind::CountersignSnapshot { .. }) && actor_id == self.node_id {
+            return Err(Rejection::new(
+                Code::NodeOnly,
+                "the node cannot witness its own ref-state attestation",
+                "a witness is worth counting only because it is not the node that made the \
+                 claim; have an independent operator cosign it",
             )
             .encode());
         }
@@ -5473,6 +5510,9 @@ impl Platform {
                 // there is no projection to write, and a hand-built one
                 // would be a second place for the shape to drift.
                 let vouches = serde_json::json!(&view.vouches);
+                // D67, on the same terms: the fold's map, not a
+                // projection of it.
+                let witnessed = serde_json::json!(&view.witnessed);
                 let counts = view_growth_counts(&view);
                 let as_of_seq = concentration_state.as_of_seq;
                 // T3 attribution reads the durable record, not the keys
@@ -5502,7 +5542,11 @@ impl Platform {
                     &refs,
                     &reviews,
                     &provenance,
-                    &[("bindings", &bindings), ("vouches", &vouches)],
+                    &[
+                        ("bindings", &bindings),
+                        ("vouches", &vouches),
+                        ("witnessed", &witnessed),
+                    ],
                     as_of_seq,
                 );
                 let newcomer_harm = newcomer_harm_json(self.newcomer_audit.as_ref());
@@ -5544,6 +5588,7 @@ impl Platform {
                     "checks": checks,
                     "bindings": bindings,
                     "vouches": vouches,
+                    "witnessed": witnessed,
                     "concentration": concentration,
                     "view_growth": view_growth,
                     "newcomer_harm": newcomer_harm,

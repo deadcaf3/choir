@@ -713,7 +713,8 @@ pub fn op_scopes(kind: &OpKind, review_repo: impl Fn(&str) -> Option<String>) ->
         | OpKind::RevokeKey { .. }
         | OpKind::Vouch { .. }
         | OpKind::WithdrawVouch { .. }
-        | OpKind::RecordRefSnapshot { .. } => Vec::new(),
+        | OpKind::RecordRefSnapshot { .. }
+        | OpKind::CountersignSnapshot { .. } => Vec::new(),
     };
     if repos.is_empty() {
         vec![Scope::Node]
@@ -755,7 +756,8 @@ pub fn op_level(kind: &OpKind) -> Level {
         | OpKind::PostComment { .. }
         | OpKind::ViewedReview { .. }
         | OpKind::Vouch { .. }
-        | OpKind::WithdrawVouch { .. } => Level::Read,
+        | OpKind::WithdrawVouch { .. }
+        | OpKind::CountersignSnapshot { .. } => Level::Read,
         OpKind::SetRef { .. }
         | OpKind::DeleteRef { .. }
         | OpKind::Submit { .. }
@@ -966,7 +968,7 @@ pub enum Disclosure {
 /// `every_section_the_view_serves_is_classified` in `tests/it/acl.rs`
 /// makes it loud, comparing this table against a view a real node
 /// served rather than against a sample written from memory.
-pub const SECTIONS: [(&str, Disclosure); 27] = [
+pub const SECTIONS: [(&str, Disclosure); 29] = [
     ("log", Disclosure::Public),
     ("build", Disclosure::Public),
     // [`crate::bound`]'s marks. Public because of *when* they are
@@ -983,6 +985,7 @@ pub const SECTIONS: [(&str, Disclosure); 27] = [
     ("changes_omitted", Disclosure::Public),
     ("bindings_omitted", Disclosure::Public),
     ("vouches_omitted", Disclosure::Public),
+    ("witnessed_omitted", Disclosure::Public),
     ("pending_omitted", Disclosure::Public),
     ("checks_omitted", Disclosure::Public),
     ("snapshot", Disclosure::NodeWide),
@@ -995,6 +998,7 @@ pub const SECTIONS: [(&str, Disclosure); 27] = [
     // is told there are no vouches to see rather than shown somebody
     // else's.
     ("vouches", Disclosure::NodeWide),
+    ("witnessed", Disclosure::NodeWide),
     ("concentration", Disclosure::NodeWide),
     ("view_growth", Disclosure::NodeWide),
     ("newcomer_harm", Disclosure::NodeWide),
@@ -1626,6 +1630,7 @@ mod tests {
             "snapshot": { "id": "b3-snap" },
             "bindings": { "k1": { "operator": "someone" } },
             "vouches": { "someone": { "another": { "at": 4, "note": "" } } },
+            "witnessed": { "someone": { "snapshot": { "codec": 30, "digest": [] }, "at": 5 } },
             "concentration": { "as_of_seq": 9 },
             "view_growth": { "entries": 9 },
             "newcomer_harm": {},

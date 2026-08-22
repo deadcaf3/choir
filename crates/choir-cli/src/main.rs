@@ -1112,6 +1112,43 @@ fn current_binding(api: &str, auth: AuthOptions<'_>, actor_id: &str) -> Option<s
 /// scope, or quietly signing without one, would produce a signature that
 /// is either refused or — worse, on a node that does not require scopes —
 /// admissible forever and everywhere.
+/// The id of the ref-state attestation this node is currently serving,
+/// read from `/api/view` (D67).
+///
+/// Read rather than accepted as an argument, and fatal on failure, for
+/// the same reason as [`log_scope`]: this value is *what gets signed*.
+/// A witness that pasted a stale id would be attesting a ref-state that
+/// is no longer current, which is the one thing a witness must never do
+/// by accident — and the node would refuse it, so the only outcome of
+/// allowing it is a confusing error instead of a correct signature.
+fn latest_snapshot(api: &str, auth: AuthOptions<'_>) -> ContentHash {
+    let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
+    let fail = |why: &str| -> ! {
+        eprintln!("choir: cannot read the ref-state attestation from {api}: {why}");
+        eprintln!("choir: not signing a witness statement about a snapshot nobody read.");
+        std::process::exit(1);
+    };
+    if !(200..300).contains(&status) {
+        fail(&format!("GET /api/view returned {status}"));
+    }
+    let view: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(view) => view,
+        Err(error) => fail(&format!("response is not JSON: {error}")),
+    };
+    match view["snapshot"]["id"].as_str().and_then(hash_from_hex) {
+        Some(id) => id,
+        // Two different absences, one message: a node that has taken no
+        // snapshot yet, and a reader whose grants hide the section. Both
+        // mean the same thing to a witness -- there is nothing here to
+        // attest -- and distinguishing them would disclose the section
+        // to somebody the ACL just withheld it from.
+        None => fail(
+            "no `snapshot.id` in the view: either the node has attested no ref-state yet, \
+             or this credential may not read node-wide sections (`@node auditor`)",
+        ),
+    }
+}
+
 fn log_scope(api: &str, auth: AuthOptions<'_>) -> (ContentHash, Option<ContentHash>) {
     let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
     let fail = |why: &str| -> ! {
@@ -2127,6 +2164,13 @@ fn main() {
         // never be given different values. Admission checks the same
         // derivation, so a hand-rolled submission that disagrees is
         // refused rather than believed.
+        ["witness", api, key_file, channel] => {
+            let op = ViewOp::new(OpKind::CountersignSnapshot {
+                witness: reviewer_operator(channel).into(),
+                snapshot: latest_snapshot(api, auth),
+            });
+            submit(api, key_file, channel, &op, auth);
+        }
         ["vouch", api, key_file, channel, subject, rest @ ..] if rest.len() <= 1 => {
             let op = ViewOp::new(OpKind::Vouch {
                 voucher: reviewer_operator(channel).into(),

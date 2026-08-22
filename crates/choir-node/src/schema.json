@@ -99,6 +99,12 @@
     },
     {
       "agent_facing": true,
+      "args": "<api> <key-file> <channel>",
+      "name": "witness",
+      "summary": "cosign the node's current ref-state attestation (D67); the snapshot id is read from the view rather than passed, so a witness cannot attest a ref-state it did not look at, and the node may not witness its own"
+    },
+    {
+      "agent_facing": true,
       "args": "<api> <key-file> <channel> <subject> [note]",
       "name": "vouch",
       "summary": "vouch for another operator; both ends need a key bound in the log, it authorizes nothing on its own, and there is no score"

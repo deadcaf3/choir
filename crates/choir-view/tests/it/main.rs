@@ -19,3 +19,4 @@ mod snapshot;
 mod validate;
 mod view;
 mod vouches;
+mod witness;

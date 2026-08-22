@@ -443,6 +443,15 @@ pub const COMMANDS: &[Command] = &[
         group: "review",
     },
     Command {
+        name: "witness",
+        args: "<api> <key-file> <channel>",
+        summary: "cosign the node's current ref-state attestation (D67); the snapshot id is \
+                  read from the view rather than passed, so a witness cannot attest a \
+                  ref-state it did not look at, and the node may not witness its own",
+        agent_facing: true,
+        group: "trust",
+    },
+    Command {
         name: "vouch",
         args: "<api> <key-file> <channel> <subject> [note]",
         summary: "vouch for another operator; both ends need a key bound in the log, it \

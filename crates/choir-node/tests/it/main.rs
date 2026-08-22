@@ -77,4 +77,5 @@ mod ui;
 mod view_growth;
 mod vouches;
 mod window;
+mod witness;
 mod workspace;

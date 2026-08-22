@@ -105,6 +105,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
 
 **trust**
 
+- `choir witness <api> <key-file> <channel>`  
+  cosign the node's current ref-state attestation (D67); the snapshot id is read from the view rather than passed, so a witness cannot attest a ref-state it did not look at, and the node may not witness its own
 - `choir vouch <api> <key-file> <channel> <subject> [note]`  
   vouch for another operator; both ends need a key bound in the log, it authorizes nothing on its own, and there is no score
 - `choir unvouch <api> <key-file> <channel> <subject> '<reason>'`  

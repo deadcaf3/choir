@@ -4,7 +4,7 @@
 //! - every persisted entry carries `format_version`
 //! - hashes are self-describing (codec byte + digest), so the hash function
 //!   can change under the same envelope (D6)
-//! - `witnesses` exists from day 1, empty until Phase 2, so the append-only →
+//! - `witnesses` exists from day 1 and stays empty (D67), so the append-only →
 //!   witnessed swap (D16) is additive, not a migration
 //!
 //! # Examples
@@ -64,7 +64,7 @@ pub mod scheme {
     pub const WEBAUTHN_ES256: u16 = 2;
 }
 
-/// A cosignature: a witness cosignature (unused until Phase 2, D16) or,
+/// A cosignature: a witness cosignature (never populated here, D67) or,
 /// in [`OpEntry::author_sig`], the author's own. Present in the format
 /// from the first persisted byte so adding witnessing never rewrites
 /// history.
@@ -194,7 +194,18 @@ pub struct OpEntry {
     pub channel: String,
     /// Opaque operation body; interpreted by the layers above L1.
     pub payload: Vec<u8>,
-    /// Witness cosignatures; empty until Phase 2 (D16).
+    /// Witness cosignatures. **Always empty, and now permanently so
+    /// (D67).**
+    ///
+    /// This field is inside the bytes [`OpEntry::content_hash`] covers,
+    /// so a cosignature added after the entry was hashed would rewrite
+    /// the entry and orphan every descendant. Filling it is therefore
+    /// possible only *before* the append — signatures gathered on the
+    /// sequencer's critical path, which is what D16's latency tripwire
+    /// exists to avoid. D67 takes the alternative that row names: a
+    /// witness cosigns the D25 ref-state attestation as its own op. The
+    /// field stays for format stability, not as a placeholder for
+    /// something still coming.
     pub witnesses: Vec<Witness>,
     /// Author signature over [`OpEntry::signing_hash`] (L8). Additive
     /// field (`serde(default)`): entries written before L8 decode with
@@ -213,8 +224,9 @@ impl OpEntry {
     /// What the author signs: a hash over `(channel, payload)` only.
     ///
     /// The author asserts *what* they submitted, not *where* it landed —
-    /// `seq`/`parent` are assigned by the sequencer after signing (and
-    /// are covered by witnesses from Phase 2). Replaying a signed op at
+    /// `seq`/`parent` are assigned by the sequencer after signing.
+    /// Position is covered instead by the D25 attestation, whose
+    /// `at_seq` a D67 witness cosigns. Replaying a signed op at
     /// a different position is rejected by the CAS `prev` carried inside
     /// the payload, not by the signature.
     pub fn signing_hash(&self) -> ContentHash {

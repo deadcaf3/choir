@@ -289,9 +289,10 @@ fn code_all_lists_every_variant() {
             Code::Unclassified => 23,
             Code::QuotaExceeded => 24,
             Code::VouchState => 25,
+            Code::WitnessState => 26,
         }
     }
-    const COUNT: usize = 26;
+    const COUNT: usize = 27;
 
     let all = Code::all();
     assert_eq!(

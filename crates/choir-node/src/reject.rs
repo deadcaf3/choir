@@ -81,6 +81,10 @@ pub enum Code {
     /// self-vouch, an edge that already stands, or a withdrawal of one
     /// that does not).
     VouchState,
+    /// A witness precondition failed (a witness with no unrevoked
+    /// binding, a cosignature over anything but the latest ref-state
+    /// attestation, or one that witness has already made).
+    WitnessState,
     /// The operator's protected-ref list could not be read, so the gate
     /// failed closed.
     PolicyUnavailable,
@@ -130,6 +134,7 @@ impl Code {
             Self::WorkspaceState => "workspace_state",
             Self::IdentityState => "identity_state",
             Self::VouchState => "vouch_state",
+            Self::WitnessState => "witness_state",
             Self::PolicyUnavailable => "policy_unavailable",
             Self::LogEvicted => "log_evicted",
             Self::DuplicateSubmission => "duplicate_submission",
@@ -163,6 +168,7 @@ impl Code {
             Self::WorkspaceState,
             Self::IdentityState,
             Self::VouchState,
+            Self::WitnessState,
             Self::PolicyUnavailable,
             Self::LogEvicted,
             Self::DuplicateSubmission,
@@ -331,6 +337,12 @@ pub fn from_view_error(e: &choir_view::ViewError) -> Rejection {
             "read `vouches` in GET /api/view; both ends need an unrevoked key binding, and an \
              edge that already stands is withdrawn rather than repeated",
         ),
+        ViewError::Witness(msg) => Rejection::new(
+            Code::WitnessState,
+            msg.clone(),
+            "read `witnessed` and `snapshot` in GET /api/view: a witness cosigns the latest \
+             ref-state attestation and no other, so re-read the snapshot and sign that one",
+        ),
         ViewError::Decode(msg) => Rejection::new(
             Code::MalformedOp,
             format!("decode failed: {msg}"),
@@ -365,6 +377,7 @@ impl Code {
             Self::ChangeState => "A stable change was unknown, duplicated, archived, or mismatched",
             Self::WorkspaceState => "A workspace lifecycle request conflicted with its durable binding",
             Self::IdentityState => "A key-binding precondition failed (key already bound to another operator, revoked or unbound key, channel naming a different operator)",
+            Self::WitnessState => "A witness precondition failed (a witness with no unrevoked key binding, a cosignature over anything but the latest ref-state attestation, or one that witness has already made)",
             Self::VouchState => "A vouch precondition failed (an end with no unrevoked key binding, a self-vouch, an edge that already stands, or a withdrawal of one that does not)",
             Self::PolicyUnavailable => "The operator's protected-ref list could not be read, so the gate failed closed",
             Self::LogEvicted => "Requested log entries are older than anything this node can serve",
@@ -398,6 +411,11 @@ impl Code {
             Self::ChangeState => "Read `changes` in `GET /api/view`, then use its owner, workspace and revision or choose a new change id.",
             Self::WorkspaceState => "Read `changes` and `workspaces` in `GET /api/view`; retry only with the exact existing binding, or choose a new workspace name.",
             Self::IdentityState => "Read `bindings` in `GET /api/view` for this key. Not a retry:                 a key belongs to one operator for the life of the key, and a revoked key is                 never rebindable. Bind a fresh key instead. `error` names which of the two                 applies.",
+            Self::WitnessState => "Read `snapshot` in `GET /api/view` and cosign the id it \
+                names. Only the latest attestation is witnessable, so a snapshot that landed \
+                while you were signing is not an error to retry blindly — re-read it, because \
+                the ref-state you attest must be the one that is current. A witness with no \
+                key binding needs the operator's `choir bind` first.",
             Self::VouchState => "Read `vouches` in `GET /api/view`. Both ends of a vouch must                 be operators with an unrevoked key bound in the log, so if `error` names an                 unbound end the repair is the operator's: `choir bind`. An edge that already                 stands is not a retry — withdraw it and vouch again if the note should                 change.",
             Self::PolicyUnavailable => "Operator problem, not a client one: the gate fails                 closed rather than guessing. Retry once the file is restored.",
             Self::LogEvicted => "Resync from the sequence in `window_base`; entries before it                 are gone from this node.",

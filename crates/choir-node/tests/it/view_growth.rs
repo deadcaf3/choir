@@ -164,6 +164,17 @@ fn assert_growth_matches_sections(view: &serde_json::Value) {
                 .values()
                 .map(|from| from.as_object().expect("voucher map").len())
                 .sum::<usize>(),
+            // One row per witness (D67), and separately how many of them
+            // name the attestation being served: the second is the only
+            // one a reader can act on, and the two diverge silently as
+            // soon as the refs move.
+            "witnesses": view["witnessed"].as_object().expect("witness map").len(),
+            "witnesses_current": view["witnessed"]
+                .as_object()
+                .expect("witness map")
+                .values()
+                .filter(|state| state["snapshot"] == view["snapshot"]["id"])
+                .count(),
         })
     );
     for section in [
@@ -213,6 +224,8 @@ fn empty_view_reports_exact_non_self_referential_sizes() {
             "revoked_bindings": 0,
             "vouch_subjects": 0,
             "vouch_edges": 0,
+            "witnesses": 0,
+            "witnesses_current": 0,
         })
     );
     for section in [
@@ -341,6 +354,8 @@ fn counts_live_archived_and_latest_provenance_records_deterministically() {
             "revoked_bindings": 0,
             "vouch_subjects": 0,
             "vouch_edges": 0,
+            "witnesses": 0,
+            "witnesses_current": 0,
         })
     );
     for section in [

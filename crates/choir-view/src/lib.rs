@@ -892,6 +892,34 @@ pub enum OpKind {
         /// rather than in the view, for the reason above.
         reason: String,
     },
+    /// One witness's cosignature over the latest ref-state attestation
+    /// (D67): "I saw this complete ref-state at this position".
+    ///
+    /// The unit is D25's [`RefSnapshot`], never an individual ref, and
+    /// never an [`choir_oplog::OpEntry`]. An entry's `witnesses` field
+    /// is inside the bytes its content hash covers, so a cosignature
+    /// added after the fact would rewrite the entry and orphan every
+    /// descendant — in-entry witnessing is therefore synchronous by
+    /// construction, and D16's tripwire exists precisely to keep that
+    /// off the sequencer's critical path. This is the async branch that
+    /// row already names as its alternative: an ordinary op, admitted
+    /// after the snapshot it attests, costing the hot path nothing.
+    ///
+    /// The witness signs in the only way this system has: the op's own
+    /// author signature covers `(channel, payload)`, and the payload
+    /// names the snapshot by content address. No second signature
+    /// scheme, and nothing new to verify.
+    CountersignSnapshot {
+        /// The operator doing the witnessing (must be the operator of
+        /// the submitting channel, enforced at admission, and never the
+        /// node whose log this is).
+        witness: String,
+        /// Content address of the snapshot being attested, which must be
+        /// the latest one the fold admitted. Attesting anything else is
+        /// the stale-ref-state replay D25 names, so it is refused rather
+        /// than recorded as a claim about the past.
+        snapshot: ContentHash,
+    },
     /// Record a signed attestation of the **complete** ref-state at one
     /// log position (D25; additive variant, wire-format unchanged).
     ///
@@ -1115,6 +1143,23 @@ impl RefSnapshot {
     pub fn id(&self) -> ContentHash {
         ContentHash::blake3(&self.canonical_bytes())
     }
+}
+
+/// What one witness has attested, as the fold sees it after replaying
+/// [`OpKind::CountersignSnapshot`] (D67).
+///
+/// One row per witness, not one per `(witness, snapshot)` pair. The
+/// question worth answering is "how many witnesses have seen the
+/// ref-state that is current", and keeping only the latest bounds this
+/// section by the witness population rather than by uptime — the D64
+/// growth property, and the same trade [`View::vouches`] makes.
+/// Everything older is still in the log, which is where history lives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessState {
+    /// Content address of the snapshot this witness last attested.
+    pub snapshot: ContentHash,
+    /// Log sequence of the countersigning op.
+    pub at: u64,
 }
 
 /// One actor key's durable binding to an operator identity, as the fold
@@ -1587,6 +1632,10 @@ pub enum ViewError {
     /// with an unrevoked binding, a self-vouch, an edge that already
     /// stands, or a withdrawal of one that does not.
     Vouch(String),
+    /// Witness precondition failure (D67): a witness with no live key
+    /// binding, a cosignature over anything but the latest ref-state
+    /// attestation, or one that witness has already made.
+    Witness(String),
 }
 
 /// One entry in a commit's tree: a path maps to file content or to an
@@ -1825,6 +1874,11 @@ pub struct View {
     /// chain check needs its identity, which [`RefSnapshot::id`] derives
     /// from the value.
     pub latest_snapshot: Option<RefSnapshot>,
+    /// Witness name to its latest attestation (D67). Only the current
+    /// [`View::latest_snapshot`] is attestable, so every row here that
+    /// names it is a live witness of the state the view is serving, and
+    /// a row naming anything else is a witness that has fallen behind.
+    pub witnessed: BTreeMap<String, WitnessState>,
     /// Vouched-for operator -> voucher -> the standing edge (D65).
     ///
     /// Keyed by subject first because that is the question a reader
@@ -2495,6 +2549,46 @@ impl View {
                 }
                 Ok(())
             }
+            OpKind::CountersignSnapshot { witness, snapshot } => {
+                // The Sybil floor, in the fold rather than the daemon,
+                // so every replayer reaches the same verdict: a witness
+                // whose standing nobody registered is not a witness.
+                if !self.is_bound_operator(witness) {
+                    return Err(ViewError::Witness(format!(
+                        "`{witness}` has no live key binding, so it cannot witness"
+                    )));
+                }
+                let Some(latest) = self.latest_snapshot.as_ref() else {
+                    return Err(ViewError::Witness(
+                        "there is no ref-state attestation to witness yet".to_string(),
+                    ));
+                };
+                // Only the current one. A cosignature over an older
+                // snapshot is the stale-ref-state replay D25 names: refs
+                // can return to a prior value, and an attestation of that
+                // value would read as current. Refused rather than kept
+                // as a claim about the past, because a reader counting
+                // witnesses cannot tell the two apart.
+                let id = latest.id();
+                if snapshot != &id {
+                    return Err(ViewError::Witness(format!(
+                        "witness attests {}, the latest attestation is {}",
+                        snapshot.to_hex(),
+                        id.to_hex()
+                    )));
+                }
+                // Saying it twice is not saying it twice as loudly.
+                if self
+                    .witnessed
+                    .get(witness)
+                    .is_some_and(|state| state.snapshot == id)
+                {
+                    return Err(ViewError::Witness(format!(
+                        "`{witness}` has already witnessed this ref-state"
+                    )));
+                }
+                Ok(())
+            }
             OpKind::RecordRefSnapshot { snapshot } => {
                 // Truth first: an attestation the fold cannot reproduce
                 // is refused by every replayer, not archived as a claim.
@@ -2861,6 +2955,15 @@ impl View {
                     // the view-growth series (D64).
                     self.vouches.remove(subject);
                 }
+            }
+            OpKind::CountersignSnapshot { witness, snapshot } => {
+                self.witnessed.insert(
+                    witness.clone(),
+                    WitnessState {
+                        snapshot: snapshot.clone(),
+                        at: self.next_seq,
+                    },
+                );
             }
             OpKind::RecordRefSnapshot { snapshot } => {
                 self.latest_snapshot = Some(snapshot.clone());

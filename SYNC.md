@@ -204,10 +204,46 @@ bundles and check the bundles against something other than themselves.
 It is still the node's own signature — a forking node signs both forks
 happily — so this is a comparison primitive, not proof.
 
-Closing it for real is what the `witnesses` field is reserved for
-(D16, Phase 2):
-independent cosignatures over entry hashes, so two readers can compare
-what they were told. Until then, treat a single node's ordering as
-trusted-by-configuration, and say so out loud in anything you build on
-top. The field being empty is the honest current state, not an
-oversight.
+## Witnesses (D67)
+
+Closing it for real needs a signature that is not the node's. A witness
+is an independent operator that reads the attestation and cosigns it,
+saying "I saw this complete ref-state at this position". `/api/view`
+reports them as `witnessed: {<operator>: {snapshot, at}}`, and
+`view_growth.counts` reports two numbers that are not the same one:
+`witnesses` is how many have ever cosigned, `witnesses_current` is how
+many cosigned the attestation being served right now. The second is the
+one to act on. They diverge the moment the refs move, silently, which is
+why they are counted separately.
+
+**A cosignature is its own op, not a field on the entry.** The
+`witnesses` field on an op-log entry is inside the bytes that entry's
+content hash covers, so adding a cosignature after the fact would
+rewrite the entry and orphan every entry after it. Witnessing in place
+is therefore only possible *before* the append — signatures gathered on
+the sequencer's critical path, which is what D16's latency tripwire
+exists to avoid. So `OpEntry.witnesses` stays empty, exactly as it
+always has, and a witness cosigns the attestation instead. That is the
+async branch D16 named as its own alternative, taken for a structural
+reason rather than a preference.
+
+What to check as a client:
+
+1. Read `snapshot.id` and `witnessed` from `/api/view`.
+2. Count the rows whose `snapshot` equals `snapshot.id`. Rows naming
+   anything else are witnesses that have fallen behind, not witnesses of
+   what you are being served.
+3. Decide what that count has to be before you trust the ordering. There
+   is no threshold in the node, deliberately: how many independent
+   observers you need is a property of your situation, not of ours.
+
+Two limits worth stating plainly. Only the *latest* attestation can be
+cosigned, so a witness that races a new one must re-read and re-sign —
+by design, because refs can return to a value they held before, and a
+cosignature over the older snapshot would read as a statement about now.
+And a witness count is only as independent as the witnesses are: the
+node cannot cosign its own attestation, but nothing here can tell you
+whether two operator names are two people. Until you have witnesses you
+have reason to believe are independent, treat a single node's ordering
+as trusted-by-configuration and say so out loud in anything you build on
+top.
