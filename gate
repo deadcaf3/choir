@@ -1,13 +1,18 @@
 #!/bin/sh
-# The release gate, in two lanes.
+# The release gate, in three lanes.
 #
 #   ./gate        every release check (before a commit or an artifact)
 #   ./gate fast   the edit loop: skips the measurement binaries
+#   ./gate quick  the sub-minute lane: every check that never invokes
+#                 the compiler -- formatting, the internal/ guard, the
+#                 book, the advisory audit. It exists so CI can answer
+#                 every push inside a minute; it compiles nothing, runs
+#                 no tests, and says so when green.
 #
-# The fast lane is **not a substitute for the full one**, and the rule it
-# depends on is that the full lane runs before every commit. This
-# project's recurring failure is a check that quietly stops checking, and
-# "the slow tests are opt-in now" is how that starts.
+# The fast lane is **not a substitute for the full one**, and the rule
+# it depends on is that the full lane runs at least every third commit.
+# This project's recurring failure is a check that quietly stops
+# checking, and "the slow tests are opt-in now" is how that starts.
 #
 # It fails closed: any stage failing exits nonzero, and the exit code of
 # every command is read directly rather than through a pipe, because
@@ -41,7 +46,20 @@ set -u
 cd "$(dirname "$0")" || exit 1
 
 LANE=${1:-full}
-LOG=${TMPDIR:-/tmp}/choir-gate
+# An unrecognised lane refuses instead of quietly running the full lane:
+# the typo `./gate quikc` silently doing twenty minutes of work is how a
+# lane stops being trusted.
+case $LANE in
+  full | fast | quick) ;;
+  *)
+    echo "usage: ./gate [fast|quick]   (no argument runs every check)" >&2
+    exit 2 ;;
+esac
+# One log directory per checkout, not per machine. Two gates running at
+# once — a worktree's and the main checkout's — used to share this
+# directory, and the second run's `rm` of the status files handed the
+# first a phantom "job died without writing a status" at collection.
+LOG=${TMPDIR:-/tmp}/choir-gate-$(pwd | cksum | tr ' ' -)
 mkdir -p "$LOG"
 
 # ---------------------------------------------------------------- style
@@ -253,6 +271,22 @@ scan_needles() {
   sh scripts/scan_history.sh "$@"
 }
 
+# Nothing under `internal/` may ever be tracked. The directory is the
+# unpublished half of this repository, and the only thing keeping it out
+# is a bare `.gitignore` entry that a single `git add -f` defeats
+# without comment. The count is printed and the paths are not: a guard
+# against leaking private file names must not leak them into a build log
+# in order to report itself.
+tracked_guard() {
+  _tracked=$(git ls-files -- internal | wc -l | tr -d ' ')
+  if [ "$_tracked" != 0 ]; then
+    echo "$_tracked path(s) under internal/ are tracked; internal/ is never published"
+    echo "run 'git ls-files internal' to see which"
+    return 1
+  fi
+  return 0
+}
+
 # ----------------------------------------------------------------- run
 MARK="$LOG/start"
 : >"$MARK"
@@ -275,9 +309,39 @@ if [ "$LANE" != fast ]; then
   fi
 fi
 
+# The advisory audit is the other stage with no interest in the build
+# lock: it reads Cargo.lock and the RustSec database, nothing else.
+# Skipped in the fast lane -- the edit loop should not need the network
+# -- and announced when the binary is absent, the same rule the book
+# follows.
+AUDIT_PID=
+if [ "$LANE" != fast ]; then
+  if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || command -v cargo-audit >/dev/null 2>&1; then
+    job audit audit cargo audit &
+    AUDIT_PID=$!
+  else
+    echo "no cargo-audit: the advisory audit is skipped" >"$LOG/audit.log"
+  fi
+fi
+
+# Announced, not silent, when this is not a git checkout (a tarball):
+# the guard cannot ask git what is tracked there.
+if [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  begin tracked
+  run tracked tracked tracked_guard
+  end $? ""
+else
+  printf '  %s-  %-10s %s%s\n' "$D" tracked "not a git checkout" "$Z"
+fi
+
 begin format
 run format format cargo fmt --all -- --check
 end $? ""
+
+# The quick lane's cargo involvement ends at `cargo fmt`: no build, no
+# tests, no clippy, no rustdoc. Sixty seconds is its budget, and this
+# suite's test execution alone runs for minutes.
+if [ "$LANE" != quick ]; then
 
 # Phase 1: one serial build of every debug test target, under the lock.
 # Its failure key is `tests` — a test that does not compile is a failed
@@ -341,6 +405,9 @@ begin isolation
 run isolation tests t_isolated
 end $? "$(count_of "$LOG/isolation.log")"
 
+# end of the quick-lane bypass: from here every lane runs again
+fi
+
 # The book over the same `docs/` files rustdoc just compiled. It is a
 # separate renderer and can fail on its own: a SUMMARY.md entry naming a
 # file that does not exist is caught here and nowhere else, because
@@ -357,7 +424,7 @@ else
   printf '  %s-  %-10s %s%s\n' "$D" book "no mdbook" "$Z"
 fi
 
-if [ "$LANE" != fast ]; then
+if [ "$LANE" = full ]; then
   begin retention
   run retention tests t_retention
   end $? "$(count_of "$LOG/retention.log")"
@@ -382,6 +449,12 @@ fi
 # after the run begins, including a comment, and the receipt is void.
 end $FRESH "$([ $FRESH -eq 0 ] || echo 'tree changed')"
 
+if [ -n "$AUDIT_PID" ]; then
+  collect "$AUDIT_PID" audit audit 'echo'
+elif [ "$LANE" != fast ]; then
+  printf '  %s-  %-10s %s%s\n' "$D" audit "no cargo-audit" "$Z"
+fi
+
 if [ -n "$SCAN_PID" ]; then
   collect "$SCAN_PID" scan scan \
     'sed -n "s/^scanning \([0-9]*\) objects.*/\1 objects/p" "$LOG/scan.log"'
@@ -403,6 +476,8 @@ for stage in $FAILED; do
     clippy)  grep -E '^(warning|error)' "$LOG/clippy.log" | head -20 ;;
     rustdoc) grep -E '^(warning|error)' "$LOG/rustdoc.log" | head -20 ;;
     format)  head -20 "$LOG/format.log" ;;
+    tracked) head -20 "$LOG/tracked.log" ;;
+    audit)   tail -20 "$LOG/audit.log" ;;
     spike)   tail -20 "$LOG/spike.log" ;;
     scan)    head -20 "$LOG/scan.log" ;;
     freshness)
@@ -415,7 +490,8 @@ done
 TOTAL=$(($(date +%s) - STARTED))
 if [ -z "$FAILED" ]; then
   printf '\n  %sgreen%s in %s\n\n' "$G" "$Z" "$(secs $TOTAL)"
-  [ "$LANE" = fast ] && printf '  %sfast lane: run ./gate before committing%s\n\n' "$Y" "$Z"
+  [ "$LANE" = fast ] && printf '  %sfast lane: run ./gate at least every third commit%s\n\n' "$Y" "$Z"
+  [ "$LANE" = quick ] && printf '  %squick lane: nothing was compiled and no tests ran%s\n\n' "$Y" "$Z"
   exit 0
 fi
 printf '\n  %sfailed:%s%s  in %s\n\n' "$R" "$FAILED" "$Z" "$(secs $TOTAL)"

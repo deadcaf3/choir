@@ -1,0 +1,109 @@
+name: Pages
+
+# The book, and the API documentation inside it, published from `main`.
+#
+# The build step is `choir docs` -- the product's own command -- rather
+# than an open-coded `cargo doc` and `mdbook build`. Two reasons. The
+# copy of rustdoc into `book/api/` is the part that is easy to get
+# subtly wrong (it has to ask cargo where the target directory is rather
+# than guess, and its own module comment tells that story), and it is
+# already written and tested once. And a publish that reimplements the
+# command drifts from it: the site would keep building after `choir
+# docs` broke, which is the failure this repository keeps writing gates
+# against.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# `pages: write` and `id-token: write` are what `deploy-pages` needs to
+# mint its deployment token. Nothing here writes to the repository.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one that is running. A
+# cancelled deploy leaves the site serving the previous version, which
+# is safe, but it also leaves a red run that says nothing was wrong.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # The same pins as ci.yml. A documentation build that renders under a
+  # different toolchain than the gate checks is a build that can go red
+  # on `main` for a reason no pull request could have caught.
+  RUST_VERSION: 1.97.1
+  MDBOOK_VERSION: 0.5.4
+  FORCE_COLOR: 1
+
+jobs:
+  build:
+    name: build the book
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup override set "$RUST_VERSION"
+
+      - name: Cache the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: pages-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pages-${{ runner.os }}-${{ env.RUST_VERSION }}-
+
+      - name: Cache mdbook
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/mdbook
+          key: mdbook-${{ runner.os }}-${{ env.MDBOOK_VERSION }}
+
+      - name: Install mdbook
+        run: |
+          command -v mdbook >/dev/null \
+            || cargo install mdbook --version "$MDBOOK_VERSION" --locked
+
+      # `book.toml` stays host-neutral on purpose: this repository is
+      # meant to end up hosted on choir itself, and a committed
+      # GitHub-Pages path is one more thing to remember to change. The
+      # host-specific value lives here, in the workflow that knows the
+      # host, and is derived from the repository name so a rename does
+      # not silently break the 404 page.
+      #
+      # `site-url` affects exactly one file: it is the `<base href>` of
+      # `404.html`, which was checked by diffing a build with the
+      # variable against one without it, and nothing else moved. That
+      # one file is also the only page GitHub serves from a path the
+      # relative links were not written for.
+      - name: Build the book and the API documentation inside it
+        env:
+          MDBOOK_OUTPUT__HTML__SITE_URL: /${{ github.event.repository.name }}/
+        run: cargo run -p choir-cli --bin choir -- docs
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: book
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
