@@ -320,10 +320,15 @@ fn the_cache_key_follows_the_files_that_produced_it() {
             .output()
             .expect("run the worktree's gate")
     };
+    // The probe must leave the file valid for whatever reads it. A `//`
+    // appended to `.cargo/config.toml` is not TOML, `cargo tree` then
+    // fails, and the cache turns itself off -- which passes every
+    // assertion below for the opposite of the reason it claims.
     let append = |path: &str| {
         let file = tree.join(path);
         let mut body = std::fs::read_to_string(&file).expect("read a file to change");
-        body.push_str("\n// cache key probe\n");
+        let comment = if path.ends_with(".toml") { "#" } else { "//" };
+        body.push_str(&format!("\n{comment} cache key probe\n"));
         std::fs::write(&file, body).expect("change a file");
     };
 
