@@ -27,6 +27,7 @@
 //! It builds on [`choir_hash`], [`choir_merge`], [`choir_oplog`], [`choir_sequencer`], [`choir_store`] and [`choir_view`].
 
 pub mod blast;
+pub mod conform;
 pub mod corpus;
 pub mod differential;
 pub mod differential_ledger;

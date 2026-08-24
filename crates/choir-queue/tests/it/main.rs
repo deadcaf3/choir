@@ -5,6 +5,7 @@
 //! globals, or fixed ports in here.
 
 mod blast;
+mod conform;
 mod corpus;
 mod depends;
 mod differential;

@@ -17,10 +17,14 @@
 //! than as a story about pipes.
 //!
 //! A Firecracker or Cloud Hypervisor driver is a different helper
-//! behind the same three lines of protocol. Neither can be built or
-//! gated here: both require KVM, which is Linux-only, so a version
-//! written on this machine would be exactly the untested single
-//! implementation this seam exists to forbid.
+//! behind the same three lines of protocol. Neither can be *built*
+//! here: both require KVM, which is Linux-only, so a version written on
+//! this machine would be exactly the untested single implementation
+//! this seam exists to forbid. It can still be *gated* by the same
+//! list, which is what `choir-ci-conform` is for: the conformance
+//! suite lives in [`crate::conform`] and takes a helper argv, so a
+//! driver on a Linux box answers the checks the four in-tree backends
+//! answer.
 //!
 //! # Protocol
 //!

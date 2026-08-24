@@ -292,8 +292,10 @@ impl std::error::Error for ExecutorError {}
 
 /// The CI executor seam (D18).
 ///
-/// Implementations must pass `conformance` in
-/// `choir-queue/tests/it/executor.rs`. A seam with one implementation
+/// Implementations must pass [`crate::conform::conform`], which the
+/// in-tree backends run from `choir-queue/tests/it/executor.rs` and a
+/// helper built elsewhere runs through `choir-ci-conform`. A seam with
+/// one implementation
 /// has never been tested against disagreement, which is how the trait
 /// this replaces stayed plausible while being unable to carry a real
 /// executor.

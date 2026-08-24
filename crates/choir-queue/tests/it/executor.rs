@@ -34,117 +34,35 @@
 //! side that stops talking.
 
 use choir_hash::ContentHash;
+use choir_queue::conform::{conform, Fixtures, Outcome};
 use choir_queue::executor::{CiExecutor, ExecutorError, Job, Synthetic, Verdict, PROTOCOL};
 use choir_queue::local::LocalRunner;
 use choir_queue::worktree::WorktreeRunner;
 use std::time::Duration;
 
-/// Jobs meaningful to one backend. A backend supplies its own, because
-/// "a command that exits 3" is spelled differently in a VM than in a
-/// subprocess -- which is exactly what the seam is abstracting.
-struct Fixtures {
-    passing: Job,
-    failing: Job,
-    /// A job the provider cannot start at all.
-    erroring: Job,
-    /// A job that outlives its deadline.
-    slow: Job,
-    /// A job that passes only if the executor ran it in
-    /// `Job::directory`, and fails otherwise. `None` for a backend with
-    /// no directory to honor, which is the same admission the module
-    /// doc makes about what a synthetic pass proves.
-    in_directory: Option<Job>,
-}
-
 fn tree(name: &str) -> ContentHash {
     ContentHash::blake3(name.as_bytes())
 }
 
-/// Every assertion both backends must satisfy.
+/// Every assertion both backends must satisfy, which now live in
+/// [`choir_queue::conform`] so that a helper this workspace cannot
+/// build -- the microVM driver the seam exists for -- is gated by the
+/// same list rather than by a copy of it.
 fn conformance(ci: &mut dyn CiExecutor, f: Fixtures) {
-    // 1. The handshake precedes work and pins the protocol.
-    let info = ci.info().expect("a reachable executor introduces itself");
-    assert_eq!(
-        info.protocol, PROTOCOL,
-        "executor `{}` speaks protocol {} and we speak {PROTOCOL}",
-        info.name, info.protocol
-    );
-    assert!(!info.name.is_empty(), "an executor must name itself");
-
-    // 2. An empty batch is an empty answer, not an error. The train can
-    //    legitimately be empty and that must not read as a fault.
-    assert_eq!(ci.run(&[]).expect("empty batch"), Vec::<Verdict>::new());
-
-    // 3. A command that succeeds passes.
-    assert_eq!(
-        ci.run(std::slice::from_ref(&f.passing))
-            .expect("passing job"),
-        vec![Verdict::Passed]
-    );
-
-    // 4. A command that exits nonzero is `Failed` -- about the change --
-    //    and is the only verdict permitted to evict.
-    let failed = ci
-        .run(std::slice::from_ref(&f.failing))
-        .expect("failing job");
+    let checks = conform(ci, f);
+    let failed: Vec<String> = checks
+        .iter()
+        .filter(|c| matches!(c.outcome, Outcome::Failed(_)))
+        .map(ToString::to_string)
+        .collect();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    // A backend that skipped everything would otherwise pass silently.
     assert!(
-        matches!(failed[0], Verdict::Failed { .. }),
-        "a nonzero exit must be Failed, got {:?}",
-        failed[0]
+        checks
+            .iter()
+            .any(|c| matches!(c.outcome, Outcome::Passed) && c.name == "handshake"),
+        "the handshake must be established, got {checks:?}"
     );
-    assert!(failed[0].evicts(), "a test failure must be able to evict");
-    assert!(failed[0].is_conclusive());
-
-    // 5. A provider that cannot start the job is `Errored` -- about us --
-    //    and must NOT evict. This is the distinction the whole seam
-    //    exists for, so it is asserted rather than assumed.
-    let errored = ci
-        .run(std::slice::from_ref(&f.erroring))
-        .expect("erroring job");
-    assert!(
-        matches!(errored[0], Verdict::Errored { .. }),
-        "a provider fault must be Errored, not a verdict about the change, got {:?}",
-        errored[0]
-    );
-    assert!(
-        !errored[0].evicts(),
-        "a provider fault must never evict a change"
-    );
-    assert!(!errored[0].is_conclusive());
-
-    // 6. A job past its deadline is `TimedOut`, and also does not evict:
-    //    a job can time out because the executor was oversubscribed.
-    let timed = ci.run(std::slice::from_ref(&f.slow)).expect("slow job");
-    assert_eq!(
-        timed[0],
-        Verdict::TimedOut,
-        "a job past its deadline must be TimedOut, got {:?}",
-        timed[0]
-    );
-    assert!(!timed[0].evicts(), "a timeout must never evict a change");
-
-    // 7. Index alignment. A provider that reorders or drops has
-    //    attributed one change's result to another, and the batch call
-    //    is worthless without this.
-    let batch = vec![f.passing.clone(), f.failing.clone(), f.passing];
-    let out = ci.run(&batch).expect("mixed batch");
-    assert_eq!(out.len(), batch.len(), "one verdict per job");
-    assert_eq!(out[0], Verdict::Passed);
-    assert!(matches!(out[1], Verdict::Failed { .. }));
-    assert_eq!(out[2], Verdict::Passed);
-
-    // 8. A provider that can run on a caller's checkout runs it in the
-    //    directory the job names. The probe passes only from inside
-    //    that directory, so an executor that ignores the field returns
-    //    `Failed` -- a well-formed verdict about the wrong tree, which
-    //    is the failure mode that made this worth a protocol bump.
-    if let Some(job) = f.in_directory {
-        assert_eq!(
-            ci.run(std::slice::from_ref(&job)).expect("directory job")[0],
-            Verdict::Passed,
-            "the job did not run in the directory it named"
-        );
-    }
 }
 
 /// A directory holding the marker `probe` looks for, distinct per
