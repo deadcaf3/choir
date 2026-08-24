@@ -264,6 +264,121 @@ count_of() {
 t_touched() { cargo test $PKGS --no-fail-fast; }
 c_touched() { cargo clippy $PKGS --all-targets -- -D warnings; }
 
+# ------------------------------------------------- verdict cache (D-gate)
+# A green verdict is cached against the hash of exactly the inputs that
+# produced it: the crate's own files (working tree, not just the index),
+# every workspace crate it depends on (cargo answers, not convention),
+# the out-of-crate files it include_str!'s (docs/, SYNC.md, a manifest),
+# Cargo.lock, the toolchain, this script, and CHOIR_GIT_HEAD -- the one
+# build-affecting env var in the workspace. Nothing unchanged is
+# verified twice; anything changed misses by construction, dependents
+# included, which is the part `git diff` alone cannot see.
+#
+# Red is never cached: a failure re-proves itself every run, so a flaky
+# pass cannot be laundered into a durable green. If freshness finds the
+# tree changed mid-run, every marker this run wrote is deleted -- the
+# verdict then describes a tree no key names. Timing-gated stages
+# (isolation, measure, retention, spike) are never cached: their
+# verdicts describe the machine as much as the code. A lost cache is a
+# slow run, never a wrong one; CHOIR_GATE_NO_CACHE=1 runs everything.
+CACHE=$LOG/cache
+KEYS=$LOG/keys
+mkdir -p "$CACHE" "$KEYS"
+: >"$LOG/marked.list"
+USE_CACHE=0
+WS_RUN= WS_TOTAL=0 CL_RUN= CL_TOTAL=0 DOC_RUN= ALLKEY=
+
+compute_keys() {
+  # Dependency closure, one cargo call. Every package's children are
+  # printed at least once even under dedupe, so the depth walk yields
+  # the complete edge set, and awk closes it transitively per member.
+  cargo tree --workspace -e normal,dev,build --prefix depth |
+    sed -n 's/^\([0-9][0-9]*\)\(choir-[a-z0-9_-]*\).*/\1 \2/p' |
+    awk '
+      { stack[$1] = $2
+        if ($1 > 0 && ($1 - 1) in stack) edge[stack[$1 - 1] "\t" $2] = 1
+        roots[$2] = 1 }
+      END {
+        for (e in edge) { split(e, a, "\t"); dep[a[1]] = dep[a[1]] " " a[2] }
+        for (r in roots) {
+          delete seen; seen[r] = 1; n = 1; q[1] = r; head = 1
+          while (head <= n) {
+            m = split(dep[q[head]], kids, " "); head++
+            for (i = 1; i <= m; i++)
+              if (kids[i] != "" && !(kids[i] in seen)) { seen[kids[i]] = 1; q[++n] = kids[i] }
+          }
+          line = r ":"
+          for (c in seen) line = line " " c
+          print line
+        }
+      }' | sort >"$KEYS/closure"
+  [ -s "$KEYS/closure" ] || return 1
+  # Everything outside any one crate that still decides what a build
+  # means: the root manifest carries the workspace lints and the release
+  # profiles, `.cargo/config.toml` carries the LIBSQLITE3_FLAGS every
+  # build in this workspace needs, and the toolchain file pins the
+  # compiler `rustc -V` only reports. A file listed here and missing is
+  # skipped, so this list can name one before it exists.
+  { rustc -V
+    for _root in Cargo.lock Cargo.toml .cargo/config.toml rust-toolchain.toml gate; do
+      [ -f "$_root" ] && printf '%s %s\n' "$_root" "$(git hash-object "$_root")"
+    done
+    printf 'CHOIR_GIT_HEAD=%s\n' "${CHOIR_GIT_HEAD:-}"
+  } | git hash-object --stdin >"$KEYS/global"
+  for _dir in crates/*/; do
+    _c=$(basename "$_dir")
+    { git ls-files -s "crates/$_c"
+      # Working-tree deviations: `ls-files -s` reports the index, and a
+      # cache keyed on the index would hit stale for an unstaged edit.
+      git status --porcelain --untracked-files=all -- "crates/$_c" |
+        while read -r _st _path; do
+          if [ -f "$_path" ]; then
+            printf 'wt %s %s\n' "$_path" "$(git hash-object "$_path")"
+          else
+            printf 'gone %s\n' "$_path"
+          fi
+        done
+      # Out-of-crate build inputs: rustdoc and one restore test pull
+      # files from the repo root via ../ climbs. Every such climb here
+      # resolves from the root, so stripping the prefix names the file.
+      grep -rhoE 'include_(str|bytes)!\("(\.\./)+[^"]*"' "crates/$_c" 2>/dev/null |
+        sed 's/.*!("//; s/"$//; s|^\(\.\./\)*||' | sort -u |
+        while read -r _inc; do
+          [ -f "$_inc" ] && printf 'inc %s %s\n' "$_inc" "$(git hash-object "$_inc")"
+        done
+    } | git hash-object --stdin >"$KEYS/self-$_c"
+  done
+  _g=$(cat "$KEYS/global")
+  while IFS=: read -r _c _deps; do
+    { echo "$_g"
+      for _d in $_deps; do printf '%s %s\n' "$_d" "$(cat "$KEYS/self-$_d")"; done | sort
+    } | git hash-object --stdin >"$KEYS/key-$_c"
+  done <"$KEYS/closure"
+}
+
+key_of() { cat "$KEYS/key-$1" 2>/dev/null; }
+cached() { _k=$(key_of "$2") && [ -n "$_k" ] && [ -f "$CACHE/$1-$_k" ]; }
+mark() {
+  [ "$USE_CACHE" = 1 ] || return 0
+  _k=$(key_of "$2") && [ -n "$_k" ] || return 0
+  : >"$CACHE/$1-$_k"
+  echo "$CACHE/$1-$_k" >>"$LOG/marked.list"
+}
+mark_list() { for _c in $2; do mark "$1" "$_c"; done; }
+mark_raw() {
+  [ "$USE_CACHE" = 1 ] || return 0
+  : >"$CACHE/$1"
+  echo "$CACHE/$1" >>"$LOG/marked.list"
+}
+stage_green() { [ -r "$LOG/$1.status" ] && [ "$(cut -d' ' -f1 "$LOG/$1.status")" = 0 ]; }
+pkg_flags() { for _c in $1; do printf ' -p %s' "$_c"; done; }
+# shellcheck disable=SC2046
+t_ws_run() { cargo test $(pkg_flags "$WS_RUN") --no-fail-fast; }
+# shellcheck disable=SC2046
+c_run() { cargo clippy $(pkg_flags "$CL_RUN") --all-targets -- -D warnings; }
+# shellcheck disable=SC2046
+d_run() { env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps $(pkg_flags "$DOC_RUN"); }
+
 fast_targets() {
   for f in crates/choir-node/tests/*.rs; do
     name=$(basename "$f" .rs)
@@ -412,6 +527,36 @@ begin format
 run format format cargo fmt --all -- --check
 end $? ""
 
+# The verdict cache's keys, once per run. If cargo cannot answer for the
+# dependency graph the cache turns itself off and everything runs: fail
+# open to slow, never to stale.
+#
+# Test mode runs no cargo, so a marker it writes describes nothing and
+# the cache stays off there by default. `CHOIR_GATE_TEST_CACHE=1` turns
+# it back on for the gate's own tests, which are the only reader that
+# wants a synthetic verdict: they exercise which stages are skipped, and
+# whether a red or a voided receipt leaves a marker behind, neither of
+# which needs the compiler to have run.
+if [ "$LANE" != quick ] && [ -z "${CHOIR_GATE_NO_CACHE:-}" ] \
+   && { [ "${CHOIR_GATE_TEST_MODE:-}" != 1 ] || [ "${CHOIR_GATE_TEST_CACHE:-}" = 1 ]; }; then
+  begin keys
+  if compute_keys 2>"$LOG/keys.log"; then
+    USE_CACHE=1
+    for _c in $(cut -d: -f1 "$KEYS/closure"); do
+      CL_TOTAL=$((CL_TOTAL + 1))
+      cached clippy "$_c" || CL_RUN="$CL_RUN $_c"
+      cached doc "$_c" || DOC_RUN="$DOC_RUN $_c"
+      case $_c in choir-node | choir-sequencer) continue ;; esac
+      WS_TOTAL=$((WS_TOTAL + 1))
+      cached test "$_c" || WS_RUN="$WS_RUN $_c"
+    done
+    ALLKEY=$(cat "$KEYS"/key-* | sort | git hash-object --stdin)
+    end 0 "$CL_TOTAL crates"
+  else
+    end 0 "unavailable; cache off"
+  fi
+fi
+
 # The quick lane's cargo involvement ends at `cargo fmt`: no build, no
 # tests, no clippy, no rustdoc. Sixty seconds is its budget, and this
 # suite's test execution alone runs for minutes.
@@ -425,16 +570,44 @@ if [ "$LANE" = touched ]; then
 # running the suite on every edit and running it when you remember to.
 PKGS=$(touched_pkgs)
 ROOT_CHANGED=$(touched_root)
-if [ -z "$PKGS" ]; then
+# A touched crate whose key already holds green test and clippy markers
+# was verified against this exact tree by an earlier run; re-running it
+# would prove nothing the marker does not already say.
+TOUCHED_CACHED=0
+if [ "$USE_CACHE" = 1 ] && [ -n "$PKGS" ]; then
+  _kept=
+  # shellcheck disable=SC2086
+  for _c in $(printf '%s\n' $PKGS | grep -v '^-p$'); do
+    if cached test "$_c" && cached clippy "$_c"; then :; else _kept="$_kept -p $_c"; fi
+  done
+  if [ -z "$_kept" ]; then TOUCHED_CACHED=1; else PKGS=$_kept; fi
+fi
+if [ "$TOUCHED_CACHED" = 1 ]; then
+  printf '  %s\342\234\223%s %-10s %scached%s\n' "$G" "$Z" touched "$D" "$Z"
+elif [ -z "$PKGS" ]; then
   printf '  %s-  %-10s %s%s\n' "$D" touched "nothing under crates/" "$Z"
 else
   begin touched
   run touched tests t_touched
-  end $? "$(count_of "$LOG/touched.log")"
+  _tt=$?
+  end $_tt "$(count_of "$LOG/touched.log")"
 
   begin clippy
   run clippy clippy c_touched
-  end $? ""
+  _tc=$?
+  end $_tc ""
+
+  # Feed the cache: a touched green is the same per-crate verdict the
+  # full lane's stages record, except for choir-node and the sequencer,
+  # whose gate stages run different target sets.
+  if [ "$_tt" -eq 0 ] && [ "$_tc" -eq 0 ]; then
+    # shellcheck disable=SC2086
+    for _c in $(printf '%s\n' $PKGS | grep -v '^-p$'); do
+      case $_c in choir-node | choir-sequencer) continue ;; esac
+      mark test "$_c"
+      mark clippy "$_c"
+    done
+  fi
 fi
 
 elif [ "$LANE" != quick ]; then
@@ -443,8 +616,15 @@ elif [ "$LANE" != quick ]; then
 # Its failure key is `tests` — a test that does not compile is a failed
 # test, and the injection fixture treats it the same way.
 begin build
-run build tests build_debug
-end $? ""
+if [ "$USE_CACHE" = 1 ] && [ -n "$ALLKEY" ] && [ -f "$CACHE/build-$LANE-$ALLKEY" ]; then
+  run build tests true
+  end $? "cached"
+else
+  run build tests build_debug
+  _bc=$?
+  end "$_bc" ""
+  [ "$_bc" -eq 0 ] && mark_raw "build-$LANE-$ALLKEY"
+fi
 
 # Phase 2: the overlap. Everything is prebuilt, so the test invocations
 # clear the lock in about a second of freshness checking each and then
@@ -453,29 +633,73 @@ end $? ""
 # queue: runners first, compilers last. If the build stage failed, run
 # the suites anyway (`--no-fail-fast` for invocations) — cargo repeats
 # the same failure cheaply and the report names every broken stage.
-if [ "$LANE" = fast ]; then
+NODE_PID=
+if [ "$USE_CACHE" = 1 ] && cached "node-$LANE" choir-node; then
+  printf '  %s\342\234\223%s %-10s %scached%s\n' "$G" "$Z" node "$D" "$Z"
+elif [ "$LANE" = fast ]; then
   job node tests t_node_fast & NODE_PID=$!
 else
   job node tests t_node & NODE_PID=$!
 fi
-job workspace tests t_workspace & WS_PID=$!
-job doctests tests t_doc & DOC_PID=$!
+WS_PID=
+if [ "$USE_CACHE" = 1 ] && [ -z "$WS_RUN" ]; then
+  printf '  %s\342\234\223%s %-10s %scached (%s crates)%s\n' "$G" "$Z" workspace "$D" "$WS_TOTAL" "$Z"
+elif [ "$USE_CACHE" = 1 ]; then
+  job workspace tests t_ws_run & WS_PID=$!
+else
+  job workspace tests t_workspace & WS_PID=$!
+fi
+DOC_PID=
+if [ "$USE_CACHE" = 1 ] && cached nodedoc choir-node; then
+  printf '  %s\342\234\223%s %-10s %scached%s\n' "$G" "$Z" doctests "$D" "$Z"
+else
+  job doctests tests t_doc & DOC_PID=$!
+fi
 # The lock has no queue discipline: on a changed tree, a compiler that
 # wins it first would stall every runner behind a long recompile. Give
 # the runners a head start to clear their freshness checks.
 [ "${CHOIR_GATE_TEST_MODE:-}" = 1 ] || sleep 3
-job clippy clippy cargo clippy --workspace --all-targets -- -D warnings & CLIPPY_PID=$!
-job rustdoc rustdoc env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps & RUSTDOC_PID=$!
+CLIPPY_PID=
+if [ "$USE_CACHE" = 1 ] && [ -z "$CL_RUN" ]; then
+  printf '  %s\342\234\223%s %-10s %scached (%s crates)%s\n' "$G" "$Z" clippy "$D" "$CL_TOTAL" "$Z"
+elif [ "$USE_CACHE" = 1 ]; then
+  job clippy clippy c_run & CLIPPY_PID=$!
+else
+  job clippy clippy cargo clippy --workspace --all-targets -- -D warnings & CLIPPY_PID=$!
+fi
+RUSTDOC_PID=
+if [ "$USE_CACHE" = 1 ] && [ -z "$DOC_RUN" ]; then
+  printf '  %s\342\234\223%s %-10s %scached%s\n' "$G" "$Z" rustdoc "$D" "$Z"
+elif [ "$USE_CACHE" = 1 ]; then
+  job rustdoc rustdoc d_run & RUSTDOC_PID=$!
+else
+  job rustdoc rustdoc env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps & RUSTDOC_PID=$!
+fi
 MEASURE_PID=
 if [ "$LANE" != fast ]; then
   job measure tests t_measure & MEASURE_PID=$!
 fi
 
-collect "$WS_PID" workspace workspace 'count_of "$LOG/workspace.log"'
-collect "$NODE_PID" node node 'count_of "$LOG/node.log"'
-collect "$DOC_PID" doctests doctests 'count_of "$LOG/doctests.log"'
-collect "$CLIPPY_PID" clippy clippy 'echo'
-collect "$RUSTDOC_PID" rustdoc rustdoc 'echo'
+if [ -n "$WS_PID" ]; then
+  collect "$WS_PID" workspace workspace 'count_of "$LOG/workspace.log"'
+  stage_green workspace && mark_list test "$WS_RUN"
+fi
+if [ -n "$NODE_PID" ]; then
+  collect "$NODE_PID" node node 'count_of "$LOG/node.log"'
+  stage_green node && mark "node-$LANE" choir-node
+fi
+if [ -n "$DOC_PID" ]; then
+  collect "$DOC_PID" doctests doctests 'count_of "$LOG/doctests.log"'
+  stage_green doctests && mark nodedoc choir-node
+fi
+if [ -n "$CLIPPY_PID" ]; then
+  collect "$CLIPPY_PID" clippy clippy 'echo'
+  stage_green clippy && mark_list clippy "$CL_RUN"
+fi
+if [ -n "$RUSTDOC_PID" ]; then
+  collect "$RUSTDOC_PID" rustdoc rustdoc 'echo'
+  stage_green rustdoc && mark_list doc "$DOC_RUN"
+fi
 [ -n "$MEASURE_PID" ] && collect "$MEASURE_PID" measure measure 'count_of "$LOG/measure.log"'
 
 # Phase 3: quiet. Timing-sensitive suites get the machine to themselves,
@@ -533,6 +757,11 @@ else
     -newer "$MARK" -print >"$LOG/freshness.log" 2>/dev/null
   [ ! -s "$LOG/freshness.log" ]
   FRESH=$?
+fi
+# A voided receipt voids the verdicts it minted: those tests ran
+# against whatever was on disk, which is no longer any tree a key names.
+if [ "$FRESH" -ne 0 ] && [ -s "$LOG/marked.list" ]; then
+  while IFS= read -r _m; do rm -f "$_m"; done <"$LOG/marked.list"
 fi
 # A receipt describes the tree as of the gate's start. Edit anything
 # after the run begins, including a comment, and the receipt is void.
