@@ -7,6 +7,7 @@
 mod blast;
 mod conform;
 mod corpus;
+mod cost;
 mod depends;
 mod differential;
 mod differential_runner;

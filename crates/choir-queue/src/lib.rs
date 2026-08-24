@@ -727,39 +727,49 @@ impl MergeQueue {
                     let failed_id = failed.id;
                     rejected.push((failed_id, Rejection::CiFailure));
 
-                    // Dependency-aware ejection: when any
-                    // waiting change declares dependencies, the failure
-                    // ejects exactly the failing change plus everything
-                    // that (transitively) depends on it, and the window
-                    // is not halved — the blast radius is named by the
-                    // declarations, not guessed by shrinking the train.
-                    // Survivors are requeued in order and land in this
-                    // same drain. With no declarations anywhere (all
-                    // existing traffic) the legacy halving path runs
-                    // unchanged.
-                    let declares = |c: &Change| !c.depends.is_empty();
-                    let dependency_mode = declares(&failed)
-                        || train.iter().any(|(c, _)| declares(c))
-                        || self.queue.iter().any(declares);
-                    if dependency_mode {
-                        let mut ejected = std::collections::BTreeSet::from([failed_id]);
-                        loop {
-                            let dependent = |c: &Change| {
-                                !ejected.contains(&c.id)
-                                    && c.depends.iter().any(|d| ejected.contains(d))
-                            };
-                            let next: Vec<u64> = train
-                                .iter()
-                                .map(|(c, _)| c)
-                                .chain(self.queue.iter())
-                                .filter(|c| dependent(c))
-                                .map(|c| c.id)
-                                .collect();
-                            if next.is_empty() {
-                                break;
-                            }
-                            ejected.extend(next);
+                    // Dependency-aware ejection: the failure ejects
+                    // exactly the failing change plus everything that
+                    // (transitively) declared a dependency on it, and the
+                    // window is not halved, because that blast radius is
+                    // named by the declarations rather than guessed by
+                    // shrinking the train. Survivors are requeued in
+                    // order and land in this same drain.
+                    //
+                    // The mode is chosen by whether anything actually
+                    // depends on *this* failure, which is why the set is
+                    // computed before the branch rather than after it.
+                    // Declarations are a lower bound on a blast radius
+                    // and never the whole of it, since an undeclared
+                    // semantic break is still possible; so a failure
+                    // nobody declared a dependency on leaves the queue
+                    // with no information about who else is bad, which is
+                    // the case halving exists for. The rule this replaces
+                    // asked whether declarations existed *anywhere* in
+                    // the train or the queue, so one change declaring one
+                    // dependency disabled halving for the whole drain.
+                    // `tests/it/cost.rs` is what measures the difference,
+                    // and under the old rule it read 4.81x against 1.64x
+                    // at a 10% failure rate scattered across the train,
+                    // with sixteen fewer changes landed at 25%.
+                    let mut ejected = std::collections::BTreeSet::from([failed_id]);
+                    loop {
+                        let dependent = |c: &Change| {
+                            !ejected.contains(&c.id)
+                                && c.depends.iter().any(|d| ejected.contains(d))
+                        };
+                        let next: Vec<u64> = train
+                            .iter()
+                            .map(|(c, _)| c)
+                            .chain(self.queue.iter())
+                            .filter(|c| dependent(c))
+                            .map(|c| c.id)
+                            .collect();
+                        if next.is_empty() {
+                            break;
                         }
+                        ejected.extend(next);
+                    }
+                    if ejected.len() > 1 {
                         for (change, _) in train.into_iter().rev() {
                             if ejected.contains(&change.id) {
                                 rejected.push((
