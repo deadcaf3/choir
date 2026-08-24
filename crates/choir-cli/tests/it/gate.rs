@@ -258,6 +258,121 @@ fn the_verdict_cache_reuses_green_and_never_red() {
     }
 }
 
+/// A cached verdict is only worth as much as the key it hangs on, and
+/// the way a key goes wrong is by missing an input: it then serves a
+/// green for a tree that never produced one. Nothing above would notice
+/// that, because nothing above changes a file.
+///
+/// So this one does, in a throwaway worktree of HEAD — a test that
+/// edited the checkout it runs in would race every other test here and
+/// leave the tree dirty on a panic. Three edits, each asserting a
+/// different half of the key:
+///
+/// - a leaf crate nobody depends on invalidates itself and leaves the
+///   node's stage cached, which is what says the closure is a closure
+///   and not just "everything";
+/// - the crate everything depends on invalidates all of it;
+/// - `.cargo/config.toml` does too, though it belongs to no crate — it
+///   carries the flags every build in this workspace needs.
+///
+/// All three edits are unstaged, so they also assert the key reads the
+/// working tree rather than the index.
+#[test]
+fn the_cache_key_follows_the_files_that_produced_it() {
+    let scratch = scratch_dir();
+    let tree = scratch.join("worktree");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(args)
+            .output()
+            .expect("git")
+    };
+    let added = git(&[
+        "worktree",
+        "add",
+        "--detach",
+        tree.to_str().expect("worktree path"),
+        "HEAD",
+    ]);
+    assert!(
+        added.status.success(),
+        "could not make a worktree to mutate: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let run_tree = |lane: Option<&str>| {
+        let mut command = std::process::Command::new("sh");
+        if let Some(lane) = lane {
+            command.arg(tree.join("gate")).arg(lane);
+        } else {
+            command.arg(tree.join("gate"));
+        }
+        command
+            .env("CHOIR_GATE_TEST_MODE", "1")
+            .env("CHOIR_GATE_TEST_CACHE", "1")
+            .env("TMPDIR", &scratch)
+            .output()
+            .expect("run the worktree's gate")
+    };
+    let append = |path: &str| {
+        let file = tree.join(path);
+        let mut body = std::fs::read_to_string(&file).expect("read a file to change");
+        body.push_str("\n// cache key probe\n");
+        std::fs::write(&file, body).expect("change a file");
+    };
+
+    assert!(run_tree(None).status.success(), "populate the cache");
+    let warm = cached_stages(&run_tree(None));
+    assert!(
+        warm.iter().any(|s| s == "node"),
+        "the second run served nothing, so nothing below proves anything: {warm:?}"
+    );
+
+    // A leaf nobody depends on. choir-demo is in the workspace stage and
+    // in nobody's dependency graph, so its stage misses and the node's
+    // does not.
+    append("crates/choir-demo/src/main.rs");
+    let leaf = cached_stages(&run_tree(None));
+    assert!(
+        !leaf.iter().any(|s| s == "workspace"),
+        "an edited crate was still served from the cache: {leaf:?}"
+    );
+    assert!(
+        leaf.iter().any(|s| s == "node"),
+        "a leaf edit invalidated a crate that does not depend on it: {leaf:?}"
+    );
+
+    // The crate everything depends on.
+    append("crates/choir-hash/src/lib.rs");
+    let root = cached_stages(&run_tree(None));
+    assert!(
+        root.is_empty(),
+        "editing the crate everything depends on left verdicts standing: {root:?}"
+    );
+
+    // A build input that belongs to no crate at all.
+    assert!(run_tree(None).status.success(), "repopulate the cache");
+    assert!(
+        !cached_stages(&run_tree(None)).is_empty(),
+        "cache is warm again"
+    );
+    append(".cargo/config.toml");
+    let config = cached_stages(&run_tree(None));
+    assert!(
+        config.is_empty(),
+        "a change to .cargo/config.toml left verdicts standing: {config:?}"
+    );
+
+    git(&[
+        "worktree",
+        "remove",
+        "--force",
+        tree.to_str().expect("worktree path"),
+    ]);
+    std::fs::remove_dir_all(scratch).ok();
+}
+
 /// The cache is opt-in twice over: off in test mode unless asked for,
 /// and off entirely under `CHOIR_GATE_NO_CACHE`. The second is the
 /// escape hatch a person reaches for when they suspect it, so it has to
