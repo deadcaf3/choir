@@ -300,6 +300,11 @@ fn the_cache_key_follows_the_files_that_produced_it() {
         "could not make a worktree to mutate: {}",
         String::from_utf8_lossy(&added.stderr)
     );
+    // `worktree add` checks out HEAD, which is the one gate this test
+    // must not run: it would exercise the last commit's script while the
+    // edit under test sits in the checkout. Every other test here runs
+    // the gate as it is on disk, and so does this one.
+    std::fs::copy(gate(), tree.join("gate")).expect("the gate under test, not HEAD's");
 
     let run_tree = |lane: Option<&str>| {
         let mut command = std::process::Command::new("sh");
