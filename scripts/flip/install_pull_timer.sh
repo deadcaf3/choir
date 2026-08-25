@@ -14,7 +14,7 @@ set -eu
 
 INTERVAL=${1:-3600}
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PULL="$(cd "$HERE/.." && pwd)/pull_backup.sh"
+PULL="$HERE/pull_backup.sh"
 LABEL=com.choir.pull-backup
 PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
 LOG=$HOME/.choir/backup-pull.log

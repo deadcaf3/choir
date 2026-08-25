@@ -425,7 +425,7 @@ sync)
     # the log copy matters more than the ref mirror, and the failure is
     # already loud on this run's own output.
     follower_feed || echo "sync: follower leg failed — continuing to the backup pull" >&2
-    sh "$HERE/pull_backup.sh"
+    sh "$HERE/scripts/flip/pull_backup.sh"
     exit 0
   fi
   # The post-flip order, in one command: canonical first, follower
@@ -450,7 +450,7 @@ verify-backup)
   # Pull the offsite copy back and check it. The mirror leg reports that
   # it wrote a backup; this is the only thing that reports the backup is
   # restorable.
-  sh "$HERE/verify_backup.sh" "${2:-}"
+  sh "$HERE/scripts/flip/verify_backup.sh" "${2:-}"
   ;;
 
 restore-from-backup)
@@ -465,7 +465,7 @@ restore-from-backup)
 pull-backup)
   # Node host -> this machine: the offsite copy of the live log, after
   # the host move. Self-verifying (checksum, prefix, seq contiguity).
-  sh "$HERE/pull_backup.sh" "${2:-}"
+  sh "$HERE/scripts/flip/pull_backup.sh" "${2:-}"
   ;;
 
 schedule-backup)
