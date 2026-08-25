@@ -1,12 +1,19 @@
 # Runbook: restoring a node from a backup
 
-You have a backup directory written by `scripts/pull_backup.sh` and no
+You have a backup directory written by `scripts/flip/pull_backup.sh` and no
 working node. This turns the first into the second, and refuses to say it
 worked until the restored node has accepted a write.
 
 ```bash
-./choirctl restore-from-backup ~/choir-oplog /srv/choir-repos
+./choirctl restore-from-backup ~/choir-backup /srv/choir-repos
 ```
+
+**`restore_from_backup.sh` is not in this repository.** It was a leg of the
+pre-host-move topology and was never committed, so the command above names
+the missing script and stops rather than failing on its path. Until it is
+written, restore by hand with the steps under "Restoring the op log" in
+`scripts/flip/RUNBOOK.md`; everything below describes what that script must
+do and what a backup cannot give you either way.
 
 Expect it to stop the first time. It stops on the things a backup cannot
 contain, and those are yours to supply.

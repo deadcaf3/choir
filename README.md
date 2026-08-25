@@ -8,7 +8,7 @@
 
 <br/>
 
-![Rust](https://img.shields.io/badge/rust-1.97.1_·_edition_2021-B7410E?style=flat-square&logo=rust&logoColor=white)
+![Rust](https://img.shields.io/badge/rust-1.94.1_·_edition_2021-B7410E?style=flat-square&logo=rust&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-4C72B0?style=flat-square)
 ![Status](https://img.shields.io/badge/status-research_prototype-8A8A8A?style=flat-square)
 ![Tests](https://img.shields.io/badge/tests-hermetic,_no_network-2E8B57?style=flat-square)
@@ -34,7 +34,7 @@ A change here is not a diff against a branch. It is a **signed operation** appen
 
 | Tool | Required? | Notes |
 |:--|:--:|:--|
-| Rust stable + Cargo | **yes** | Built with **1.97.1**, edition 2021. Install via [rustup](https://rustup.rs/) or Homebrew. |
+| Rust stable + Cargo | **yes** | Built with **1.94.1** (pinned in `rust-toolchain.toml`), edition 2021. Install via [rustup](https://rustup.rs/) or Homebrew. |
 | `git` | **yes** | Smart-HTTP CGI + all integration tests. |
 | `curl` | **yes** | Only HTTP client the crates use. |
 | `openssl` | **yes** | Auth tokens, bridge RS256; tests shell out to it. **Headers too** (`libssl-dev` on Debian/Ubuntu, `brew install openssl@3` on macOS): the node's TLS is `tiny_http`'s OpenSSL backend, so `openssl-sys` links it at build time. |
@@ -68,6 +68,8 @@ Default `cargo build` / `cargo test` skip `choir-actor` (heavy Rivet dep). Full 
 ```bash
 ./gate
 ```
+
+It fails closed, and three narrower lanes exist for the edit loop: `./gate touched` (only the crates this tree changed), `./gate quick` (sub-minute; compiles nothing), `./gate fast` (skips the timing-gated stages). None of them substitutes for the full lane, which is what a piece of work is presented as green under. Verdicts are cached against the inputs that produced them, so a repeat full run on an unchanged tree is cheap; `CHOIR_GATE_NO_CACHE=1` turns that off.
 
 Put the CLI on your PATH (or use `cargo run -p choir-cli -- …`):
 
@@ -112,6 +114,8 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 --create owner/demo.git --auth-
 ```
 
 Repos must be created with `--create` (or the installer) so the `pre-receive` hook is installed; a bare repo made any other way is **not** sequenced.
+
+A browser at the bare address gets a front page rather than a password box: what this is, and the three commands it takes to join. Everything behind it needs a credential. Backups run from the same script, once the node lives on its own host — `./choirctl pull-backup` copies the log, the node fingerprint, the policy files and one git bundle per repository to a disk that cannot be lost with the original, and `./choirctl verify-backup` checks that copy offline. Neither ever carries a key or a token.
 
 > [!WARNING]
 > **Without `--acl-file`, every credential reaches every repository.** The auth file authenticates and nothing else. Read [Authorization](docs/operating/authorization.md) before issuing a second credential.

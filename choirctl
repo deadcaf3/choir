@@ -640,7 +640,7 @@ install-cli)
   review <id> <oid> [repo:ref]                   open a landing review
   verdict <reviewer> <id> <verdict> [note]       cast a reviewer verdict
   abandon <id>     settle a stale incomplete review as lapsed-unapproved
-  verify-backup    pull the offsite copy back and check all five ways
+  verify-backup    pull the offsite copy back and check all six ways
   pull-backup      fetch the log copy from the node host (remote mode)
   schedule-backup [secs]   pull-backup on a launchd interval (default 3600)
   restore-from-backup <backup-dir> <target-root>
