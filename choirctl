@@ -23,19 +23,6 @@ choir_bin() {
   echo "$bin"
 }
 
-# Two legs of the pre-host-move topology were never committed to this
-# repository: push_mirror.sh (the Forgejo follower) and
-# restore_from_backup.sh. Rather than die on a missing path, say which
-# script is absent and what still works without it -- a command that
-# fails with "No such file or directory" reads as a broken checkout.
-need_script() {
-  [ -f "$1" ] && return 0
-  echo "choirctl: $(basename "$1") is not in this repository" >&2
-  echo "  it was never committed; this checkout has never had it" >&2
-  [ -n "${2:-}" ] && echo "  $2" >&2
-  exit 1
-}
-
 # After the D20 host move the canonical node lives on the mirror VM and
 # every 127.0.0.1:$PORT below reaches it through an SSH -L forward. The
 # marker is what says which world this machine is in; the scripts that
@@ -374,8 +361,7 @@ mirror)
     follower_feed
     exit 0
   fi
-  need_script "$HERE/push_mirror.sh" "the follower is Forgejo-only; the canonical node is unaffected"
-  sh "$HERE/push_mirror.sh"
+  sh "$HERE/scripts/push_mirror.sh"
   ;;
 
 review)
@@ -456,8 +442,7 @@ sync)
   # get ahead of the node (D21 single-canonical). What backgrounding
   # changes is only who waits, and nothing waits on a follower.
   printf 'started %s %s\n' "$(date +%s)" "$(git -C "$HERE" rev-parse HEAD)" > "$RECEIPT"
-  need_script "$HERE/push_mirror.sh" "the canonical push above already succeeded; only the mirror leg is missing"
-  nohup sh "$HERE/push_mirror.sh" >> "$RECEIPT" 2>&1 &
+  nohup sh "$HERE/scripts/push_mirror.sh" >> "$RECEIPT" 2>&1 &
   echo "mirror: running in background -> $RECEIPT (see: ./choirctl status)"
   ;;
 
@@ -474,8 +459,7 @@ restore-from-backup)
   # legs above it makes no ssh connection and does not care which side of
   # the D20 host move this machine is on.
   [ $# -ge 3 ] || { echo "usage: choirctl restore-from-backup <backup-dir> <target-root>" >&2; exit 2; }
-  need_script "$HERE/restore_from_backup.sh" "restore by hand with the steps under 'Restoring the op log' in scripts/flip/RUNBOOK.md"
-  sh "$HERE/restore_from_backup.sh" "$2" "$3"
+  sh "$HERE/scripts/restore_from_backup.sh" "$2" "$3"
   ;;
 
 pull-backup)

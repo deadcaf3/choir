@@ -8,15 +8,10 @@ worked until the restored node has accepted a write.
 ./choirctl restore-from-backup ~/choir-backup /srv/choir-repos
 ```
 
-**`restore_from_backup.sh` is not in this repository.** It was a leg of the
-pre-host-move topology and was never committed, so the command above names
-the missing script and stops rather than failing on its path. Until it is
-written, restore by hand with the steps under "Restoring the op log" in
-`scripts/flip/RUNBOOK.md`; everything below describes what that script must
-do and what a backup cannot give you either way.
-
-Expect it to stop the first time. It stops on the things a backup cannot
-contain, and those are yours to supply.
+Expect it to stop the first time, and re-run it after supplying what it
+asked for: a target root holding this backup's log unchanged is treated
+as its own earlier placement and resumed, not refused. It stops on the
+things a backup cannot contain, and those are yours to supply.
 
 ## Exit codes
 
@@ -130,8 +125,12 @@ Not "the files copied". In order:
 
 1. The backup's supported format, sequence, parent chain, and recomputed
    entry hashes verify through the final record.
-2. The nine beta policy and configuration files are present, and no secret
-   is.
+2. The four files a node cannot boot or serve restored refs without are
+   present — `keys`, `reviewers`, `protected-refs`, `repos.list` — and no
+   secret is. The other five beta policy files are named one by one when
+   the backup lacks them, and the restored node starts without them: the
+   two backup legs here carry different sets, and `scripts/flip/`
+   `pull_backup.sh` ships the six-file tar.
 3. Every repo in `repos.list` has a bundle.
 4. The target root holds no log — an existing one is never overwritten.
 5. The node boots, replays, and retracts nothing.

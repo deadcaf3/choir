@@ -26,7 +26,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC=${1:-}
 ROOT=${2:-}
 NODE_BIN=${CHOIR_NODE_BIN:-$HERE/../target/release/choir-node}
-POLICY_FILES="keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl repos.list acl private-beta.manifest"
+# The four a node cannot boot or serve the restored refs without, and
+# the five it starts degraded but honest without. Split because the two
+# backup legs in this repository carry different sets: scripts/
+# pull_backup.sh ships all nine as a directory, scripts/flip/
+# pull_backup.sh ships the first six as one tar. A restore that demanded
+# nine would refuse every backup the flip-era leg has ever written.
+POLICY_REQUIRED="keys reviewers protected-refs repos.list"
+POLICY_OPTIONAL="newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl acl private-beta.manifest"
 
 fail() { echo "restore: $1" >&2; exit 1; }
 decide() { echo "restore: $1" >&2; exit 3; }
@@ -64,21 +71,52 @@ lines=$(wc -l < "$SRC/ops.jsonl" | tr -d ' ')
 "$NODE_BIN" --verify-log "$SRC/ops.jsonl" \
   || fail "the backup failed format/sequence/parent/hash verification"
 
+# Either shape of the same thing: a policy/ directory, or one policy.tar
+# holding the same names at the top level. The tar is unpacked into the
+# work directory rather than the target, so a backup that fails a check
+# below has still written nothing where a node would read it.
+if [ -d "$SRC/policy" ]; then
+  POLICY_DIR=$SRC/policy
+elif [ -f "$SRC/policy.tar" ]; then
+  POLICY_DIR=$WORK/policy
+  mkdir -p "$POLICY_DIR"
+  tar -xf "$SRC/policy.tar" -C "$POLICY_DIR" \
+    || fail "could not read $SRC/policy.tar"
+else
+  fail "no policy in $SRC (neither policy/ nor policy.tar): a node restored without reviewers does not boot"
+fi
+
 missing=
-for f in $POLICY_FILES; do
-  [ -f "$SRC/policy/$f" ] || missing="$missing $f"
+for f in $POLICY_REQUIRED; do
+  [ -f "$POLICY_DIR/$f" ] || missing="$missing $f"
 done
 [ -z "$missing" ] || fail "policy files missing from the backup:$missing (a node restored without reviewers does not boot)"
 
+# Named, not failed. Their absence changes what the restored node
+# enforces, and a restore that stayed quiet about that would hand back a
+# node whose policy is weaker than the one it replaced.
+for f in $POLICY_OPTIONAL; do
+  [ -f "$POLICY_DIR/$f" ] || echo "restore: $f is not in this backup — the restored node starts without it"
+done
+
 # The same assertion pull_backup.sh makes about its own output, made
 # again here about its input. It holds whoever put the file there.
-leaked=$(ls "$SRC" "$SRC/policy" | grep -E '^(auth)$|\.key$|\.pem$' || true)
+leaked=$(ls "$SRC" "$POLICY_DIR" | grep -E '^(auth)$|\.key$|\.pem$' || true)
 [ -z "$leaked" ] || fail "SECRETS IN THE BACKUP: $leaked (a backup holding a token or key is a credential channel, and this restore will not spread it)"
 
-repos=$(grep -v '^[[:space:]]*#' "$SRC/policy/repos.list" | grep -v '^[[:space:]]*$' || true)
+repos=$(grep -v '^[[:space:]]*#' "$POLICY_DIR/repos.list" | grep -v '^[[:space:]]*$' || true)
 [ -n "$repos" ] || fail "repos.list names no repositories: there is nothing to serve"
+
+# Two bundle namings, one per backup leg: the full repo path
+# (`owner/name.git.bundle`) and the basename the flip-era leg writes
+# (`name.bundle`). Resolved once here so the unbundle loop below and
+# this check can never disagree about which file they mean.
+bundle_for() {
+  if [ -f "$SRC/repos/$1.bundle" ]; then echo "$SRC/repos/$1.bundle"
+  else echo "$SRC/repos/$(basename "$1" .git).bundle"; fi
+}
 for repo in $repos; do
-  [ -f "$SRC/repos/$repo.bundle" ] \
+  [ -f "$(bundle_for "$repo")" ] \
     || fail "no bundle for $repo: the log's refs for it name commits nothing here holds"
 done
 
@@ -86,11 +124,24 @@ done
 # Never write over a log. If the target already holds one, the operator
 # decides which of the two is real -- this script has no basis for that
 # and would be destroying the evidence needed to decide.
+# One exception, and only one: a log byte-identical to the backup's is
+# this script's own placement from a run that exited 3, and the runbook
+# tells the operator to supply the key or the token and re-run. Refusing
+# that re-run would make the documented recovery path unreachable — the
+# first run places the files, the second could never get past this line.
+# Anything else is somebody's node, and which of the two logs is real is
+# not a decision available here.
+RESUME=
 if [ -e "$ROOT/.choir/ops.jsonl" ]; then
-  fail "$ROOT/.choir/ops.jsonl already exists: restore into an empty root, or move the existing log aside first (it is never overwritten here)"
+  if cmp -s "$ROOT/.choir/ops.jsonl" "$SRC/ops.jsonl"; then
+    RESUME=1
+    echo "restore: resuming — $ROOT/.choir/ops.jsonl is this backup, placed and not appended to"
+  else
+    fail "$ROOT/.choir/ops.jsonl already exists and is not this backup: restore into an empty root, or move the existing log aside first (it is never overwritten here)"
+  fi
 fi
 for repo in $repos; do
-  if [ -e "$ROOT/$repo" ]; then
+  if [ -e "$ROOT/$repo" ] && [ -z "$RESUME" ]; then
     fail "$ROOT/$repo already exists: restore into an empty root"
   fi
 done
@@ -104,7 +155,13 @@ fi
 if [ -f "$SRC/refs.snapshot" ]; then
   cp "$SRC/refs.snapshot" "$ROOT/.choir/refs.snapshot"
 fi
-for f in $POLICY_FILES; do cp "$SRC/policy/$f" "$ROOT/.choir/policy/$f"; done
+# `if`, not `[ … ] && cp`: the last name in the list is the one most
+# often absent, and a loop whose final iteration is a failed test is a
+# nonzero status, which under `set -e` ends the restore here — after the
+# log has been placed and before anything has been proven.
+for f in $POLICY_REQUIRED $POLICY_OPTIONAL; do
+  if [ -f "$POLICY_DIR/$f" ]; then cp "$POLICY_DIR/$f" "$ROOT/.choir/policy/$f"; fi
+done
 chmod 700 "$ROOT/.choir" && chmod 600 "$ROOT/.choir/policy/"*
 
 # Objects before the first boot, never after. Startup reconciliation
@@ -114,8 +171,9 @@ chmod 700 "$ROOT/.choir" && chmod 600 "$ROOT/.choir/policy/"*
 # repos the daemon created for itself would therefore erase, in signed
 # ops, exactly the ref state being restored.
 for repo in $repos; do
+  [ -e "$ROOT/$repo" ] && continue
   mkdir -p "$(dirname "$ROOT/$repo")"
-  git clone --bare --quiet "$SRC/repos/$repo.bundle" "$ROOT/$repo" \
+  git clone --bare --quiet "$(bundle_for "$repo")" "$ROOT/$repo" \
     || fail "could not unbundle $repo"
   # A bundle clone leaves an `origin` pointing at the bundle file, which
   # would make the restored repo fetch from a path that is about to be a
@@ -149,18 +207,26 @@ AUTH=${CHOIR_RESTORE_AUTH:-$ROOT/.choir/auth}
 # collides with the node it is rehearsing to replace.
 create_args=""
 for repo in $repos; do create_args="$create_args --create $repo"; done
+# The optional policy is passed only where the file exists. A flag
+# naming a path that is not there is not a smaller policy, it is a
+# daemon that does not start.
+policy_args=""
+for f in $POLICY_OPTIONAL; do
+  [ -f "$ROOT/.choir/policy/$f" ] || continue
+  case $f in
+    newcomer-audit.jsonl)          policy_args="$policy_args --newcomer-audit $ROOT/.choir/policy/$f" ;;
+    newcomer-adjudications.jsonl)  policy_args="$policy_args --newcomer-adjudications $ROOT/.choir/policy/$f" ;;
+    review-adjudications.jsonl)    policy_args="$policy_args --review-adjudications $ROOT/.choir/policy/$f" ;;
+    acl)                           policy_args="$policy_args --acl-file $ROOT/.choir/policy/$f" ;;
+  esac
+done
 # shellcheck disable=SC2086
 "$NODE_BIN" "$ROOT" 0 --bind 127.0.0.1 \
   --auth-file "$AUTH" \
   --keys-file "$ROOT/.choir/policy/keys" \
   --reviewers-file "$ROOT/.choir/policy/reviewers" \
   --protected-refs "$ROOT/.choir/policy/protected-refs" \
-  --newcomer-audit "$ROOT/.choir/policy/newcomer-audit.jsonl" \
-  --newcomer-adjudications "$ROOT/.choir/policy/newcomer-adjudications.jsonl" \
-  --review-adjudications "$ROOT/.choir/policy/review-adjudications.jsonl" \
-  --acl-file "$ROOT/.choir/policy/acl" \
   --require-assignment \
-  --protected-refs "$ROOT/.choir/policy/protected-refs" \
   --require-review \
   --require-scope \
   --read-only-browser \
@@ -174,7 +240,7 @@ for repo in $repos; do create_args="$create_args --create $repo"; done
   --api-body-limit 1048576 \
   --batch-limit 256 \
   --ready-min-free-bytes 1073741824 \
-  $create_args > "$WORK/node.out" 2> "$WORK/node.err" &
+  $policy_args $create_args > "$WORK/node.out" 2> "$WORK/node.err" &
 NODE_PID=$!
 
 # Wait for the daemon's own marker, not for a duration: a slow machine
@@ -256,10 +322,21 @@ for repo in $repos; do
   url="http://$USER_TOKEN@127.0.0.1:$PORT/$repo"
   rm -rf "$WORK/canary"
   git clone --quiet "$url" "$WORK/canary" 2>/dev/null || continue
+  # Any commit will do, and HEAD is not reliably one of them: a repo
+  # rebuilt from a bundle keeps whatever HEAD the original had, so a
+  # served repo whose default branch is not among the restored refs
+  # clones with an unborn HEAD and nothing checked out. Fall back to a
+  # fetched branch before concluding this repo has nothing to push --
+  # otherwise a restore that worked reports that it proved nothing.
+  # --verify, because a bare `rev-parse HEAD` on an unborn HEAD prints
+  # the string "HEAD" on stdout *and* fails, so the fallback's output
+  # would be appended to it and the push would name a two-line refspec.
+  tip=$(git -C "$WORK/canary" rev-parse --verify --quiet HEAD 2>/dev/null \
+        || git -C "$WORK/canary" for-each-ref --count=1 --format='%(objectname)' refs/remotes/origin/ 2>/dev/null)
   # An empty repo clones fine and has nothing to push. That is not a
   # failure of this repo, only a reason to try the next one.
-  git -C "$WORK/canary" rev-parse HEAD >/dev/null 2>&1 || continue
-  git -C "$WORK/canary" push --quiet "$url" "HEAD:$CANARY" \
+  [ -n "$tip" ] || continue
+  git -C "$WORK/canary" push --quiet "$url" "$tip:$CANARY" \
     || fail "the canary push to $repo was refused. The restored node serves, but it does not accept writes."
   pushed=$repo
   break
