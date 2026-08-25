@@ -239,6 +239,47 @@ client over an SSH tunnel, and the backup direction inverts: the laptop
 pulls (`choirctl pull-backup`), because a live log and its only copy on
 one disk is not a backup.
 
+### What a bare Linux host needs first
+
+Two prerequisites are not obvious and neither names itself in the
+failure it causes. Both were hit building a node on a fresh Debian 13
+host.
+
+`libssl-dev` must be installed before the first build. Without it
+`openssl-sys` fails with "Could not find directory of OpenSSL
+installation", which reads as a toolchain problem and is not one. The
+full apt set is `git build-essential pkg-config curl certbot libssl-dev`,
+plus `zsh` if the operator scripts written for macOS are to be run on
+the host, and `rustup` — which Debian packages, so the toolchain needs
+no pipe-to-shell installer. `rust-toolchain.toml` pins the version the
+first `cargo` invocation then fetches.
+
+**The node must not run as a cloud-provisioned login account.** On GCE
+with OS Login the account has a dynamic uid that `systemd-logind`
+cannot resolve, so `loginctl enable-linger` fails with "No such
+process" and writing `/var/lib/systemd/linger/<user>` by hand does not
+help either. Without linger the user unit stops at logout, which means
+the node dies when the operator's ssh session ends and does not come
+back at boot. Create an ordinary unprivileged local account for it
+(`useradd -m choir`), enable linger on that, and install as it. That
+account is also the better home for the node's identity: it is stable
+across IAM changes, which the login account is not.
+
+A non-interactive `ssh <host> --command` also has no session bus, so
+`systemctl --user` fails there with a `DBUS_SESSION_BUS_ADDRESS`
+complaint even once linger is on. Export both when installing over ssh:
+
+```sh
+sudo -u choir env HOME=/home/choir \
+  XDG_RUNTIME_DIR=/run/user/$(id -u choir) \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u choir)/bus \
+  sh ~choir/choir-build/scripts/flip/install_node_linux.sh 8417 <owner/repo>.git ~choir/bin ~choir/bin
+```
+
+Verify with `systemctl --user is-enabled choir-node` under the same
+environment: `enabled` plus `Linger=yes` is what survives a reboot.
+`active` alone does not.
+
 Rebuilding the VM node after a landing (`choirctl install` prints this
 too): check `/proc/swaps` still lists the 3 GiB swapfile, then on the VM
 
