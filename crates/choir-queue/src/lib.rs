@@ -47,7 +47,19 @@ use choir_oplog::MemLog;
 use choir_sequencer::Sequencer;
 use speculate::{Speculator, Step};
 
-/// Default initial speculation window (a documented default).
+/// Default speculation window: both the initial size and the ceiling
+/// growth may not pass (a documented default).
+///
+/// It is a ceiling and not only a starting point because the cost model
+/// quoted everywhere else depends on it being one. A round's fleet cost
+/// is about `1 + p*k/2` and its tail about `1 + p*k`, and both are
+/// unbounded statements unless `k` is. Additive increase still runs --
+/// it is what walks the window back up to this ceiling after a
+/// multiplicative decrease -- it just cannot walk past it. TCP calls the
+/// same thing a maximum congestion window; a controller with only the
+/// increase half is not flow control, it is a ramp.
+///
+/// [`MergeQueue::set_max_window`] raises or lowers it per queue.
 pub const DEFAULT_WINDOW: usize = 20;
 
 /// A change submitted to the queue: a full-file edit carrying its own base.
@@ -186,6 +198,10 @@ pub struct MergeQueue {
     /// installs the git one.
     speculator: Box<dyn Speculator>,
     window: usize,
+    /// The ceiling `window` may not grow past. Enforced in one place,
+    /// [`MergeQueue::resize`], so that a future growth path cannot
+    /// bypass it by being written somewhere else.
+    max_window: usize,
     queue: std::collections::VecDeque<Change>,
     memory: memory::ResolutionMemory,
     landed: std::collections::BTreeSet<String>,
@@ -318,7 +334,13 @@ impl MergeQueue {
     /// so the answer does not have to be inferred from timing.
     fn resize(&mut self, to: usize, cause: &str) {
         let from = self.window;
-        self.window = to;
+        // The clamp lives here rather than at the call site because the
+        // call site is a loop body that runs once per landed change: a
+        // ceiling checked anywhere else is a ceiling one caller can
+        // forget. A resize to the size it already is records nothing,
+        // so a queue sitting at the ceiling stays quiet in the journal.
+        self.window = to.min(self.max_window);
+        let to = self.window;
         if from != to {
             self.journal
                 .record(choir_sequencer::journal::Event::WindowResize {
@@ -327,6 +349,34 @@ impl MergeQueue {
                     cause: cause.to_string(),
                 });
         }
+    }
+
+    /// Sets the ceiling the speculation window may grow to, and brings
+    /// the current window under it now rather than at the next resize.
+    ///
+    /// The cost of a round is linear in this number and so is the
+    /// number of CI jobs in flight at once, which is why it is a
+    /// deliberate call and not a field a caller can drift upward.
+    ///
+    /// # Panics
+    ///
+    /// If `n` is zero, which would be a queue that speculates on
+    /// nothing and drains forever.
+    pub fn set_max_window(&mut self, n: usize) {
+        assert!(
+            n > 0,
+            "a window of zero would take no change from the queue"
+        );
+        self.max_window = n;
+        if self.window > n {
+            self.resize(n, "max window lowered");
+        }
+    }
+
+    /// The ceiling [`MergeQueue::window`] may grow to.
+    #[must_use]
+    pub fn max_window(&self) -> usize {
+        self.max_window
     }
 
     /// Sends window changes to `journal` instead of discarding them.
@@ -375,6 +425,7 @@ impl MergeQueue {
             base: base.to_string(),
             speculator,
             window: DEFAULT_WINDOW,
+            max_window: DEFAULT_WINDOW,
             reporter: None,
             queue: std::collections::VecDeque::new(),
             memory: memory::ResolutionMemory::new(),

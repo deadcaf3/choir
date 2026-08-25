@@ -60,9 +60,18 @@ fn a_failing_build_ejects_its_dependents_and_lands_the_independent_change() {
         "dependency ejection must replace window halving, got {:?}",
         report.window_trace
     );
-    // C landed within this drain — the same window pass, not a
-    // resubmission after the failure.
-    assert_eq!(*report.window_trace.last().unwrap(), DEFAULT_WINDOW + 1);
+    // C landed within this drain, not on a resubmission after the
+    // failure: `report.merged` above is the witness, from one
+    // `run_batch`. This assertion is now about the window alone, and it
+    // is the stronger statement of the two the old `DEFAULT_WINDOW + 1`
+    // made: across both passes the window neither halved (declarations
+    // named the blast radius, so there was nothing to back off from)
+    // nor grew past its ceiling.
+    assert_eq!(
+        report.window_trace,
+        vec![DEFAULT_WINDOW, DEFAULT_WINDOW],
+        "dependency ejection must neither halve the window nor lift it past the ceiling"
+    );
 }
 
 /// A dependent still waiting in the queue (behind the window) is ejected

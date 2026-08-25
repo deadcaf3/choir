@@ -37,8 +37,14 @@ fn all_green_train_merges_everything_in_order() {
             .final_state
             .contains(&format!("edited by change {id}")));
     }
-    // Green merges grow the window: 20 + 15.
-    assert_eq!(*report.window_trace.last().unwrap(), DEFAULT_WINDOW + 15);
+    // Green merges grow the window, but not past the ceiling, and a
+    // queue that starts at the ceiling has nowhere to grow to. This
+    // asserted `DEFAULT_WINDOW + 15` while growth was unbounded, which
+    // made the documented `1 + p*k` tail a statement about no `k` at
+    // all. That additive increase still *works* is proved below, by
+    // `ci_failure_halves_window_and_retests_behind`, where the window
+    // has room underneath the ceiling to climb back through.
+    assert_eq!(*report.window_trace.last().unwrap(), DEFAULT_WINDOW);
     // Assume-pass: one CI run per change, no retests needed.
     assert_eq!(report.ci_runs, 15);
 }
@@ -55,8 +61,12 @@ fn ci_failure_halves_window_and_retests_behind() {
     assert_eq!(ops, 9);
     // The failed change's edit must not be in the final state.
     assert!(!report.final_state.contains("edited by change 4"));
-    // Window halved after the failure: (20 + 4 greens) / 2 = 12, then +5.
-    assert_eq!(report.window_trace, vec![12, 17]);
+    // Window halved after the failure, then walked back up: the four
+    // greens ahead of the failure cannot lift it above the ceiling, so
+    // it halves from 20 to 10 and additive increase carries it to 15.
+    // Both halves of AIMD are in this one vector -- the decrease, and
+    // the increase that is only observable below the ceiling.
+    assert_eq!(report.window_trace, vec![10, 15]);
     // Changes 5..10 were tested twice: once ahead of the failure (speculative
     // states later discarded), once after requeueing.
     assert_eq!(report.ci_runs, 10 + 5);
@@ -549,5 +559,87 @@ fn a_landed_head_is_the_subject_its_check_names() {
     assert_eq!(
         view.checks_verdict(&choir_hash::ContentHash::blake3(b"never built")),
         None
+    );
+}
+
+/// The window is a congestion window, so it has a ceiling: additive
+/// increase walks it back up after a failure and stops there.
+///
+/// Without the ceiling `resize(self.window + 1, ..)` runs once per
+/// landed change with nothing to stop it, so a green round of width `w`
+/// leaves the window at `2w` and the next at `4w`. That is not a
+/// tuning detail: the cost model quoted everywhere else is `1 + p*k/2`
+/// on average and `1 + p*k` at the tail, and both say nothing at all
+/// unless `k` has a bound. It also sets the number of CI jobs in
+/// flight at once, which is why the unbounded version was an
+/// availability problem before it was a billing one.
+#[test]
+fn the_window_grows_back_to_its_ceiling_and_not_past_it() {
+    let mut queue = MergeQueue::new(&base());
+    assert_eq!(queue.window(), DEFAULT_WINDOW, "starts at the ceiling");
+    assert_eq!(queue.max_window(), DEFAULT_WINDOW);
+
+    // Lower the ceiling so there is room to observe growth beneath it,
+    // then fail one change to force the multiplicative decrease.
+    queue.set_max_window(8);
+    assert_eq!(
+        queue.window(),
+        8,
+        "lowering the ceiling brings the window under it now"
+    );
+
+    for id in 0..12 {
+        queue.submit(disjoint_change(id));
+    }
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let report = queue.drain(&mut Synthetic::failing_labels(&["3"]), &sequencer);
+    sequencer.shutdown();
+
+    assert!(
+        report.window_trace.iter().all(|w| *w <= 8),
+        "the window must never pass its ceiling, got {:?}",
+        report.window_trace
+    );
+    assert!(
+        report.window_trace.iter().any(|w| *w < 8),
+        "a CI failure must still halve it, got {:?}",
+        report.window_trace
+    );
+    assert_eq!(
+        queue.window(),
+        8,
+        "and additive increase must walk it back to the ceiling"
+    );
+}
+
+/// Raising the ceiling is the only way past the default, and it is a
+/// call rather than a field so that a cost multiplier cannot drift
+/// upward by accident.
+#[test]
+fn the_ceiling_is_raised_only_deliberately() {
+    let mut queue = MergeQueue::new(&base());
+    queue.set_max_window(DEFAULT_WINDOW * 3);
+    assert_eq!(queue.max_window(), DEFAULT_WINDOW * 3);
+    // Raising the ceiling does not itself widen the window: only
+    // landings do, one change at a time.
+    assert_eq!(queue.window(), DEFAULT_WINDOW);
+
+    for id in 0..40 {
+        queue.submit(disjoint_change(id));
+    }
+    let sequencer = Sequencer::spawn(Box::new(MemLog::new()));
+    let report = queue.drain(&mut Synthetic::passing(), &sequencer);
+    sequencer.shutdown();
+
+    assert_eq!(report.merged.len(), 40);
+    assert!(
+        report.window_trace.iter().all(|w| *w <= DEFAULT_WINDOW * 3),
+        "the raised ceiling still bounds growth, got {:?}",
+        report.window_trace
+    );
+    assert!(
+        *report.window_trace.last().unwrap() > DEFAULT_WINDOW,
+        "and growth beyond the default is reachable once it is raised, got {:?}",
+        report.window_trace
     );
 }
