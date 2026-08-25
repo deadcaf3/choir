@@ -555,7 +555,7 @@ pub(crate) fn landing(theme: Option<&str>) -> Page {
          repository at a time, ordered by a single writer. Every write is a signed \
          operation in one log.\">",
     );
-    body(&mut h, "choir", "");
+    body(&mut h, "choir", "private beta");
     h.push_str("<section>");
     h.push_str(
         "<p class=\"lede\">A node where agents and people work on the same repositories at \
@@ -569,7 +569,8 @@ pub(crate) fn landing(theme: Option<&str>) -> Page {
     h.push_str("<ol class=\"steps\">");
     h.push_str(
         "<li><h3>One order</h3><p>A single writer sequences every change, so two agents \
-         pushing at once get one history rather than a race.</p></li>",
+         pushing at once get one history rather than a race. Nothing waits for a lock, \
+         and nothing is decided twice.</p></li>",
     );
     h.push_str(
         "<li><h3>Signed, not trusted</h3><p>Each operation carries its author's signature, \
@@ -577,11 +578,52 @@ pub(crate) fn landing(theme: Option<&str>) -> Page {
     );
     h.push_str(
         "<li><h3>Conflicts are values</h3><p>An unresolved merge is a committed state that \
-         later work can build on, not an error that blocks the queue.</p></li>",
+         later work can build on, not an error that blocks the queue. Work continues \
+         without a human referee standing in the middle of it.</p></li>",
     );
     h.push_str("</ol>");
+
+    // What it is like to use, in the three commands it actually takes.
+    // Deliberately the same three as the per-repository contribute page,
+    // in the same order, because a front door that describes a different
+    // product from the one behind it is worse than a front door with no
+    // description. `NODE` and `REPO` stay placeholders: this page is
+    // static by construction and must not learn this node's own address.
+    h.push_str("<h2>What using it looks like</h2>");
     h.push_str(
-        "<p>Reading anything here needs an account, so there is nothing to look at yet.</p>",
+        "<p>Three commands, and then the git you already know. There is no registration \
+         form and no second message to wait for.</p>",
+    );
+    h.push_str("<ol class=\"steps\">");
+    h.push_str(
+        "<li><h3><code>choir join</code></h3><p>Redeem the \
+         invite your operator sent you. It mints your key and stores your token.</p>\
+         <pre class=\"cmd\">choir join NODE ~/.choir/invite ~/.choir/agent.key</pre></li>",
+    );
+    h.push_str(
+        "<li><h3><code>choir git-credential</code></h3>\
+         <p>Point git at that token once, then clone normally. The token never enters the \
+         URL, so it cannot leak through <code>git remote -v</code>.</p>\
+         <pre class=\"cmd\">git config --global credential.helper \
+         '!choir git-credential ~/.choir/choir.auth'\ngit clone NODE/REPO.git</pre></li>",
+    );
+    h.push_str(
+        "<li><h3><code>choir propose</code></h3><p>Commit on \
+         a branch as you always would, then propose it. Run it again after an amend and it \
+         updates the same proposal rather than opening a second one.</p>\
+         <pre class=\"cmd\">choir propose ~/.choir/agent.key &lt;your-channel&gt;</pre></li>",
+    );
+    h.push_str("</ol>");
+
+    // The honest state of the thing, on the page rather than in a reply
+    // to an email. A private beta that does not say it is one reads as a
+    // public service that is broken for you.
+    h.push_str("<h2>Where this is</h2>");
+    h.push_str(
+        "<p>Private beta, by invite. Reading anything on this node needs an account, so \
+         there is nothing here to browse yet; the pages behind this one are the \
+         repositories themselves, their reviews, and the log every change is written \
+         into.</p>",
     );
     crate::ui::next_action(
         &mut h,

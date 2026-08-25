@@ -138,6 +138,34 @@ fn a_stranger_at_the_bare_address_gets_a_page_rather_than_a_password_box() {
         "the landing page lists a repository: {body}"
     );
 
+    // The front door says what it takes to use the thing, in the same
+    // three commands as the per-repository contribute page. A door that
+    // describes a different product from the one behind it is worse than
+    // a door that describes nothing.
+    for command in ["choir join", "choir git-credential", "choir propose"] {
+        assert!(
+            body.contains(command),
+            "the front door does not name `{command}`: {body}"
+        );
+    }
+    // Those commands are placeholders, not this node filled in. The
+    // static-by-construction property is what keeps the address of a
+    // private node off a page anybody can fetch.
+    assert!(
+        body.contains("choir join NODE"),
+        "the example was specialised to this node: {body}"
+    );
+    assert!(
+        !body.contains(&s.base),
+        "the landing page prints this node's own address: {body}"
+    );
+    // And it says which state it is in. A private beta that does not say
+    // so reads as a public service that is broken for the reader.
+    assert!(
+        body.contains("Private beta"),
+        "the page does not say it is invite-only: {body}"
+    );
+
     // A credential that is presented and wrong must still get the normal
     // challenge, or a reader who mistyped their password lands on a
     // marketing page and cannot retry.

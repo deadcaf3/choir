@@ -15,7 +15,9 @@ surface confirms that a repository exists.
 
 ## Browser surface
 
-Open the node's base URL (`/`) in a browser and it serves one read-only page: refs grouped by repository, the review queue with approval weights and verdicts, the latest ref-state attestation, workspaces, and sequencer health against the 100 ms gate. It is behind the same auth wall as everything else, so a browser prompts for a `--auth-file` user and token: anonymous readers get `401`, on the page exactly as on the API.
+Open the node's base URL (`/`) in a browser with a credential and it serves the repository index, and behind it one read-only page per repository: refs, the review queue with approval weights and verdicts, the latest ref-state attestation, workspaces, and sequencer health against the 100 ms gate. It is behind the same auth wall as everything else, so a browser prompts for a `--auth-file` user and token, and the API answers `401` to a request carrying none.
+
+**The one exception is the bare address itself (D57).** A `GET /` that presents *no* credential gets a static front page instead of a password box: what a choir node is, the three commands it takes to use one (`choir join`, `choir git-credential`, `choir propose`), and that the node is invite-only. It names no repository, no sequence number and not even this node's own address — it takes no store, no platform and no view, so there is nothing on it that could grow node state without somebody adding a parameter on purpose. A credential that is presented and *wrong* still gets the `401` and the `WWW-Authenticate` challenge, because a reader who mistyped a password needs the browser to ask again rather than a page explaining what choir is.
 
 It is deliberately not an app. The page is server-rendered from the same `/api/view` payload the API serves (so it cannot drift from the API), cached by view sequence, and revalidated with an `ETag`: a repeat visit on unchanged state returns `304` with no body, so refreshing or polling it costs the node nothing. No JavaScript, no build step, no external fetch, so it works offline and inside networks with no route to the internet.
 
