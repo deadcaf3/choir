@@ -59,6 +59,16 @@ else
   echo "  UNVERIFIED: no $VERIFIER — build it: cargo build --release -p choir-node"
 fi
 
+# 3b. The D25 attestation. Not required — a node that never moved a ref
+#     never signed one — but its absence removes a check from the restore
+#     rather than failing one, and that is worth saying where an operator
+#     reads whether the backup is good.
+if [ -s "$DEST/refs.snapshot" ]; then
+  ok "ref attestation present (the restore will check the view it replays into)"
+else
+  echo "  no ref attestation — a restore from this backup cannot check the view it replays into"
+fi
+
 # 4. The policy files, without which a restored node refuses to boot
 #    rather than starting degraded. Their absence is the rehearsal's
 #    finding, so it is checked by name.

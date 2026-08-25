@@ -26,14 +26,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC=${1:-}
 ROOT=${2:-}
 NODE_BIN=${CHOIR_NODE_BIN:-$HERE/../target/release/choir-node}
-# The four a node cannot boot or serve the restored refs without, and
-# the five it starts degraded but honest without. Split because the two
-# backup legs in this repository carry different sets: scripts/
-# pull_backup.sh ships all nine as a directory, scripts/flip/
-# pull_backup.sh ships the first six as one tar. A restore that demanded
-# nine would refuse every backup the flip-era leg has ever written.
-POLICY_REQUIRED="keys reviewers protected-refs repos.list"
-POLICY_OPTIONAL="newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl acl private-beta.manifest"
+# The three a node cannot boot or serve the restored refs without, and
+# the six it starts without — each of which changes what the restored
+# node enforces. Split because the two backup legs in this repository
+# carry different sets: scripts/pull_backup.sh ships all nine as a
+# directory, scripts/flip/pull_backup.sh ships up to six as one tar and
+# skips any the node host does not have. A restore that demanded nine
+# would refuse every backup the flip-era leg has ever written, and one
+# that demanded protected-refs would refuse a node that protects no ref.
+POLICY_REQUIRED="keys reviewers repos.list"
+POLICY_OPTIONAL="protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl acl private-beta.manifest"
 
 fail() { echo "restore: $1" >&2; exit 1; }
 decide() { echo "restore: $1" >&2; exit 3; }
@@ -149,7 +151,12 @@ done
 # -------------------------------------------------------------- 3. place
 mkdir -p "$ROOT/.choir/policy"
 cp "$SRC/ops.jsonl" "$ROOT/.choir/ops.jsonl"
-if [ -f "$SRC/node.fingerprint" ]; then
+# Not on a resume. Deleting the fingerprint is option (b) of the key
+# decision below — the operator accepting that the log changes author —
+# and it is taken between two runs of this script. Re-placing it here
+# would put back the pin they just removed, and the re-run they were
+# told to make would stop at the same refusal forever.
+if [ -f "$SRC/node.fingerprint" ] && [ -z "$RESUME" ]; then
   cp "$SRC/node.fingerprint" "$ROOT/.choir/node.fingerprint"
 fi
 if [ -f "$SRC/refs.snapshot" ]; then
@@ -195,7 +202,14 @@ if [ ! -f "$ROOT/.choir/node.key" ]; then
         and re-run. Every op after the seam is signed by a different actor.
   Option (b) is not reversible and not invisible: see docs/runbook-restore.md."
   fi
-  decide "no node key at $ROOT/.choir/node.key. The daemon will mint one on first start, which is correct only if this log has no earlier author."
+  # No key and no pin: either this log never had an author to keep, or
+  # the operator has taken option (b) above by deleting the fingerprint.
+  # Nothing here can tell those apart, and refusing both would leave (b)
+  # with no way forward at all — the key it asks for is the one that is
+  # gone. So it proceeds, loudly, naming the seq the seam falls at.
+  echo "restore: NO SIGNING KEY AND NO PIN — the daemon will mint a fresh key on the start below." >&2
+  echo "  Every op from seq $lines on is signed by a different actor than seq 0..$((lines - 1))." >&2
+  echo "  Anyone holding the old fingerprint should be told (docs/runbook-restore.md)." >&2
 fi
 AUTH=${CHOIR_RESTORE_AUTH:-$ROOT/.choir/auth}
 [ -f "$AUTH" ] || decide "no auth file at $AUTH. Backups carry no credentials, so mint one now:
@@ -214,6 +228,11 @@ policy_args=""
 for f in $POLICY_OPTIONAL; do
   [ -f "$ROOT/.choir/policy/$f" ] || continue
   case $f in
+    # The review gate, both halves or neither: --require-review without
+    # --protected-refs is refused by the daemon, because a gate over
+    # nothing is worse than no gate. A backup from a node that protects
+    # no ref restores into a node that protects no ref.
+    protected-refs)                policy_args="$policy_args --protected-refs $ROOT/.choir/policy/$f --require-review" ;;
     newcomer-audit.jsonl)          policy_args="$policy_args --newcomer-audit $ROOT/.choir/policy/$f" ;;
     newcomer-adjudications.jsonl)  policy_args="$policy_args --newcomer-adjudications $ROOT/.choir/policy/$f" ;;
     review-adjudications.jsonl)    policy_args="$policy_args --review-adjudications $ROOT/.choir/policy/$f" ;;
@@ -225,9 +244,7 @@ done
   --auth-file "$AUTH" \
   --keys-file "$ROOT/.choir/policy/keys" \
   --reviewers-file "$ROOT/.choir/policy/reviewers" \
-  --protected-refs "$ROOT/.choir/policy/protected-refs" \
   --require-assignment \
-  --require-review \
   --require-scope \
   --read-only-browser \
   --journal "$ROOT/.choir/journal.jsonl" \

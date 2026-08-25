@@ -10,10 +10,11 @@
 # never on the node host. It refuses the other direction rather than
 # writing a "backup" next to the thing it is backing up.
 #
-# What travels: ops.jsonl, node.fingerprint, the six policy files as one
-# tar, and one `--all` bundle per served repo. The log says which commits
-# the refs named; only the bundles make the git objects restorable, and
-# ops.jsonl is not a git object so no bundle has ever contained it.
+# What travels: ops.jsonl, node.fingerprint, refs.snapshot, the six policy
+# files as one tar, and one `--all` bundle per served repo. The log says
+# which commits the refs named; only the bundles make the git objects
+# restorable, and ops.jsonl is not a git object so no bundle has ever
+# contained it.
 #
 # What must not, and is never named below: node.key, auth, and any
 # *.key/*.pem. A backup carrying the signing key lets whoever holds the
@@ -140,6 +141,28 @@ fi
 echo "pulling node.fingerprint"
 node_ssh "cat $REMOTE_STATE/repos/.choir/node.fingerprint" > "$INCOMING/node.fingerprint"
 
+# The D25 ref attestation: what the node signed for its own ref-state, as
+# against what a restore happens to replay into. It is the only check a
+# restore can make that a checksum cannot reach -- bytes can arrive
+# perfectly and still fold into a different view -- and
+# restore_from_backup.sh skips that check entirely when the backup has no
+# snapshot in it, which is every backup this leg wrote before now.
+#
+# Absent is not a failure: a node that has never moved a ref has never
+# attested one. It is said out loud instead, because a silently skipped
+# proof reads exactly like a passed one.
+echo "pulling refs.snapshot"
+if node_ssh "test -f $REMOTE_STATE/repos/.choir/refs.snapshot"; then
+  node_ssh "cat $REMOTE_STATE/repos/.choir/refs.snapshot" > "$INCOMING/refs.snapshot"
+  [ -s "$INCOMING/refs.snapshot" ] || {
+    echo "pull_backup: refs.snapshot is on the node but arrived empty" >&2
+    exit 1
+  }
+  echo "  attestation ok ($(wc -c < "$INCOMING/refs.snapshot" | tr -d ' ') bytes)"
+else
+  echo "  no attestation on the node — a restore from this backup cannot check the view it replays into"
+fi
+
 # The node's policy is configuration, not sequenced fact, so it lives
 # outside the log -- and a node rebuilt from ops.jsonl alone refuses to
 # boot for want of it. Named one by one rather than globbed: a glob over
@@ -208,6 +231,15 @@ MANIFEST
 # harmless.
 mv "$INCOMING/ops.jsonl"        "$DEST/ops.jsonl"
 mv "$INCOMING/node.fingerprint" "$DEST/node.fingerprint"
+# A snapshot from an earlier run is removed rather than kept beside a
+# newer log. The restore compares the attestation against the view the
+# whole log replays into, so a stale one describes a ref-state the log
+# has since moved past and would fail a restore that is perfectly good.
+if [ -f "$INCOMING/refs.snapshot" ]; then
+  mv "$INCOMING/refs.snapshot" "$DEST/refs.snapshot"
+else
+  rm -f "$DEST/refs.snapshot"
+fi
 mv "$INCOMING/policy.tar"       "$DEST/policy.tar"
 mv "$INCOMING/manifest"         "$DEST/manifest"
 mkdir -p "$DEST/repos"

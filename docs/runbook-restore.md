@@ -53,12 +53,13 @@ that is a fact about the log, not a formality:
 rm /srv/choir-repos/.choir/node.fingerprint
 ```
 
-The daemon mints a new key on the next start and pins it. Every op after
-the seam is signed by a different actor from every op before it. Nothing
-that already verified stops verifying — historical signatures are still
-good — but from here on, "the node" is a different key, and anyone
-holding the old fingerprint should be told. Write down the seq the seam
-falls at; it is the last entry in the backup.
+The daemon mints a new key on the next start and pins it. The re-run
+does not put the fingerprint back, and it does not stop again: it names
+the seq the seam falls at and carries on. Every op after the seam is
+signed by a different actor from every op before it. Nothing that
+already verified stops verifying — historical signatures are still good
+— but from here on, "the node" is a different key, and anyone holding
+the old fingerprint should be told.
 
 Keep the node key somewhere the node host's disk failure cannot reach.
 It is the one piece of state with no second copy anywhere, because every
@@ -125,17 +126,18 @@ Not "the files copied". In order:
 
 1. The backup's supported format, sequence, parent chain, and recomputed
    entry hashes verify through the final record.
-2. The four files a node cannot boot or serve restored refs without are
-   present — `keys`, `reviewers`, `protected-refs`, `repos.list` — and no
-   secret is. The other five beta policy files are named one by one when
-   the backup lacks them, and the restored node starts without them: the
-   two backup legs here carry different sets, and `scripts/flip/`
-   `pull_backup.sh` ships the six-file tar.
+2. The three files a node cannot boot or serve restored refs without are
+   present — `keys`, `reviewers`, `repos.list` — and no secret is. The
+   other six beta policy files are named one by one when the backup lacks
+   them, and the restored node starts without them, enforcing less than
+   the node it replaces. `protected-refs` is one of those six: a backup
+   from a node that protects no ref restores into a node that protects
+   no ref, review gate and all.
 3. Every repo in `repos.list` has a bundle.
 4. The target root holds no log — an existing one is never overwritten.
 5. The node boots, replays, and retracts nothing.
 6. The view it serves matches the D25 ref attestation, if the backup
-   carried one. Bytes can arrive perfectly and still replay into a
+   carried one — `refs.snapshot`, which both backup legs now pull. Bytes can arrive perfectly and still replay into a
    different view; this is the only check that sees that.
 7. A real `git push` over HTTP lands: through `http-backend`, the
    `pre-receive` hook, the sequencer, and into the log. Anything less
