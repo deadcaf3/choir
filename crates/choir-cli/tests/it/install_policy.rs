@@ -1112,7 +1112,7 @@ fn the_mirror_push_reuses_one_ssh_connection() {
     // fine, the command just does not exist.
     let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl source");
     assert!(
-        driver.contains("sh \"$HERE/push_mirror.sh\""),
+        driver.contains("sh \"$HERE/scripts/push_mirror.sh\""),
         "choirctl no longer runs the mirror push with sh; revisit the shell assumptions below"
     );
     for line in script.lines().filter(|l| !l.trim_start().starts_with('#')) {
@@ -1205,7 +1205,7 @@ fn the_mirror_receipt_is_read_not_merely_written() {
     // survives backgrounding precisely because `set -e` stops before
     // this line when the canonical half fails.
     assert!(
-        driver.contains("nohup sh \"$HERE/push_mirror.sh\""),
+        driver.contains("nohup sh \"$HERE/scripts/push_mirror.sh\""),
         "choirctl sync no longer backgrounds the mirror leg"
     );
     let sync = driver
@@ -1328,6 +1328,122 @@ fn the_backup_is_verified_by_pulling_it_back_not_by_having_written_it() {
         "verify_backup.sh is not valid sh: {}",
         String::from_utf8_lossy(&syntax.stderr)
     );
+}
+
+/// The same properties, pinned on the pair `choirctl` actually runs.
+///
+/// There are two backup families in this repository — `scripts/` and
+/// `scripts/flip/` — and every test above this one reads the first while
+/// `choirctl pull-backup` and `choirctl verify-backup` run the second.
+/// That gap is not theoretical: the flip pull shipped no `refs.snapshot`
+/// for its whole life, so the restore's D25 attestation check silently
+/// skipped on every backup an operator has ever taken, and nothing here
+/// noticed. A property is only pinned on the implementation that runs.
+#[test]
+fn the_backup_pair_choirctl_runs_is_pinned_too() {
+    let strip = |path: &str| -> String {
+        std::fs::read_to_string(repo_root().join(path))
+            .unwrap_or_else(|_| panic!("{path}"))
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let pull = strip("scripts/flip/pull_backup.sh");
+    // The log, its pin, and the attestation the restore checks the
+    // replayed view against. Without the third, that check is skipped
+    // and the restore says nothing about it either way.
+    //
+    // Both ends of each file's journey, not the bare name: a script that
+    // merely mentions `refs.snapshot` in an error string passes a
+    // contains-check while pulling nothing, which is what the first
+    // version of this assertion did.
+    for needed in ["ops.jsonl", "node.fingerprint", "refs.snapshot"] {
+        assert!(
+            pull.contains(&format!("$INCOMING/{needed}"))
+                && pull.contains(&format!("$DEST/{needed}")),
+            "the pull stopped carrying {needed} into the promoted backup"
+        );
+    }
+    assert!(
+        !pull.contains("node.key"),
+        "the pulled backup must never carry node.key off the node that owns it"
+    );
+    assert!(
+        pull.contains("checksum mismatch") && pull.contains("--verify-log"),
+        "the pull must compare checksums and run the release verifier over what arrived"
+    );
+    // The check no single-file checksum can make: an append-only log
+    // that shrank or was rewritten still checksums fine on its own.
+    assert!(
+        pull.contains("prefix"),
+        "the pull stopped requiring the held copy to be a prefix of the node's log"
+    );
+    assert!(
+        pull.contains("REFUSING"),
+        "the pull must refuse a policy tar that gained a credential"
+    );
+
+    let verify = strip("scripts/flip/verify_backup.sh");
+    // Three that stop a restore booting, six that leave it enforcing
+    // less than the node it replaces. Both sets are reported; only the
+    // first fails, because a node that protects no ref has no
+    // protected-refs file to back up.
+    for needed in [
+        "keys",
+        "reviewers",
+        "repos.list",
+        "protected-refs",
+        "newcomer-audit.jsonl",
+        "newcomer-adjudications.jsonl",
+        "review-adjudications.jsonl",
+        "acl",
+        "private-beta.manifest",
+    ] {
+        assert!(
+            verify.contains(needed),
+            "verify-backup stopped looking for {needed}; a restore can enforce less without saying so"
+        );
+    }
+    assert!(
+        verify.contains("--verify-log") && verify.contains("CONTAINS A CREDENTIAL"),
+        "verify-backup must run the release verifier and fail a backup holding a credential"
+    );
+    assert!(
+        verify.contains("refs.snapshot"),
+        "verify-backup must say whether the attestation is there; a skipped proof reads like a passed one"
+    );
+
+    let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl");
+    for wired in [
+        "scripts/flip/pull_backup.sh",
+        "scripts/flip/verify_backup.sh",
+        "scripts/restore_from_backup.sh",
+        "scripts/push_mirror.sh",
+    ] {
+        assert!(
+            driver.contains(wired),
+            "choirctl no longer names {wired}, so nothing runs it"
+        );
+    }
+
+    for script in [
+        "scripts/flip/pull_backup.sh",
+        "scripts/flip/verify_backup.sh",
+        "scripts/restore_from_backup.sh",
+    ] {
+        let syntax = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(repo_root().join(script))
+            .output()
+            .expect("run sh -n");
+        assert!(
+            syntax.status.success(),
+            "{script} is not valid sh: {}",
+            String::from_utf8_lossy(&syntax.stderr)
+        );
+    }
 }
 
 /// The op log is the only state in the system with exactly one copy:

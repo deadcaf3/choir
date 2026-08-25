@@ -81,6 +81,18 @@ if [ -s "$DEST/policy.tar" ]; then
       fail "policy: $p absent — a node restored from this refuses to boot"
     fi
   done
+  # The other six. Absent, they do not stop a restore: they make the
+  # restored node enforce less than the one it replaces — no protected
+  # ref, no review gate, no ownership, no newcomer audit — and that is a
+  # thing to learn here rather than from a node that is quietly open.
+  for p in protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl \
+           review-adjudications.jsonl acl private-beta.manifest; do
+    if printf '%s\n' "$MEMBERS" | grep -qx "$p"; then
+      ok "policy: $p"
+    else
+      echo "  no $p — a node restored from this starts without it and enforces less"
+    fi
+  done
   # The other direction: a backup that gained a credential is worse than
   # one missing a policy file, so it fails rather than warns.
   if printf '%s\n' "$MEMBERS" | grep -Eq '(^|/)(auth|node\.key)$|\.(key|pem)$'; then
