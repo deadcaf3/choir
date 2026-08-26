@@ -65,6 +65,9 @@ struct Config<'a> {
     read_only_browser: bool,
     /// Override the readiness free-space floor.
     ready_min_free_bytes: Option<u64>,
+    /// Serve without a request log at all. Every other test wants one;
+    /// the metrics counters have to work for the node that does not.
+    no_request_log: bool,
 }
 
 /// Binds a node on port 0, serves it on a background thread, and returns
@@ -119,8 +122,10 @@ fn served(tag: &str, config: &Config<'_>) -> Served {
     } else {
         config.max_bytes
     };
-    node.enable_request_log(log.clone(), max_bytes)
-        .expect("request log opens");
+    if !config.no_request_log {
+        node.enable_request_log(log.clone(), max_bytes)
+            .expect("request log opens");
+    }
     node.enable_rate_limit(
         config.api.and_then(std::num::NonZeroU32::new),
         config.git.and_then(std::num::NonZeroU32::new),
@@ -1002,4 +1007,115 @@ fn a_ref_the_repository_lost_alone_makes_the_node_unready() {
         "git losing a ref is not a log fault: {checks}"
     );
     assert_eq!(checks["storage_writable"], true, "{checks}");
+}
+
+/// Reads one counter out of the `/metrics` text.
+fn metric(node: &Served, name: &str) -> u64 {
+    let text = body(&["-u", "alice:a", &format!("{}/metrics", node.base)]);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(name) {
+            if let Some(value) = rest.strip_prefix(' ') {
+                return value
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{name} is not a number ({e}): {line}"));
+            }
+        }
+    }
+    panic!("{name} is not exported at all:\n{text}");
+}
+
+/// The alerts `docs/private-beta-runbook.md` calls critical must have
+/// something to fire from.
+///
+/// Every metric the node exported was a gauge over a state it could read
+/// on demand -- ready, free disk, ref agreement. Nothing described what
+/// had *happened*, so "401/429/5xx spikes" and "latency gate breaches",
+/// both named as critical alerts, had no metric at all. An alert wants a
+/// rate and a rate wants a counter.
+///
+/// Counting also had to move ahead of the request log. It sat inside
+/// `Access::finish` past a `let Some(log) = log else { return }`, so a
+/// node started without `--request-log` -- which is every node that has
+/// not opted into a per-request record -- would have exported zeroes
+/// forever while serving normally. This drives that node deliberately.
+#[test]
+fn refused_throttled_and_failed_requests_are_counted_without_a_request_log() {
+    let node = served(
+        "metrics-counters",
+        &Config {
+            // Two API requests a minute, so the third is throttled.
+            api: Some(2),
+            ready_min_free_bytes: Some(0),
+            no_request_log: true,
+            ..Config::default()
+        },
+    );
+    let state = node.work.join("repos/.choir");
+    std::fs::create_dir_all(&state).expect("state directory");
+    std::fs::write(state.join("ops.jsonl"), "").expect("empty verified log");
+    assert!(
+        !node.log.exists(),
+        "this fixture must not have a request log; the counters are what is under test"
+    );
+
+    // A scrape renders before it finishes, so the first one reports zero
+    // requests -- itself included, and correctly. The second one has to
+    // see the first, which is the real claim and the one that fails if
+    // counting never happens.
+    assert_eq!(
+        metric(&node, "choir_requests_total"),
+        0,
+        "something was counted before any request finished"
+    );
+    let before = metric(&node, "choir_requests_total");
+    assert_eq!(
+        before, 1,
+        "the first scrape was not counted, so nothing is counting"
+    );
+    assert!(
+        metric(&node, "choir_process_start_time_seconds") > 0,
+        "a restart-loop alert has no restart to see"
+    );
+
+    // A refusal.
+    let unauthorized = metric(&node, "choir_requests_unauthorized_total");
+    assert_eq!(
+        status(&["-u", "alice:wrong", &format!("{}/api/view", node.base)]),
+        401
+    );
+    assert_eq!(
+        metric(&node, "choir_requests_unauthorized_total"),
+        unauthorized + 1,
+        "a 401 did not reach the counter"
+    );
+
+    // A throttle. The ceiling is two a minute and `bob` has spent
+    // nothing, so the first two land and the third is refused.
+    let throttled = metric(&node, "choir_requests_throttled_total");
+    let view = format!("{}/api/view", node.base);
+    let mut saw_429 = false;
+    for _ in 0..6 {
+        if status(&["-u", "bob:b", &view]) == 429 {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(saw_429, "the rate limit never refused anything");
+    assert_eq!(
+        metric(&node, "choir_requests_throttled_total"),
+        throttled + 1,
+        "a 429 did not reach the counter"
+    );
+
+    // Time is accumulated, which with the request count is the pair an
+    // average-latency alert subtracts across two scrapes.
+    assert!(
+        metric(&node, "choir_request_duration_microseconds_total") > 0,
+        "no request has taken any time, which cannot be true"
+    );
+    assert!(
+        metric(&node, "choir_requests_total") > before,
+        "the total stopped moving"
+    );
 }

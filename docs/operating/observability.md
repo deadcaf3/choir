@@ -14,6 +14,52 @@ losing every one of them changes no decision the node has made. That is what
 licenses their cheapest properties — an unsynced write, a dropped record
 under load — and it is also why none of them substitutes for the op log.
 
+## Metrics and what can be alerted on (`/metrics`)
+
+`/metrics` is Prometheus text format, authenticated like every other
+operational endpoint. It carries two kinds of number, and the difference
+decides what an alert can say.
+
+**Gauges** describe a state the node can read on demand:
+`choir_ready`, `choir_log_verified`, `choir_sequencer_live`,
+`choir_storage_writable`, `choir_free_disk_bytes`,
+`choir_ref_disagreements`, and `choir_process_start_time_seconds`.
+
+**Counters** describe what has happened, and only ever rise:
+`choir_requests_total`, `choir_requests_unauthorized_total` (401 and
+403), `choir_requests_throttled_total` (429),
+`choir_requests_failed_total` (5xx, and any response the node failed to
+finish writing), and `choir_request_duration_microseconds_total`. The
+last two together are the pair an average-latency alert subtracts across
+two scrapes; a single gauge could not carry that.
+
+Counters are incremented for every served request whether or not
+`--request-log` is enabled. Declining to keep a per-request record is a
+privacy choice; it must not also be a decision to make the node
+unalertable.
+
+A scrape renders before it finishes, so it never counts itself. Every
+scrape is one request behind, uniformly, which no rate can see.
+
+### The alerts a node cannot source
+
+`docs/private-beta-runbook.md` requires nine critical alerts. Four come
+from this endpoint: readiness failure (`choir_ready`), durability errors
+(`choir_sequencer_live`), disk exhaustion (`choir_free_disk_bytes`), and
+request spikes with latency breaches (the counters above). A fifth,
+restart loops, is visible as `choir_process_start_time_seconds` moving.
+
+The remaining four are outside the node by construction, and the
+operator has to source them elsewhere rather than wait for a metric that
+is not coming:
+
+| Alert | Where it comes from |
+|:--|:--|
+| Inode exhaustion | the host's own exporter; the node counts bytes, not inodes |
+| Certificate expiry inside 21 days | the reverse proxy, which is what holds the certificate |
+| Backup age beyond 90 minutes | the pull timer, on the host that pulls |
+| Staging promotion failures | the deployment path, not the running node |
+
 ## Decision journal (`--journal`)
 
 The request log records what was *asked*. It cannot say what the sequencer *decided*, because an accepted op and a refused one are both a `200` on `POST /api/submit`. `--journal <file>` appends one JSON object per admission decision, plus the events that explain the decisions around it:

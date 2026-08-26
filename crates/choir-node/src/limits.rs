@@ -317,6 +317,93 @@ fn complain(sink: &mut Sink, error: &std::io::Error) {
     }
 }
 
+/// The running totals behind the counters in `/metrics`.
+///
+/// Every gauge the node exported before these described a state it could
+/// read on demand -- readiness, free disk, ref agreement. Nothing
+/// described what had *happened*, so two of the alerts
+/// `docs/private-beta-runbook.md` calls critical, a spike in refused or
+/// failed requests and a breach of the latency gate, had no metric to
+/// fire from. These are that, and they are counters rather than gauges
+/// on purpose: an alert wants a rate, and a rate needs a number that
+/// only ever goes up.
+///
+/// Counted in [`Access::finish`], which every served request passes
+/// through, and counted **before** the request log is consulted --
+/// a node started without `--request-log` still has to be alertable.
+#[derive(Debug, Default)]
+pub struct Counters {
+    requests: std::sync::atomic::AtomicU64,
+    unauthorized: std::sync::atomic::AtomicU64,
+    throttled: std::sync::atomic::AtomicU64,
+    failed: std::sync::atomic::AtomicU64,
+    duration_us: std::sync::atomic::AtomicU64,
+}
+
+/// One reading of [`Counters`], taken field by field.
+///
+/// The fields are not read atomically with respect to each other, which
+/// is the ordinary bargain for a metrics scrape: a counter may be one
+/// request further along than the one beside it. An alert on a rate over
+/// a scrape interval cannot see the difference.
+#[derive(Debug, Clone, Copy)]
+pub struct CountersSnapshot {
+    /// Requests served, whatever their status.
+    pub requests: u64,
+    /// Requests refused as unauthenticated or forbidden (401, 403).
+    pub unauthorized: u64,
+    /// Requests refused by a rate limit or a quota (429).
+    pub throttled: u64,
+    /// Requests the node failed to serve (5xx, and I/O errors mid-write).
+    pub failed: u64,
+    /// Total time spent serving, microseconds. With `requests`, this is
+    /// the pair an average-latency alert needs.
+    pub duration_us: u64,
+}
+
+impl Counters {
+    /// Records one finished request.
+    fn record(&self, status: Option<u16>, elapsed: Duration) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.requests.fetch_add(1, Relaxed);
+        self.duration_us.fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Relaxed,
+        );
+        match status {
+            // A response the node never finished writing is a failure of
+            // the node, and is the case a status-code match would miss:
+            // the status was fine when it was chosen.
+            None => {
+                self.failed.fetch_add(1, Relaxed);
+            }
+            Some(401 | 403) => {
+                self.unauthorized.fetch_add(1, Relaxed);
+            }
+            Some(429) => {
+                self.throttled.fetch_add(1, Relaxed);
+            }
+            Some(code) if code >= 500 => {
+                self.failed.fetch_add(1, Relaxed);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Reads every counter.
+    #[must_use]
+    pub fn snapshot(&self) -> CountersSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        CountersSnapshot {
+            requests: self.requests.load(Relaxed),
+            unauthorized: self.unauthorized.load(Relaxed),
+            throttled: self.throttled.load(Relaxed),
+            failed: self.failed.load(Relaxed),
+            duration_us: self.duration_us.load(Relaxed),
+        }
+    }
+}
+
 /// One request in flight: what it was, and when it started.
 ///
 /// Built at the top of the request's thread and consumed by
@@ -327,6 +414,7 @@ pub struct Access {
     started: Instant,
     method: String,
     path: String,
+    counters: std::sync::Arc<Counters>,
 }
 
 impl Access {
@@ -338,12 +426,13 @@ impl Access {
     /// later edit to the formatting can leak a token that was passed as a
     /// query parameter.
     #[must_use]
-    pub fn start(request: &tiny_http::Request) -> Self {
+    pub fn start(request: &tiny_http::Request, counters: std::sync::Arc<Counters>) -> Self {
         let url = request.url();
         Self {
             started: Instant::now(),
             method: request.method().as_str().to_string(),
             path: url.split('?').next().unwrap_or(url).to_string(),
+            counters,
         }
     }
 
@@ -358,18 +447,23 @@ impl Access {
     /// stopped it — a truncated response is exactly the thing an incident
     /// needs recorded, so it is logged rather than dropped.
     ///
-    /// A `None` log makes this a no-op, which is what a node started
-    /// without `--request-log` pays.
+    /// A `None` log skips the *line*, which is what a node started
+    /// without `--request-log` pays. The counters are bumped either way:
+    /// they are what `/metrics` exports, and a node nobody can alert on
+    /// is not an acceptable price for declining to keep a per-request
+    /// record.
     pub fn finish(
         self,
         log: Option<&RequestLog>,
         user: &str,
         outcome: &std::io::Result<(u16, u64)>,
     ) {
+        let elapsed = self.started.elapsed();
+        self.counters
+            .record(outcome.as_ref().ok().map(|(status, _)| *status), elapsed);
         let Some(log) = log else {
             return;
         };
-        let elapsed = self.started.elapsed();
         let at_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)

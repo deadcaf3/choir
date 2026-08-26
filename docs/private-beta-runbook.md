@@ -155,7 +155,10 @@ repository/ref agreement.
 
 Alert on process restart loops, readiness failure, durability errors, latency
 gate breaches, 401/429/5xx spikes, disk and inode exhaustion, certificate expiry
-inside 21 days, and backup age beyond 90 minutes. Before launch, deliberately
+inside 21 days, and backup age beyond 90 minutes. Five of those come from the
+node's own `/metrics`; the other four cannot, and
+`docs/operating/observability.md` says where each one has to be sourced
+instead. Check that list before looking for a metric that is not coming. Before launch, deliberately
 trigger each alert in staging. Use an invalid credential for 401, a staging-only
 low rate limit for 429, the impossible readiness disk floor for readiness, a
 stopped backup timer for stale backup, and the supervisor test fixture for a

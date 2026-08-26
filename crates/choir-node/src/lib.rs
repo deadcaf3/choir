@@ -274,6 +274,14 @@ pub struct Node {
     site_repo: Option<String>,
     /// Free-space floor used by the authenticated readiness endpoint.
     ready_min_free_bytes: u64,
+    /// Running request totals, exported by `/metrics`. Shared with every
+    /// request thread rather than owned by one, since the counting
+    /// happens on whichever thread served the request.
+    counters: std::sync::Arc<limits::Counters>,
+    /// When this process began serving, as seconds since the epoch.
+    /// `choir_process_start_time_seconds`, which is how a restart-loop
+    /// alert sees a restart at all.
+    started_unix: u64,
     /// Distinguishes an intentional `unblock()` from a receive timeout.
     /// tiny_http reports both as `Ok(None)` from `recv_timeout`.
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -420,6 +428,11 @@ impl Node {
                 .expect("the default API body limit is nonzero"),
             browser_writes: true,
             ready_min_free_bytes: DEFAULT_READY_MIN_FREE_BYTES,
+            counters: std::sync::Arc::new(limits::Counters::default()),
+            started_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_secs())
+                .unwrap_or_default(),
             shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -1153,6 +1166,8 @@ impl Node {
             let browser_writes = self.browser_writes;
             let site_repo = self.site_repo.clone();
             let ready_min_free_bytes = self.ready_min_free_bytes;
+            let counters = std::sync::Arc::clone(&self.counters);
+            let started_unix = self.started_unix;
             let authenticated = self.auth.is_some();
             let port = self.port;
             let scheme = self.scheme;
@@ -1162,7 +1177,7 @@ impl Node {
                 // D33. Started before anything else the thread does, so
                 // the recorded duration is the node's whole cost. The
                 // query string is dropped here and never carried further.
-                let access = limits::Access::start(&request);
+                let access = limits::Access::start(&request, std::sync::Arc::clone(&counters));
                 let log = request_log.as_deref();
                 // D39's client half, ahead of authentication and
                 // deliberately so.
@@ -1335,6 +1350,8 @@ impl Node {
                         &root,
                         platform.as_deref(),
                         ready_min_free_bytes,
+                        &counters,
+                        started_unix,
                         request,
                     );
                     access.finish(log, &user, &outcome);
@@ -3400,6 +3417,8 @@ fn handle_observability(
     root: &Path,
     platform: Option<&Platform>,
     min_free_bytes: u64,
+    counters: &limits::Counters,
+    started_unix: u64,
     request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
     if request.url() == "/healthz" {
@@ -3422,19 +3441,40 @@ fn handle_observability(
 
     let state = readiness(root, platform, min_free_bytes);
     if request.url() == "/metrics" {
+        // This scrape is itself a request, and it has not finished yet,
+        // so it is not in these numbers. That is the ordinary shape and
+        // not a defect: every scrape is one request behind, uniformly.
+        let traffic = counters.snapshot();
         let body = format!(
             "# TYPE choir_ready gauge\nchoir_ready {}\n\
              # TYPE choir_log_verified gauge\nchoir_log_verified {}\n\
              # TYPE choir_sequencer_live gauge\nchoir_sequencer_live {}\n\
              # TYPE choir_storage_writable gauge\nchoir_storage_writable {}\n\
              # TYPE choir_free_disk_bytes gauge\nchoir_free_disk_bytes {}\n\
-             # TYPE choir_ref_disagreements gauge\nchoir_ref_disagreements {}\n",
+             # TYPE choir_ref_disagreements gauge\nchoir_ref_disagreements {}\n\
+             # TYPE choir_process_start_time_seconds gauge\n\
+             choir_process_start_time_seconds {}\n\
+             # TYPE choir_requests_total counter\nchoir_requests_total {}\n\
+             # TYPE choir_requests_unauthorized_total counter\n\
+             choir_requests_unauthorized_total {}\n\
+             # TYPE choir_requests_throttled_total counter\n\
+             choir_requests_throttled_total {}\n\
+             # TYPE choir_requests_failed_total counter\n\
+             choir_requests_failed_total {}\n\
+             # TYPE choir_request_duration_microseconds_total counter\n\
+             choir_request_duration_microseconds_total {}\n",
             u8::from(state.ready()),
             u8::from(state.log_verified),
             u8::from(state.sequencer_live),
             u8::from(state.storage_writable),
             state.free_disk_bytes.unwrap_or(0),
             state.ref_disagreements,
+            started_unix,
+            traffic.requests,
+            traffic.unauthorized,
+            traffic.throttled,
+            traffic.failed,
+            traffic.duration_us,
         );
         let bytes = body.len() as u64;
         let response = tiny_http::Response::from_string(body).with_header(
