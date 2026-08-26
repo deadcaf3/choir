@@ -65,6 +65,58 @@ Keep the node key somewhere the node host's disk failure cannot reach.
 It is the one piece of state with no second copy anywhere, because every
 mechanism in this repository is built to stop it having one.
 
+#### Where it is kept, and how to put it there (D70)
+
+A Keychain secure note on the operator's laptop, holding the base64 of
+the raw 32 bytes. Both halves are done by hand in Keychain Access: the
+`security` CLI is not an option here, because its only working form
+puts the secret in argv where `ps` can read it.
+
+**Escrow, once, from the host that holds the key.** The base64 is 44
+characters and lands in terminal scrollback, so do this in a window you
+are willing to close afterwards:
+
+```bash
+ssh <choir-user>@<SERVER_IP> 'base64 < ~/.choir/repos/.choir/node.key'
+```
+
+Copy that line, then Keychain Access, File, New Secure Note Item. Name
+it for the fingerprint it belongs to, `choir node key 1e-...`, so a
+restore can tell two identities apart. Paste, save, close the terminal
+window.
+
+**Retrieval, at restore time.** Open the note, copy its contents, and
+decode through the clipboard rather than the command line:
+
+```bash
+tmp=$(mktemp)
+pbpaste | base64 -d > "$tmp"
+if [ "$(wc -c < "$tmp")" -eq 32 ]; then
+  install -m 600 "$tmp" /srv/choir-repos/.choir/node.key && echo "key installed"
+else
+  echo "REFUSED: clipboard decoded to $(wc -c < "$tmp") bytes, not 32"
+fi
+rm -f "$tmp"
+```
+
+Decode to a temporary file and install only on 32 bytes. Writing the
+redirect straight at `node.key` truncates it before the decode is known
+to have worked, so a clipboard holding anything else -- the command you
+just copied, most likely -- leaves a zero-byte key behind. The daemon
+does catch that, `node.key must be 32 bytes`, but it catches it three
+steps later and the original is gone by then.
+
+Then re-run the restore. It compares the key against
+`node.fingerprint` and refuses a mismatch, so a wrong note is caught
+rather than appended.
+
+Two gaps this leaves open, recorded rather than solved. A single laptop
+is a single point of failure unless Time Machine covers it, and iCloud
+Keychain would close that only by putting the node identity on a third
+party's servers, which nobody has decided. And a personal Keychain
+cannot be reached by the second operator that
+`docs/private-beta-runbook.md` receipt 4 asks to rehearse a restore.
+
 ### 2. Auth tokens
 
 ```bash
