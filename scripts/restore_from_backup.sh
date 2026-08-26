@@ -30,8 +30,8 @@ NODE_BIN=${CHOIR_NODE_BIN:-$HERE/../target/release/choir-node}
 # the six it starts without — each of which changes what the restored
 # node enforces. Split because the two backup legs in this repository
 # carry different sets: scripts/pull_backup.sh ships all nine as a
-# directory, scripts/flip/pull_backup.sh ships up to six as one tar and
-# skips any the node host does not have. A restore that demanded nine
+# directory, scripts/flip/pull_backup.sh ships whichever of the nine the
+# node host has, as one tar, naming the rest as it goes. A restore that demanded nine
 # would refuse every backup the flip-era leg has ever written, and one
 # that demanded protected-refs would refuse a node that protects no ref.
 POLICY_REQUIRED="keys reviewers repos.list"
