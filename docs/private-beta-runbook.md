@@ -164,27 +164,33 @@ durability exit. Do not fill a production filesystem to test disk alerts.
 ## The BETA-0n tests
 
 Receipt 1 below names five focused tests. They had names and nothing else
-for as long as the receipt existed, which is a receipt that cannot be
-collected; four of them now exist and run in the ordinary suite.
+for as long as the receipt existed, which is a receipt nobody could
+collect. All five now exist and run in the ordinary suite.
 
 | Test | Claim | Where |
 |---|---|---|
 | BETA-01 | A review gate that cannot enforce anything is refused at startup, all three ways to configure one | `crates/choir-node/tests/it/review_gate_config.rs` |
 | BETA-02 | Under `--read-only-browser` no page renders a mutation control, the review page included | `crates/choir-node/tests/it/browse.rs`, `a_read_only_browser_renders_no_mutation_control_anywhere` |
 | BETA-03 | `/healthz`, `/readyz` and `/metrics` each refuse an anonymous request | `crates/choir-node/tests/limits.rs`, `authenticated_health_readiness_and_metrics_report_independent_checks` |
-| BETA-04 | The shipped ACL grants no beta user more than their named repositories | **not written; see below** |
+| BETA-04 | A private-beta ACL grants no beta user every repository | `scripts/flip/validate_beta_acl.sh`, tested in `crates/choir-cli/tests/it/install_policy.rs` |
 | BETA-05 | The manifest's ceilings are the unit's flags are the numbers the daemon parses | `crates/choir-node/tests/it/beta_limits.rs` |
 
-BETA-04 is open, and deliberately so rather than by omission. The rule it
-would enforce is narrower than "no wildcards": the ACL section above
-requires a wildcard, for the operator credential that holds the node-wide
-audit grant and the ownership a recovery needs. So a check has to
-distinguish an operator row from a beta-user row, and the ACL file format
-carries no such distinction -- a row is `<user> <repo|*|@node> <level>`
-and nothing more. Deciding what marks an operator is a design question,
-not a test, and it is not answered by writing the test first. Until it is
-answered, receipt 1 has four tests and one named gap, which is a truer
-receipt than five where one enforces a rule nobody has defined.
+BETA-04's rule is narrower than "no wildcards", and the narrowness is the
+whole of it. The scope column takes three forms and two are wide: `*` is
+every repository, `@node` is the node itself -- the op log, the ref
+attestation, and ops naming no repository -- and `*` never matches
+`@node`. The ACL section above requires the second, for the operator
+credential holding the node-wide audit grant a recovery needs. So the
+operator's grant and a beta user's over-grant are already distinguishable
+in the file, and only `*` has no legitimate use in a beta: it reaches
+every repository including other beta users', and names none of them, so
+nobody reading the file sees who was exposed.
+
+The check is `validate_beta_acl.sh`, a sibling of
+`validate_review_policy.sh` and pure the same way, called by
+`render_private_beta_service.sh` before it renders anything. It is
+deliberately not called by the general installers: a node that is not a
+private beta may want `*`, and this is a beta rule, not an ACL rule.
 
 ## Go-live receipts
 
@@ -192,9 +198,7 @@ Production remains network-closed until the release record contains all of the
 following:
 
 1. The BETA-0n focused tests above and the full CI gate are green for the exact
-   artifact commit. BETA-04 is unwritten, so this receipt cannot be collected in
-   full until its design question is answered or the receipt is deliberately
-   narrowed to the four that exist.
+   artifact commit.
 2. Host-local and remote evidence proves the node listens only on loopback and
    all application access crosses the hardened TLS proxy.
 3. Public-hostname smoke receipts cover authentication, allowed and denied ACL

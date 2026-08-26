@@ -46,6 +46,7 @@ grep -Eq '^[[:space:]]*[^#[:space:]]' "$STATE/acl" \
 grep -Eq '^[[:space:]]*[^#[:space:]]' "$STATE/repos.list" \
   || fail "repos.list has no repositories"
 sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$STATE/protected-refs"
+sh "$HERE/validate_beta_acl.sh" "$STATE/acl"
 
 sh "$HERE/render_node_service.sh" choir-node "$BIN" "$ROOT" "$PORT" \
   "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$LOG" "$STATE/repos.list" \

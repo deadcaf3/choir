@@ -1816,3 +1816,87 @@ fn the_installers_progress_line_names_the_crate_and_not_the_path() {
         "a filesystem path reached the progress line: {label}"
     );
 }
+
+/// Runs `validate_beta_acl.sh` over `acl` and returns its exit success
+/// together with everything it said on stderr.
+fn validate_beta_acl(tag: &str, acl: &str) -> (bool, String) {
+    let path = std::env::temp_dir().join(format!(
+        "choir-beta-acl-{tag}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, acl).expect("acl fixture");
+    let output = std::process::Command::new("sh")
+        .arg(repo_root().join("scripts/flip/validate_beta_acl.sh"))
+        .arg(&path)
+        .output()
+        .expect("run validate_beta_acl.sh");
+    std::fs::remove_file(&path).ok();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// BETA-04. The private beta's ACL gives no beta user more than the
+/// repositories it names.
+///
+/// The rule is narrower than "no wildcards", and the narrowness is the
+/// whole of it. `choir_node::acl::Scope` has three forms and two are
+/// wide: `*` is every repository, `@node` is the node itself -- the op
+/// log, the attestation, ops naming no repository -- and `*` never
+/// matches `@node`. The runbook *requires* the second, for the operator
+/// credential holding the node-wide audit grant a recovery needs. So the
+/// two are already distinguishable in the file, and only `*` has no
+/// legitimate use in a beta: it reaches every repository including other
+/// beta users', and names none of them, so nobody reading the file sees
+/// who was exposed.
+#[test]
+fn a_private_beta_acl_grants_no_beta_user_every_repository() {
+    let (ok, stderr) = validate_beta_acl(
+        "named",
+        "# the shape the runbook asks for\n\
+         alice agents/one write\n\
+         bob agents/two write\n\
+         ops @node auditor\n",
+    );
+    assert!(ok, "a correctly narrow ACL was refused: {stderr}");
+
+    let (ok, stderr) = validate_beta_acl(
+        "wildcard",
+        "alice agents/one write\n\
+         mallory * write\n",
+    );
+    assert!(!ok, "an ACL granting every repository was accepted");
+    assert!(
+        stderr.contains("mallory") && stderr.contains("2"),
+        "the refusal must name the line and the user: {stderr}"
+    );
+
+    // A deadline is a fourth column (D66), so a wildcard wearing one is
+    // still in the scope column and still refused. An expiring grant to
+    // every repository is a grant to every repository.
+    let (ok, _) = validate_beta_acl("wildcard-until", "mallory * write until=99999999999\n");
+    assert!(!ok, "a deadline does not narrow a wildcard");
+
+    // Comments run to end of line, so a `*` in one is not a grant.
+    let (ok, stderr) = validate_beta_acl(
+        "commented",
+        "alice agents/one write   # not * every repository\n",
+    );
+    assert!(ok, "a `*` inside a comment was read as a grant: {stderr}");
+
+    // And the private-beta renderer must actually call it. The renderer
+    // itself cannot run here -- it reads Linux file modes with `stat -c`
+    // before it reaches any policy check -- so this is the same
+    // source-level assertion `the_linux_installer_carries_the_same_policy_wiring`
+    // makes, including the ordering that would leave `$HERE` unset.
+    let renderer =
+        std::fs::read_to_string(repo_root().join("scripts/flip/render_private_beta_service.sh"))
+            .expect("private beta renderer source");
+    let here = renderer.find("HERE=").expect("renderer defines HERE");
+    let call = renderer
+        .find("validate_beta_acl.sh")
+        .expect("the private beta renderer does not validate its ACL");
+    assert!(here < call, "renderer invokes the validator before HERE");
+}
