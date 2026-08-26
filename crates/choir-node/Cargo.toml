@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+# Two binaries live here (`choir-node` and the `choir-ssh` shim), so a bare
+# `cargo run -p choir-node` is ambiguous and every documented invocation
+# would need `--bin`. The daemon is what that spelling means.
+default-run = "choir-node"
 
 [dependencies]
 choir-fs = { path = "../choir-fs" }
