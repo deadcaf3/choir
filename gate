@@ -284,8 +284,9 @@ c_touched() { cargo clippy $PKGS --all-targets -- -D warnings; }
 # produced it: the crate's own files (working tree, not just the index),
 # every workspace crate it depends on (cargo answers, not convention),
 # the out-of-crate files it include_str!'s (docs/, SYNC.md, a manifest),
-# Cargo.lock, the toolchain, this script, and CHOIR_GIT_HEAD -- the one
-# build-affecting env var in the workspace. Nothing unchanged is
+# Cargo.lock, the toolchain, this script, `scripts/` and `choirctl` --
+# which tests read at run time rather than include -- and
+# CHOIR_GIT_HEAD, the one build-affecting env var in the workspace. Nothing unchanged is
 # verified twice; anything changed misses by construction, dependents
 # included, which is the part `git diff` alone cannot see.
 #
@@ -338,6 +339,27 @@ compute_keys() {
     for _root in Cargo.lock Cargo.toml .cargo/config.toml rust-toolchain.toml gate; do
       [ -f "$_root" ] && printf '%s %s\n' "$_root" "$(git hash-object "$_root")"
     done
+    # The shell scripts, which tests read at run time rather than
+    # `include_str!` -- `install_policy.rs` drives fifteen of them and
+    # `deploy.rs` two more, and one of those paths is built with
+    # `format!`, so no scan of string literals can find them all.
+    # Without this, editing a script the tests exercise left every crate
+    # verdict cached: the gate printed green for a tree in which a
+    # load-bearing script had changed and nothing had verified it.
+    #
+    # Global rather than per-crate, and coarse on purpose. Scripts change
+    # rarely, the mapping from script to crate is exactly what nobody
+    # maintains correctly, and this file's own rule is that a lost cache
+    # is a slow run and never a wrong one.
+    git ls-files -s scripts choirctl
+    git status --porcelain --untracked-files=all -- scripts choirctl |
+      while read -r _st _path; do
+        if [ -f "$_path" ]; then
+          printf 'wt %s %s\n' "$_path" "$(git hash-object "$_path")"
+        else
+          printf 'gone %s\n' "$_path"
+        fi
+      done
     printf 'CHOIR_GIT_HEAD=%s\n' "${CHOIR_GIT_HEAD:-}"
   } | git hash-object --stdin >"$KEYS/global"
   for _dir in crates/*/; do
