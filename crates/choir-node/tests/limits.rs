@@ -435,7 +435,17 @@ fn authenticated_health_readiness_and_metrics_report_independent_checks() {
     std::fs::create_dir_all(&state).expect("state directory");
     std::fs::write(state.join("ops.jsonl"), "").expect("empty verified log");
 
-    assert_eq!(status(&[&format!("{}/healthz", node.base)]), 401);
+    // BETA-03. All three operational endpoints are authenticated by
+    // reaching the handler at all, so the anonymous refusal is a property
+    // of the route table and not of any one route. Assert it on each:
+    // adding a fourth endpoint beside these must not inherit an exemption.
+    for route in ["healthz", "readyz", "metrics"] {
+        assert_eq!(
+            status(&[&format!("{}/{route}", node.base)]),
+            401,
+            "/{route} must refuse an anonymous request"
+        );
+    }
     assert_eq!(
         status(&["-u", "alice:a", &format!("{}/healthz", node.base)]),
         200

@@ -702,12 +702,17 @@ fn run() -> std::io::Result<()> {
                 ));
             }
         } else if rest.iter().any(|a| a == "--require-assignment")
+            || rest.iter().any(|a| a == "--require-review")
             || flag_value("--protected-refs").is_some()
             || reviewer_conflict_policy.is_some()
         {
             // Without a pool nothing can ever be assigned, so every
             // review would stall unassigned. Refuse the combination
             // rather than serve a review system that cannot finish.
+            // `--require-review` is in that list for a second reason:
+            // with no pool it reaches neither arm above, so it used to
+            // start a node that named the gate in its flags and enforced
+            // nothing. BETA-01 covers all three refusals.
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "review assignment policy needs --reviewers-file",

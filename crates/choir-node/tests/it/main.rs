@@ -60,6 +60,7 @@ mod require_scope_config;
 mod restore;
 mod resync;
 mod review;
+mod review_gate_config;
 mod review_outcomes;
 mod review_pruning;
 mod reviewer_conflict_config;
