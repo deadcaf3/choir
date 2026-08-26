@@ -161,13 +161,40 @@ low rate limit for 429, the impossible readiness disk floor for readiness, a
 stopped backup timer for stale backup, and the supervisor test fixture for a
 durability exit. Do not fill a production filesystem to test disk alerts.
 
+## The BETA-0n tests
+
+Receipt 1 below names five focused tests. They had names and nothing else
+for as long as the receipt existed, which is a receipt that cannot be
+collected; four of them now exist and run in the ordinary suite.
+
+| Test | Claim | Where |
+|---|---|---|
+| BETA-01 | A review gate that cannot enforce anything is refused at startup, all three ways to configure one | `crates/choir-node/tests/it/review_gate_config.rs` |
+| BETA-02 | Under `--read-only-browser` no page renders a mutation control, the review page included | `crates/choir-node/tests/it/browse.rs`, `a_read_only_browser_renders_no_mutation_control_anywhere` |
+| BETA-03 | `/healthz`, `/readyz` and `/metrics` each refuse an anonymous request | `crates/choir-node/tests/limits.rs`, `authenticated_health_readiness_and_metrics_report_independent_checks` |
+| BETA-04 | The shipped ACL grants no beta user more than their named repositories | **not written; see below** |
+| BETA-05 | The manifest's ceilings are the unit's flags are the numbers the daemon parses | `crates/choir-node/tests/it/beta_limits.rs` |
+
+BETA-04 is open, and deliberately so rather than by omission. The rule it
+would enforce is narrower than "no wildcards": the ACL section above
+requires a wildcard, for the operator credential that holds the node-wide
+audit grant and the ownership a recovery needs. So a check has to
+distinguish an operator row from a beta-user row, and the ACL file format
+carries no such distinction -- a row is `<user> <repo|*|@node> <level>`
+and nothing more. Deciding what marks an operator is a design question,
+not a test, and it is not answered by writing the test first. Until it is
+answered, receipt 1 has four tests and one named gap, which is a truer
+receipt than five where one enforces a rule nobody has defined.
+
 ## Go-live receipts
 
 Production remains network-closed until the release record contains all of the
 following:
 
-1. BETA-01 through BETA-05 focused tests and the full CI gate are green for the
-   exact artifact commit.
+1. The BETA-0n focused tests above and the full CI gate are green for the exact
+   artifact commit. BETA-04 is unwritten, so this receipt cannot be collected in
+   full until its design question is answered or the receipt is deliberately
+   narrowed to the four that exist.
 2. Host-local and remote evidence proves the node listens only on loopback and
    all application access crosses the hardened TLS proxy.
 3. Public-hostname smoke receipts cover authentication, allowed and denied ACL
