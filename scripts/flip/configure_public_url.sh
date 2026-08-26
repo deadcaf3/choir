@@ -43,7 +43,17 @@ if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
   exit 2
 fi
 
-wanted=https://$DOMAIN:$PORT
+# 443 is written without the port. The whole reason to move termination
+# to a proxy on the default port is that the base becomes something a
+# person can type and an agent can be handed, and `https://host:443`
+# would keep the port visible in every clone URL, every .choir/config
+# and every doc example for no gain. Both spellings reach the same
+# socket; only one of them reads like a product.
+if [ "$PORT" = 443 ]; then
+  wanted=https://$DOMAIN
+else
+  wanted=https://$DOMAIN:$PORT
+fi
 if [ -f "$PUBLIC_URL_FILE" ] \
   && [ "$(sed -n '1p' "$PUBLIC_URL_FILE")" = "$wanted" ] \
   && [ "$(wc -l < "$PUBLIC_URL_FILE" | tr -d ' ')" = 1 ]; then
