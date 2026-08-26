@@ -94,6 +94,19 @@ fn hrefs(page: &str) -> Vec<String> {
 /// `acl` is written to a file only when non-empty, so one helper covers
 /// both the ungated and the gated node.
 fn served(tag: &str, acl: &str) -> (String, std::path::PathBuf, String, std::path::PathBuf) {
+    served_with(tag, acl, true)
+}
+
+/// The same fixture with the browser's write surface switchable, which
+/// is the private beta's posture (`--read-only-browser`). BETA-02 needs
+/// both settings from one fixture: a sweep for absent mutation controls
+/// proves nothing unless the identical sweep finds them when writes are
+/// on.
+fn served_with(
+    tag: &str,
+    acl: &str,
+    browser_writes: bool,
+) -> (String, std::path::PathBuf, String, std::path::PathBuf) {
     let work = std::env::temp_dir().join(format!("choir-node-browse-{tag}"));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).expect("temp root");
@@ -121,6 +134,9 @@ fn served(tag: &str, acl: &str) -> (String, std::path::PathBuf, String, std::pat
     if !acl.is_empty() {
         std::fs::write(&acl_path, acl).expect("acl file");
         node.watch_acl_file(acl_path.clone()).expect("acl loads");
+    }
+    if !browser_writes {
+        node.disable_browser_writes();
     }
     node.enable_platform(platform);
     std::thread::spawn(move || node.serve_forever());
@@ -1993,6 +2009,203 @@ fn a_page_tag_changes_with_the_build_as_well_as_the_commit() {
 /// `form-action 'self'`": the next form added to this surface is covered
 /// without anyone remembering to extend a list, and a policy tightened
 /// back to `'none'` fails here whichever page it breaks.
+/// BETA-02. Under `--read-only-browser`, no page offers a way to write.
+///
+/// The private beta's claim to operators is that the browser surface is
+/// read-only, and the enforcement for it lives at two routes: `/account`
+/// and `/api/prepare` refuse, and the review page swaps its write
+/// sections for a sentence. Refusing a route is only half of a read-only
+/// browser, though. A page that still *renders* the control -- a verdict
+/// button, a comment box, the one `<script>` this repository serves --
+/// hands the reader an affordance that ends in a 403, and the reader
+/// learns the posture by clicking it.
+///
+/// So this asserts absence over every page, rather than refusal over the
+/// two routes that happen to check today. The needles are literals on
+/// purpose: `ui`'s constants are private to the crate, and a black-box
+/// sweep that reads the served bytes cannot be satisfied by a constant
+/// that moved. `<button` and `<script` are unconditional because
+/// `write_sections` is the only thing in the browse surface that emits
+/// either.
+///
+/// An absence sweep passes for the wrong reason the moment its needles
+/// stop matching anything, so this carries two controls. The needles are
+/// checked against the source that emits them, and the review page --
+/// the one page in the surface with controls to lose -- is rendered
+/// twice from the same fixture with only the posture changed, so the
+/// absence is measured against a presence rather than against nothing.
+/// That distinction has been got wrong here before:
+/// `every_page_with_a_form_is_served_a_policy_that_permits_it` carries
+/// its own note about a check that compared nothing to nothing.
+#[test]
+fn a_read_only_browser_renders_no_mutation_control_anywhere() {
+    /// Every page an authenticated reader can reach, `/account`
+    /// included: it is the passkey enrollment page, so it is both a page
+    /// in this sweep and the positive control for it.
+    const PAGES: &[&str] = &[
+        "/r/",
+        "/r/agents/one",
+        "/r/agents/one/tree/main/src",
+        "/r/agents/one/blob/main/README.md",
+        "/r/agents/one/commits/main",
+        "/r/agents/one/reviews",
+        "/r/agents/one/contribute",
+        "/r/agents/one/search/main?q=lib&in=files",
+        "/status",
+        "/account",
+    ];
+    /// Markup that only a write affordance emits.
+    const CONTROLS: &[&str] = &[
+        "<button",
+        "<script",
+        "/static/webauthn.js",
+        "/api/prepare",
+        "/api/accounts/passkey",
+    ];
+
+    let (base, _work, _oid, _) = served_with("read-only-controls", "", false);
+    for path in PAGES {
+        let (status, _, body) = get(&format!("{base}{path}"), &["-u", "alice:a"]);
+        assert!(
+            status < 500,
+            "{path} failed to render at all under a read-only browser ({status})"
+        );
+        for control in CONTROLS {
+            assert!(
+                !body.contains(control),
+                "{path} renders `{control}` under --read-only-browser: the control ends in a 403"
+            );
+        }
+        // A GET form is navigation -- the search box is one. Anything
+        // else submits a change, and there must be none.
+        for form in body.split("<form").skip(1) {
+            let open = form.split('>').next().unwrap_or("").to_ascii_lowercase();
+            assert!(
+                open.contains("method=\"get\"") || open.contains("method='get'"),
+                "{path} renders a non-GET form under --read-only-browser: <form{open}>"
+            );
+        }
+    }
+
+    // The anti-vacuity control. Every needle must still be markup or a
+    // route the write path emits; a needle matching nothing turns the
+    // loop above into an assertion about text no page ever contained.
+    let emitting = concat!(
+        include_str!("../../src/browse.rs"),
+        include_str!("../../src/ui.rs"),
+    );
+    for control in CONTROLS {
+        assert!(
+            emitting.contains(control),
+            "`{control}` appears nowhere in the code that renders writes; \
+             the read-only sweep is asserting the absence of nothing"
+        );
+    }
+
+    // And the page that actually has controls to lose. None of the pages
+    // above renders one under either posture -- the browse surface is
+    // read-only by construction -- so the sweep over them would not
+    // notice a regression. The review page is the exception, and it only
+    // renders a control for a viewer who is named as a reviewer, so it
+    // needs a fixture of its own rather than a path in the list.
+    let (read_only, _w1) = review_page("read-only-review", false);
+    for control in CONTROLS {
+        assert!(
+            !read_only.contains(control),
+            "the review page renders `{control}` under --read-only-browser"
+        );
+    }
+    assert!(
+        read_only.contains("read-only"),
+        "the review page dropped its write sections without saying why: {read_only}"
+    );
+    let (writable, _w2) = review_page("writable-review", true);
+    assert!(
+        CONTROLS.iter().any(|control| writable.contains(control)),
+        "the review page renders no control even with browser writes enabled, \
+         so the read-only assertion above holds for the wrong reason: {writable}"
+    );
+}
+
+/// A review page as one named reviewer sees it, with the browser's write
+/// surface set either way. Returns the served HTML and the temporary
+/// root, which the caller holds so the fixture outlives the read.
+///
+/// Separate from [`served_with`] because the write sections render for a
+/// viewer with a verdict to cast, so the reviewer and the authenticated
+/// user have to be the same person -- and that means an author key the
+/// registry knows, which the shared fixture does not have.
+fn review_page(tag: &str, browser_writes: bool) -> (String, std::path::PathBuf) {
+    let work = std::env::temp_dir().join(format!("choir-node-browse-{tag}"));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let author = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry
+        .register(&author.public_key_bytes())
+        .expect("register author");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node =
+        Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/one.git").expect("repo created");
+    if !browser_writes {
+        node.disable_browser_writes();
+    }
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
+            .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let clone = work.join("clone");
+    let url = format!("http://alice:a@127.0.0.1:{port}/agents/one.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    std::fs::write(clone.join("f.txt"), "proposed\n").unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "the proposal"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+    let proposal = String::from_utf8_lossy(&git(&clone, &["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    // `alice` is the reviewer *and* the browsing user, which is the only
+    // shape in which the page has a verdict button to render at all.
+    let request = ViewOp::new(OpKind::RequestReview {
+        id: "r-readonly".into(),
+        target: choir_oplog::ContentHash::from_git_oid(&proposal).expect("a git oid"),
+        reviewers: vec!["alice".into()],
+        target_ref: Some("agents/one.git:refs/heads/main".into()),
+    });
+    let (code, resp) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        &crate::support::submit_body_legacy(&author, "alice", &request),
+        &format!("{base}/api/submit"),
+    ]);
+    assert_eq!(code, 200, "{resp}");
+
+    let (status, _, page) = get(
+        &format!("{base}/r/agents/one/review/r-readonly"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200, "review page did not render: {page}");
+    (page, work)
+}
+
 #[test]
 fn every_page_with_a_form_is_served_a_policy_that_permits_it() {
     let (base, _work, _oid, _) = served("csp-form", "");
