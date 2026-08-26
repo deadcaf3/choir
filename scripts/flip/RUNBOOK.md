@@ -343,9 +343,17 @@ refused).
 The node goes from tunnel-only to publicly reachable in three operator
 steps, all on the node host, all reversible by deleting one marker file:
 
-1. Firewall: allow inbound 80 (certbot standalone issuance, and every
-   ~60-day renewal rebinds it) and the serving port. Nothing else ever
-   serves on 80.
+1. Pick the challenge method, because it decides whether the origin
+   address becomes public. Writing `~/.choir/cloudflare.ini` at 0600,
+   holding `dns_cloudflare_api_token = <token>` for a token scoped to
+   Zone:DNS:Edit on that zone alone, selects DNS-01: no inbound port, and
+   the record can stay proxied throughout. Without that file the script
+   falls back to HTTP-01 on port 80, which needs the firewall open to 80
+   permanently (renewals rebind it every ~60 days, and nothing else ever
+   serves on 80) and needs the record unproxied for issuance and for every
+   renewal. Unproxying publishes the origin IP, passive-DNS services
+   archive it permanently, and re-enabling the proxy afterwards does not
+   take it back. Behind a proxying CDN, prefer DNS-01.
 2. `sh ~/choir-build/scripts/flip/setup_tls.sh <domain> [port]` issues
    the Let's Encrypt cert (account registered without an email, per the
    standing privacy rule), installs a deploy hook that re-projects the

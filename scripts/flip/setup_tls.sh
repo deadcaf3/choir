@@ -21,9 +21,27 @@
 # no expiry-warning mail, which the deploy hook's automation is the
 # actual answer to; `certbot renew --dry-run` is the manual check.
 #
-# Issuance and renewal use --standalone on port 80, so the host's
-# firewall must allow inbound 80 permanently — renewals rebind it every
-# ~60 days. Nothing else ever serves on 80 here.
+# Two issuance methods, selected by a file rather than a flag, same
+# marker discipline as tls.enabled: if $HOME/.choir/cloudflare.ini
+# exists it is DNS-01 through the Cloudflare API, otherwise HTTP-01 via
+# --standalone on port 80.
+#
+# Prefer DNS-01 behind a proxying CDN. HTTP-01 needs the challenge to
+# reach this host on port 80, which means the DNS record cannot be
+# proxied during issuance or any renewal, and that publishes the origin
+# IP. Passive-DNS services archive it permanently, so re-enabling the
+# proxy afterwards does not take it back: the origin stays reachable
+# directly, around whatever the CDN is absorbing. DNS-01 proves control
+# of the record instead, needs no inbound port, and never exposes the
+# address.
+#
+# The credentials file is `dns_cloudflare_api_token = <token>`, 0600,
+# with a token scoped to Zone:DNS:Edit on this zone alone. It is
+# untracked, like every other secret here.
+#
+# With --standalone the host's firewall must allow inbound 80
+# permanently, because renewals rebind it every ~60 days. Nothing else
+# ever serves on 80 here. DNS-01 needs no such hole.
 set -eu
 
 DOMAIN=${1:?usage: setup_tls.sh <domain> [port]}
@@ -39,9 +57,27 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 command -v certbot >/dev/null 2>&1 \
   || { echo "certbot is not installed; run: sudo apt-get install -y certbot" >&2; exit 1; }
 
+CF_INI=$STATE/cloudflare.ini
+
 # 1. Issue. Idempotent: certbot keeps the existing lineage if one exists.
-sudo certbot certonly --standalone -d "$DOMAIN" \
-  --non-interactive --agree-tos --register-unsafely-without-email
+#    The challenge method is whichever the credentials file selects, and
+#    the choice is recorded in the renewal config, so `certbot renew`
+#    later reuses it without this script being present.
+if [ -f "$CF_INI" ]; then
+  command -v certbot-dns-cloudflare >/dev/null 2>&1 \
+    || python3 -c 'import certbot_dns_cloudflare' 2>/dev/null \
+    || { echo "the cloudflare dns plugin is missing; run: sudo apt-get install -y python3-certbot-dns-cloudflare" >&2; exit 1; }
+  [ "$(stat -c '%a' "$CF_INI")" = "600" ] \
+    || { echo "$CF_INI must be 0600; it holds an API token" >&2; exit 1; }
+  sudo certbot certonly --dns-cloudflare \
+    --dns-cloudflare-credentials "$CF_INI" -d "$DOMAIN" \
+    --non-interactive --agree-tos --register-unsafely-without-email
+else
+  echo "no $CF_INI; using HTTP-01, which requires port 80 reachable and the" >&2
+  echo "DNS record unproxied for this run and every renewal" >&2
+  sudo certbot certonly --standalone -d "$DOMAIN" \
+    --non-interactive --agree-tos --register-unsafely-without-email
+fi
 
 # 2. The deploy hook: copy the pair somewhere the node user owns, then
 #    restart the node so it serves the fresh cert. Written before the
@@ -81,4 +117,9 @@ sh "$HERE/configure_public_url.sh" "$DOMAIN" "$PORT"
 echo "issued for $DOMAIN; pair projected to $TLS_DIR; marker written to $MARKER"
 echo "next: re-run the installer to render the TLS unit, e.g."
 echo "  sh ~/choir-build/scripts/flip/install_node_linux.sh $PORT '' ~/bin"
-echo "and keep firewall ports 80 (renewals) and $PORT (serving) open."
+if [ -f "$CF_INI" ]; then
+  echo "issued over DNS-01; keep firewall port $PORT (serving) open. No port 80"
+  echo "hole is needed and the origin address was never published."
+else
+  echo "and keep firewall ports 80 (renewals) and $PORT (serving) open."
+fi
