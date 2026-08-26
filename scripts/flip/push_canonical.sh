@@ -37,12 +37,34 @@ fi
 URL=$(printf '%s' "$BASE/$REPO" | sed "s|://|://$USER_NAME:$TOKEN@|")
 
 # The bare repo must exist on the node; creating it installs the
-# pre-receive hook that turns pushes into signed ops.
-if ! curl -sf -u "$USER_NAME:$TOKEN" "$BASE/$REPO/info/refs?service=git-upload-pack" > /dev/null; then
-  echo "no such repo on the node: $REPO" >&2
-  echo "create it with: choir-node ... --create $REPO   (or restart the agent with that flag)" >&2
-  exit 1
-fi
+# pre-receive hook that turns pushes into signed ops. Read the status
+# rather than -f, because -f collapses every failure into one exit code
+# and this probe has two very different ones. A refused credential
+# reported as a missing repository sends the operator to create a
+# repository that is already there, and nothing contradicts them: the
+# repo is present, the unit already names it, and the only wrong thing
+# is the credential.
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$USER_NAME:$TOKEN" \
+  "$BASE/$REPO/info/refs?service=git-upload-pack")
+case "$CODE" in
+  200) ;;
+  401|403)
+    echo "the node refused this credential for $REPO (HTTP $CODE)" >&2
+    echo "the repository may well exist. Check that the credential file's" >&2
+    echo "first line matches the node's own, and that the ACL grants" >&2
+    echo "$USER_NAME access to $REPO" >&2
+    exit 1 ;;
+  404)
+    echo "no such repo on the node: $REPO" >&2
+    echo "create it with: choir-node ... --create $REPO   (or restart the agent with that flag)" >&2
+    exit 1 ;;
+  000)
+    echo "no answer from $BASE: the node is down, or the tunnel is not up" >&2
+    exit 1 ;;
+  *)
+    echo "unexpected $CODE from $BASE/$REPO while checking it exists" >&2
+    exit 1 ;;
+esac
 
 cd "$REPO_DIR"
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
