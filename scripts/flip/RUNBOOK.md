@@ -354,16 +354,20 @@ steps, all on the node host, all reversible by deleting one marker file:
    renewal. Unproxying publishes the origin IP, passive-DNS services
    archive it permanently, and re-enabling the proxy afterwards does not
    take it back. Behind a proxying CDN, prefer DNS-01.
-2. `sh ~/choir-build/scripts/flip/setup_tls.sh <domain> [port]` issues
+2. `sudo sh ~choir/choir-build/scripts/flip/setup_tls.sh <domain> <port> choir`
+   issues
    the Let's Encrypt cert (account registered without an email, per the
    standing privacy rule), installs a deploy hook that re-projects the
    pair to `~/.choir/tls/` at 0600 and restarts the unit on every
    renewal, runs that hook once now so it is proven today rather than at
    the first renewal, writes `~/.choir/tls.enabled` (two lines: cert
    path, key path), and writes `~/.choir-public-url` with the
-   certificate-valid API base. An existing TLS node can add only the
-   route marker with `sh scripts/flip/configure_public_url.sh <domain>
-   [port]`; that does not renew or restart anything.
+   certificate-valid API base. Run it as root from the operator's own
+   account, naming the node user: the node account stays unprivileged,
+   and no sudoers rule narrow enough to look safe actually is, since
+   NOPASSWD on tee or chmod is root by another spelling. An existing TLS
+   node can add only the route marker with `sudo -u choir sh
+   scripts/flip/configure_public_url.sh <domain> [port]`; that does not renew or restart anything.
 3. Re-run the installer. The marker flips the rendered unit to
    `--bind 0.0.0.0 --tls-cert ... --tls-key ...`; the same one-way
    marker discipline as the review and scope gates, so every later

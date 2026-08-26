@@ -3,9 +3,19 @@
 # certificate for the node's public name, project the pair to where the
 # node's user can read it, install a renewal hook that keeps doing so,
 # and write the tls.enabled marker the installer reads. Run ON the node
-# host as the node's user; the certbot and hook steps need sudo.
+# host as root, naming the unprivileged user the node runs as.
 #
-# Usage: sh setup_tls.sh <domain> [port]
+# Usage: sudo sh setup_tls.sh <domain> <port> <node-user>
+#
+# Root, not the node's user, because everything privileged here is
+# genuinely root's: certbot writes /etc/letsencrypt, and the deploy hook
+# lives under it. The node account is deliberately unprivileged
+# (`useradd -m choir`, see RUNBOOK.md) and giving it sudo to run this
+# would undo that for the life of the machine. Any sudoers rule narrow
+# enough to look safe is not: NOPASSWD on tee or chmod is root by
+# another spelling. So the privilege stays with the operator's own
+# account for the length of one command, and the node user is named as
+# an argument rather than inferred from who is running.
 #
 # Why the copy instead of pointing the unit at /etc/letsencrypt: the
 # live cert dir is root-owned by design, the node deliberately runs
@@ -46,12 +56,19 @@ set -eu
 
 DOMAIN=${1:?usage: setup_tls.sh <domain> [port]}
 PORT=${2:-8417}
-STATE=$HOME/.choir
+# Required, never defaulted. Falling back to logname or SUDO_USER would
+# name the operator's own account, which is exactly the account the node
+# does not run as, and the failure is silent: markers and a cert pair
+# land in the wrong home and the node keeps serving plaintext.
+NODE_USER=${3:?usage: sudo sh setup_tls.sh <domain> <port> <node-user>}
+[ "$(id -u)" = 0 ] || { echo "run this as root: sudo sh setup_tls.sh $DOMAIN $PORT $NODE_USER" >&2; exit 2; }
+id "$NODE_USER" >/dev/null 2>&1 || { echo "no such user: $NODE_USER" >&2; exit 1; }
+NODE_HOME=$(getent passwd "$NODE_USER" | cut -d: -f6)
+STATE=$NODE_HOME/.choir
 TLS_DIR=$STATE/tls
 MARKER=$STATE/tls.enabled
 HOOK=/etc/letsencrypt/renewal-hooks/deploy/choir-tls
-NODE_USER=$(id -un)
-NODE_UID=$(id -u)
+NODE_UID=$(id -u "$NODE_USER")
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 command -v certbot >/dev/null 2>&1 \
@@ -69,13 +86,13 @@ if [ -f "$CF_INI" ]; then
     || { echo "the cloudflare dns plugin is missing; run: sudo apt-get install -y python3-certbot-dns-cloudflare" >&2; exit 1; }
   [ "$(stat -c '%a' "$CF_INI")" = "600" ] \
     || { echo "$CF_INI must be 0600; it holds an API token" >&2; exit 1; }
-  sudo certbot certonly --dns-cloudflare \
+  certbot certonly --dns-cloudflare \
     --dns-cloudflare-credentials "$CF_INI" -d "$DOMAIN" \
     --non-interactive --agree-tos --register-unsafely-without-email
 else
   echo "no $CF_INI; using HTTP-01, which requires port 80 reachable and the" >&2
   echo "DNS record unproxied for this run and every renewal" >&2
-  sudo certbot certonly --standalone -d "$DOMAIN" \
+  certbot certonly --standalone -d "$DOMAIN" \
     --non-interactive --agree-tos --register-unsafely-without-email
 fi
 
@@ -83,7 +100,7 @@ fi
 #    restart the node so it serves the fresh cert. Written before the
 #    first copy so the manual step below and every future renewal go
 #    through the same code.
-sudo tee "$HOOK" > /dev/null <<HOOK_EOF
+tee "$HOOK" > /dev/null <<HOOK_EOF
 #!/bin/sh
 # Installed by choir's setup_tls.sh: project the renewed cert pair to
 # the node user's state dir and restart the node unit.
@@ -95,24 +112,24 @@ install -o $NODE_USER -g $NODE_USER -m 600 \
 sudo -u $NODE_USER XDG_RUNTIME_DIR=/run/user/$NODE_UID \
   systemctl --user restart choir-node
 HOOK_EOF
-sudo chmod 755 "$HOOK"
+chmod 755 "$HOOK"
 
 # 3. First projection, through the hook itself so it is proven now, not
 #    at the first renewal two months from today.
-mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
-sudo "$HOOK"
+install -d -o "$NODE_USER" -g "$NODE_USER" -m 700 "$STATE" "$TLS_DIR"
+"$HOOK"
 
 # 4. The marker the installer reads: cert path, then key path. Once this
 #    exists every reinstall keeps the public TLS bind, same one-way
 #    marker discipline as the review and scope gates.
 printf '%s\n%s\n' "$TLS_DIR/fullchain.pem" "$TLS_DIR/privkey.pem" > "$MARKER"
-chmod 600 "$MARKER"
+chown "$NODE_USER:$NODE_USER" "$MARKER" && chmod 600 "$MARKER"
 
 # 5. The certificate-valid route operator tools use. Without this marker
 #    they fall back to the pre-TLS loopback tunnel; on the node itself that
 #    either depends on a tunnel that does not exist or reaches TLS by IP and
 #    fails hostname verification. Keep the name explicit and untracked.
-sh "$HERE/configure_public_url.sh" "$DOMAIN" "$PORT"
+sudo -u "$NODE_USER" sh "$HERE/configure_public_url.sh" "$DOMAIN" "$PORT"
 
 echo "issued for $DOMAIN; pair projected to $TLS_DIR; marker written to $MARKER"
 echo "next: re-run the installer to render the TLS unit, e.g."
