@@ -174,6 +174,14 @@ collect. All five now exist and run in the ordinary suite.
 | BETA-03 | `/healthz`, `/readyz` and `/metrics` each refuse an anonymous request | `crates/choir-node/tests/limits.rs`, `authenticated_health_readiness_and_metrics_report_independent_checks` |
 | BETA-04 | A private-beta ACL grants no beta user every repository | `scripts/flip/validate_beta_acl.sh`, tested in `crates/choir-cli/tests/it/install_policy.rs` |
 | BETA-05 | The manifest's ceilings are the unit's flags are the numbers the daemon parses | `crates/choir-node/tests/it/beta_limits.rs` |
+| BETA-06 | Each readiness sub-check fails on its own, and the others stay true | `crates/choir-node/tests/limits.rs`, the three `_alone_makes_the_node_unready` tests |
+
+BETA-06 is past what receipt 1 names, and is here because the gap it
+covers was found looking for the five. `/readyz` reports five checks and
+only the free-space floor had ever been driven to a refusal; the rest
+were asserted on the healthy path, where a check that has stopped
+looking at anything is indistinguishable from a passing one. Receipt 5's
+readiness alert is only as good as that endpoint.
 
 BETA-04's rule is narrower than "no wildcards", and the narrowness is the
 whole of it. The scope column takes three forms and two are wide: `*` is
