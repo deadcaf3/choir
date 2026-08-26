@@ -403,6 +403,38 @@ compute_keys() {
         while read -r _inc; do
           [ -f "$_inc" ] && printf 'inc %s %s\n' "$_inc" "$(git hash-object "$_inc")"
         done
+      # Another crate's files, named as a path and read at run time. The
+      # dependency closure below covers a crate this one *builds* on; it
+      # cannot see one this one only *reads*. `surface.rs` link-checks
+      # crates/choir-bridge/PERMISSIONS.md, and choir-cli declares no
+      # dependency on choir-bridge, so breaking a link in that file left
+      # every verdict cached and all three lanes green -- the full one
+      # included.
+      #
+      # A string literal naming a path into a crate is the rule, not a
+      # list, and not a guess about which calls are filesystem calls: the
+      # path that broke this was a bare entry in an array.
+      #
+      # `.rs` files are excluded, and that line is load-bearing in both
+      # directions. Rust sources are what the dependency closure already
+      # covers, so nothing is lost; and synthetic paths naming a source
+      # file in some other crate's tree are how two suites here build
+      # fixtures -- `blast.rs` computes a blast radius over invented
+      # paths, `gate.rs` edits a copied tree. Hashing those made a leaf
+      # crate's edit invalidate a crate that does not depend on it, which
+      # `the_cache_key_follows_the_files_that_produced_it` exists to
+      # forbid. What the closure cannot see is the other crate's *data*:
+      # a doc, a schema, a fixture read off disk.
+      grep -rhoE '"crates/[a-z0-9_-]+/[^"]*"' "crates/$_c" 2>/dev/null |
+        tr -d '"' | grep -v '\.rs$' | sort -u |
+        while read -r _rd; do
+          if [ -f "$_rd" ]; then
+            printf 'read %s %s\n' "$_rd" "$(git hash-object "$_rd")"
+          elif [ -d "$_rd" ]; then
+            printf 'readdir %s\n' "$_rd"
+            git ls-files -s "$_rd" | grep -v '\.rs$'
+          fi
+        done
     } | git hash-object --stdin >"$KEYS/self-$_c"
   done
   _g=$(cat "$KEYS/global")
