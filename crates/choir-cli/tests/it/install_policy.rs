@@ -1,7 +1,7 @@
 //! The dogfood installer must not silently drop an explicitly enabled
 //! review gate. Test the pure plist renderer rather than touching launchd.
 
-fn repo_root() -> std::path::PathBuf {
+pub(crate) fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 

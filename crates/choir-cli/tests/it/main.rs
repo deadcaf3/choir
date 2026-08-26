@@ -10,6 +10,7 @@ mod check_exit_codes;
 mod claude_hooks;
 mod cli;
 mod config;
+mod deploy;
 mod gate;
 mod insight;
 mod install_policy;
