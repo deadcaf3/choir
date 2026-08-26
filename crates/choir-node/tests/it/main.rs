@@ -69,6 +69,7 @@ mod schema;
 mod search_api;
 mod signers_reload;
 mod smart_http;
+mod smoke_script;
 mod snapshot_admission;
 mod snapshot_emission;
 mod ssh;

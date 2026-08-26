@@ -135,10 +135,40 @@ the commit, emits SHA-256 checksums and CycloneDX SBOMs, and packages a versione
 artifact.
 
 `private-beta-release.yml` is manual. It repeats the fail-closed gate, deploys
-the same artifact to staging, and runs authenticated GUI, API-limit, clone, and
-canary-push smoke tests. Production promotion is a separate protected
-environment approval. Configure required reviewers on that environment before
-the workflow is enabled.
+the same artifact to staging, and runs the smoke tests. Production promotion is
+a separate protected environment approval. Configure required reviewers on that
+environment before the workflow is enabled.
+
+`smoke_private_beta.sh` is what issues receipt 3, so what it does *not* check
+matters as much as what it does:
+
+```bash
+smoke_private_beta.sh <https-base> <auth-file> <owner/repo.git> \
+  [--push-canary] [--denied <owner/repo.git>]
+```
+
+It probes anonymously first - `/healthz`, `/readyz`, `/metrics`, `/api/schema`,
+`/api/view`, the repository page and a git fetch must all answer 401 - then
+repeats the reachable ones with credentials, sends one byte over the API body
+ceiling expecting 413, and clones. `/` is deliberately outside both lists: it is
+the public landing page and answers 200 to anybody, so fetching it with
+credentials proves nothing about authentication. Pass `--denied` a repository
+the credential must not reach and the denied half of the ACL is covered too; the
+allowed half is the clone.
+
+Until 2026-08-26 the script only ever sent credentials. A node that came up with
+authentication switched off passed every check it made, and said so. That is now
+a test: `smoke_script::a_node_serving_anonymously_fails_the_smoke_script` in
+`crates/choir-node/tests/it/`, which runs the shipped script against a real node
+over real TLS.
+
+Four of receipt 3's items cannot be sourced from outside the host and must be
+read off the node instead of waited for here: scope and review policy, quotas,
+and request logging all need either a second identity or the host's own
+filesystem. Oversized *git* requests are a fifth: the shipped ceiling is 512 MiB
+per request, and a smoke test is not the place to send half a gigabyte over the
+wire. All five are covered by the test suite against a local node; what the
+public hostname adds is only that the proxy does not alter them.
 
 `deploy_private_beta.sh` installs into a new release directory, archives the
 current symlink target, switches atomically, and restores the old target if the
