@@ -96,7 +96,18 @@ fn daemon_flags_enforce_the_reviewer_conflict_distance() {
         .args(["-s", "-X", "POST", "-d", &body, &format!("{api}/submit")])
         .output()
         .expect("curl runs");
-    assert!(output.status.success());
+    // Named, not bare. This failed once in a full-lane run and reported
+    // only `assertion failed: output.status.success()`, which says
+    // nothing about whether the node refused, the connection was reset,
+    // or the port had been handed to somebody else -- the last being a
+    // live hazard, since the free port above is chosen and released
+    // before the child binds it.
+    assert!(
+        output.status.success(),
+        "curl exited {} talking to port {port}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         response["reviewers"],

@@ -174,14 +174,17 @@ fn the_node_runs_on_the_ceilings_the_unit_carries() {
     let auth = work.join("auth");
     std::fs::write(&auth, "alice:a\n").expect("auth file");
 
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("free port");
-    let port = listener.local_addr().expect("local address").port();
-    drop(listener);
-
+    // Port 0, and the readiness signal is read off stderr rather than by
+    // connecting. The usual shape here -- bind 0, take the number, drop
+    // the listener, hand the number to a child -- leaves a window in
+    // which another test's `bind(0)` is handed the same port, and this
+    // harness runs its daemons in parallel. This test never needs to
+    // speak to the node, only to hear what it parsed, so it can stay out
+    // of that race entirely instead of widening it.
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_choir-node"));
     command.args([
         work.join("repos").as_os_str(),
-        std::ffi::OsStr::new(&port.to_string()),
+        std::ffi::OsStr::new("0"),
         std::ffi::OsStr::new("--auth-file"),
         auth.as_os_str(),
         std::ffi::OsStr::new("--request-log"),
@@ -196,26 +199,35 @@ fn the_node_runs_on_the_ceilings_the_unit_carries() {
         .spawn()
         .expect("start choir-node");
 
-    let mut serving = false;
-    for _ in 0..500 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            serving = true;
-            break;
+    // Read stderr on a thread so a child that never reaches `serving`
+    // cannot block the read forever; the pipe closes when it is killed.
+    let mut pipe = child.stderr.take().expect("stderr is piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut announced = String::new();
+        for line in std::io::BufReader::new(&mut pipe)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let serving = line.contains("serving");
+            announced.push_str(&line);
+            announced.push('\n');
+            if serving {
+                tx.send(()).ok();
+            }
         }
-        if let Some(status) = child.try_wait().expect("wait on choir-node") {
-            panic!("choir-node refused the unit's own ceilings: exited {status}");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+        announced
+    });
+    let serving = rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok();
     child.kill().ok();
     child.wait().ok();
-    let mut announced = String::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        use std::io::Read;
-        pipe.read_to_string(&mut announced).ok();
-    }
+    let announced = reader.join().expect("stderr reader");
     std::fs::remove_dir_all(&work).ok();
-    assert!(serving, "choir-node did not bind port {port}: {announced}");
+    assert!(
+        serving,
+        "choir-node never reported serving on the unit's own ceilings: {announced}"
+    );
 
     for (key, flag, sentence) in CEILINGS {
         let expected = sentence.replace("{}", &flag_value(&argv, flag));
