@@ -28,6 +28,7 @@
 //! It depends on no other crate in this workspace.
 
 pub mod safety;
+pub mod silent_revert;
 
 /// Result of one strategy's attempt at a 3-way merge.
 pub enum MergeOutcome {
