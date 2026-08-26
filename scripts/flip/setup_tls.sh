@@ -96,15 +96,29 @@ else
     --non-interactive --agree-tos --register-unsafely-without-email
 fi
 
-# 2. The deploy hook: copy the pair somewhere the node user owns, then
-#    restart the node so it serves the fresh cert. Written before the
-#    first copy so the manual step below and every future renewal go
-#    through the same code.
+# 2. The deploy hook: refresh whichever process is terminating TLS.
+#    Written before the first copy so the manual step below and every
+#    future renewal go through the same code.
+#
+#    Both boundaries are handled, and which one is live is read at
+#    renewal time rather than baked in here. The node terminating TLS
+#    itself needs the pair projected into a directory it can read and a
+#    restart; an nginx boundary in front of a loopback-only node reads
+#    /etc/letsencrypt directly as root and needs a reload. Switching
+#    between them is an operator decision that must not require
+#    remembering to rewrite a hook: a renewal that does not reach the
+#    live listener is a certificate that expires while every file on
+#    disk says it was renewed, in November, silently.
 tee "$HOOK" > /dev/null <<HOOK_EOF
 #!/bin/sh
-# Installed by choir's setup_tls.sh: project the renewed cert pair to
-# the node user's state dir and restart the node unit.
+# Installed by choir's setup_tls.sh: refresh whatever is terminating
+# TLS for this node, whether that is the node itself or an nginx
+# boundary in front of it.
 set -eu
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  systemctl reload nginx
+fi
+[ -f "$STATE/tls.enabled" ] || exit 0
 install -o $NODE_USER -g $NODE_USER -m 600 \
   "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$TLS_DIR/fullchain.pem"
 install -o $NODE_USER -g $NODE_USER -m 600 \
@@ -114,16 +128,22 @@ sudo -u $NODE_USER XDG_RUNTIME_DIR=/run/user/$NODE_UID \
 HOOK_EOF
 chmod 755 "$HOOK"
 
-# 3. First projection, through the hook itself so it is proven now, not
-#    at the first renewal two months from today.
+# 3. The marker the installer reads: cert path, then key path. While it
+#    exists the installer renders the public TLS bind; deleting it moves
+#    termination to a proxy in front of a loopback-only node.
+#
+#    Written before the hook runs, not after, because the hook now reads
+#    it to decide whether the node needs the pair at all. Run in the
+#    other order it would find no marker on a first install, skip the
+#    projection, and hand the installer a marker naming two files that
+#    are not there.
 install -d -o "$NODE_USER" -g "$NODE_USER" -m 700 "$STATE" "$TLS_DIR"
-"$HOOK"
-
-# 4. The marker the installer reads: cert path, then key path. Once this
-#    exists every reinstall keeps the public TLS bind, same one-way
-#    marker discipline as the review and scope gates.
 printf '%s\n%s\n' "$TLS_DIR/fullchain.pem" "$TLS_DIR/privkey.pem" > "$MARKER"
 chown "$NODE_USER:$NODE_USER" "$MARKER" && chmod 600 "$MARKER"
+
+# 4. First projection, through the hook itself so it is proven now, not
+#    at the first renewal two months from today.
+"$HOOK"
 
 # 5. The certificate-valid route operator tools use. Without this marker
 #    they fall back to the pre-TLS loopback tunnel; on the node itself that
