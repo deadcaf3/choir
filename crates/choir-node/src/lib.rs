@@ -243,6 +243,14 @@ pub struct Node {
     /// Self-service credentials (D36). `None` = no `--accounts-file`, so
     /// the only credentials are the ones the operator wrote by hand.
     accounts: Option<std::sync::Arc<accounts::Accounts>>,
+    /// Whether passkeys are usable on this node (D39, D71). Off unless
+    /// [`Node::enable_passkeys`] is called, and separate from
+    /// [`Node::accounts`] on purpose: enrolment and the WebAuthn write
+    /// path both live behind the accounts store, so without this switch
+    /// turning on self-service credentials would turn on browser
+    /// signing with them in the same move, and a deployment that says
+    /// it does not offer passkeys could not be telling the truth.
+    passkeys: bool,
     /// Admission control for the pre-auth routes (D57).
     ///
     /// Always present, unlike [`Node::rate`]: those routes answer before
@@ -415,6 +423,7 @@ impl Node {
             request_log: None,
             rate: None,
             accounts: None,
+            passkeys: false,
             // One ceiling for the whole pre-auth surface, because there
             // is no per-client key to hold a second one against (D59).
             // Sized for a node's worth of real joining rather than for one
@@ -538,12 +547,16 @@ impl Node {
     /// Enables the platform API (`/api/submit`, `/api/view`) backed by
     /// `platform`. Call before [`Node::serve_forever`].
     pub fn enable_platform(&mut self, platform: Platform) {
-        // The other half of the join in `enable_accounts`: whichever flag
-        // is applied second attaches the store, so passkey verification
-        // does not depend on the order the daemon happens to configure in
-        // (D39).
-        if let Some(store) = self.accounts.as_ref() {
-            platform.attach_accounts(store.clone());
+        // One of the three halves of the join in `enable_accounts` and
+        // `enable_passkeys`: whichever flag is applied last attaches the
+        // store, so passkey verification does not depend on the order the
+        // daemon happens to configure in (D39). The store is withheld
+        // while passkeys are off, which is what keeps the write path shut
+        // rather than merely unadvertised.
+        if self.passkeys {
+            if let Some(store) = self.accounts.as_ref() {
+                platform.attach_accounts(store.clone());
+            }
         }
         self.platform = Some(std::sync::Arc::new(platform));
     }
@@ -657,6 +670,26 @@ impl Node {
         Ok(())
     }
 
+    /// Turns on passkeys: WebAuthn enrolment and the browser write path
+    /// that verifies assertions against enrolled keys (D39, D71).
+    ///
+    /// Separate from [`Node::enable_accounts`] even though both need the
+    /// accounts store, because a node can reasonably offer self-service
+    /// credentials without offering browser signing, and the private beta
+    /// says in its manifest that it does exactly that. Without this
+    /// switch that sentence could not be true: the enrolment routes and
+    /// `platform`'s assertion check are both reachable the moment the
+    /// store exists.
+    pub fn enable_passkeys(&mut self) {
+        self.passkeys = true;
+        // The third way into the same join. Enabling passkeys after both
+        // of the others is the ordinary case, and without this the store
+        // would never reach the policy.
+        if let (Some(platform), Some(store)) = (self.platform.as_ref(), self.accounts.as_ref()) {
+            platform.attach_accounts(store.clone());
+        }
+    }
+
     /// Turns on account and token self-service (D36) from the store at
     /// `path`, optionally generating the `authorized_keys` D31's forced
     /// commands live in.
@@ -703,11 +736,13 @@ impl Node {
         }
         eprintln!("accounts enabled ({} issued)", store.len());
         let store = std::sync::Arc::new(store);
-        // Either order: whichever of the two flags is applied second
-        // performs the join, so a passkey submission is verifiable
-        // regardless of how the daemon was configured (D39).
-        if let Some(platform) = self.platform.as_ref() {
-            platform.attach_accounts(store.clone());
+        // Any order: whichever flag is applied last performs the join, so
+        // a passkey submission is verifiable regardless of how the daemon
+        // was configured (D39). Withheld while passkeys are off.
+        if self.passkeys {
+            if let Some(platform) = self.platform.as_ref() {
+                platform.attach_accounts(store.clone());
+            }
         }
         self.accounts = Some(store);
         Ok(())
@@ -1161,6 +1196,7 @@ impl Node {
             let request_log = self.request_log.clone();
             let rate = self.rate.clone();
             let accounts = self.accounts.clone();
+            let passkeys = self.passkeys;
             let quotas = self.quotas;
             let api_body_limit = self.api_body_limit;
             let browser_writes = self.browser_writes;
@@ -1498,6 +1534,31 @@ impl Node {
                         access.finish(log, &user, &outcome);
                         return;
                     }
+                    // Offering the ceremony while the switch is off would
+                    // serve a page whose one button answers 503. Checked
+                    // after the read-only refusal above, because a node
+                    // that has turned every browser page read-only has
+                    // said something broader than "not this ceremony", and
+                    // the broader answer is the one to give.
+                    if !passkeys {
+                        let html = ui::refusal(
+                            "Passkeys are not enabled",
+                            503,
+                            &ui::Refusal {
+                                code: "passkeys_disabled",
+                                error: "This node does not offer passkeys.",
+                                expected: Some("a node with passkeys enabled"),
+                                actual: Some("a passkey enrollment page"),
+                                next: "Ask the operator to start the node with --passkeys; \
+                                       until then, sign in with the credential you were given.",
+                            },
+                            &[],
+                            reader_chrome(&request),
+                        );
+                        let outcome = respond_page(request, 503, html, None);
+                        access.finish(log, &user, &outcome);
+                        return;
+                    }
                     let page = account_page::render(
                         accounts.as_deref(),
                         &user,
@@ -1546,7 +1607,10 @@ impl Node {
                     || request.url().starts_with("/api/accounts/")
                 {
                     let outcome = handle_accounts(
-                        accounts.as_deref(),
+                        SelfService {
+                            store: accounts.as_deref(),
+                            passkeys,
+                        },
                         &user,
                         invite.as_deref(),
                         acl.as_deref(),
@@ -2782,8 +2846,19 @@ fn with_join_url(answer: (u16, String), origin: Option<&str>) -> (u16, String) {
     (status, parsed.to_string())
 }
 
+/// The self-service surface a request is answered against: the store, and
+/// whether passkeys are switched on (D71).
+///
+/// One argument rather than two because they are one decision. Passing
+/// them separately is what let the store's presence stand in for the
+/// passkey answer in the first place.
+struct SelfService<'a> {
+    store: Option<&'a accounts::Accounts>,
+    passkeys: bool,
+}
+
 fn handle_accounts(
-    store: Option<&accounts::Accounts>,
+    self_service: SelfService<'_>,
     user: &str,
     invite: Option<&str>,
     acl: Option<&acl::Effective>,
@@ -2803,6 +2878,7 @@ fn handle_accounts(
     // cannot know it — it has never seen a request — so the link is
     // assembled here, where the `Host` header is.
     let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let SelfService { store, passkeys } = self_service;
     let (status, body) = match (store, acl) {
         (None, _) => (
             503,
@@ -2842,6 +2918,14 @@ fn handle_accounts(
                         ),
                     },
                     (Some(json), "POST", "/api/accounts/revoke") => store.revoke(&json),
+                    (Some(_), "POST", "/api/accounts/passkey" | "/api/accounts/passkey/remove")
+                        if !passkeys =>
+                    {
+                        (
+                            503,
+                            r#"{"error":"passkeys are not enabled on this node"}"#.to_string(),
+                        )
+                    }
                     (Some(json), "POST", "/api/accounts/passkey") => {
                         store.enroll_passkey(user, &json)
                     }

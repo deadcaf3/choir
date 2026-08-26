@@ -109,6 +109,7 @@ fn render_output(
     scope: bool,
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
+    accounts: Option<&str>,
 ) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_plist.sh");
     let repos_path = repos_file(repos);
@@ -132,20 +133,25 @@ fn render_output(
     // in for an absent policy.
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope || tls.is_some() || acl.is_some() {
+    } else if scope || tls.is_some() || acl.is_some() || accounts.is_some() {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
-    } else if tls.is_some() || acl.is_some() {
+    } else if tls.is_some() || acl.is_some() || accounts.is_some() {
         command.arg("");
     }
     if let Some((cert, key)) = tls {
         command.args([cert, key]);
-    } else if acl.is_some() {
+    } else if acl.is_some() || accounts.is_some() {
         command.args(["", ""]);
     }
     if let Some(path) = acl {
+        command.arg(path);
+    } else if accounts.is_some() {
+        command.arg("");
+    }
+    if let Some(path) = accounts {
         command.arg(path);
     }
     let output = command.output().expect("render plist");
@@ -154,7 +160,7 @@ fn render_output(
 }
 
 fn render(protected: Option<&str>, scope: bool) -> String {
-    render_tls(protected, scope, None, None)
+    render_tls(protected, scope, None, None, None)
 }
 
 fn render_tls(
@@ -162,8 +168,9 @@ fn render_tls(
     scope: bool,
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
+    accounts: Option<&str>,
 ) -> String {
-    let output = render_output("owner/repo.git\n", protected, scope, tls, acl);
+    let output = render_output("owner/repo.git\n", protected, scope, tls, acl, accounts);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 plist")
 }
@@ -227,6 +234,7 @@ fn render_unit_output(
     scope: bool,
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
+    accounts: Option<&str>,
 ) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
     let repos_path = repos_file(repos);
@@ -247,20 +255,25 @@ fn render_unit_output(
     ]);
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope || tls.is_some() || acl.is_some() {
+    } else if scope || tls.is_some() || acl.is_some() || accounts.is_some() {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
-    } else if tls.is_some() || acl.is_some() {
+    } else if tls.is_some() || acl.is_some() || accounts.is_some() {
         command.arg("");
     }
     if let Some((cert, key)) = tls {
         command.args([cert, key]);
-    } else if acl.is_some() {
+    } else if acl.is_some() || accounts.is_some() {
         command.args(["", ""]);
     }
     if let Some(path) = acl {
+        command.arg(path);
+    } else if accounts.is_some() {
+        command.arg("");
+    }
+    if let Some(path) = accounts {
         command.arg(path);
     }
     let output = command.output().expect("render unit");
@@ -273,13 +286,23 @@ fn render_unit_tls(
     scope: bool,
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
+    accounts: Option<&str>,
 ) -> String {
-    let output = render_unit_output("owner/repo.git\n", protected, scope, tls, acl);
+    let output = render_unit_output("owner/repo.git\n", protected, scope, tls, acl, accounts);
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 unit")
 }
 
 fn render_private_beta(protected: &str, scope: &str, acl: &str) -> std::process::Output {
+    render_private_beta_full(protected, scope, acl, "/srv/choir/accounts.jsonl")
+}
+
+fn render_private_beta_full(
+    protected: &str,
+    scope: &str,
+    acl: &str,
+    accounts: &str,
+) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
     let repos_path = repos_file("owner/repo.git\n");
     let output = std::process::Command::new("sh")
@@ -303,6 +326,7 @@ fn render_private_beta(protected: &str, scope: &str, acl: &str) -> std::process:
             "",
             "",
             acl,
+            accounts,
             "choir",
         ])
         .output()
@@ -365,10 +389,19 @@ fn private_beta_service_is_loopback_only_fail_closed_and_hardened() {
         !unit.contains("--tls-cert"),
         "TLS belongs at the reverse proxy"
     );
+    // Invites are how a beta user is given a credential, which the runbook
+    // documents and the landing page advertises; the manifest carries
+    // `accounts=enabled` and render_private_beta_service.sh reads it from
+    // there rather than deciding for itself.
     assert!(
-        !unit.contains("--accounts-file"),
-        "self-service accounts stay disabled"
+        unit.contains("--accounts-file"),
+        "invite-only self-service is how a beta user gets a credential"
     );
+    // Passkeys are the separate switch, and stay off for this beta. Without
+    // its own flag this assertion could not be written: enrolment and the
+    // browser write path both sit behind the accounts store, so the line
+    // above would have turned them on too.
+    assert!(!unit.contains("--passkeys"), "passkeys stay disabled");
     assert!(!unit.contains("--hooks-file"), "webhooks stay disabled");
     assert!(!unit.contains("--ssh-handoff"), "SSH stays disabled");
 }
@@ -535,65 +568,78 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
                 Some(("/state/tls/fullchain.pem", "/state/tls/privkey.pem")),
             ] {
                 for acl in [None, Some("/state/acl")] {
-                    let plist = plist_argv(&render_tls(protected, scope, tls, acl));
-                    let unit = unit_argv(&render_unit_tls(protected, scope, tls, acl));
+                    for accounts in [None, Some("/state/accounts.jsonl")] {
+                        let plist = plist_argv(&render_tls(protected, scope, tls, acl, accounts));
+                        let unit =
+                            unit_argv(&render_unit_tls(protected, scope, tls, acl, accounts));
 
-                    // Without this the whole test passes vacuously when a renderer
-                    // rejects its arguments and prints usage to stderr — which is
-                    // exactly how the first version of this check reported success
-                    // while comparing nothing to nothing.
-                    assert!(
-                        plist.len() >= 10,
-                        "extracted {} arguments; the renderer did not run",
-                        plist.len()
-                    );
-                    assert!(
-                        !unit.iter().any(String::is_empty),
-                        "unit ExecStart carries an empty argument (a spliced-in empty \
+                        // Without this the whole test passes vacuously when a renderer
+                        // rejects its arguments and prints usage to stderr — which is
+                        // exactly how the first version of this check reported success
+                        // while comparing nothing to nothing.
+                        assert!(
+                            plist.len() >= 10,
+                            "extracted {} arguments; the renderer did not run",
+                            plist.len()
+                        );
+                        assert!(
+                            !unit.iter().any(String::is_empty),
+                            "unit ExecStart carries an empty argument (a spliced-in empty \
                  policy leaves a double space): {unit:?}"
-                    );
-                    // Equality alone passes when both renderers drop the flag, so
-                    // its presence is pinned to the input, not to the sibling.
-                    assert_eq!(
-                        plist.iter().any(|arg| arg == "--require-scope"),
-                        scope,
-                        "--require-scope must appear exactly when the scope slot is set"
-                    );
-                    // The TLS pair and the bind are one decision: a public bind
-                    // must carry the cert pair, loopback must carry neither.
-                    assert_eq!(
-                        plist.iter().any(|arg| arg == "--tls-cert"),
-                        tls.is_some(),
-                        "--tls-cert must appear exactly when the tls slots are set"
-                    );
-                    let bind = plist
-                        .windows(2)
-                        .find(|pair| pair[0] == "--bind")
-                        .map(|pair| pair[1].clone())
-                        .expect("--bind is always rendered");
-                    assert_eq!(
-                        bind,
-                        if tls.is_some() {
-                            "0.0.0.0"
-                        } else {
-                            "127.0.0.1"
-                        },
-                        "the bind must flip with the TLS pair and only with it"
-                    );
-                    // The gate that decides which repositories a credential can
-                    // reach, pinned to its slot rather than to the sibling
-                    // renderer, so both dropping it cannot read as agreement.
-                    assert_eq!(
-                        plist.iter().any(|arg| arg == "--acl-file"),
-                        acl.is_some(),
-                        "--acl-file must appear exactly when the acl slot is set"
-                    );
-                    assert_eq!(
-                        plist, unit,
-                        "launchd and systemd must start the node with identical \
+                        );
+                        // Equality alone passes when both renderers drop the flag, so
+                        // its presence is pinned to the input, not to the sibling.
+                        assert_eq!(
+                            plist.iter().any(|arg| arg == "--require-scope"),
+                            scope,
+                            "--require-scope must appear exactly when the scope slot is set"
+                        );
+                        // The TLS pair and the bind are one decision: a public bind
+                        // must carry the cert pair, loopback must carry neither.
+                        assert_eq!(
+                            plist.iter().any(|arg| arg == "--tls-cert"),
+                            tls.is_some(),
+                            "--tls-cert must appear exactly when the tls slots are set"
+                        );
+                        let bind = plist
+                            .windows(2)
+                            .find(|pair| pair[0] == "--bind")
+                            .map(|pair| pair[1].clone())
+                            .expect("--bind is always rendered");
+                        assert_eq!(
+                            bind,
+                            if tls.is_some() {
+                                "0.0.0.0"
+                            } else {
+                                "127.0.0.1"
+                            },
+                            "the bind must flip with the TLS pair and only with it"
+                        );
+                        // The gate that decides which repositories a credential can
+                        // reach, pinned to its slot rather than to the sibling
+                        // renderer, so both dropping it cannot read as agreement.
+                        assert_eq!(
+                            plist.iter().any(|arg| arg == "--acl-file"),
+                            acl.is_some(),
+                            "--acl-file must appear exactly when the acl slot is set"
+                        );
+                        // D36 invite-only self-service. Pinned to its slot for the
+                        // same reason as the others, and worth its own line because
+                        // the deployed node ran for a day with this flag missing
+                        // from both renderers while its public landing page told
+                        // visitors to open the invite they were sent.
+                        assert_eq!(
+                            plist.iter().any(|arg| arg == "--accounts-file"),
+                            accounts.is_some(),
+                            "--accounts-file must appear exactly when the accounts slot is set"
+                        );
+                        assert_eq!(
+                            plist, unit,
+                            "launchd and systemd must start the node with identical \
                  arguments; a flag added to one supervisor and not the other \
                  is a node running without the gate its operator configured"
-                    );
+                        );
+                    }
                 }
             }
         }
@@ -610,12 +656,26 @@ fn a_half_tls_pair_is_refused_by_both_renderers() {
         ("/state/tls/fullchain.pem", ""),
         ("", "/state/tls/privkey.pem"),
     ] {
-        let plist = render_output("owner/repo.git\n", None, false, Some((cert, key)), None);
+        let plist = render_output(
+            "owner/repo.git\n",
+            None,
+            false,
+            Some((cert, key)),
+            None,
+            None,
+        );
         assert!(
             !plist.status.success(),
             "plist renderer accepted half a TLS pair"
         );
-        let unit = render_unit_output("owner/repo.git\n", None, false, Some((cert, key)), None);
+        let unit = render_unit_output(
+            "owner/repo.git\n",
+            None,
+            false,
+            Some((cert, key)),
+            None,
+            None,
+        );
         assert!(
             !unit.status.success(),
             "unit renderer accepted half a TLS pair"
@@ -667,9 +727,23 @@ fn choirctl_runs_its_coloured_path_under_zsh() {
 #[test]
 fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
     let repos = "# comment\n\nowner/repo.git\nsecond/other.git\n";
-    let plist_out = render_output(repos, Some("/state/protected-refs"), false, None, None);
+    let plist_out = render_output(
+        repos,
+        Some("/state/protected-refs"),
+        false,
+        None,
+        None,
+        None,
+    );
     assert!(plist_out.status.success());
-    let unit_out = render_unit_output(repos, Some("/state/protected-refs"), false, None, None);
+    let unit_out = render_unit_output(
+        repos,
+        Some("/state/protected-refs"),
+        false,
+        None,
+        None,
+        None,
+    );
     assert!(unit_out.status.success());
 
     let plist = plist_argv(&String::from_utf8(plist_out.stdout).expect("UTF-8 plist"));
@@ -691,13 +765,13 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 
     for empty in ["", "# only a comment\n"] {
         assert!(
-            !render_output(empty, None, false, None, None)
+            !render_output(empty, None, false, None, None, None)
                 .status
                 .success(),
             "the plist renderer must refuse a repos list with no entries"
         );
         assert!(
-            !render_unit_output(empty, None, false, None, None)
+            !render_unit_output(empty, None, false, None, None, None)
                 .status
                 .success(),
             "the unit renderer must refuse a repos list with no entries"
@@ -1899,4 +1973,99 @@ fn a_private_beta_acl_grants_no_beta_user_every_repository() {
         .find("validate_beta_acl.sh")
         .expect("the private beta renderer does not validate its ACL");
     assert!(here < call, "renderer invokes the validator before HERE");
+}
+
+/// The private-beta renderer takes the accounts decision from the
+/// manifest, not from its own opinion (D36).
+///
+/// The unit assertions above drive `render_node_service.sh` with the
+/// slots filled in by hand, so they say what the unit renderer does with
+/// a given argument and nothing about where that argument comes from.
+/// The path from `accounts=enabled` in the manifest to `--accounts-file`
+/// in a running node's ExecStart was, until this test, a claim in a
+/// comment. That is the exact shape of the four cache holes this
+/// repository spent a day closing: a statement nobody re-derived after
+/// the thing it described moved.
+#[test]
+fn the_beta_renderer_reads_the_accounts_decision_from_the_manifest() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let state = std::env::temp_dir().join(format!("choir-beta-manifest-{}", std::process::id()));
+    std::fs::remove_dir_all(&state).ok();
+    std::fs::create_dir_all(&state).expect("state dir");
+
+    let private = |name: &str, body: &str| {
+        let path = state.join(name);
+        std::fs::write(&path, body).expect("state file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+    };
+    private("auth", "alice:token\n");
+    // Two fields exactly: the validator binds a reviewer to a key by
+    // `$1 == name && NF == 2`.
+    private("keys", "alice/laptop AAAA\nbob/laptop BBBB\n");
+    private("reviewers", "alice/laptop\nbob/laptop\n");
+    private("protected-refs", "owner/repo.git:refs/heads/main\n");
+    private("acl", "alice @node write\nalice owner/repo.git write\n");
+    for name in [
+        "newcomer-audit.jsonl",
+        "newcomer-adjudications.jsonl",
+        "review-adjudications.jsonl",
+        "accounts.jsonl",
+    ] {
+        std::fs::write(state.join(name), "").expect("state file");
+    }
+    std::fs::write(state.join("repos.list"), "owner/repo.git\n").expect("repos.list");
+    // Byte-for-byte this tree's manifest, because the renderer compares
+    // them and refuses a copy that has drifted. That refusal is why this
+    // test cannot also drive the disabled case: a manifest saying
+    // something else is, correctly, not a manifest this tree will render.
+    std::fs::copy(
+        repo_root().join("scripts/flip/private-beta.manifest"),
+        state.join("private-beta.manifest"),
+    )
+    .expect("manifest copy");
+
+    let bin = state.join("choir-node");
+    std::fs::write(&bin, "#!/bin/sh\n").expect("fake binary");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("executable");
+
+    let output = std::process::Command::new("sh")
+        .arg(repo_root().join("scripts/flip/render_private_beta_service.sh"))
+        .args([
+            "choir",
+            bin.to_str().expect("path"),
+            "/srv/choir/repos",
+            "8417",
+            state.to_str().expect("path"),
+            "/var/log/choir/node.log",
+        ])
+        .output()
+        .expect("render the private beta unit");
+    assert!(
+        output.status.success(),
+        "renderer refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let unit = String::from_utf8(output.stdout).expect("UTF-8 unit");
+
+    let manifest = std::fs::read_to_string(state.join("private-beta.manifest")).expect("manifest");
+    let enabled = manifest.lines().any(|line| line == "accounts=enabled");
+    assert!(
+        enabled,
+        "this test is about the manifest deciding; if the beta turns accounts \
+         off again, flip the expectation here rather than deleting the test"
+    );
+    assert!(
+        unit.contains(&format!(
+            "--accounts-file {}",
+            state.join("accounts.jsonl").display()
+        )),
+        "the manifest says accounts=enabled and the unit must carry the flag:\n{unit}"
+    );
+    assert!(
+        !unit.contains("--passkeys"),
+        "passkeys are a separate switch and the manifest keeps them off:\n{unit}"
+    );
+
+    std::fs::remove_dir_all(&state).ok();
 }

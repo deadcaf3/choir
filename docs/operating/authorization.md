@@ -153,6 +153,8 @@ Review retention is opt-in. `--review-retention N` archives completed reviews wh
 
 `--accounts-file <path>` turns on invite-only self-service. Nothing above changes: the auth file and the ACL file stay yours, and issued credentials are added to what they say rather than written into them.
 
+Passkeys are a second switch, `--passkeys`, and not part of this one. Enrolment and the browser write path both read the same accounts store, so without a separate flag turning on self-service credentials would turn on browser signing with them in the same move, and a node could not offer one without the other. With `--accounts-file` alone, `POST /api/accounts/passkey` and the `/account` enrolment page both answer 503 and say which switch is missing.
+
 ```bash
 choir-node ./repos 8417 --auth-file ~/.choir/auth --acl-file ~/.choir/acl \
   --keys-file ~/.choir/keys --accounts-file ./repos/.choir/accounts.json \

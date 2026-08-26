@@ -463,6 +463,7 @@ fn enrolment_acts_on_the_caller_and_refuses_the_principals_that_have_no_account(
     let mut node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(acl_path).expect("acl loads");
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
@@ -608,6 +609,7 @@ fn an_op_signed_by_an_enrolled_passkey_is_admitted() {
     let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
@@ -1121,6 +1123,7 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
@@ -1253,6 +1256,7 @@ fn a_comment_is_prepared_by_the_node_and_signed_by_a_passkey() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
@@ -1458,6 +1462,7 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
@@ -1672,6 +1677,7 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
     let port = node.port();
     node.create_repo("agents/demo.git").expect("repo created");
     node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
@@ -1873,6 +1879,7 @@ fn the_account_page_still_lists_your_passkeys_with_scripting_disabled() {
     let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
     let port = node.port();
     node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(
@@ -1957,6 +1964,91 @@ fn the_account_page_still_lists_your_passkeys_with_scripting_disabled() {
     assert!(
         readable.contains("/api/accounts/passkey"),
         "the scripting-off reader is told nothing about how to enrol"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// The switch that lets a node offer self-service credentials without
+/// offering browser signing with them (D39).
+///
+/// Enrolment, the write path and the enrolment page all live behind the
+/// accounts store, so before this switch existed turning on
+/// `--accounts-file` turned on passkeys in the same move. The private
+/// beta's manifest says it offers accounts and not passkeys; this is the
+/// test that the sentence is true of a running node rather than only of
+/// the document.
+#[test]
+fn accounts_without_passkeys_offers_neither_the_ceremony_nor_the_page() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-switch");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    let acl_path = work.join("acl");
+    std::fs::write(&acl_path, "alice @node write\nalice * write\n").expect("acl file");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let root = work.join("repos");
+    let mut node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.watch_acl_file(acl_path).expect("acl loads");
+    // Accounts on, passkeys deliberately not.
+    node.enable_accounts(work.join("accounts.json"), None, None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Self-service itself is on: this is what separates the two switches
+    // from one switch, and without it the test would pass on a node with
+    // accounts off for the wrong reason.
+    let (status, body) = curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
+        r#"{"user":"bob","grants":["owner/repo.git write"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    assert_eq!(
+        status, 200,
+        "accounts must be enabled for this test: {body}"
+    );
+
+    let (public_key, _secret) = credential(&work, "cred");
+    let (status, body) = curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
+        &format!(r#"{{"credential_id":"c","public_key":"{public_key}"}}"#),
+        &format!("{base}/api/accounts/passkey"),
+    ]);
+    assert_eq!(status, 503, "enrolment must be refused: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("passkeys are not enabled")),
+        "the refusal must name the switch: {body}"
+    );
+
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-u", "alice:a", &format!("{base}/account")])
+        .output()
+        .expect("curl runs");
+    let page = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        page.contains("Passkeys are not enabled"),
+        "the enrolment page must refuse rather than offer a button that 503s: {page}"
     );
 
     std::fs::remove_dir_all(&work).ok();

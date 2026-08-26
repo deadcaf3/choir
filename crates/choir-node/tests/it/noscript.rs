@@ -112,6 +112,9 @@ fn served() -> (String, String) {
         .expect("node binds on a free port");
     let port = node.port();
     node.create_repo("agents/one.git").expect("repo created");
+    // D71: /account is one of the pages this walks, and the ceremony is
+    // only offered on a node that has passkeys switched on.
+    node.enable_passkeys();
     node.enable_platform(
         Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate())
             .expect("platform starts"),

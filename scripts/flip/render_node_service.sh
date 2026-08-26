@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 17 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [private-beta-service-user]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 18 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [private-beta-service-user]" >&2
   exit 2
 fi
 
@@ -42,7 +42,14 @@ TLS_KEY=${15:-}
 # Same contract as the plist renderer: a non-empty 16th argument is the
 # D29 ACL path, empty means no per-repository authorization.
 ACL=${16:-}
-PRIVATE_BETA=${17:-}
+# Same contract as the plist renderer: a non-empty 17th argument is the
+# D36 accounts file, empty means invite-only self-service is off. It sits
+# at 17 on both renderers rather than after the Linux-only service user,
+# so every argument the two platforms share keeps the same position and a
+# flag added to one and forgotten on the other is still a diff between
+# two files fed the same inputs.
+ACCOUNTS=${17:-}
+PRIVATE_BETA=${18:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -77,6 +84,9 @@ EXEC="$EXEC --newcomer-audit $NEWCOMER_AUDIT"
 EXEC="$EXEC --newcomer-adjudications $NEWCOMER_ADJUDICATIONS"
 if [ -n "$ACL" ]; then
   EXEC="$EXEC --acl-file $ACL"
+fi
+if [ -n "$ACCOUNTS" ]; then
+  EXEC="$EXEC --accounts-file $ACCOUNTS"
 fi
 if [ -n "$PROTECTED_REFS" ]; then
   EXEC="$EXEC --require-assignment --protected-refs $PROTECTED_REFS --require-review"

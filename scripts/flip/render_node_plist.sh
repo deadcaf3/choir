@@ -4,8 +4,8 @@
 # secrets, or touching launchd.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 16 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 17 ]; then
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts]" >&2
   exit 2
 fi
 
@@ -42,6 +42,9 @@ TLS_KEY=${15:-}
 # and refusing to render would lock out every single-operator node that
 # has never needed one.
 ACL=${16:-}
+# A non-empty 17th argument is the D36 accounts file, same position as
+# the systemd renderer's.
+ACCOUNTS=${17:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_plist.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -81,6 +84,10 @@ PLIST_HEAD
 
 if [ -n "$ACL" ]; then
   printf '    <string>--acl-file</string><string>%s</string>\n' "$ACL"
+fi
+
+if [ -n "$ACCOUNTS" ]; then
+  printf '    <string>--accounts-file</string><string>%s</string>\n' "$ACCOUNTS"
 fi
 
 if [ -n "$PROTECTED_REFS" ]; then

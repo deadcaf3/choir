@@ -1171,6 +1171,10 @@ fn a_review_page_names_the_person_behind_a_handle() {
     let port = node.port();
     node.create_repo("agents/one.git").expect("repo created");
     node.watch_acl_file(acl_path).expect("acl loads");
+    // D71: this walks a passkey through enrolment to a named reviewer
+    // seat, and the store only reaches the admission policy when the
+    // switch is on.
+    node.enable_passkeys();
     node.enable_accounts(work.join("accounts.json"), None, None)
         .expect("accounts enable");
     node.enable_platform(

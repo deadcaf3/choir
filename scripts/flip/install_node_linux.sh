@@ -123,6 +123,14 @@ ACL=""
 if [ -f "$STATE/acl" ]; then
   ACL="$STATE/acl"
 fi
+# D36 invite-only credential self-service, same file-as-marker contract
+# as the ACL: the accounts file's existence is what turns it on. Without
+# it the node answers 503 to issuing and redeeming invites, which is the
+# public landing page advertising a door that is not there.
+ACCOUNTS=""
+if [ -f "$STATE/accounts.jsonl" ]; then
+  ACCOUNTS="$STATE/accounts.jsonl"
+fi
 # TLS marker: two lines, cert path then key path, both readable by this
 # user. Once present, every reinstall keeps the public TLS bind — the
 # same one-way marker discipline as the review and scope gates, and the
@@ -153,13 +161,13 @@ if [ -f "$POLICY_MARKER" ]; then
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" > "$UNIT"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$UNIT"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" > "$UNIT"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$UNIT"
 fi
 if [ -n "$TLS_CERT" ]; then
   echo "TLS public bind enabled ($TLS_MARKER): serving 0.0.0.0:$PORT with $TLS_CERT"

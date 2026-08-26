@@ -15,7 +15,7 @@
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--quota-push-bytes n] [--quota-workspaces n]
 //! [--api-body-limit bytes] [--batch-limit operations] [--ready-min-free-bytes bytes]
-//! [--read-only-browser] [--site-repo owner/name]
+//! [--read-only-browser] [--site-repo owner/name] [--passkeys]
 //! [--bind addr] [--ssh-handoff path]
 //! [--accounts-file path [--ssh-authorized-keys path [--ssh-shim path]]]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
@@ -95,6 +95,13 @@
 //! `--ssh-handoff` (D31) writes this daemon's base URL and loopback
 //! secret to a 0600 file for the `choir-ssh` forced command, which is how
 //! a push arriving over SSH reaches the same sequencer an HTTP push does.
+//! `--passkeys` (D39, D71) turns on WebAuthn: the `/account` enrolment page,
+//! `POST /api/accounts/passkey`, and the browser write path that checks
+//! assertions against enrolled keys. Separate from `--accounts-file`
+//! because all three read the accounts store, so one flag would mean a
+//! node offering self-service credentials always offered browser signing
+//! with them. Without it those routes answer 503 and name the switch.
+//!
 //! `--accounts-file` (D36) turns on invite-only credential self-service:
 //! a holder of `@node write` mints a single-use expiring invite at
 //! `POST /api/accounts/invite`, its holder redeems it at
@@ -788,6 +795,17 @@ fn run() -> std::io::Result<()> {
     // start without one — a token issued on a node with nothing to grade
     // it against is a token to every repository. Before the handoff,
     // because the handoff carries the store's path to the SSH shim.
+    // D71. Passkeys are a separate switch from `--accounts-file` even
+    // though both need the same store: enrolment and the browser write
+    // path are both reachable the moment that store exists, so a node
+    // offering self-service credentials would be offering browser
+    // signing with them unless something says otherwise. The private
+    // beta's manifest says exactly that, and this is what makes the
+    // sentence true rather than aspirational.
+    if rest.iter().any(|arg| arg == "--passkeys") {
+        node.enable_passkeys();
+        eprintln!("passkeys: enrolment and browser signing enabled (D39)");
+    }
     if let Some(path) = flag_value("--accounts-file") {
         let keys_out = match flag_value("--ssh-authorized-keys") {
             Some(out) => {

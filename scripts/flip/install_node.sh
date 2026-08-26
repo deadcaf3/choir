@@ -140,6 +140,14 @@ ACL=""
 if [[ -f "$STATE/acl" ]]; then
   ACL="$STATE/acl"
 fi
+# D36 invite-only credential self-service, same file-as-marker contract
+# as the ACL and the same reason: an absent accounts file and an empty one
+# mean opposite things, so a separate enable flag could disagree with the
+# file it guards.
+ACCOUNTS=""
+if [[ -f "$STATE/accounts.jsonl" ]]; then
+  ACCOUNTS="$STATE/accounts.jsonl"
+fi
 # TLS marker: two lines, cert path then key path -- same contract as the
 # Linux installer, same fail-closed refusal on a half-filled marker.
 TLS_CERT=""
@@ -167,13 +175,13 @@ if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$PLIST"
 fi
 if [[ -n "$ACL" ]]; then
   echo "per-repository authorization enabled ($ACL): ungranted access is refused"

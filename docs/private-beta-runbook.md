@@ -22,12 +22,19 @@ Enabled:
 - Signed CLI operations, operator-issued credentials, repository ACLs, scoped
   operations, assigned reviewers, and protected-ref review gates.
 - Authenticated health, readiness, and Prometheus-format metrics endpoints.
+- Invite-only self-service accounts (D36), which is how a beta user is given a
+  credential. The manifest carries `accounts=enabled`, and the renderer takes
+  its answer from that file rather than from a flag an operator could set
+  against it.
 
 Unsupported for this beta:
 
 - Anonymous access of any kind.
-- Browser mutations, passkeys, self-service accounts, SSH, webhooks, and the
-  bridge.
+- Browser mutations, passkeys, SSH, webhooks, and the bridge. Passkeys are a
+  switch of their own (`--passkeys`), separate from the accounts file, because
+  enrolment and the browser write path both sit behind the accounts store: a
+  node offering self-service credentials would otherwise be offering browser
+  signing with them in the same move, and this line could not be true.
 - A consumer login experience or a separate SPA.
 
 The launch objectives are 99.5 percent monthly availability, a one-hour RPO,
