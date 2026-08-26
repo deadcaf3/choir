@@ -261,6 +261,21 @@ count_of() {
   } END { if (f) printf "%d ok, %d failed", p, f; else printf "%d ok", p }' "$1"
 }
 
+# The workspace stage runs only the crates whose cached verdict missed,
+# and printed that count in the same shape as a full run -- so a receipt
+# reading `workspace 237 ok` against an earlier `343 ok` looked like 106
+# tests had vanished, when it was the same suite over fewer crates. Say
+# which. The fully-cached branch already says `cached (N crates)`; this
+# is the partial one, which had nothing.
+ws_count() {
+  if [ "$USE_CACHE" = 1 ] && [ -n "$WS_RUN" ]; then
+    printf '%s (%s/%s run)' "$(count_of "$LOG/workspace.log")" \
+      "$(echo $WS_RUN | wc -w | tr -d ' ')" "$WS_TOTAL"
+  else
+    count_of "$LOG/workspace.log"
+  fi
+}
+
 t_touched() { cargo test $PKGS --no-fail-fast; }
 c_touched() { cargo clippy $PKGS --all-targets -- -D warnings; }
 
@@ -681,7 +696,7 @@ if [ "$LANE" != fast ]; then
 fi
 
 if [ -n "$WS_PID" ]; then
-  collect "$WS_PID" workspace workspace 'count_of "$LOG/workspace.log"'
+  collect "$WS_PID" workspace workspace 'ws_count'
   stage_green workspace && mark_list test "$WS_RUN"
 fi
 if [ -n "$NODE_PID" ]; then
