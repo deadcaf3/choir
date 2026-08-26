@@ -1,0 +1,14 @@
+# The toolchain the gate runs on, pinned to the version every workflow
+# installs (RUST_VERSION in ci.yml, nightly.yml, pages.yml and
+# private-beta-release.yml). Without this file the local gate runs on
+# whatever rustup's default happens to be, which is how the full lane
+# came to be green on 1.94 while the nightly fast lane and the release
+# artifact's full lane both ran on 1.97.1 -- three minor versions of
+# clippy lints that nothing local would ever have reported.
+#
+# The workflows still `rustup override set` their own pin, so they do
+# not depend on this file; it exists so a clone and a laptop agree with
+# them by default. Bump both together.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
