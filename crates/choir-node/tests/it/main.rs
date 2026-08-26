@@ -21,6 +21,7 @@ mod api;
 mod assignment;
 mod auth;
 mod batch_barriers;
+mod beta_limits;
 mod bounded;
 mod browse;
 mod checks;

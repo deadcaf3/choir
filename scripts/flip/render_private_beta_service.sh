@@ -26,8 +26,12 @@ case "$SERVICE_USER" in ''|*[!a-zA-Z0-9_-]*) fail "invalid service user" ;; esac
 for file in auth keys reviewers protected-refs newcomer-audit.jsonl newcomer-adjudications.jsonl review-adjudications.jsonl repos.list acl private-beta.manifest; do
   [ -f "$STATE/$file" ] || fail "required beta state is missing: $STATE/$file"
 done
+# The state copy must be this tree's copy. That the numbers in this
+# tree's copy are the numbers render_node_service.sh goes on to emit is
+# a separate claim, and one this script cannot make about itself; it is
+# asserted in choir-node's `beta_limits` tests (BETA-05).
 cmp -s "$HERE/private-beta.manifest" "$STATE/private-beta.manifest" \
-  || fail "private-beta.manifest differs from the limits and feature set this renderer emits"
+  || fail "private-beta.manifest differs from this tree's copy of the limits and feature set"
 
 # Auth and policy are operator material. Group/world-readable files are
 # refused before they become command-line inputs to a public service.
