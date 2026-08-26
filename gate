@@ -245,20 +245,23 @@ touched_pkgs() {
   } | sed -n 's|^crates/\([^/]*\)/.*|-p \1|p' | sort -u | tr '\n' ' '
 }
 
-# A build or *test* input outside `crates/` that no `-p` selection can
-# cover. The manifests and the toolchain pin are build inputs; `docs/`,
-# `scripts/` and `choirctl` are test inputs, read at run time by suites
-# that live in crates no path here names -- `surface.rs` walks all of
-# `docs/`, `install_policy.rs` and `deploy.rs` drive the scripts.
+# Anything outside `crates/` this tree changed, as top-level names.
 #
-# Without `docs/` in this list the touched lane printed "nothing under
-# crates/" and a green receipt for a tree carrying an untagged code
-# fence, which is a silent doctest the full lane then fails on.
+# No `-p` selection can cover any of it, and the reason it is the whole
+# of `outside crates/` rather than a list is that the list was wrong
+# three times in one day. The manifests and the toolchain pin are build
+# inputs. `docs/`, `scripts/`, `choirctl` and `templates/` are *test*
+# inputs, read at run time by suites living in crates no path here
+# names: `surface.rs` walks all of `docs/` and reads five `templates/`
+# files, `install_policy.rs` and `deploy.rs` drive seventeen scripts.
+# Each was found only after a lane reported green on a tree it had not
+# verified -- `templates/` while every lane including the full one was
+# green on a broken shipped deliverable.
 touched_root() {
   { git diff --name-only HEAD 2>/dev/null
     git ls-files --others --exclude-standard 2>/dev/null
-  } | grep -E '^(Cargo\.toml|Cargo\.lock|rust-toolchain[^/]*|choirctl|(docs|scripts)/.*)$' \
-    | sed -E 's|^(docs\|scripts)/.*|\1/|' | sort -u | tr '\n' ' '
+  } | grep -v '^crates/' | grep -v '^$' \
+    | sed -E 's|^([^/]+)/.*|\1/|' | sort -u | tr '\n' ' '
 }
 
 count_of() {
@@ -348,22 +351,28 @@ compute_keys() {
     for _root in Cargo.lock Cargo.toml .cargo/config.toml rust-toolchain.toml gate; do
       [ -f "$_root" ] && printf '%s %s\n' "$_root" "$(git hash-object "$_root")"
     done
-    # The shell scripts and the docs, which tests read at run time rather
-    # than `include_str!` -- `install_policy.rs` drives fifteen scripts
-    # and `deploy.rs` two more, one of those paths is built with
-    # `format!` so no scan of string literals can find them all, and
-    # `surface.rs` walks the whole of `docs/` looking for fences and
-    # claims. Without this, editing either left every crate verdict
-    # cached: the gate printed green for a tree in which a load-bearing
-    # script had changed and nothing had verified it, and later did the
-    # same for a doc carrying an untagged fence the full lane fails on.
+    # Every tracked file outside `crates/`, because tests read them at
+    # run time rather than through `include_str!` and nothing else in
+    # this key can see that: `install_policy.rs` and `deploy.rs` drive
+    # seventeen scripts, one path built with `format!` so no scan of
+    # string literals finds it; `surface.rs` walks the whole of `docs/`
+    # and reads five files under `templates/`.
     #
-    # Global rather than per-crate, and coarse on purpose. Scripts change
-    # rarely, the mapping from script to crate is exactly what nobody
-    # maintains correctly, and this file's own rule is that a lost cache
-    # is a slow run and never a wrong one.
-    git ls-files -s scripts choirctl docs
-    git status --porcelain --untracked-files=all -- scripts choirctl docs |
+    # It is the whole directory rather than a list because the list was
+    # wrong three times in one day. Editing a script left every crate
+    # verdict cached, so the gate printed green for a tree in which a
+    # load-bearing script had changed and nothing had verified it. Then
+    # a doc carrying an untagged fence -- a silent doctest -- passed the
+    # touched and fast lanes. Then a broken string in `templates/`, a
+    # shipped deliverable, passed *every* lane including the full one.
+    #
+    # Global rather than per-crate, and coarse on purpose: the mapping
+    # from a file to the crate whose tests read it is exactly what
+    # nobody maintains correctly, and this file's own rule is that a
+    # lost cache is a slow run and never a wrong one. `internal/` is
+    # gitignored, so the build log does not invalidate anything.
+    git ls-files -s -- ':(exclude)crates'
+    git status --porcelain --untracked-files=all -- ':(exclude)crates' |
       while read -r _st _path; do
         if [ -f "$_path" ]; then
           printf 'wt %s %s\n' "$_path" "$(git hash-object "$_path")"
