@@ -41,6 +41,28 @@ unalertable.
 A scrape renders before it finishes, so it never counts itself. Every
 scrape is one request behind, uniformly, which no rate can see.
 
+### The rules themselves
+
+`scripts/flip/choir-alerts.rules.yml` holds the expressions, in two
+groups: `choir-node-state` off the gauges, `choir-node-traffic` off the
+counters. Load it into Prometheus beside whatever the host exporter
+already provides.
+
+Two things about that file are deliberate. **Its thresholds are not
+measured** - this node has served no beta traffic, so every window and
+rate in it is a starting point, not an observation, and the file says so
+at the top. And the latency rule is a **mean**, not a percentile: a sum
+and a count cannot yield a p99, and since the gate's bound is a p99
+under 100 ms, a mean above 100 ms is the strongest claim those two
+numbers support.
+
+`every_metric_these_alert_rules_name_is_one_the_node_exports` in
+`crates/choir-node/tests/limits.rs` scrapes a live node and asserts every
+`choir_*` name the rules read is one the node still exports. Renaming a
+metric without editing the rules is otherwise silent: the rule fires
+never, and a rule that never fires looks exactly like a rule with
+nothing to report.
+
 ### The alerts a node cannot source
 
 `docs/private-beta-runbook.md` requires nine critical alerts. Four come

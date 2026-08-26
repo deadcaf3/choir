@@ -1,0 +1,119 @@
+# Prometheus alerting rules for a private-beta choir node.
+#
+# Every expression here reads a metric the node exports from /metrics.
+# `every_metric_these_alert_rules_name_is_one_the_node_exports` in
+# crates/choir-node/tests/limits.rs asserts exactly that against a live
+# node. A rule naming a metric that has been renamed or removed fires
+# never, which looks identical to a rule that is not firing because
+# nothing is wrong: the one failure mode an alerting config cannot
+# self-report.
+#
+# THE THRESHOLDS ARE NOT MEASURED. This node has served no beta traffic,
+# so every `for` window and every rate below is a starting point chosen
+# to be roughly right, not a number derived from this deployment. Revise
+# them against the first fortnight of real traffic and say so here when
+# you do. Do not cite them as if they described observed behaviour.
+#
+# Four of the nine alerts docs/private-beta-runbook.md requires are not
+# here and cannot be: inode exhaustion, certificate expiry, backup age,
+# and promotion failure come from the host exporter, the reverse proxy,
+# the pull timer, and the deployment path. See
+# docs/operating/observability.md.
+groups:
+  - name: choir-node-state
+    rules:
+      # The composite. It fires for any readiness failure, including the
+      # ones below, so the specific rules carry the diagnosis and this
+      # one carries the page.
+      - alert: ChoirNotReady
+        expr: choir_ready == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "choir node is refusing traffic at /readyz"
+          runbook: "docs/operating/observability.md"
+
+      - alert: ChoirLogUnverified
+        expr: choir_log_verified == 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "the op log does not verify: chain, sequence or hash"
+          runbook: "docs/operating/observability.md#repairing-a-log-choir-repair"
+
+      - alert: ChoirSequencerDown
+        expr: choir_sequencer_live == 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "the sequencer has lost durability; the daemon should be exiting"
+
+      - alert: ChoirStorageUnwritable
+        expr: choir_storage_writable == 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "the node cannot write to its own root"
+
+      # The same floor the private-beta unit passes as
+      # --ready-min-free-bytes. Alert before readiness does, so the page
+      # arrives while there is still room to act.
+      - alert: ChoirDiskLow
+        expr: choir_free_disk_bytes < 2147483648
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "free storage is within 2 GiB; the readiness floor is 1 GiB"
+
+      - alert: ChoirRefDisagreement
+        expr: choir_ref_disagreements > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "the log names refs the repositories do not have"
+          runbook: "docs/runbook-restore.md"
+
+      # A restart moves the start time. Three in fifteen minutes is a
+      # loop rather than a deploy.
+      - alert: ChoirRestartLoop
+        expr: changes(choir_process_start_time_seconds[15m]) > 2
+        for: 0m
+        labels: { severity: page }
+        annotations:
+          summary: "the node has restarted more than twice in fifteen minutes"
+
+  - name: choir-node-traffic
+    rules:
+      - alert: ChoirUnauthorizedSpike
+        expr: rate(choir_requests_unauthorized_total[5m]) > 1
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "sustained 401/403s: a broken credential or someone trying keys"
+
+      - alert: ChoirThrottleSpike
+        expr: rate(choir_requests_throttled_total[5m]) > 0.5
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "sustained 429s: a beta user is at a ceiling, or one is too low"
+
+      - alert: ChoirFailureSpike
+        expr: rate(choir_requests_failed_total[5m]) > 0.1
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "the node is failing requests it accepted"
+
+      # Mean, not a quantile: the node exports a sum and a count, which
+      # cannot yield a p99. The gate's p99 bound is 100 ms, so a *mean*
+      # above 100 ms means something far worse than the gate allows, and
+      # is the strongest claim these two numbers can support.
+      - alert: ChoirLatencyHigh
+        expr: >
+          rate(choir_request_duration_microseconds_total[5m])
+          / rate(choir_requests_total[5m]) > 100000
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "mean request latency above 100 ms over five minutes"

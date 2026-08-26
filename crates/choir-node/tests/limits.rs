@@ -1119,3 +1119,81 @@ fn refused_throttled_and_failed_requests_are_counted_without_a_request_log() {
         "the total stopped moving"
     );
 }
+
+/// The alert rules the operator installs beside the node.
+const ALERT_RULES: &str = include_str!("../../../scripts/flip/choir-alerts.rules.yml");
+
+/// Every `choir_*` name an expression in [`ALERT_RULES`] reads.
+///
+/// Comments are stripped first: the file's header names the metrics in
+/// prose, and a rule deleted but still described would otherwise keep
+/// its name alive here.
+fn names_the_rules_read() -> Vec<String> {
+    let mut found = Vec::new();
+    for line in ALERT_RULES.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        let bytes = code.as_bytes();
+        let mut i = 0;
+        while let Some(at) = code[i..].find("choir_") {
+            let start = i + at;
+            let mut end = start;
+            while end < bytes.len() && (bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric()) {
+                end += 1;
+            }
+            let name = code[start..end].to_string();
+            if !found.contains(&name) {
+                found.push(name);
+            }
+            i = end;
+        }
+    }
+    found
+}
+
+/// Every metric name a live node exports, one per sample line.
+fn names_the_node_exports(node: &Served) -> Vec<String> {
+    body(&["-u", "alice:a", &format!("{}/metrics", node.base)])
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// An alert rule naming a metric the node no longer exports fires never,
+/// and a rule that never fires is indistinguishable from a rule that is
+/// not firing because nothing is wrong. Nothing in Prometheus reports
+/// that; the rename happens here, so the check belongs here.
+#[test]
+fn every_metric_these_alert_rules_name_is_one_the_node_exports() {
+    let node = served(
+        "alert-rules",
+        &Config {
+            acl: Some("alice @node auditor\n"),
+            ..Config::default()
+        },
+    );
+
+    let read = names_the_rules_read();
+    // Anti-vacuity: an extractor that silently matched nothing would make
+    // the assertion below pass over an empty list.
+    assert!(
+        read.len() >= 10,
+        "the rules file should name ~a dozen metrics, extracted {}: {read:?}",
+        read.len()
+    );
+
+    let exported = names_the_node_exports(&node);
+    assert!(
+        exported.contains(&"choir_ready".to_string()),
+        "scrape produced no recognisable samples: {exported:?}"
+    );
+
+    for name in &read {
+        assert!(
+            exported.contains(name),
+            "{name} is named by an alert rule but exported by no node; \
+             /metrics has {exported:?}"
+        );
+    }
+}
