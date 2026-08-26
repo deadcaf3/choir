@@ -1384,6 +1384,26 @@ fn the_backup_pair_choirctl_runs_is_pinned_too() {
         pull.contains("REFUSING"),
         "the pull must refuse a policy tar that gained a credential"
     );
+    // All nine names, because the three this leg once left behind --
+    // adjudications, ownership, beta limits -- are exactly the ones
+    // whose absence makes a restored node enforce less than the node it
+    // replaces, while booting and serving normally.
+    for needed in [
+        "keys",
+        "reviewers",
+        "protected-refs",
+        "newcomer-audit.jsonl",
+        "newcomer-adjudications.jsonl",
+        "review-adjudications.jsonl",
+        "acl",
+        "private-beta.manifest",
+        "repos.list",
+    ] {
+        assert!(
+            pull.contains(needed),
+            "the pull stopped asking the node for {needed}"
+        );
+    }
 
     let verify = strip("scripts/flip/verify_backup.sh");
     // Three that stop a restore booting, six that leave it enforcing

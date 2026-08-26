@@ -10,8 +10,9 @@
 # never on the node host. It refuses the other direction rather than
 # writing a "backup" next to the thing it is backing up.
 #
-# What travels: ops.jsonl, node.fingerprint, refs.snapshot, the six policy
-# files as one tar, and one `--all` bundle per served repo. The log says
+# What travels: ops.jsonl, node.fingerprint, refs.snapshot, whichever of
+# the nine policy files the node has, as one tar, and one `--all` bundle
+# per served repo. The log says
 # which commits the refs named; only the bundles make the git objects
 # restorable, and ops.jsonl is not a git object so no bundle has ever
 # contained it.
@@ -167,17 +168,38 @@ fi
 # outside the log -- and a node rebuilt from ops.jsonl alone refuses to
 # boot for want of it. Named one by one rather than globbed: a glob over
 # ~/.choir would sweep in auth and node.key.
+#
+# All nine, not the six this leg carried for its whole life. The three it
+# left behind -- review-adjudications.jsonl, acl, private-beta.manifest --
+# are the ones that decide whether landings are adjudicated, who owns
+# which repository, and which limits the beta runs under. A node restored
+# without them boots and serves and enforces less than the node it
+# replaces, which is the failure worth catching here rather than later.
+#
+# tar is given every name and its complaints are dropped: a node that
+# protects no ref has no protected-refs file, and that is a fact about
+# the node rather than an error. Which names actually arrived is read
+# back off the finished archive below, so the count can never be a claim
+# about what was asked for.
+POLICY_NAMES='keys reviewers protected-refs newcomer-audit.jsonl
+newcomer-adjudications.jsonl review-adjudications.jsonl acl
+private-beta.manifest repos.list'
 echo "pulling policy"
-node_ssh "cd $REMOTE_STATE && tar cf - \
-  keys reviewers protected-refs newcomer-audit.jsonl \
-  newcomer-adjudications.jsonl repos.list 2>/dev/null || true" > "$INCOMING/policy.tar"
+node_ssh "cd $REMOTE_STATE && tar cf - $(echo $POLICY_NAMES) 2>/dev/null || true" \
+  > "$INCOMING/policy.tar"
 
 [ -s "$INCOMING/policy.tar" ] || {
   echo "pull_backup: policy tar is empty — the node has no policy files to ship" >&2
   exit 1
 }
 
-# Belt and braces. The tar above names six files and none of them are
+MEMBERS=$(tar tf "$INCOMING/policy.tar")
+for f in $POLICY_NAMES; do
+  printf '%s\n' "$MEMBERS" | grep -qx "$f" \
+    || echo "  no $f on the node — a restore from this backup starts without it"
+done
+
+# Belt and braces. The tar above names nine files and none of them are
 # secrets, but a backup that quietly grew a key is worth failing loudly
 # over rather than trusting the line that built it.
 if tar tf "$INCOMING/policy.tar" | grep -Eq '(^|/)(auth|node\.key)$|\.(key|pem)$'; then
