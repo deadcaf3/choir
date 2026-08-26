@@ -831,3 +831,175 @@ fn the_daemon_refuses_attribution_and_metering_without_authentication() {
     );
     assert!(err.contains("needs a value"), "{err}");
 }
+
+/// Starts a node whose readiness can only fail for the reason a test
+/// injects: the free-space floor is zero and the log on disk is present
+/// and verifiable. Returns it with `/readyz` already asserted to be 200,
+/// so anything after this is the injection and not the fixture.
+fn ready_node(tag: &str, repos: &[&str]) -> Served {
+    let node = served(
+        tag,
+        &Config {
+            ready_min_free_bytes: Some(0),
+            repos,
+            ..Config::default()
+        },
+    );
+    let state = node.work.join("repos/.choir");
+    std::fs::create_dir_all(&state).expect("state directory");
+    if !state.join("ops.jsonl").exists() {
+        std::fs::write(state.join("ops.jsonl"), "").expect("empty verified log");
+    }
+    assert_eq!(
+        status(&["-u", "alice:a", &format!("{}/readyz", node.base)]),
+        200,
+        "the fixture is not ready before anything was broken"
+    );
+    node
+}
+
+/// The `checks` object `/readyz` reports, with the status it came with.
+fn readiness_checks(node: &Served) -> (u16, serde_json::Value) {
+    let url = format!("{}/readyz", node.base);
+    let code = status(&["-u", "alice:a", &url]);
+    let text = body(&["-u", "alice:a", &url]);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("readiness JSON ({e}): {text}"));
+    (code, parsed["checks"].clone())
+}
+
+/// BETA-06. Each readiness sub-check has to be able to fail by itself.
+///
+/// `authenticated_health_readiness_and_metrics_report_independent_checks`
+/// above proves the checks are *reported* independently, and drives one
+/// of them — the free-space floor — to a refusal. The other three were
+/// asserted only on the healthy path, which is the shape where a check
+/// that has quietly stopped looking at anything still reads as green:
+/// `log_verified` is a `.is_ok_and(…)` over a file, and a check that
+/// always answers true is indistinguishable from a passing one until
+/// something breaks.
+///
+/// So break each one, and assert two things every time: this check went
+/// false and the node refuses traffic, and the *other* checks stayed
+/// true. The second half is what makes it an independence test rather
+/// than three ways of watching `ready` go false.
+///
+/// `sequencer_live` is deliberately not here. A durability failure
+/// terminates the daemon for its supervisor (D16), which
+/// `tests/durability_exit.rs` asserts, so a live node reporting
+/// `sequencer_live: false` on `/readyz` is a window measured in the time
+/// it takes to exit rather than a state to drive a fixture into.
+#[test]
+fn a_broken_log_chain_alone_makes_the_node_unready() {
+    let node = ready_node("readiness-broken-log", &[]);
+    std::fs::write(
+        node.work.join("repos/.choir/ops.jsonl"),
+        "this is not an op entry\n",
+    )
+    .expect("corrupt the log");
+
+    let (code, checks) = readiness_checks(&node);
+    assert_eq!(code, 503, "an unverifiable log still served traffic");
+    assert_eq!(checks["log_verified"], false, "{checks}");
+    assert_eq!(
+        checks["storage_writable"], true,
+        "a corrupt log must not be reported as a storage failure: {checks}"
+    );
+    assert_eq!(checks["ref_agreement"], true, "{checks}");
+    assert_eq!(checks["disk_space_ok"], true, "{checks}");
+
+    // And `/metrics` must carry the same answer, since an operator's
+    // alert reads that rather than the JSON.
+    let metrics = body(&["-u", "alice:a", &format!("{}/metrics", node.base)]);
+    assert!(
+        metrics.contains("choir_log_verified 0") && metrics.contains("choir_ready 0"),
+        "the gauges disagree with /readyz: {metrics}"
+    );
+}
+
+#[test]
+fn unwritable_storage_alone_makes_the_node_unready() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let node = ready_node("readiness-unwritable", &[]);
+    let root = node.work.join("repos");
+    let original = std::fs::metadata(&root)
+        .expect("root metadata")
+        .permissions();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555))
+        .expect("make the root read-only");
+
+    // Captured before the permissions go back, and asserted after, so a
+    // failure here cannot leave an unwritable directory in the temp dir.
+    let observed = readiness_checks(&node);
+    std::fs::set_permissions(&root, original).expect("restore permissions");
+
+    let (code, checks) = observed;
+    assert_eq!(code, 503, "a read-only root still served traffic");
+    assert_eq!(checks["storage_writable"], false, "{checks}");
+    assert_eq!(
+        checks["log_verified"], true,
+        "a directory that is readable must still verify its log: {checks}"
+    );
+    assert_eq!(checks["ref_agreement"], true, "{checks}");
+}
+
+#[test]
+fn a_ref_the_repository_lost_alone_makes_the_node_unready() {
+    let node = ready_node("readiness-ref-drift", &["owner/repo.git"]);
+    let url = with_creds(&node.base, "alice:a");
+    let dir = node.work.join("clone");
+    std::fs::create_dir_all(&dir).expect("clone dir");
+    assert!(
+        git(
+            &node.work,
+            &[
+                "clone",
+                "-q",
+                &format!("{url}/owner/repo.git"),
+                dir.to_str().unwrap()
+            ]
+        )
+        .status
+        .success(),
+        "clone failed"
+    );
+    std::fs::write(dir.join("f.txt"), "seed\n").expect("write");
+    assert!(git(&dir, &["add", "."]).status.success());
+    assert!(git(&dir, &["commit", "-q", "-m", "seed"]).status.success());
+    assert!(
+        git(&dir, &["push", "-q", "origin", "HEAD:refs/heads/main"])
+            .status
+            .success(),
+        "the seeding push must reach the log through the hook"
+    );
+    assert_eq!(
+        status(&["-u", "alice:a", &format!("{}/readyz", node.base)]),
+        200,
+        "a ref that is in both places is not a disagreement"
+    );
+
+    // Delete it in git alone. The log still names it, which is exactly
+    // the state a restore into empty repositories produces and the one
+    // the survey exists to see.
+    let bare = node.work.join("repos/owner/repo.git");
+    assert!(
+        git(&bare, &["update-ref", "-d", "refs/heads/main"])
+            .status
+            .success(),
+        "could not delete the ref from the bare repository"
+    );
+
+    let (code, checks) = readiness_checks(&node);
+    assert_eq!(code, 503, "a ref the log names and git lost still served");
+    assert_eq!(checks["ref_agreement"], false, "{checks}");
+    assert!(
+        checks["ref_disagreements"].as_u64().unwrap_or(0) >= 1,
+        "the count must name how many: {checks}"
+    );
+    assert_eq!(
+        checks["log_verified"], true,
+        "git losing a ref is not a log fault: {checks}"
+    );
+    assert_eq!(checks["storage_writable"], true, "{checks}");
+}
