@@ -1,5 +1,5 @@
 //! The page a person signs in on, in place of the browser's own
-//! credential dialog (D71).
+//! credential dialog (D71, D74).
 //!
 //! Before this, an unauthenticated browser request was answered with
 //! `WWW-Authenticate: Basic`, and what the reader saw was a grey box
@@ -9,10 +9,20 @@
 //! person could approve an operation with a fingerprint and then be asked
 //! to type a secret to look at the result.
 //!
-//! The page reads correctly with scripting off, like every other surface
-//! here, and says so plainly rather than presenting a button that cannot
-//! work: without script there is no ceremony to run, and the honest
-//! fallback is the credential the operator issued.
+//! D71 replaced it for the passkey half and left the other half where it
+//! was: a link back to the browser dialog, for the one credential
+//! everybody has before they have a passkey. So the first sign-in on a
+//! node -- the only one that happens to every single person -- was the
+//! grey box, and cancelling it left them on the word `unauthorized` in
+//! Times New Roman. The route that mattered most was the one that was
+//! never replaced.
+//!
+//! This page now carries both: the ceremony for somebody who has enrolled
+//! a passkey, and an ordinary username and password form for somebody who
+//! has not. The form is plain HTML, so it works with scripting off and
+//! the browser's own password manager offers to remember it -- which is
+//! the second half of "never type this again", the first being the
+//! passkey the account page enrols.
 
 /// A rendered page, matching [`crate::account_page::Page`].
 pub(crate) struct Page {
@@ -24,27 +34,35 @@ pub(crate) struct Page {
 
 /// Escapes text for HTML, the same five characters the sibling pages do.
 fn esc(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
+    crate::ui::esc(text)
 }
 
-/// The sign-in page, returning to `next` once the ceremony succeeds.
+/// What the page has to say about the attempt that produced it.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Said {
+    /// Nobody has tried yet: this is the page an unauthenticated request
+    /// was answered with.
+    Nothing,
+    /// A username and password were sent and did not match.
+    ///
+    /// Deliberately one variant for both halves. Telling somebody their
+    /// username exists but the password is wrong is telling anybody with
+    /// a list of names which ones this node has issued.
+    NoMatch,
+}
+
+/// The sign-in page, returning to `next` once either route succeeds.
 ///
 /// `passkeys` is whether this node offers the ceremony at all (D71). With
-/// it off the page still renders, because it is what an unauthenticated
-/// browser is now shown, and it names the credential that does work here
-/// instead of a button that would 503.
-pub(crate) fn render(passkeys: bool, next: &str, chrome: crate::browse::Chrome<'_>) -> Page {
+/// it off the page still renders and the password form is still the way
+/// in, because that form is what an unauthenticated browser needs
+/// whatever else the node offers.
+pub(crate) fn render(
+    passkeys: bool,
+    next: &str,
+    said: Said,
+    chrome: crate::browse::Chrome<'_>,
+) -> Page {
     let mut h = String::with_capacity(4 * 1024);
     h.push_str("<!doctype html><html lang=\"en\"");
     crate::browse::theme_attribute(&mut h, chrome.theme);
@@ -58,10 +76,23 @@ pub(crate) fn render(passkeys: bool, next: &str, chrome: crate::browse::Chrome<'
     h.push_str("<span class=\"pill\"><a href=\"/\">node</a></span></div></header>");
     h.push_str("<main id=\"main\"><section>");
 
+    if said == Said::NoMatch {
+        // Above everything, because a reader who just failed is looking
+        // at the top of the page and not at the bottom of the form.
+        h.push_str(
+            "<p class=\"note\">That username and password did not match. \
+             Check them and try again.</p>",
+        );
+    }
+
     if passkeys {
-        h.push_str("<p>This node knows you by a passkey. There is nothing to type: your ");
-        h.push_str("browser will ask for the fingerprint, face, or device PIN the passkey ");
-        h.push_str("is held behind.</p>");
+        // The fast path first, for the person who has one: nothing to
+        // type, and no field to tab past on the way to a button.
+        h.push_str(
+            "<p>If you have enrolled a passkey here, use it. There is nothing to type: \
+             your browser will ask for the fingerprint, face, or device PIN it is held \
+             behind.</p>",
+        );
         // `next` is rendered onto the element rather than read from the
         // query string by the script, so one place decides where a
         // sign-in returns to and that place is the server.
@@ -69,22 +100,42 @@ pub(crate) fn render(passkeys: bool, next: &str, chrome: crate::browse::Chrome<'
         h.push_str(&esc(next));
         h.push_str("\"><button id=\"signin-go\">Use a passkey</button>");
         h.push_str("<p id=\"signin-said\" class=\"note\" hidden></p></div>");
-        h.push_str("<noscript><p class=\"note\">A passkey needs scripting, which is off in ");
-        h.push_str("this browser. Everything here is also reachable with the credential you ");
-        h.push_str("were issued, through the <code>choir</code> command line.</p></noscript>");
-        // The bootstrap, and the only way to a first passkey. Without a
-        // link here the ceremony is unreachable for anybody who does not
-        // already have one, which is everybody at first: this page
-        // replaced the browser's credential dialog, so there is no longer
-        // any route that asks for the issued credential by accident.
-        h.push_str("<p class=\"note\">No passkey yet? <a href=\"");
-        h.push_str(&esc(&format!("/signin/credential?next={next}")));
-        h.push_str("\">Sign in with the credential you were issued</a>, then enrol one ");
-        h.push_str("from your account page.</p>");
-    } else {
-        h.push_str("<p class=\"note\">This node does not offer passkeys, so there is no ");
-        h.push_str("ceremony to run here. Use the credential you were issued, through the ");
-        h.push_str("<code>choir</code> command line or an ordinary HTTP client.</p>");
+        h.push_str("<h2>Or with the credential you were issued</h2>");
+    }
+
+    // The form every person meets once, whatever else this node offers,
+    // because a passkey is enrolled by somebody already signed in.
+    h.push_str("<form method=\"post\" action=\"/signin\">");
+    h.push_str("<input type=\"hidden\" name=\"next\" value=\"");
+    h.push_str(&esc(next));
+    h.push_str("\">");
+    // `autocomplete` is the whole reason these carry the names they do:
+    // it is what makes a browser's own password manager offer to keep
+    // this, which is what stops the credential being retyped from a chat
+    // window every morning.
+    h.push_str(
+        "<p><label for=\"signin-user\">Username</label><br>\
+         <input id=\"signin-user\" name=\"user\" autocomplete=\"username\" \
+         autocapitalize=\"none\" spellcheck=\"false\" required></p>",
+    );
+    h.push_str(
+        "<p><label for=\"signin-secret\">Password</label><br>\
+         <input id=\"signin-secret\" name=\"secret\" type=\"password\" \
+         autocomplete=\"current-password\" required></p>",
+    );
+    h.push_str("<p><button type=\"submit\">Sign in</button></p>");
+    h.push_str("</form>");
+
+    if passkeys {
+        h.push_str(
+            "<p class=\"note\">First time? Sign in with the username and password you were \
+             given, and this node will take you straight to the page that enrols a passkey. \
+             After that there is nothing to type.</p>",
+        );
+        h.push_str(
+            "<noscript><p class=\"note\">The passkey button needs scripting, which is off in \
+             this browser. The form above does not, and works exactly as well.</p></noscript>",
+        );
     }
 
     h.push_str("</section></main>");
@@ -105,6 +156,8 @@ pub(crate) fn render(passkeys: bool, next: &str, chrome: crate::browse::Chrome<'
 
 #[cfg(test)]
 mod tests {
+    use super::Said;
+
     /// The ids are the whole contract between this page and
     /// [`crate::ui::WEBAUTHN_JS`], the same contract the account page
     /// keeps and for the same reason: rename one on either side and the
@@ -122,14 +175,19 @@ mod tests {
 
     /// A node without passkeys still has to answer an unauthenticated
     /// browser, and what it must not do is offer a ceremony that would be
-    /// refused.
+    /// refused. The form is not a ceremony and is still there.
     #[test]
-    fn a_node_without_passkeys_offers_no_ceremony() {
-        let page = super::render(false, "/", crate::browse::Chrome::default());
+    fn a_node_without_passkeys_offers_no_ceremony_and_still_offers_a_way_in() {
+        let page = super::render(false, "/", Said::Nothing, crate::browse::Chrome::default());
         assert_eq!(page.status, 401);
         assert!(!page.html.contains("signin-go"), "no switch, no button");
-        assert!(page.html.contains("does not offer passkeys"));
         assert!(!page.html.contains("<script"), "no ceremony, no script");
+        assert!(
+            page.html.contains("name=\"secret\""),
+            "no way in: {}",
+            page.html
+        );
+        assert!(page.html.contains("action=\"/signin\""), "{}", page.html);
     }
 
     /// The control starts hidden and the shared script is what reveals
@@ -141,7 +199,7 @@ mod tests {
     /// an explanation of passkeys and no button.
     #[test]
     fn the_page_that_offers_the_ceremony_also_loads_it() {
-        let page = super::render(true, "/", crate::browse::Chrome::default());
+        let page = super::render(true, "/", Said::Nothing, crate::browse::Chrome::default());
         assert!(page.html.contains("signin-go"), "the control is rendered");
         assert!(
             page.html.contains(crate::ui::CEREMONY_SCRIPT),
@@ -150,18 +208,49 @@ mod tests {
         );
     }
 
-    /// A first passkey is enrolled by an authenticated caller, and this
-    /// page is what replaced the browser dialog that used to ask. Without
-    /// the bootstrap link there is no route left that asks for the issued
-    /// credential, so nobody without a passkey can ever get one.
+    /// D74. A first passkey is enrolled by somebody already signed in, so
+    /// the route to a first passkey is a route to a first *session* --
+    /// and it is on this page, not behind a link to the browser's own
+    /// dialog. That link is what the screenshots of the ugly flow were.
     #[test]
-    fn the_page_offers_the_only_route_to_a_first_passkey() {
-        let page = super::render(true, "/r/", crate::browse::Chrome::default());
+    fn the_first_sign_in_happens_on_this_page_and_not_in_browser_chrome() {
+        let page = super::render(true, "/r/", Said::Nothing, crate::browse::Chrome::default());
         assert!(
-            page.html.contains("/signin/credential?next=/r/"),
-            "no way to present an issued credential: {}",
+            !page.html.contains("/signin/credential"),
+            "the page still hands the reader back to the browser dialog: {}",
             page.html
         );
+        assert!(
+            page.html.contains("autocomplete=\"current-password\""),
+            "{}",
+            page.html
+        );
+        // `next` survives both routes, so a person who was going
+        // somewhere still gets there.
+        assert!(page.html.contains("data-next=\"/r/\""), "{}", page.html);
+        assert!(page.html.contains("value=\"/r/\""), "{}", page.html);
+    }
+
+    /// A refusal says one thing for both halves of a wrong credential.
+    /// "No such user" and "wrong password" told apart is a way to ask
+    /// this node which names it has issued.
+    #[test]
+    fn a_refusal_does_not_say_which_half_was_wrong() {
+        let page = super::render(true, "/", Said::NoMatch, crate::browse::Chrome::default());
+        assert_eq!(page.status, 401);
+        assert!(page.html.contains("did not match"), "{}", page.html);
+        for leak in [
+            "no such user",
+            "unknown user",
+            "wrong password",
+            "no account",
+        ] {
+            assert!(
+                !page.html.to_ascii_lowercase().contains(leak),
+                "the refusal names which half was wrong: {}",
+                page.html
+            );
+        }
     }
 
     /// The status is 401 and not 200: the request that produced this page
@@ -169,8 +258,7 @@ mod tests {
     /// see that rather than a successful page.
     #[test]
     fn the_page_is_an_unauthorized_answer_not_a_successful_one() {
-        let page = super::render(true, "/r/", crate::browse::Chrome::default());
+        let page = super::render(true, "/r/", Said::Nothing, crate::browse::Chrome::default());
         assert_eq!(page.status, 401);
-        assert!(page.html.contains("data-next=\"/r/\""));
     }
 }

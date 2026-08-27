@@ -95,18 +95,8 @@ pub(crate) fn render(
     h.push_str("</div></header>");
     h.push_str("<main id=\"main\">");
 
-    if in_session {
-        // A plain form, so the control works with scripting off like
-        // every other one here. The endpoint answers 303, which is why
-        // this needs no script to follow it.
-        h.push_str("<section><h2>This browser</h2><p class=\"note\">Signed in with a ");
-        h.push_str("passkey. Signing out forgets the session on the node, so this ");
-        h.push_str("browser stops being you.</p>");
-        h.push_str("<form method=\"post\" action=\"/api/signout\">");
-        h.push_str("<button type=\"submit\">Sign out</button></form></section>");
-    }
-
     let Some(store) = store else {
+        sign_out(&mut h, in_session);
         h.push_str("<section><p class=\"note\">This node does not run account self-service, ");
         h.push_str("so there is nothing here to manage. Credentials are whatever the operator ");
         h.push_str("wrote in the node's auth file.</p></section>");
@@ -131,15 +121,20 @@ pub(crate) fn render(
         // to infer.
         h.push_str("<p class=\"note\">Your write path is the CLI, signed with your actor key. ");
         h.push_str("That is unchanged and stays available whatever anyone enrols.</p></section>");
+        sign_out(&mut h, in_session);
         return Page {
             status: 200,
             html: close(h),
         };
     }
     if enrolled.is_empty() {
-        h.push_str("<p class=\"empty\">None yet. A passkey lets you approve reviews from this ");
-        h.push_str("browser, with your fingerprint, face or hardware key. Your token keeps ");
-        h.push_str("working either way.</p>");
+        // The one thing a person who has just signed in with a password
+        // is here to do (D74), so it is stated as an instruction rather
+        // than as a description of a feature.
+        h.push_str("<p class=\"empty\">None yet. Add one now and you will not type that ");
+        h.push_str("password again: your browser will ask for a fingerprint, face or ");
+        h.push_str("hardware key instead. The password keeps working for git and the CLI ");
+        h.push_str("either way.</p>");
     } else {
         h.push_str("<table><thead><tr><th>name</th><th>credential</th><th>added</th>");
         h.push_str("</tr></thead><tbody>");
@@ -168,10 +163,32 @@ pub(crate) fn render(
     h.push_str("<p id=\"enrol-said\" class=\"note\" hidden></p></div>");
     h.push_str(crate::ui::CEREMONY_SCRIPT);
     h.push_str("</section>");
+    sign_out(&mut h, in_session);
     Page {
         status: 200,
         html: close(h),
     }
+}
+
+/// The way out of a browser session, when the reader arrived on one.
+///
+/// A plain form, so the control works with scripting off like every
+/// other one here; the endpoint answers `303`, which is why this needs
+/// no script to follow it.
+///
+/// Rendered only for a session, because signing out of a Basic-auth
+/// request does nothing the reader can see: the browser holds the header
+/// and sends it again on the next request. It is also last on the page
+/// rather than first -- somebody who has just arrived is here to enrol a
+/// passkey, not to leave.
+fn sign_out(h: &mut String, in_session: bool) {
+    if !in_session {
+        return;
+    }
+    h.push_str("<section><h2>This browser</h2><p class=\"note\">Signed in. Signing out ");
+    h.push_str("forgets the session on the node, so this browser stops being you.</p>");
+    h.push_str("<form method=\"post\" action=\"/api/signout\">");
+    h.push_str("<button type=\"submit\">Sign out</button></form></section>");
 }
 
 /// Closing tags, matching the browse shell — including its footer,

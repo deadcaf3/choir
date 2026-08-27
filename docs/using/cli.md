@@ -40,6 +40,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
 | `POST /api/accounts/invite` | Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one. A grant may carry its own deadline, `owner/repo write until=<unix seconds>` (D66); the invite's expiry bounds redemption, never what redemption hands over |
 | `POST /api/accounts/redeem` | Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it |
+| `POST /api/accounts/request/grant` | Answer somebody who asked for access (D72): turns their pending request into an invite under the id and secret they already hold, so the link they were given starts working with nothing sent |
+| `POST /api/accounts/request/decline` | Drop a pending access request. Their link then says only that it is not valid, the same as a link that never existed |
 | `POST /api/accounts/revoke` | Delete an account: its token stops authenticating on the next request, and its grants and keys go with it |
 | `GET /api/accounts` | Who holds an account, what they were granted, and which invites are outstanding; never a secret or its hash |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
@@ -133,6 +135,14 @@ The signed-operation API is the primary agent path: it carries actor identity an
 
 **operating a node**
 
+- `choir invite <api> <name> <owner/repo> [read|write]`  
+  mint an invite and print the one link to send; the same thing the node's /people page does, for when a terminal is where you are
+- `choir asks <api>`  
+  who has asked for access and is waiting on an answer (D72)
+- `choir grant <api> <request-id> <owner/repo> [read|write]`  
+  let one of them in; the link they already hold becomes their invite, so there is nothing to send
+- `choir decline <api> <request-id>`  
+  drop a pending request; their link then reads as one that was never valid
 - `choir runner <config-file>`  
   drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout
 - `choir bind <api> <node-key-file> <operator> <key-hex> [channel]`  

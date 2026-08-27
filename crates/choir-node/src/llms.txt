@@ -21,6 +21,8 @@ GET /sync.md - The sync contract, in full: cursor semantics and how to verify a 
 GET /api/ref-agreement - Where the op log and the bare repos disagree about a ref, read-only
 POST /api/accounts/invite - Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one. A grant may carry its own deadline, `owner/repo write until=<unix seconds>` (D66); the invite's expiry bounds redemption, never what redemption hands over
 POST /api/accounts/redeem - Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it
+POST /api/accounts/request/grant - Answer somebody who asked for access (D72): turns their pending request into an invite under the id and secret they already hold, so the link they were given starts working with nothing sent
+POST /api/accounts/request/decline - Drop a pending access request. Their link then says only that it is not valid, the same as a link that never existed
 POST /api/accounts/revoke - Delete an account: its token stops authenticating on the next request, and its grants and keys go with it
 GET /api/accounts - Who holds an account, what they were granted, and which invites are outstanding; never a secret or its hash
 POST /api/git-update - Internal: the pre-receive hook callback
@@ -34,6 +36,10 @@ For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <comman
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form
 choir git-credential <auth-file> [--auth-user <name>] get|store|erase - git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
 choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>] - redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
+choir invite <api> <name> <owner/repo> [read|write] - mint an invite and print the one link to send; the same thing the node's /people page does, for when a terminal is where you are
+choir asks <api> - who has asked for access and is waiting on an answer (D72)
+choir grant <api> <request-id> <owner/repo> [read|write] - let one of them in; the link they already hold becomes their invite, so there is nothing to send
+choir decline <api> <request-id> - drop a pending request; their link then reads as one that was never valid
 choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]... - provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
 choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid> - publish an immutable change revision after committing and pushing its Git object
 choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]... - propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal

@@ -342,6 +342,36 @@ pub const COMMANDS: &[Command] = &[
         group: "getting started",
     },
     Command {
+        name: "invite",
+        args: "<api> <name> <owner/repo> [read|write]",
+        summary: "mint an invite and print the one link to send; the same thing the \
+                  node's /people page does, for when a terminal is where you are",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "asks",
+        args: "<api>",
+        summary: "who has asked for access and is waiting on an answer (D72)",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "grant",
+        args: "<api> <request-id> <owner/repo> [read|write]",
+        summary: "let one of them in; the link they already hold becomes their invite, \
+                  so there is nothing to send",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "decline",
+        args: "<api> <request-id>",
+        summary: "drop a pending request; their link then reads as one that was never valid",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
         name: "workspace",
         args: "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...",
         summary: "provision a CoW workspace; advanced flags owner-sign an exact base and stable change, \
@@ -810,6 +840,21 @@ pub const ENDPOINTS: &[Endpoint] = &[
         path: "/api/accounts/redeem",
         purpose: "Redeem an invite — presented as the credential — for a token, once, and \
                   register an ssh key with it",
+        mcp: None,
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/accounts/request/grant",
+        purpose: "Answer somebody who asked for access (D72): turns their pending request \
+                  into an invite under the id and secret they already hold, so the link \
+                  they were given starts working with nothing sent",
+        mcp: None,
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/accounts/request/decline",
+        purpose: "Drop a pending access request. Their link then says only that it is not \
+                  valid, the same as a link that never existed",
         mcp: None,
     },
     Endpoint {

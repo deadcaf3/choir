@@ -9,6 +9,10 @@
 //! choir [--auth-file <path>] [--auth-user <name>] <command> ...
 //! choir key <key-file> [name]
 //! choir git-credential <auth-file> [--auth-user <name>] get|store|erase
+//! choir invite <api> <name> <owner/repo> [read|write]
+//! choir asks <api>
+//! choir grant <api> <request-id> <owner/repo> [read|write]
+//! choir decline <api> <request-id>
 //! choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]
 //! choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
 //! choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
@@ -365,6 +369,173 @@ fn derived_view(
         }
     };
     serde_json::to_string_pretty(&derive(&view)).expect("derived documents are serializable")
+}
+
+/// One authenticated call to the node, for the operator-side commands
+/// that are a request and a printed answer and nothing else.
+///
+/// Exists so the four D72 commands below do not each carry the same
+/// twenty lines of client construction and status handling, and so the
+/// exit codes they return cannot drift apart: 1 when the node refused,
+/// 2 when this machine could not ask.
+fn operator_call(
+    api: &str,
+    auth: AuthOptions<'_>,
+    method: &str,
+    path: &'static str,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let endpoint = choir_cli::surface::endpoint(method, path)
+        .unwrap_or_else(|| panic!("{path} is in the endpoint table"));
+    let client = match choir_cli::mcp::HttpClient::new(
+        api,
+        auth.file.map(std::path::Path::new),
+        auth.user,
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("choir: {error}");
+            std::process::exit(2);
+        }
+    };
+    let (status, text) = match client.request(endpoint, body) {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("choir: {error}");
+            std::process::exit(1);
+        }
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+    if !(200..300).contains(&status) {
+        eprintln!(
+            "choir: {method} {path} returned {status}: {}",
+            parsed["error"].as_str().unwrap_or(text.trim())
+        );
+        if status == 403 || status == 401 {
+            eprintln!("this needs a credential holding `@node write`.");
+        }
+        std::process::exit(1);
+    }
+    parsed
+}
+
+/// A repository argument as the ACL spells one.
+///
+/// `.git` is how a grant names a repository, and leaving it off is the
+/// mistake that mints an invite granting nothing. Added rather than
+/// refused, since there is exactly one right answer.
+fn grant_line(repo: &str, level: &str) -> String {
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    format!("{repo}.git {level}")
+}
+
+/// Refuses a level that is not one, before the node has to.
+fn checked_level(level: &str) -> &str {
+    match level {
+        "read" | "propose" | "write" => level,
+        other => {
+            eprintln!("choir: `{other}` is not a level; use read, propose or write");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `choir invite <api> <name> <owner/repo> [read|write]`
+///
+/// Prints the join link and nothing else, because the link is the whole
+/// artefact: it gets pasted into a chat window, and anything printed
+/// beside it invites pasting that too. The `id:secret` pair the API also
+/// returns is for `curl -u` and is not what a person receives.
+///
+/// `name` is a *display* name (D46). The account handle is minted by the
+/// node, so the string the op log carries forever is never one an
+/// operator typed at half past midnight.
+fn invite(api: &str, auth: AuthOptions<'_>, name: &str, repo: &str, level: &str) -> ! {
+    let answer = operator_call(
+        api,
+        auth,
+        "POST",
+        "/api/accounts/invite",
+        &serde_json::json!({
+            "display_name": name,
+            "grants": [grant_line(repo, checked_level(level))],
+        }),
+    );
+    match answer["join_url"].as_str() {
+        Some(url) => println!("{url}"),
+        // A node reached without a `Host` header gets no link rather
+        // than a guessed one, so say what there is: the pair, which is
+        // what `curl -u` wants.
+        None => println!("{}", answer["invite"].as_str().unwrap_or_default()),
+    }
+    std::process::exit(0)
+}
+
+/// `choir asks <api>` — the queue, oldest first.
+///
+/// One line each: the id to answer, how long they have been waiting, and
+/// what they wrote. No address, because none was collected (D72).
+fn asks(api: &str, auth: AuthOptions<'_>) -> ! {
+    let answer = operator_call(api, auth, "GET", "/api/accounts", &serde_json::json!({}));
+    let rows = answer["requests"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if rows.is_empty() {
+        println!("Nobody is waiting.");
+        std::process::exit(0);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for row in rows {
+        let asked_at = row["asked_at"].as_u64().unwrap_or(now);
+        let waited = now.saturating_sub(asked_at) / 3600;
+        println!(
+            "{}  {}  ({waited}h)  {}",
+            row["request_id"].as_str().unwrap_or("?"),
+            row["display_name"].as_str().unwrap_or("?"),
+            row["about"].as_str().unwrap_or("")
+        );
+    }
+    std::process::exit(0)
+}
+
+/// `choir grant <api> <request-id> <owner/repo> [read|write]`
+///
+/// Nothing to send afterwards, and that is the point: the request
+/// becomes an invite under the id and secret the asker already holds, so
+/// the link they were given is the link that starts working.
+fn grant(api: &str, auth: AuthOptions<'_>, id: &str, repo: &str, level: &str) -> ! {
+    let answer = operator_call(
+        api,
+        auth,
+        "POST",
+        "/api/accounts/request/grant",
+        &serde_json::json!({
+            "request_id": id,
+            "grants": [grant_line(repo, checked_level(level))],
+        }),
+    );
+    println!(
+        "{} is in as {}. The link they already hold now works; send nothing.",
+        answer["display_name"].as_str().unwrap_or("they"),
+        answer["user"].as_str().unwrap_or("?")
+    );
+    std::process::exit(0)
+}
+
+/// `choir decline <api> <request-id>`
+fn decline(api: &str, auth: AuthOptions<'_>, id: &str) -> ! {
+    operator_call(
+        api,
+        auth,
+        "POST",
+        "/api/accounts/request/decline",
+        &serde_json::json!({ "request_id": id }),
+    );
+    println!("Declined. Their link now reads as one that was never valid.");
+    std::process::exit(0)
 }
 
 /// Rewrites an ACL file's trailing comments from the node's roster (D46).
@@ -2488,6 +2659,12 @@ fn main() {
             );
             finish(200, &doc.to_string());
         }
+        ["invite", api, name, repo] => invite(api, auth, name, repo, "write"),
+        ["invite", api, name, repo, level] => invite(api, auth, name, repo, level),
+        ["asks", api] => asks(api, auth),
+        ["grant", api, id, repo] => grant(api, auth, id, repo, "write"),
+        ["grant", api, id, repo, level] => grant(api, auth, id, repo, level),
+        ["decline", api, id] => decline(api, auth, id),
         ["acl", "render", api, acl_file] => acl_render(api, auth, acl_file),
         ["funnel", api] => {
             println!("{}", derived_view(api, auth, choir_cli::triage::funnel));

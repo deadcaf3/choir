@@ -20,6 +20,30 @@
       "summary": "redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself"
     },
     {
+      "agent_facing": false,
+      "args": "<api> <name> <owner/repo> [read|write]",
+      "name": "invite",
+      "summary": "mint an invite and print the one link to send; the same thing the node's /people page does, for when a terminal is where you are"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api>",
+      "name": "asks",
+      "summary": "who has asked for access and is waiting on an answer (D72)"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api> <request-id> <owner/repo> [read|write]",
+      "name": "grant",
+      "summary": "let one of them in; the link they already hold becomes their invite, so there is nothing to send"
+    },
+    {
+      "agent_facing": false,
+      "args": "<api> <request-id>",
+      "name": "decline",
+      "summary": "drop a pending request; their link then reads as one that was never valid"
+    },
+    {
       "agent_facing": true,
       "args": "<api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...",
       "name": "workspace",
@@ -778,6 +802,26 @@
       "name": null,
       "path": "/api/accounts/redeem",
       "purpose": "Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/accounts/request/grant",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/accounts/request/grant",
+      "purpose": "Answer somebody who asked for access (D72): turns their pending request into an invite under the id and secret they already hold, so the link they were given starts working with nothing sent",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/accounts/request/decline",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/accounts/request/decline",
+      "purpose": "Drop a pending access request. Their link then says only that it is not valid, the same as a link that never existed",
       "query_parameters": []
     },
     {

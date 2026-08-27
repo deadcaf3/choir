@@ -2339,14 +2339,15 @@ fn a_passkey_opens_a_browser_session_and_the_challenge_is_spent() {
     std::fs::remove_dir_all(&work).ok();
 }
 
-/// The bootstrap: a person with no passkey can still get one (D71).
+/// The bootstrap: a person with no passkey can still get one (D71, D74).
 ///
 /// Enrolment acts on an authenticated caller, and the sign-in page
 /// replaced the browser's own credential dialog. Taken together that
 /// closed the only door: the ceremony needs a passkey to reach the page
-/// that enrols a passkey. `/signin/credential` is the deliberate way back
-/// to the challenge, and it is on the page precisely because no route
-/// asks for an issued credential by accident any more.
+/// that enrols a passkey. D71 propped it open with a link back to the
+/// dialog, which is the flow the screenshots of the ugly route were; the
+/// page carries its own username and password form now, and this bounds
+/// what that change did to the wall every other client meets.
 #[test]
 fn a_person_with_no_passkey_can_still_reach_the_page_that_enrols_one() {
     let work = std::env::temp_dir().join("choir-node-passkeys-bootstrap");
@@ -2382,29 +2383,28 @@ fn a_person_with_no_passkey_can_still_reach_the_page_that_enrols_one() {
         "a browser route must not raise the dialog any more: {ordinary}"
     );
 
-    // The bootstrap route does raise it, even though it is a browser
-    // asking, because it is the one route whose whole purpose is to.
-    let bootstrap = headers(&[
+    // There is no route left that hands a browser back to the dialog.
+    // The one that used to is gone, and asking for it now is a `404`
+    // like any other path this node does not serve -- not a `401` with a
+    // challenge on it.
+    let removed = headers(&[
         "-H",
         "Accept: text/html",
         &format!("{base}/signin/credential"),
     ]);
     assert!(
-        bootstrap.contains("www-authenticate"),
-        "the bootstrap must ask for the issued credential: {bootstrap}"
+        !removed.contains("www-authenticate"),
+        "the route back to browser chrome is still there: {removed}"
     );
 
-    // And with the credential it forwards to where the person was going,
-    // by which point the browser holds it for the origin.
-    let forwarded = headers(&[
-        "-u",
-        "alice:a",
-        "-H",
-        "Accept: text/html",
-        &format!("{base}/signin/credential?next=/account"),
-    ]);
-    assert!(forwarded.contains("303"), "{forwarded}");
-    assert!(forwarded.contains("location: /account"), "{forwarded}");
+    // A client that does not ask for HTML still gets the wall it speaks.
+    // Every API client, every script and git itself authenticate this
+    // way, and a page would be an unparseable answer to all of them.
+    let api = headers(&[&format!("{base}/api/view")]);
+    assert!(
+        api.contains("www-authenticate"),
+        "an API client was shown a page: {api}"
+    );
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -2519,6 +2519,204 @@ fn the_enrolment_page_works_under_a_read_only_browser() {
     assert_eq!(
         status, 403,
         "browser authorship survived --read-only-browser: {prepared}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// D74. The first sign-in on a node -- the one that happens to every
+/// single person, before they have a passkey to sign in with -- used to
+/// be the browser's own credential dialog, reached through a link on the
+/// sign-in page. Cancelling it left the reader on the word
+/// `unauthorized`.
+///
+/// It is a form on our own page now, and this drives the whole route a
+/// newcomer takes: refused with no credential, shown the page, signing
+/// in with what they were issued, and landing on the page that enrols
+/// the passkey they will use instead from then on.
+#[test]
+fn a_person_signs_in_with_a_password_on_our_page_and_lands_where_they_enrol_a_passkey() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-form");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    let acl_path = work.join("acl");
+    std::fs::write(&acl_path, "alice @node write\nalice * write\n").expect("acl file");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.create_repo("agents/demo.git").expect("repo created");
+    node.watch_acl_file(acl_path).expect("acl loads");
+    node.enable_passkeys();
+    node.enable_accounts(work.join("accounts.json"), None, None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let head = |path: &str, args: &[&str]| -> (u16, String, String) {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-i", "-w", "\n%{http_code}"])
+            .args(args)
+            .arg(format!("{base}{path}"))
+            .output()
+            .expect("curl runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (rest, code) = text.rsplit_once('\n').expect("status line");
+        let (headers, body) = rest.split_once("\r\n\r\n").unwrap_or((rest, ""));
+        (
+            code.trim().parse().expect("numeric status"),
+            headers.to_string(),
+            body.to_string(),
+        )
+    };
+    let header_of = |headers: &str, name: &str| -> Option<String> {
+        headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+    };
+
+    // An account to be, since a passkey is enrolled on an issued one.
+    let (status, minted) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        r#"{"user":"bea","grants":["agents/demo.git write"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    assert_eq!(status, 200, "{minted}");
+    let pair = minted["invite"].as_str().expect("a pair").to_string();
+    let (status, redeemed) = crate::support::curl(&[
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "-d",
+        "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    assert_eq!(status, 200, "{redeemed}");
+    let token = redeemed["token"].as_str().expect("a token").to_string();
+
+    // A browser with no credential is shown the page, not the dialog,
+    // and the page carries a form rather than a link back to the dialog.
+    let (status, _, page) = head("/r/", &["-H", "Accept: text/html"]);
+    assert_eq!(status, 401);
+    assert!(
+        page.contains("name=\"secret\""),
+        "no form on the page: {page}"
+    );
+    assert!(
+        !page.contains("/signin/credential"),
+        "the page still hands the reader back to browser chrome: {page}"
+    );
+    // And it remembers where they were going.
+    assert!(page.contains("value=\"/r/\""), "{page}");
+
+    // A wrong password is the same page again, saying one thing, and no
+    // session is opened.
+    let (status, headers, page) = head(
+        "/signin",
+        &["-X", "POST", "-d", "user=bea&secret=wrong&next=/r/"],
+    );
+    assert_eq!(status, 401, "{page}");
+    assert!(page.contains("did not match"), "{page}");
+    assert!(
+        header_of(&headers, "Set-Cookie").is_none(),
+        "a failed sign-in opened a session: {headers}"
+    );
+
+    // The right one opens a session and lands on the page that enrols a
+    // passkey, because this account has none.
+    let (status, headers, _) = head(
+        "/signin",
+        &[
+            "-X",
+            "POST",
+            "-d",
+            &format!("user=bea&secret={token}&next=/r/"),
+        ],
+    );
+    assert_eq!(status, 303, "{headers}");
+    assert_eq!(
+        header_of(&headers, "Location").as_deref(),
+        Some("/account"),
+        "a newcomer was not shown where the passkey is: {headers}"
+    );
+    let cookie = header_of(&headers, "Set-Cookie").expect("a session cookie");
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+    let jar: String = cookie.split(';').next().expect("cookie pair").to_string();
+
+    // The session works: the page they were refused now renders, with no
+    // credential presented at all.
+    let (status, _, _) = head("/r/", &["-H", &format!("Cookie: {jar}")]);
+    assert_eq!(status, 200, "the session does not authenticate");
+
+    // The operator's own credential, which lives in the auth file and
+    // never in the store, signs in on the same form. Without that the
+    // one person who must get in before anybody else could not.
+    let (status, headers, _) = head(
+        "/signin",
+        &["-X", "POST", "-d", "user=alice&secret=a&next=/people"],
+    );
+    assert_eq!(status, 303, "{headers}");
+    assert_eq!(
+        header_of(&headers, "Location").as_deref(),
+        Some("/people"),
+        "an operator has no account record, so nothing to enrol: {headers}"
+    );
+
+    // A form from another site cannot spend a cached credential here.
+    let (status, _, _) = head(
+        "/signin",
+        &[
+            "-X",
+            "POST",
+            "-H",
+            "Origin: https://evil.example",
+            "-d",
+            &format!("user=bea&secret={token}"),
+        ],
+    );
+    assert_eq!(status, 403);
+
+    // And `next` cannot be turned into somewhere else entirely.
+    let (status, headers, _) = head(
+        "/signin",
+        &[
+            "-X",
+            "POST",
+            "-d",
+            "user=alice&secret=a&next=//evil.example/",
+        ],
+    );
+    assert_eq!(status, 303);
+    assert_eq!(
+        header_of(&headers, "Location").as_deref(),
+        Some("/"),
+        "an open redirect: {headers}"
+    );
+
+    // Git still meets the wall it speaks, because it does not ask for
+    // HTML and its URLs name a repository.
+    let (status, headers, _) = head("/agents/demo.git/info/refs?service=git-upload-pack", &[]);
+    assert_eq!(status, 401);
+    assert!(
+        header_of(&headers, "WWW-Authenticate").is_some(),
+        "git was shown a sign-in page: {headers}"
     );
 
     std::fs::remove_dir_all(&work).ok();

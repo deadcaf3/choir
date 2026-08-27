@@ -26,9 +26,14 @@ Enabled:
   credential. The manifest carries `accounts=enabled`, and the renderer takes
   its answer from that file rather than from a flag an operator could set
   against it.
-- Passkey sign-in (D39, D71): a browser that can run the ceremony is offered a
-  page rather than the browser's own credential dialog, and the session it
-  opens is an opaque token held in memory. It is a switch of its own
+- Sign-in on the node's own page (D71, D74): every unauthenticated browser is
+  offered a page rather than the browser's own credential dialog. It carries a
+  username and password form for the credential a person was issued, and a
+  passkey button for somebody who has enrolled one; the session either opens is
+  an opaque token held in memory. A first password sign-in by an account with no
+  passkey lands on `/account`, which is where one is enrolled. Every non-browser
+  client -- git, `curl`, the CLI -- still meets `401` and a `WWW-Authenticate`
+  challenge. It is a switch of its own
   (`--passkeys`), separate from the accounts file, because enrolment, the
   ceremony page and the browser write path all read that one store; the
   manifest carries `passkeys=enabled` and the renderer refuses that line

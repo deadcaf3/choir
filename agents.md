@@ -60,6 +60,8 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
 | `POST /api/accounts/invite` | Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one. A grant may carry its own deadline, `owner/repo write until=<unix seconds>` (D66); the invite's expiry bounds redemption, never what redemption hands over |
 | `POST /api/accounts/redeem` | Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it |
+| `POST /api/accounts/request/grant` | Answer somebody who asked for access (D72): turns their pending request into an invite under the id and secret they already hold, so the link they were given starts working with nothing sent |
+| `POST /api/accounts/request/decline` | Drop a pending access request. Their link then says only that it is not valid, the same as a link that never existed |
 | `POST /api/accounts/revoke` | Delete an account: its token stops authenticating on the next request, and its grants and keys go with it |
 | `GET /api/accounts` | Who holds an account, what they were granted, and which invites are outstanding; never a secret or its hash |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |

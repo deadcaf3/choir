@@ -1355,14 +1355,21 @@ impl Node {
                 // challenge the one allocation an unauthenticated caller
                 // can repeat, and why they sit behind the same
                 // `PublicLimiter` as everything else in this block.
-                let signin_route = passkeys
+                //
+                // The page and its form are public whatever `--passkeys`
+                // says (D74): the credential an operator issued is what
+                // every person holds before they hold anything else, and
+                // the page that takes it is the page that replaced the
+                // browser's own dialog. Only the ceremony's two halves
+                // are gated on the switch that offers it.
+                let signin_route = matches!(
+                    (method, public_path.as_str()),
+                    ("GET" | "POST", "/signin") | ("POST", "/api/signout")
+                ) || (passkeys
                     && matches!(
                         (method, public_path.as_str()),
-                        ("GET", "/signin")
-                            | ("POST", "/api/signin")
-                            | ("POST", "/api/signin/challenge")
-                            | ("POST", "/api/signout")
-                    );
+                        ("POST", "/api/signin") | ("POST", "/api/signin/challenge")
+                    ));
                 // D72's queue. Public for the same reason the front
                 // door is: the caller holds no credential and the whole
                 // point is that they can ask for one. What keeps it from
@@ -1399,7 +1406,10 @@ impl Node {
                         respond_signin(
                             request,
                             &public_path,
-                            accounts.as_deref(),
+                            Credentials {
+                                auth: auth.as_ref().as_ref(),
+                                accounts: accounts.as_deref(),
+                            },
                             &sessions,
                             passkeys,
                             scheme,
@@ -1479,24 +1489,25 @@ impl Node {
                             // than trusted to not send `text/html`, since
                             // what a client sends is not a promise about
                             // what it can do with the answer.
-                            // `/signin/credential` is the deliberate way
-                            // back to the browser's own dialog, and the
-                            // only bootstrap there is: a passkey is
-                            // enrolled by an authenticated caller, and
-                            // before the first one exists the credential
-                            // the operator issued is the only thing a
-                            // person has. Replacing the challenge on every
-                            // route, as this first did, left no way to
-                            // present it and no way to enrol.
-                            let wants_page = passkeys
-                                && !request.url().starts_with("/signin/credential")
-                                && !request.url().contains(".git")
+                            // Not gated on `--passkeys` any more (D74).
+                            // The page's other half is a username and
+                            // password form, which is the way in on every
+                            // node whatever it offers, so withholding the
+                            // page from a node without passkeys withheld
+                            // the form too and left the grey box as the
+                            // whole answer.
+                            let wants_page = !request.url().contains(".git")
                                 && header(&request, "accept")
                                     .is_some_and(|a| a.contains("text/html"));
                             let outcome = if wants_page {
                                 let next = request.url().split('?').next().unwrap_or("/");
                                 let next = if next.starts_with('/') { next } else { "/" };
-                                let page = signin_page::render(true, next, reader_chrome(&request));
+                                let page = signin_page::render(
+                                    passkeys,
+                                    next,
+                                    signin_page::Said::Nothing,
+                                    reader_chrome(&request),
+                                );
                                 respond_scripted_page(request, page.status, page.html)
                             } else {
                                 let body = "unauthorized\n";
@@ -1690,31 +1701,6 @@ impl Node {
                         return;
                     }
                     let outcome = handle_prepare(&user, acl.as_deref(), api_body_limit, request);
-                    access.finish(log, &user, &outcome);
-                    return;
-                }
-                // The bootstrap route (D71). Reaching this line at all
-                // means a credential was accepted, since the auth gate is
-                // above: the browser has now cached it for this origin and
-                // will send it onward, so there is nothing to do but
-                // forward to whatever was being asked for.
-                if request.url().split('?').next() == Some("/signin/credential") {
-                    let next = request
-                        .url()
-                        .split_once("?next=")
-                        .map(|(_, raw)| raw.split('&').next().unwrap_or("").to_string())
-                        .filter(|raw| raw.starts_with('/') && !raw.starts_with("//"))
-                        .unwrap_or_else(|| "/account".to_string());
-                    let response = tiny_http::Response::empty(303)
-                        .with_header(
-                            tiny_http::Header::from_bytes(&b"Location"[..], next.as_bytes())
-                                .expect("location header"),
-                        )
-                        .with_header(
-                            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
-                                .expect("static header"),
-                        );
-                    let outcome = served(request, response, 303, 0);
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -2746,15 +2732,49 @@ fn base64url_any(input: &str) -> Option<Vec<u8>> {
 /// enumerable: a wrong credential id and a wrong signature produce the
 /// same refusal, so the endpoint never says whether an account exists.
 #[allow(clippy::too_many_arguments)]
+/// The two tables a presented username and password are graded against.
+///
+/// One argument rather than two because they answer one question -- is
+/// this a credential this node issued or an operator wrote down -- and
+/// the sign-in form has to ask both. An operator's own credential lives
+/// in the auth file and never in the store, so a form that consulted
+/// only the store would refuse the one person who has to be able to get
+/// in before anybody else does.
+#[derive(Clone, Copy)]
+struct Credentials<'a> {
+    auth: Option<&'a AuthTable>,
+    accounts: Option<&'a accounts::Accounts>,
+}
+
+impl Credentials<'_> {
+    /// The account name a `user`/`secret` pair proves, or `None`.
+    ///
+    /// An unredeemed invite is deliberately not a sign-in: it reaches one
+    /// route, its own redemption, and a session opened for it would be a
+    /// session for an account that does not exist yet.
+    fn account_for(&self, user: &str, secret: &str) -> Option<String> {
+        if let Some(expected) = self.auth.and_then(|table| table.get(user)) {
+            if constant_time_eq(expected.as_bytes(), secret.as_bytes()) {
+                return Some(user.to_string());
+            }
+        }
+        match self.accounts?.authenticate(user, secret) {
+            Some(accounts::Principal::Account(name)) => Some(name),
+            _ => None,
+        }
+    }
+}
+
 fn respond_signin(
     mut request: tiny_http::Request,
     path: &str,
-    accounts: Option<&accounts::Accounts>,
+    credentials: Credentials<'_>,
     sessions: &session::Sessions,
     passkeys: bool,
     scheme: &'static str,
     body_limit: std::num::NonZeroU64,
 ) -> std::io::Result<(u16, u64)> {
+    let accounts = credentials.accounts;
     if path == "/api/signout" {
         // Forgetting the token is the whole mechanism: nothing else
         // anywhere would still honour it. Idempotent on purpose, and it
@@ -2788,16 +2808,72 @@ fn respond_signin(
             );
         return served(request, response, 303, 0);
     }
-    if path == "/signin" {
-        let next = request
-            .url()
-            .split_once("?next=")
-            .map(|(_, raw)| raw.split('&').next().unwrap_or("").to_string())
-            .filter(|raw| raw.starts_with('/') && !raw.starts_with("//"))
-            .unwrap_or_else(|| "/".to_string());
+    if path == "/signin" && request.method().as_str() != "POST" {
+        let next = safe_next(
+            request
+                .url()
+                .split_once("?next=")
+                .map(|(_, raw)| raw.split('&').next().unwrap_or("").to_string()),
+            "/",
+        );
         let chrome = reader_chrome(&request);
-        let page = signin_page::render(passkeys, &next, chrome);
+        let page = signin_page::render(passkeys, &next, signin_page::Said::Nothing, chrome);
         return respond_scripted_page(request, page.status, page.html);
+    }
+    // The form (D74). Plain `POST`, so it works with scripting off and a
+    // browser's password manager can offer to keep what was typed.
+    if path == "/signin" {
+        if !same_origin(&request, scheme) {
+            let html = ui::refusal(
+                "Cross-origin sign-in refused",
+                403,
+                &ui::Refusal {
+                    code: "cross_origin",
+                    error: "That form was submitted from another site.",
+                    expected: Some("this node's own sign-in page"),
+                    actual: Some("a form somewhere else"),
+                    next: "Open this node's address and sign in there.",
+                },
+                &[],
+                reader_chrome(&request),
+            );
+            return respond_page(request, 403, html, None);
+        }
+        let chrome = reader_chrome(&request);
+        let body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
+            quota::Body::Complete(body) => String::from_utf8_lossy(&body).into_owned(),
+            quota::Body::OverLimit { limit, size } => {
+                return respond_api_too_large(request, limit, size)
+            }
+        };
+        let next = safe_next(join_page::form_value(&body, "next"), "/");
+        let signed_in = join_page::form_value(&body, "user")
+            .zip(join_page::form_value(&body, "secret"))
+            .and_then(|(user, secret)| credentials.account_for(user.trim(), &secret));
+        let Some(user) = signed_in else {
+            // The same page again, at the same status, saying the one
+            // thing it may say. No redirect: a `303` here would put the
+            // failure in history and lose what was typed in the other
+            // field.
+            let page = signin_page::render(passkeys, &next, signin_page::Said::NoMatch, chrome);
+            return respond_scripted_page(request, page.status, page.html);
+        };
+        // Straight to the page that enrols a passkey, when this node
+        // offers them and this account has none (D74). That is the step
+        // everybody has to take exactly once and the one nobody knows to
+        // look for, and a redirect is a cheaper way to say it than a
+        // sentence somebody has to read.
+        let enrol_first = passkeys
+            && accounts.is_some_and(|store| {
+                store.has_account(&user) && store.passkeys_json(&user).is_empty()
+            });
+        let land = if enrol_first {
+            "/account"
+        } else {
+            next.as_str()
+        };
+        let token = sessions.open(&user);
+        return respond_session(request, &token, land, scheme);
     }
 
     let body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
@@ -2903,6 +2979,50 @@ fn respond_signin(
                 .expect("static header"),
         );
     served(request, response, 200, bytes)
+}
+
+/// A `next` from a request, reduced to somewhere on this node.
+///
+/// A path, starting with one slash. `//evil.example` is a *protocol
+/// relative URL* and would send somebody who signed in here to another
+/// origin, which is the whole open-redirect family in one line.
+fn safe_next(raw: Option<String>, fallback: &str) -> String {
+    raw.filter(|next| next.starts_with('/') && !next.starts_with("//"))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Opens the browser session cookie and sends the reader on to `land`.
+///
+/// `SameSite=Lax` is what keeps every state-changing form on this node
+/// out of reach of another site: a cross-site `POST` does not carry this
+/// cookie. `HttpOnly` because no script here reads it, and `Secure`
+/// whenever the node is speaking https, so a session cannot be sent in
+/// clear by a downgrade.
+fn respond_session(
+    request: tiny_http::Request,
+    token: &str,
+    land: &str,
+    scheme: &'static str,
+) -> std::io::Result<(u16, u64)> {
+    let secure = if scheme == "https" { "; Secure" } else { "" };
+    let cookie = format!(
+        "{}={token}; Path=/; Max-Age=43200; SameSite=Lax; HttpOnly{secure}",
+        session::COOKIE
+    );
+    let response = tiny_http::Response::empty(303)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Location"[..], land.as_bytes())
+                .expect("location header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Set-Cookie"[..], cookie.as_bytes())
+                .expect("set-cookie header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        );
+    served(request, response, 303, 0)
 }
 
 /// The challenge an assertion says it signed, as the node spells one.
