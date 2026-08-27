@@ -232,17 +232,76 @@ case "${1:-}" in
 install)
   # Build, mint secrets, load the supervised LaunchAgent. Idempotent.
   if remote_node; then
-    echo "the node lives on the VM now (~/.choir/node-remote); install there:" >&2
-    echo "  ssh in, then:" >&2
-    echo "    git -C ~/choir-build fetch ~/.choir/repos/choir/choir.git main && git -C ~/choir-build merge --ff-only FETCH_HEAD" >&2
-    # CHOIR_GIT_HEAD is the stamp's sound path (build.rs source 1); the
-    # git fallback happens to be right in a clean checkout, but the env
-    # var is the one cargo is guaranteed to rebuild on.
-    echo "    CHOIR_GIT_HEAD=\$(git -C ~/choir-build rev-parse HEAD) cargo build --release --manifest-path ~/choir-build/Cargo.toml -p choir-node -p choir-cli" >&2
-    echo "    sh ~/choir-build/scripts/flip/install_node_linux.sh $PORT <repo> ~/bin ~/choir-build/target/release" >&2
+    echo "the node lives on the VM now (~/.choir/node-remote): use ./choirctl deploy" >&2
     exit 1
   fi
   sh "$HERE/scripts/flip/install_node.sh" "$PORT" "${2:-choir/choir.git}"
+  ;;
+
+deploy)
+  # Ship this checkout to the remote node: push, fetch, merge, rebuild,
+  # reinstall, and say what is running afterwards.
+  #
+  # This used to be five commands an operator retyped by hand every time,
+  # because `install` printed them and refused. Printing instructions is
+  # how they drift: the ones it printed built with `--manifest-path`,
+  # which looks equivalent to `cd` and is not -- rustup resolves
+  # rust-toolchain.toml from the working directory, so that form fails on
+  # a node whose account has no default toolchain, with an error naming
+  # rustup rather than the flag that caused it.
+  remote_node || { echo "deploy is for the remote node; use ./choirctl install here" >&2; exit 2; }
+  repo="${2:-choir/choir.git}"
+
+  # Every stage runs under `spin_run`, which sends both streams to a file
+  # and animates one line. git and cargo both narrate on stderr, so a
+  # stage that let its output through would scroll away the very line
+  # being redrawn in place -- which is what the first version of this did
+  # on its first run.
+  stage() {  # $1 label, rest: command
+    local label=$1; shift
+    step_begin "$label"
+    if ! spin_run "$@"; then
+      step_end 1 "failed"
+      echo >&2
+      cat "$SPIN_LOG" >&2
+      exit 1
+    fi
+  }
+
+  stage push tunnel_up
+  stage push sh "$HERE/scripts/flip/push_canonical.sh" "$PORT" "$repo"
+  step_end 0 "$(git rev-parse --short HEAD)"
+
+  # One ssh per stage rather than one for all of them: a failure names
+  # the stage it happened in, and `set -e` on the remote side of a single
+  # joined command would report only that something exited nonzero.
+  stage fetch node_ssh 'git -C ~/choir-build fetch -q ~/.choir/repos/choir/choir.git main'
+  step_end 0 "fetched"
+
+  stage merge node_ssh 'git -C ~/choir-build merge --ff-only -q FETCH_HEAD'
+  step_end 0 "$(node_ssh 'git -C ~/choir-build rev-parse --short HEAD')"
+
+  # `cd`, not --manifest-path: see above. The stamp comes from the env
+  # var because that is the path build.rs is guaranteed to rebuild on.
+  stage build node_ssh 'cd ~/choir-build && CHOIR_GIT_HEAD=$(git rev-parse HEAD) cargo build --release -p choir-node -p choir-cli'
+  step_end 0 "compiled"
+
+  # A non-interactive ssh has no session bus, so `systemctl --user` needs
+  # both of these exported or it fails with a DBUS complaint that names
+  # nothing useful.
+  stage install node_ssh 'XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus sh ~/choir-build/scripts/flip/install_node_linux.sh '"$PORT"' "" ~/bin ~/choir-build/target/release'
+  step_end 0 "unit reloaded"
+
+  # The receipt: what the running daemon says it is, rather than what we
+  # just asked it to become.
+  running=$(node_ssh 'grep -o "choir-node build [a-f0-9]*" ~/.choir/node.log | tail -1 | awk "{print \$3}"')
+  wanted=$(git rev-parse HEAD | cut -c1-12)
+  if [ "$running" = "$wanted" ]; then
+    echo "deployed: the node is serving $running"
+  else
+    echo "deploy: the node reports $running but this checkout is $wanted" >&2
+    exit 1
+  fi
   ;;
 
 status)
@@ -608,7 +667,8 @@ install-cli)
 ./choirctl <command>
 
   install [repo]   build + mint secrets + load the supervised daemon
-  install-cli      put `choir` on your PATH as a real binary
+  deploy [repo]    push, rebuild and reinstall the remote node, in one
+  install-cli      put the choir CLI on your PATH as a real binary
   status           is it running, is auth on, what does the view say
   logs [n]         last n lines of the daemon log
   stop             unload it for now (it returns at next login)
