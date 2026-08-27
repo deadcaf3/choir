@@ -841,9 +841,9 @@ impl Accounts {
     /// # Errors
     ///
     /// 400 for a missing or malformed field, a public key that is not a
-    /// P-256 SubjectPublicKeyInfo, or a credential id already enrolled
-    /// on this account; 404 when the caller has no account record, which
-    /// is the case for an `--auth-file` operator.
+    /// P-256 SubjectPublicKeyInfo, or 409 for a credential id already
+    /// enrolled anywhere on this node; 404 when the caller has no account
+    /// record, which is the case for an `--auth-file` operator.
     #[must_use]
     pub fn enroll_passkey(&self, user: &str, body: &serde_json::Value) -> (u16, String) {
         let field = |name: &str| {
@@ -868,6 +868,22 @@ impl Accounts {
         }
 
         let mut state = self.state.write().expect("accounts write lock");
+        // Store-wide, not just this account's. A credential id names one
+        // credential on one authenticator, so the same id under two
+        // accounts is a claim that cannot be true of both. It also has a
+        // consequence at sign-in, where the credential id is the only name
+        // in the assertion and the account is looked up from it: with the
+        // check scoped per account, enrolling somebody else's credential
+        // id together with their public key -- neither of which is secret,
+        // and the roster prints both -- would let their next sign-in
+        // verify correctly and open a session on the wrong account.
+        if state
+            .accounts
+            .values()
+            .any(|a| a.passkeys.iter().any(|k| k.credential_id == credential_id))
+        {
+            return conflict("that credential is already enrolled");
+        }
         let Some(account) = state.accounts.get_mut(user) else {
             return (
                 404,
@@ -877,13 +893,6 @@ impl Accounts {
                 ),
             );
         };
-        if account
-            .passkeys
-            .iter()
-            .any(|k| k.credential_id == credential_id)
-        {
-            return conflict("that credential is already enrolled");
-        }
         if account.passkeys.len() >= MAX_PASSKEYS {
             return conflict("this account already holds the maximum number of passkeys");
         }
@@ -966,6 +975,36 @@ impl Accounts {
     /// Keyed by `(user, credential_id)` rather than by credential id
     /// alone: an assertion names a credential, but the request already
     /// names a principal, and looking the key up under that principal is
+    /// The account holding `credential_id`, and that credential's public
+    /// key (D71).
+    ///
+    /// Sign-in runs the lookup the other way round from every other
+    /// passkey path: an assertion arrives before anyone has said who they
+    /// are, and the credential id is the only name in it. WebAuthn's own
+    /// answer is a discoverable credential carrying a user handle, which
+    /// this deliberately does not depend on -- a credential enrolled
+    /// before that was asked for would then be one its owner could sign
+    /// with but not sign in with, and the person holding it would have no
+    /// way to tell those apart.
+    ///
+    /// A credential id is enrolled at most once across the store, which
+    /// [`Accounts::enroll_passkey`] enforces, so the first match is the
+    /// only match.
+    #[must_use]
+    pub fn account_for_credential(&self, credential_id: &str) -> Option<(String, Vec<u8>)> {
+        let state = self.state.read().expect("accounts read lock");
+        let found = state.accounts.iter().find_map(|(name, account)| {
+            let key = account
+                .passkeys
+                .iter()
+                .find(|k| k.credential_id == credential_id)?;
+            Some((name.clone(), key.public_key.clone()))
+        });
+        drop(state);
+        let (name, encoded) = found?;
+        Some((name, base64url_decode(&encoded)?))
+    }
+
     /// what stops one account's assertion from being spent as another's.
     #[must_use]
     pub fn passkey_spki(&self, user: &str, credential_id: &str) -> Option<Vec<u8>> {

@@ -182,7 +182,17 @@
             // test that holds this line greps for the identifiers, so
             // it stays out of the prose.
             pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-            authenticatorSelection: { userVerification: 'preferred' },
+            // Discoverable, because sign-in offers no username to look
+            // a credential up by: the assertion's credential id is the
+            // only name in it. Both spellings, since the older one is
+            // what browsers predating `residentKey` understand and the
+            // two disagreeing is how a credential gets enrolled that
+            // can approve an operation but cannot open a session.
+            authenticatorSelection: {
+              userVerification: 'preferred',
+              residentKey: 'required',
+              requireResidentKey: true
+            },
             timeout: 120000
           }
         }).then(function (c) {
@@ -200,7 +210,57 @@
     });
   };
 
+  // Signing in. The fourth ceremony, and the only one that runs for
+  // somebody the node has not identified yet: it is the page served in
+  // place of the browser's own credential dialog, which is chrome no
+  // page can style, explain, or offer a passkey through.
+  //
+  // No username is collected. The assertion carries a credential id and
+  // the node looks the account up from it, which is why enrolment above
+  // asks for a discoverable credential.
+  var signin = function () {
+    var box = document.getElementById('signin');
+    var go = document.getElementById('signin-go');
+    if (!box || !go) return;
+    var say = sayer('signin-said');
+    box.hidden = false;
+    go.addEventListener('click', function () {
+      say('Follow your browser\u2019s prompt...');
+      // The challenge is minted per attempt and spent on use, so a page
+      // left open does not accumulate signable bytes.
+      fetch('/api/signin/challenge', { method: 'POST', credentials: 'same-origin' })
+        .then(function (r) {
+          if (!r.ok) throw new Error('the node issued no challenge');
+          return r.json();
+        })
+        .then(function (issued) {
+          return assert(issued.challenge);
+        })
+        .then(function (c) {
+          return post('/api/signin', {
+            key_id: c.id,
+            scheme: 2,
+            signature_hex: hex(c.response.signature),
+            authenticator_data_hex: hex(c.response.authenticatorData),
+            client_data_json_hex: hex(c.response.clientDataJSON)
+          });
+        })
+        .then(function (r) {
+          if (r.ok) {
+            // Back to whatever was being asked for, which the node put
+            // on the element rather than this file reading the query
+            // string: one place decides where a sign-in returns to.
+            location.assign(box.dataset.next || '/');
+            return;
+          }
+          return r.text().then(function (t) { say('Not signed in: ' + t); });
+        })
+        .catch(function (e) { say('Not signed in: ' + e.message); });
+    });
+  };
+
   verdict();
   comment();
   enrol();
+  signin();
 })();

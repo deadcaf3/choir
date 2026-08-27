@@ -54,6 +54,8 @@ pub mod queue_api;
 pub mod quota;
 mod readme;
 pub mod reject;
+mod session;
+mod signin_page;
 pub mod ssh;
 mod ui;
 
@@ -257,6 +259,9 @@ pub struct Node {
     /// signing with them in the same move, and a deployment that says
     /// it does not offer passkeys could not be telling the truth.
     passkeys: bool,
+    /// Browser sessions opened by a passkey (D71). In memory, so they end
+    /// with the process.
+    sessions: std::sync::Arc<session::Sessions>,
     /// Admission control for the pre-auth routes (D57).
     ///
     /// Always present, unlike [`Node::rate`]: those routes answer before
@@ -430,6 +435,7 @@ impl Node {
             rate: None,
             accounts: None,
             passkeys: false,
+            sessions: std::sync::Arc::new(session::Sessions::default()),
             // One ceiling for the whole pre-auth surface, because there
             // is no per-client key to hold a second one against (D59).
             // Sized for a node's worth of real joining rather than for one
@@ -1224,6 +1230,7 @@ impl Node {
             let rate = self.rate.clone();
             let accounts = self.accounts.clone();
             let passkeys = self.passkeys;
+            let sessions = self.sessions.clone();
             let quotas = self.quotas;
             let api_body_limit = self.api_body_limit;
             let browser_writes = self.browser_writes;
@@ -1287,10 +1294,24 @@ impl Node {
                     .unwrap_or("")
                     .to_string();
                 let method = request.method().as_str();
-                let public = matches!(
-                    (method, public_path.as_str()),
-                    ("GET" | "POST", "/join")
-                ) || (method == "GET" && public_path == ui::CARD_PATH)
+                // D71's ceremony, public for the same reason D57's front
+                // door is: a person signing in has no credential yet, and
+                // the whole point of the page is to give them one. Both
+                // API halves are pre-auth too, which is what makes the
+                // challenge the one allocation an unauthenticated caller
+                // can repeat, and why they sit behind the same
+                // `PublicLimiter` as everything else in this block.
+                let signin_route = passkeys
+                    && matches!(
+                        (method, public_path.as_str()),
+                        ("GET", "/signin")
+                            | ("POST", "/api/signin")
+                            | ("POST", "/api/signin/challenge")
+                            | ("POST", "/api/signout")
+                    );
+                let public = signin_route
+                    || matches!((method, public_path.as_str()), ("GET" | "POST", "/join"))
+                    || (method == "GET" && public_path == ui::CARD_PATH)
                     // The landing page replaces the challenge only for a
                     // request that presented nothing. A credential that
                     // was presented and is wrong still gets the `401`,
@@ -1307,7 +1328,17 @@ impl Node {
                         access.finish(log, "anon", &outcome);
                         return;
                     }
-                    let outcome = if public_path == ui::CARD_PATH {
+                    let outcome = if signin_route {
+                        respond_signin(
+                            request,
+                            &public_path,
+                            accounts.as_deref(),
+                            &sessions,
+                            passkeys,
+                            scheme,
+                            api_body_limit,
+                        )
+                    } else if public_path == ui::CARD_PATH {
                         respond_card(request)
                     } else {
                         respond_join(
@@ -1336,8 +1367,20 @@ impl Node {
                 // invite rather than an account, which may reach exactly
                 // one route.
                 let mut invite: Option<String> = None;
+                // A signed-in browser presents no credential at all: the
+                // cookie is the whole claim, and it is checked before the
+                // Authorization header so a stale header cannot shadow a
+                // live session.
+                let session_token =
+                    session::cookie(header(&request, "Cookie").as_deref(), session::COOKIE);
+                let session_user = session_token
+                    .as_deref()
+                    .and_then(|token| sessions.user(token));
                 if let Some(table) = auth.as_ref() {
-                    match authenticate(table, accounts.as_deref(), &request) {
+                    match session_user
+                        .map(accounts::Principal::Account)
+                        .or_else(|| authenticate(table, accounts.as_deref(), &request))
+                    {
                         Some(accounts::Principal::Account(u)) => user = u,
                         Some(accounts::Principal::Invite(id)) => {
                             user.clone_from(&id);
@@ -1345,17 +1388,41 @@ impl Node {
                         }
                         None if internal_ok => {}
                         None => {
-                            let body = "unauthorized\n";
-                            let response = tiny_http::Response::from_string(body)
-                                .with_status_code(401)
-                                .with_header(
-                                    tiny_http::Header::from_bytes(
-                                        &b"WWW-Authenticate"[..],
-                                        &b"Basic realm=\"choir\""[..],
-                                    )
-                                    .expect("static header"),
-                                );
-                            let outcome = served(request, response, 401, body.len() as u64);
+                            // A browser that can run the ceremony is shown
+                            // the page instead of the challenge, because
+                            // `WWW-Authenticate` is answered by chrome no
+                            // page can style, explain, or offer a passkey
+                            // through. Everything else keeps the header:
+                            // git speaks it, every API client speaks it,
+                            // and a node with passkeys off has no other
+                            // way in.
+                            //
+                            // The git routes are excluded by name rather
+                            // than trusted to not send `text/html`, since
+                            // what a client sends is not a promise about
+                            // what it can do with the answer.
+                            let wants_page = passkeys
+                                && !request.url().contains(".git")
+                                && header(&request, "accept")
+                                    .is_some_and(|a| a.contains("text/html"));
+                            let outcome = if wants_page {
+                                let next = request.url().split('?').next().unwrap_or("/");
+                                let next = if next.starts_with('/') { next } else { "/" };
+                                let page = signin_page::render(true, next, reader_chrome(&request));
+                                respond_page(request, page.status, page.html, None)
+                            } else {
+                                let body = "unauthorized\n";
+                                let response = tiny_http::Response::from_string(body)
+                                    .with_status_code(401)
+                                    .with_header(
+                                        tiny_http::Header::from_bytes(
+                                            &b"WWW-Authenticate"[..],
+                                            &b"Basic realm=\"choir\""[..],
+                                        )
+                                        .expect("static header"),
+                                    );
+                                served(request, response, 401, body.len() as u64)
+                            };
                             access.finish(log, &user, &outcome);
                             return;
                         }
@@ -2468,6 +2535,232 @@ fn respond_page(
     served(request, response, status, bytes)
 }
 
+/// A JSON body with a status, for the pre-auth ceremony that has no
+/// other responder to borrow.
+fn respond_json(
+    request: tiny_http::Request,
+    status: u16,
+    body: &str,
+) -> std::io::Result<(u16, u64)> {
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body.to_string())
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        );
+    served(request, response, status, bytes)
+}
+
+/// base64url as WebAuthn writes it, tolerating the padded spelling.
+///
+/// `clientDataJSON` is required to be unpadded base64url, but the node
+/// reads it rather than writing it, and a decoder that refuses padding
+/// would make this node the one that rejects an otherwise valid
+/// authenticator over a spelling nobody would think to check.
+fn base64url_any(input: &str) -> Option<Vec<u8>> {
+    let standard: String = input
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .filter(|c| *c != '=')
+        .collect();
+    base64_decode(&standard)
+}
+
+/// Serves the three halves of the passkey sign-in ceremony (D71): the
+/// page, the challenge it spends, and the assertion it posts back.
+///
+/// All three answer before any credential has been evaluated, so this
+/// function does what the auth gate would have done: it never trusts a
+/// name from the body, it bounds the read, and it returns an outcome the
+/// caller logs as `anon`.
+///
+/// The account is looked up from the credential id in the assertion
+/// rather than from anything the caller says they are. That is the
+/// property that makes a sign-in unforgeable without also making it
+/// enumerable: a wrong credential id and a wrong signature produce the
+/// same refusal, so the endpoint never says whether an account exists.
+#[allow(clippy::too_many_arguments)]
+fn respond_signin(
+    mut request: tiny_http::Request,
+    path: &str,
+    accounts: Option<&accounts::Accounts>,
+    sessions: &session::Sessions,
+    passkeys: bool,
+    scheme: &'static str,
+    body_limit: std::num::NonZeroU64,
+) -> std::io::Result<(u16, u64)> {
+    if path == "/api/signout" {
+        // Forgetting the token is the whole mechanism: nothing else
+        // anywhere would still honour it. Idempotent on purpose, and it
+        // never says whether the token was live, because a caller signing
+        // out has no use for that answer and a caller guessing tokens
+        // would.
+        if let Some(token) = session::cookie(header(&request, "Cookie").as_deref(), session::COOKIE)
+        {
+            sessions.close(&token);
+        }
+        // A redirect and a cleared cookie rather than JSON, so the control
+        // that calls this can be an ordinary form and work with scripting
+        // off, like every other control on these pages.
+        let secure = if scheme == "https" { "; Secure" } else { "" };
+        let cleared = format!(
+            "{}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly{secure}",
+            session::COOKIE
+        );
+        let response = tiny_http::Response::empty(303)
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Location"[..], &b"/"[..])
+                    .expect("location header"),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Set-Cookie"[..], cleared.as_bytes())
+                    .expect("set-cookie header"),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                    .expect("static header"),
+            );
+        return served(request, response, 303, 0);
+    }
+    if path == "/signin" {
+        let next = request
+            .url()
+            .split_once("?next=")
+            .map(|(_, raw)| raw.split('&').next().unwrap_or("").to_string())
+            .filter(|raw| raw.starts_with('/') && !raw.starts_with("//"))
+            .unwrap_or_else(|| "/".to_string());
+        let chrome = reader_chrome(&request);
+        let page = signin_page::render(passkeys, &next, chrome);
+        return respond_page(request, page.status, page.html, None);
+    }
+
+    let body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
+        quota::Body::Complete(body) => body,
+        quota::Body::OverLimit { limit, size } => {
+            return respond_api_too_large(request, limit, size)
+        }
+    };
+
+    if path == "/api/signin/challenge" {
+        let issued = sessions.issue_challenge();
+        // WebAuthn wants the challenge base64url, and what it stands for
+        // is the hex of a hash: the same bytes `webauthn_challenge` hands
+        // a browser approving an operation, so one verifier checks both.
+        let answer = serde_json::json!({
+            "format_version": 1,
+            "challenge": prepare::base64url_nopad(issued.to_hex().as_bytes()),
+        })
+        .to_string();
+        return respond_json(request, 200, &answer);
+    }
+
+    // `/api/signin`.
+    let refuse = |request| {
+        respond_json(
+            request,
+            401,
+            r#"{"error":"that passkey did not sign this node's challenge"}"#,
+        )
+    };
+    let Some(store) = accounts else {
+        return respond_json(
+            request,
+            503,
+            r#"{"error":"account self-service is not enabled on this node"}"#,
+        );
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return respond_json(request, 400, r#"{"error":"body must be JSON"}"#);
+    };
+    let field = |name: &str| {
+        body.get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let (Some(key_id), Some(signature), Some(authenticator), Some(client_data)) = (
+        field("key_id"),
+        field("signature_hex"),
+        field("authenticator_data_hex"),
+        field("client_data_json_hex"),
+    ) else {
+        return respond_json(request, 400, r#"{"error":"the assertion is incomplete"}"#);
+    };
+    let Some((user, spki)) = store.account_for_credential(&key_id) else {
+        return refuse(request);
+    };
+    let witness = choir_oplog::Witness {
+        key_id,
+        scheme: Some(choir_oplog::scheme::WEBAUTHN_ES256),
+        signature: match platform::hex_decode(&signature) {
+            Some(bytes) => bytes,
+            None => return refuse(request),
+        },
+        authenticator_data: platform::hex_decode(&authenticator),
+        client_data_json: platform::hex_decode(&client_data),
+        credential_key: None,
+    };
+    // The challenge inside the assertion decides which challenge is being
+    // spent, and spending it is what stops the same assertion opening a
+    // second session. Read before verification only because verification
+    // needs to know which bytes were promised; an assertion naming a
+    // challenge this node never issued is refused here.
+    let Some(claimed) = claimed_challenge(&witness) else {
+        return refuse(request);
+    };
+    if !sessions.spend_challenge(&claimed) {
+        return refuse(request);
+    }
+    if choir_identity::verify_webauthn_assertion(&spki, &claimed, &witness).is_err() {
+        return refuse(request);
+    }
+
+    let token = sessions.open(&user);
+    let secure = if scheme == "https" { "; Secure" } else { "" };
+    let cookie = format!(
+        "{}={token}; Path=/; Max-Age=43200; SameSite=Lax; HttpOnly{secure}",
+        session::COOKIE
+    );
+    let answer = serde_json::json!({ "format_version": 1, "user": user }).to_string();
+    let bytes = answer.len() as u64;
+    let response = tiny_http::Response::from_string(answer)
+        .with_status_code(200)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Set-Cookie"[..], cookie.as_bytes())
+                .expect("set-cookie header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        );
+    served(request, response, 200, bytes)
+}
+
+/// The challenge an assertion says it signed, as the node spells one.
+///
+/// `clientDataJSON` carries it base64url, and what it decodes to is the
+/// hex of a [`ContentHash`]; this turns that back into the hash so the
+/// store can be asked whether it issued it.
+fn claimed_challenge(witness: &choir_oplog::Witness) -> Option<choir_hash::ContentHash> {
+    let json = witness.client_data_json.as_ref()?;
+    let client: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let encoded = client.get("challenge")?.as_str()?;
+    let hex = String::from_utf8(base64url_any(encoded)?).ok()?;
+    choir_hash::ContentHash::from_hex(&hex)
+}
+
 /// Serves the social-preview card (D57).
 ///
 /// Immutable and cached for a year: the bytes are compiled into the
@@ -2692,16 +2985,24 @@ pub(crate) fn repo_from_path(url: &str) -> Option<String> {
 /// the authenticated username.
 fn authorized(table: &AuthTable, request: &tiny_http::Request) -> Option<String> {
     let (user, token) = basic_auth(request)?;
-    // Compare without early exit on length/content so timing doesn't
-    // leak how much of the token matched.
     let expected = table.get(&user)?;
-    let a = expected.as_bytes();
-    let b = token.as_bytes();
+    constant_time_eq(expected.as_bytes(), token.as_bytes()).then_some(user)
+}
+
+/// Compares two secrets without exiting early on length or content, so
+/// timing does not leak how much of one matched the other.
+///
+/// Extracted when session tokens became a second thing worth comparing
+/// this way. Written as one function rather than two loops because the
+/// property is easy to state and easy to lose: an early `return false`
+/// added later for readability would be invisible in review and would
+/// undo it.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = a.len() ^ b.len();
     for i in 0..a.len().min(b.len()) {
         diff |= (a[i] ^ b[i]) as usize;
     }
-    (diff == 0).then_some(user)
+    diff == 0
 }
 
 /// Identifies a request: an operator credential from the auth file, or a

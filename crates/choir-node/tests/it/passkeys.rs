@@ -98,6 +98,22 @@ fn assertion(
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let signing = choir_oplog::signing_hash(channel, payload);
     let challenge = base64url(&choir_identity::webauthn_challenge(&signing));
+    assertion_over(work, secret, tag, origin, &challenge)
+}
+
+/// The same ceremony over a challenge somebody else chose.
+///
+/// Signing in has no operation to commit to, so its challenge is a nonce
+/// the node minted rather than a `signing_hash`. Everything after that
+/// point is identical, which is the property worth keeping visible: one
+/// assertion format, one verifier, two sources of bytes.
+fn assertion_over(
+    work: &std::path::Path,
+    secret: &std::path::Path,
+    tag: &str,
+    origin: &str,
+    challenge: &str,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let client_data =
         format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"{origin}"}}"#)
             .into_bytes();
@@ -2049,6 +2065,233 @@ fn accounts_without_passkeys_offers_neither_the_ceremony_nor_the_page() {
     assert!(
         page.contains("Passkeys are not enabled"),
         "the enrolment page must refuse rather than offer a button that 503s: {page}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// A credential id is enrolled at most once across the whole node, not
+/// merely once per account (D71).
+///
+/// Sign-in looks the account up *from* the credential id, because an
+/// assertion arrives before anyone has said who they are and the id is
+/// the only name in it. Neither the id nor the public key is a secret --
+/// the operator's roster prints both -- so with the check scoped to one
+/// account, anybody holding an account could enrol somebody else's pair
+/// and their next sign-in would verify correctly against the wrong
+/// account and open a session there.
+#[test]
+fn one_credential_id_belongs_to_one_account_across_the_node() {
+    let (store, _path, work) = store_with_bob("global-unique");
+    let (status, body) = store.invite(
+        "alice",
+        &json(r#"{"user":"carol","grants":["agents/demo read"]}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let invite = json(&body)["invite"]
+        .as_str()
+        .expect("invite pair")
+        .to_string();
+    let id = invite.split(':').next().expect("invite id").to_string();
+    let (status, body) = store.redeem(&id, &json("{}"));
+    assert_eq!(status, 200, "{body}");
+
+    let (public_key, _secret) = credential(&work, "shared");
+    let enrol = |user: &str| {
+        store.enroll_passkey(
+            user,
+            &json(&format!(
+                r#"{{"credential_id":"the-same-id","public_key":"{public_key}"}}"#
+            )),
+        )
+    };
+
+    let (status, body) = enrol("bob");
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = enrol("carol");
+    assert_eq!(
+        status, 409,
+        "a credential already enrolled elsewhere must be refused: {body}"
+    );
+
+    // And the lookup sign-in depends on answers with the one account that
+    // actually holds it.
+    let (owner, _spki) = store
+        .account_for_credential("the-same-id")
+        .expect("the credential resolves to its account");
+    assert_eq!(owner, "bob");
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// The whole sign-in ceremony against a running node (D71): the node
+/// mints a challenge, an authenticator signs it, and what comes back is a
+/// session cookie that reaches pages a credential used to be needed for.
+///
+/// Also the properties that make it a credential rather than a
+/// formality: the challenge is spent on use, so replaying an assertion
+/// opens nothing; a signature over bytes this node never issued is
+/// refused; and signing out stops the cookie working.
+#[test]
+fn a_passkey_opens_a_browser_session_and_the_challenge_is_spent() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-signin");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    let acl_path = work.join("acl");
+    std::fs::write(&acl_path, "alice @node write\nalice * write\nbob * read\n").expect("acl file");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let root = work.join("repos");
+    let mut node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.create_repo("agents/demo.git").expect("repo created");
+    node.watch_acl_file(acl_path).expect("acl loads");
+    node.enable_passkeys();
+    node.enable_accounts(work.join("accounts.json"), None, None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let (_, invite) = curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
+        r#"{"user":"bob","grants":["agents/demo.git read"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    let pair = invite["invite"].as_str().expect("invite").to_string();
+    let (_, redeemed) = curl(&[
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "--data-binary",
+        "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    let token = redeemed["token"].as_str().expect("token").to_string();
+    let bob = format!("bob:{token}");
+
+    let (public_key, secret) = credential(&work, "signin");
+    let (status, body) = curl(&[
+        "-u",
+        &bob,
+        "-X",
+        "POST",
+        "--data-binary",
+        &format!(r#"{{"credential_id":"bobs-key","public_key":"{public_key}"}}"#),
+        &format!("{base}/api/accounts/passkey"),
+    ]);
+    assert_eq!(status, 200, "{body}");
+
+    // The ceremony proper. No credential is presented at any point after
+    // this line: the assertion is the whole claim.
+    let challenge_of = || {
+        let (status, issued) = curl(&["-X", "POST", &format!("{base}/api/signin/challenge")]);
+        assert_eq!(status, 200, "{issued}");
+        issued["challenge"]
+            .as_str()
+            .expect("a challenge")
+            .to_string()
+    };
+    use choir_node::platform::hex_encode;
+    let sign = |tag: &str, challenge: &str| {
+        let (auth_data, client_data, signature) =
+            assertion_over(&work, &secret, tag, &base, challenge);
+        serde_json::json!({
+            "key_id": "bobs-key",
+            "scheme": 2,
+            "signature_hex": hex_encode(&signature),
+            "authenticator_data_hex": hex_encode(&auth_data),
+            "client_data_json_hex": hex_encode(&client_data),
+        })
+        .to_string()
+    };
+
+    let challenge = challenge_of();
+    let jar = work.join("jar");
+    let signed_in = std::process::Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "-c"])
+        .arg(&jar)
+        .args([
+            "-X",
+            "POST",
+            "--data-binary",
+            &sign("one", &challenge),
+            &format!("{base}/api/signin"),
+        ])
+        .output()
+        .expect("curl runs");
+    assert_eq!(
+        String::from_utf8_lossy(&signed_in.stdout),
+        "200",
+        "the ceremony must open a session"
+    );
+
+    // The cookie now reaches a page that refuses an anonymous caller.
+    let with_jar = |path: &str| {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "-b"])
+            .arg(&jar)
+            .arg(format!("{base}{path}"))
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    assert_eq!(
+        with_jar("/api/view"),
+        "200",
+        "the session must authenticate"
+    );
+
+    // Replaying the same assertion opens nothing: the challenge it names
+    // was spent by the sign-in above.
+    let replay = curl(&[
+        "-X",
+        "POST",
+        "--data-binary",
+        &sign("one", &challenge),
+        &format!("{base}/api/signin"),
+    ]);
+    assert_eq!(replay.0, 401, "a spent challenge must not sign in again");
+
+    // Bytes this node never issued are refused even though the signature
+    // over them is perfectly good.
+    let forged = curl(&[
+        "-X",
+        "POST",
+        "--data-binary",
+        &sign(
+            "two",
+            &base64url(b"1e-0000000000000000000000000000000000000000000000000000000000000000"),
+        ),
+        &format!("{base}/api/signin"),
+    ]);
+    assert_eq!(forged.0, 401, "a challenge we never minted must be refused");
+
+    // Signing out forgets the token, and nothing else honours it.
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "-b"])
+        .arg(&jar)
+        .args(["-X", "POST", &format!("{base}/api/signout")])
+        .output()
+        .expect("curl runs");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "303");
+    assert_eq!(
+        with_jar("/api/view"),
+        "401",
+        "a closed session must stop authenticating"
     );
 
     std::fs::remove_dir_all(&work).ok();
