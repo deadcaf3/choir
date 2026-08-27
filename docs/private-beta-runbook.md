@@ -26,15 +26,19 @@ Enabled:
   credential. The manifest carries `accounts=enabled`, and the renderer takes
   its answer from that file rather than from a flag an operator could set
   against it.
+- Passkey sign-in (D39, D71): a browser that can run the ceremony is offered a
+  page rather than the browser's own credential dialog, and the session it
+  opens is an opaque token held in memory. It is a switch of its own
+  (`--passkeys`), separate from the accounts file, because enrolment, the
+  ceremony page and the browser write path all read that one store; the
+  manifest carries `passkeys=enabled` and the renderer refuses that line
+  without `accounts=enabled`, since a passkey is enrolled on an issued
+  account. Browser *writes* remain off: signing in is not a mutation.
 
 Unsupported for this beta:
 
 - Anonymous access of any kind.
-- Browser mutations, passkeys, SSH, webhooks, and the bridge. Passkeys are a
-  switch of their own (`--passkeys`), separate from the accounts file, because
-  enrolment and the browser write path both sit behind the accounts store: a
-  node offering self-service credentials would otherwise be offering browser
-  signing with them in the same move, and this line could not be true.
+- Browser mutations, SSH, webhooks, and the bridge.
 - A consumer login experience or a separate SPA.
 
 The launch objectives are 99.5 percent monthly availability, a one-hour RPO,

@@ -116,6 +116,7 @@ fn unit_argv() -> Vec<String> {
             "/srv/choir/acl",
             "/srv/choir/accounts.jsonl",
             "behind-tls-proxy",
+            "on",
             "choir",
         ])
         .output()

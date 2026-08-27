@@ -52,9 +52,17 @@ fn esc(text: &str) -> String {
 /// `store` is `None` on a node without `--accounts-file`, which is not an
 /// error: it is a node where nobody has an account, and the page says
 /// that rather than 404ing on a path that exists.
+///
+/// `in_session` is whether the caller arrived on a browser session
+/// rather than a credential (D71). The sign-out control is rendered only
+/// then, because signing out of a Basic-auth request does nothing the
+/// reader can see: the browser holds the header and sends it again on the
+/// next request. Offering a button that appears to do nothing is worse
+/// than offering none.
 pub(crate) fn render(
     store: Option<&Accounts>,
     user: &str,
+    in_session: bool,
     chrome: crate::browse::Chrome<'_>,
 ) -> Page {
     let mut h = String::with_capacity(4 * 1024);
@@ -78,6 +86,17 @@ pub(crate) fn render(
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\"><a href=\"/r/\">repositories</a>");
     h.push_str("</span><span class=\"pill\"><a href=\"/\">node</a></span></div></header>");
     h.push_str("<main id=\"main\">");
+
+    if in_session {
+        // A plain form, so the control works with scripting off like
+        // every other one here. The endpoint answers 303, which is why
+        // this needs no script to follow it.
+        h.push_str("<section><h2>This browser</h2><p class=\"note\">Signed in with a ");
+        h.push_str("passkey. Signing out forgets the session on the node, so this ");
+        h.push_str("browser stops being you.</p>");
+        h.push_str("<form method=\"post\" action=\"/api/signout\">");
+        h.push_str("<button type=\"submit\">Sign out</button></form></section>");
+    }
 
     let Some(store) = store else {
         h.push_str("<section><p class=\"note\">This node does not run account self-service, ");
@@ -177,12 +196,22 @@ mod tests {
         }
     }
 
+    /// The sign-out control appears only for a session, because signing
+    /// out of a Basic-auth request does nothing a reader can see.
+    #[test]
+    fn signing_out_is_offered_only_to_a_session() {
+        let with = super::render(None, "alice", true, crate::browse::Chrome::default());
+        assert!(with.html.contains("/api/signout"));
+        let without = super::render(None, "alice", false, crate::browse::Chrome::default());
+        assert!(!without.html.contains("/api/signout"));
+    }
+
     /// A node with no store, and a credential with no account, are
     /// different situations with different repairs, and neither is an
     /// error page.
     #[test]
     fn the_page_distinguishes_no_store_from_no_account() {
-        let page = super::render(None, "alice", crate::browse::Chrome::default());
+        let page = super::render(None, "alice", false, crate::browse::Chrome::default());
         assert_eq!(page.status, 200);
         assert!(page.html.contains("does not run account self-service"));
         assert!(!page.html.contains("<script"), "no store, no ceremony");

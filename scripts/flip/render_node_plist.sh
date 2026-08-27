@@ -4,8 +4,8 @@
 # secrets, or touching launchd.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 18 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 19 ]; then
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn]" >&2
   exit 2
 fi
 
@@ -48,6 +48,9 @@ ACCOUNTS=${17:-}
 # A non-empty 18th argument says a TLS-terminating proxy is in front,
 # same position and same meaning as the systemd renderer's.
 BEHIND_TLS_PROXY=${18:-}
+# A non-empty 19th argument turns on WebAuthn (D71), same position
+# and same meaning as the systemd renderer's.
+WEBAUTHN=${19:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_plist.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -95,6 +98,10 @@ fi
 
 if [ -n "$BEHIND_TLS_PROXY" ]; then
   echo '    <string>--behind-tls-proxy</string>'
+fi
+
+if [ -n "$WEBAUTHN" ]; then
+  printf '    <string>%s</string>\n' '--passkeys'
 fi
 
 if [ -n "$PROTECTED_REFS" ]; then

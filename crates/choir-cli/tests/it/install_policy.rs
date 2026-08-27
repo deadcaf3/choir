@@ -324,7 +324,7 @@ fn render_unit_tls(
 }
 
 fn render_private_beta(protected: &str, scope: &str, acl: &str) -> std::process::Output {
-    render_private_beta_full(protected, scope, acl, "/srv/choir/accounts.jsonl")
+    render_private_beta_full(protected, scope, acl, "/srv/choir/accounts.jsonl", "on")
 }
 
 fn render_private_beta_full(
@@ -332,6 +332,7 @@ fn render_private_beta_full(
     scope: &str,
     acl: &str,
     accounts: &str,
+    webauthn: &str,
 ) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
     let repos_path = repos_file("owner/repo.git\n");
@@ -358,6 +359,7 @@ fn render_private_beta_full(
             acl,
             accounts,
             "behind-tls-proxy",
+            webauthn,
             "choir",
         ])
         .output()
@@ -432,7 +434,14 @@ fn private_beta_service_is_loopback_only_fail_closed_and_hardened() {
     // its own flag this assertion could not be written: enrolment and the
     // browser write path both sit behind the accounts store, so the line
     // above would have turned them on too.
-    assert!(!unit.contains("--passkeys"), "passkeys stay disabled");
+    // The manifest now asks for WebAuthn, and the renderer reads it from
+    // there. Still its own slot and its own flag: a beta that turns it
+    // off again changes one line in the manifest, not the meaning of the
+    // accounts file.
+    assert!(
+        unit.contains("--passkeys"),
+        "the manifest asks for WebAuthn and the unit must carry it"
+    );
     // The other half of "TLS belongs at the reverse proxy": a node that
     // refuses its own TLS because something in front terminates it must
     // write its absolute URLs as the scheme that thing speaks. An invite
@@ -2119,9 +2128,11 @@ fn the_beta_renderer_reads_the_accounts_decision_from_the_manifest() {
         )),
         "the manifest says accounts=enabled and the unit must carry the flag:\n{unit}"
     );
-    assert!(
-        !unit.contains("--passkeys"),
-        "passkeys are a separate switch and the manifest keeps them off:\n{unit}"
+    let webauthn = manifest.lines().any(|line| line == "passkeys=enabled");
+    assert_eq!(
+        unit.contains("--passkeys"),
+        webauthn,
+        "the unit must carry WebAuthn exactly when the manifest asks for it:\n{unit}"
     );
 
     std::fs::remove_dir_all(&state).ok();

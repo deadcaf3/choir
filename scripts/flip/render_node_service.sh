@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 19 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [private-beta-service-user]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 20 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn] [private-beta-service-user]" >&2
   exit 2
 fi
 
@@ -56,7 +56,14 @@ ACCOUNTS=${17:-}
 # run time, because an invite link is a bearer credential and the node
 # cannot tell a header its proxy set from one a caller sent.
 BEHIND_TLS_PROXY=${18:-}
-PRIVATE_BETA=${19:-}
+# Same contract as the plist renderer: any non-empty 19th argument
+# turns on WebAuthn (D71) -- enrolment, the ceremony page, and the
+# browser write path. Separate from the accounts file because all
+# three read that one store, so a single flag would mean a node
+# offering self-service credentials always offered browser signing
+# with them.
+WEBAUTHN=${19:-}
+PRIVATE_BETA=${20:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -102,6 +109,9 @@ if [ -n "$ACCOUNTS" ]; then
 fi
 if [ -n "$BEHIND_TLS_PROXY" ]; then
   EXEC="$EXEC --behind-tls-proxy"
+fi
+if [ -n "$WEBAUTHN" ]; then
+  EXEC="$EXEC --passkeys"
 fi
 if [ -n "$PROTECTED_REFS" ]; then
   EXEC="$EXEC --require-assignment --protected-refs $PROTECTED_REFS --require-review"

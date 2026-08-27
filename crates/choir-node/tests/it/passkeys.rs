@@ -2280,6 +2280,20 @@ fn a_passkey_opens_a_browser_session_and_the_challenge_is_spent() {
     ]);
     assert_eq!(forged.0, 401, "a challenge we never minted must be refused");
 
+    // The control is on the page, so signing out is something a person
+    // can do rather than only something an endpoint supports.
+    let account = std::process::Command::new("curl")
+        .args(["-s", "-b"])
+        .arg(&jar)
+        .arg(format!("{base}/account"))
+        .output()
+        .expect("curl runs");
+    let account = String::from_utf8_lossy(&account.stdout);
+    assert!(
+        account.contains("action=\"/api/signout\""),
+        "a session must be offered a way out of itself: {account}"
+    );
+
     // Signing out forgets the token, and nothing else honours it.
     let out = std::process::Command::new("curl")
         .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "-b"])

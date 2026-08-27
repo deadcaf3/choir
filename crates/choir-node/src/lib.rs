@@ -1376,6 +1376,7 @@ impl Node {
                 let session_user = session_token
                     .as_deref()
                     .and_then(|token| sessions.user(token));
+                let session_user_present = session_user.is_some();
                 if let Some(table) = auth.as_ref() {
                     match session_user
                         .map(accounts::Principal::Account)
@@ -1656,6 +1657,7 @@ impl Node {
                     let page = account_page::render(
                         accounts.as_deref(),
                         &user,
+                        session_user_present,
                         browse::Chrome {
                             site: None,
                             theme: chosen_theme(&request),

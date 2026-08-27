@@ -62,8 +62,19 @@ if grep -qx 'accounts=enabled' "$STATE/private-beta.manifest"; then
   BETA_ACCOUNTS="$STATE/accounts.jsonl"
 fi
 
+# D71, read from the same file for the same reason. WebAuthn needs the
+# accounts store, so a manifest asking for it without accounts asks for a
+# node that cannot exist; refused here rather than rendered into a unit
+# whose behaviour contradicts the file it came from.
+BETA_WEBAUTHN=""
+if grep -qx 'passkeys=enabled' "$STATE/private-beta.manifest"; then
+  [ -n "$BETA_ACCOUNTS" ] \
+    || fail "manifest asks for passkeys without accounts; they are enrolled on issued accounts"
+  BETA_WEBAUTHN=on
+fi
+
 sh "$HERE/render_node_service.sh" choir-node "$BIN" "$ROOT" "$PORT" \
   "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$LOG" "$STATE/repos.list" \
   "$STATE/newcomer-audit.jsonl" "$STATE/newcomer-adjudications.jsonl" \
   "$STATE/protected-refs" require-scope '' '' "$STATE/acl" \
-  "$BETA_ACCOUNTS" behind-tls-proxy "$SERVICE_USER"
+  "$BETA_ACCOUNTS" behind-tls-proxy "$BETA_WEBAUTHN" "$SERVICE_USER"
