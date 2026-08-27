@@ -47,6 +47,41 @@ fn esc(text: &str) -> String {
     out
 }
 
+/// Opens the document, the chrome and the header every page here shares.
+///
+/// One function because two of them would be two places for the console
+/// pill to appear on one page and not the other, and a reader who found
+/// it on one would reasonably conclude the other had lost it.
+fn open_page(h: &mut String, user: &str, console: bool, chrome: crate::browse::Chrome<'_>) {
+    h.push_str("<!doctype html><html lang=\"en\"");
+    crate::browse::theme_attribute(h, chrome.theme);
+    h.push_str("><head><meta charset=\"utf-8\">");
+    h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    h.push_str("<title>choir: your account</title>");
+    h.push_str(crate::ui::STYLE);
+    h.push_str("</head><body>");
+    h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
+    // The same fixed bar every other page carries. Without it this page
+    // was the one surface with no way back except the two pills below
+    // it, no search box, and — once the palette became a control rather
+    // than a system setting — no way to change it. A page that drops
+    // the chrome reads as a different product, and this one is reached
+    // from a link in that chrome.
+    crate::browse::chrome(h, crate::browse::Bar::index(chrome));
+    h.push_str("<header class=\"top\"><h1>");
+    h.push_str(&esc(user));
+    h.push_str("</h1><div class=\"sub\"><span class=\"pill\"><a href=\"/r/\">repositories</a>");
+    h.push_str("</span><span class=\"pill\"><a href=\"/\">node</a></span>");
+    // The operator's console (D72), offered only to somebody who may use
+    // it. A link everybody can see and only one person can follow is a
+    // link that teaches most readers what they are not.
+    if console {
+        h.push_str("<span class=\"pill\"><a href=\"/people\">people</a></span>");
+    }
+    h.push_str("</div></header>");
+    h.push_str("<main id=\"main\">");
+}
+
 /// The account page for `user`.
 ///
 /// `store` is `None` on a node without `--accounts-file`, which is not an
@@ -64,35 +99,11 @@ pub(crate) fn render(
     user: &str,
     in_session: bool,
     console: bool,
+    node: Option<&str>,
     chrome: crate::browse::Chrome<'_>,
 ) -> Page {
     let mut h = String::with_capacity(4 * 1024);
-    h.push_str("<!doctype html><html lang=\"en\"");
-    crate::browse::theme_attribute(&mut h, chrome.theme);
-    h.push_str("><head><meta charset=\"utf-8\">");
-    h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    h.push_str("<title>choir: your account</title>");
-    h.push_str(crate::ui::STYLE);
-    h.push_str("</head><body>");
-    h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
-    // The same fixed bar every other page carries. Without it this page
-    // was the one surface with no way back except the two pills below
-    // it, no search box, and — once the palette became a control rather
-    // than a system setting — no way to change it. A page that drops
-    // the chrome reads as a different product, and this one is reached
-    // from a link in that chrome.
-    crate::browse::chrome(&mut h, crate::browse::Bar::index(chrome));
-    h.push_str("<header class=\"top\"><h1>");
-    h.push_str(&esc(user));
-    h.push_str("</h1><div class=\"sub\"><span class=\"pill\"><a href=\"/r/\">repositories</a>");
-    h.push_str("</span><span class=\"pill\"><a href=\"/\">node</a></span>");
-    // The operator's console (D72), offered only to somebody who may use
-    // it. A link everybody can see and only one person can follow is a
-    // link that teaches most readers what they are not.
-    if console {
-        h.push_str("<span class=\"pill\"><a href=\"/people\">people</a></span>");
-    }
-    h.push_str("</div></header>");
+    open_page(&mut h, user, console, chrome);
     h.push_str("<main id=\"main\">");
 
     let Some(store) = store else {
@@ -163,7 +174,95 @@ pub(crate) fn render(
     h.push_str("<p id=\"enrol-said\" class=\"note\" hidden></p></div>");
     h.push_str(crate::ui::CEREMONY_SCRIPT);
     h.push_str("</section>");
+    tokens(&mut h, node, user, store.has_token(user));
     sign_out(&mut h, in_session);
+    Page {
+        status: 200,
+        html: close(h),
+    }
+}
+
+/// The credential git and the CLI need, made on request (D75).
+///
+/// A passwordless account has none, and that is not a gap to be filled
+/// at redemption: git speaks basic auth and cannot present a passkey, so
+/// a secret is needed for exactly that job and for nothing else. Minting
+/// it here means the person asking has already been authenticated by
+/// this node, and that they are asking because something actually
+/// wanted one.
+///
+/// One token per account, so a second mint replaces the first. Said out
+/// loud, because the old one stops working the moment the button is
+/// pressed and somebody with a working `git push` deserves to know that
+/// before they press it.
+fn tokens(h: &mut String, node: Option<&str>, user: &str, has_one: bool) {
+    h.push_str("<section><h2>Tokens</h2>");
+    h.push_str(
+        "<p>Git and the <code>choir</code> command line authenticate with a password, \
+         because neither can present a passkey. This is that password, and it is the only \
+         thing it is for.</p>",
+    );
+    if has_one {
+        h.push_str(
+            "<p class=\"note\">You have one. Making another replaces it, and whatever is \
+             using the old one stops working until you paste the new one in.</p>",
+        );
+    } else {
+        h.push_str("<p class=\"empty\">None. Nothing needs one until you clone or push.</p>");
+    }
+    h.push_str("<form method=\"post\" action=\"/account/token\"><p>");
+    h.push_str("<button type=\"submit\">");
+    h.push_str(if has_one {
+        "Replace my token"
+    } else {
+        "Make a token"
+    });
+    h.push_str("</button></p></form>");
+    let _ = (node, user);
+    h.push_str("</section>");
+}
+
+/// The page that hands one over, after the `POST` that made it.
+///
+/// Rendered directly rather than redirected to, like the invite link on
+/// the console: this node kept only a hash, so a redirect would drop the
+/// one copy that exists.
+pub(crate) fn minted(
+    token: &str,
+    user: &str,
+    node: Option<&str>,
+    replaced: bool,
+    chrome: crate::browse::Chrome<'_>,
+) -> Page {
+    let mut h = String::with_capacity(4 * 1024);
+    open_page(&mut h, user, false, chrome);
+    h.push_str("<section><h2>Your token</h2>");
+    h.push_str(
+        "<p class=\"lede\">Copy it now. It is shown once and this node keeps only a hash of \
+         it, so nobody -- including the operator -- can show it to you again.</p>",
+    );
+    h.push_str("<pre class=\"cmd\">");
+    h.push_str(&esc(token));
+    h.push_str("</pre>");
+    if replaced {
+        h.push_str(
+            "<p class=\"note\">This replaced the one you had. Anything still using that one \
+             is now refused.</p>",
+        );
+    }
+    if let Some(node) = node {
+        h.push_str("<h3>So git stops asking</h3>");
+        h.push_str(
+            "<p>Git will ask for this on every push unless it has somewhere to keep it. \
+             macOS and Windows come with somewhere; on Linux, run <code>git config --global \
+             credential.helper</code> first to check you have one.</p>",
+        );
+        h.push_str("<pre class=\"cmd\">");
+        h.push_str(&esc(&crate::join_page::approve_command(node, user, token)));
+        h.push_str("</pre>");
+    }
+    h.push_str("<p><span class=\"pill\"><a href=\"/account\">back to your account</a></span></p>");
+    h.push_str("</section>");
     Page {
         status: 200,
         html: close(h),
@@ -225,13 +324,21 @@ mod tests {
     /// out of a Basic-auth request does nothing a reader can see.
     #[test]
     fn signing_out_is_offered_only_to_a_session() {
-        let with = super::render(None, "alice", true, false, crate::browse::Chrome::default());
+        let with = super::render(
+            None,
+            "alice",
+            true,
+            false,
+            None,
+            crate::browse::Chrome::default(),
+        );
         assert!(with.html.contains("/api/signout"));
         let without = super::render(
             None,
             "alice",
             false,
             false,
+            None,
             crate::browse::Chrome::default(),
         );
         assert!(!without.html.contains("/api/signout"));
@@ -247,6 +354,7 @@ mod tests {
             "alice",
             false,
             false,
+            None,
             crate::browse::Chrome::default(),
         );
         assert_eq!(page.status, 200);

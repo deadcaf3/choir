@@ -80,6 +80,13 @@ pub(crate) struct Page {
     pub status: u16,
     /// The document.
     pub html: String,
+    /// The account a browser session should be opened for, when this
+    /// page is the end of a passwordless redemption (D75).
+    ///
+    /// Carried on the page rather than returned beside it, so the one
+    /// place that decides "this reader is now that account" is the same
+    /// place that renders the sentence saying so.
+    pub session: Option<String>,
     /// Whether this document loads [`crate::ui::WEBAUTHN_JS`], and so
     /// needs the CSP that permits it (D72).
     ///
@@ -90,6 +97,21 @@ pub(crate) struct Page {
     /// header does not allow -- which is exactly how D71's sign-in page
     /// shipped with a button that could not run.
     pub scripted: bool,
+}
+
+/// What this node offers the holder of an invite.
+///
+/// One struct rather than two `bool` arguments, because they are one
+/// question -- what can this person finish with, here, today -- and
+/// because two adjacent bare booleans in a call is how a transport flag
+/// ends up switching a credential ceremony.
+#[derive(Clone, Copy)]
+pub(crate) struct Offers {
+    /// Whether the node serves git over ssh, so the page asks for a key.
+    pub ssh: bool,
+    /// Whether the node offers passkeys, so redemption can be
+    /// passwordless (D75).
+    pub passkeys: bool,
 }
 
 /// What the front door can offer somebody who arrives with nothing (D72).
@@ -181,6 +203,7 @@ pub(crate) fn not_valid(status: u16, theme: Option<&str>) -> Page {
     Page {
         status,
         html: close(h),
+        session: None,
         scripted: false,
     }
 }
@@ -209,6 +232,7 @@ fn no_self_service(theme: Option<&str>) -> Page {
     Page {
         status: 200,
         html: close(h),
+        session: None,
         scripted: false,
     }
 }
@@ -280,11 +304,12 @@ fn offer(
     summary: &crate::accounts::InviteSummary,
     id: &str,
     secret: &str,
-    ssh: bool,
+    offers: Offers,
     theme: Option<&str>,
     origin: Option<&str>,
     now: u64,
 ) -> Page {
+    let Offers { ssh, passkeys } = offers;
     let mut h = shell("choir: you're invited", theme);
     // The card a chat client shows. Deliberately generic: it names no
     // repository, no issuer and no username, because the preview is
@@ -317,9 +342,15 @@ fn offer(
     body(&mut h, "You're invited", "expires once used");
     h.push_str("<section><h2>What this gives you</h2>");
     h.push_str("<table class=\"kv\"><tbody>");
-    h.push_str("<tr><td>you will be</td><td class=\"mono\">");
-    h.push_str(&esc(&summary.user));
+    if let Some(user) = summary.user.as_deref() {
+        h.push_str("<tr><td>you will be</td><td class=\"mono\">");
+        h.push_str(&esc(user));
+        h.push_str("</td></tr>");
+    }
+    h.push_str("<tr>");
     if let Some(name) = summary.display_name.as_deref() {
+        h.push_str("<td>shown as</td><td>");
+        h.push_str(&esc(name));
         h.push_str("</td></tr><tr><td>shown as</td><td>");
         h.push_str(&esc(name));
     }
@@ -339,16 +370,31 @@ fn offer(
         h.push_str("</td></tr>");
     }
     h.push_str("</tbody></table>");
-    h.push_str(
-        "<p class=\"note\">Accepting creates that account and shows you a password once. \
-         The link works a single time.</p>",
-    );
-    h.push_str("<form method=\"post\" action=\"/join\">");
+    h.push_str("<p class=\"note\">The link works a single time.</p>");
+    h.push_str("<form id=\"claim\" method=\"post\" action=\"/join\">");
     h.push_str("<input type=\"hidden\" name=\"i\" value=\"");
     h.push_str(&esc(id));
     h.push_str("\"><input type=\"hidden\" name=\"k\" value=\"");
     h.push_str(&esc(secret));
     h.push_str("\">");
+    // The one string about somebody the op log can never withdraw, asked
+    // of the person it is about (D75). It used to be minted by this node
+    // or typed by the operator, both of which decide on their behalf
+    // something neither of them has to live with.
+    if summary.user.is_none() {
+        h.push_str("<h2>Pick your username</h2>");
+        h.push_str(
+            "<p class=\"note\">Letters, digits, <code>-</code> and <code>_</code>. It is \
+             what every change you make here will be signed as, and it cannot be changed \
+             or reused afterwards, because the log that records your work keeps it \
+             forever.</p>",
+        );
+        h.push_str(
+            "<p><input id=\"claim-user\" name=\"user\" maxlength=\"32\" required \
+             autocomplete=\"username\" autocapitalize=\"none\" spellcheck=\"false\" \
+             placeholder=\"ada\"></p>",
+        );
+    }
     if ssh {
         // Offered rather than required: a person who has no key, or does
         // not know what one is, must still be able to finish. The token
@@ -362,23 +408,64 @@ fn offer(
              placeholder=\"ssh-ed25519 AAAAC3N... you@your-laptop\"></textarea>",
         );
     }
-    h.push_str("<p><button class=\"go\" type=\"submit\">Accept and create my account</button></p>");
+    // The passkey the account is created with (D75). Hidden fields the
+    // ceremony fills in and then submits this same form, so there is one
+    // endpoint and one code path whether or not script ran.
+    if passkeys {
+        h.push_str("<input type=\"hidden\" id=\"claim-credential\" name=\"credential_id\">");
+        h.push_str("<input type=\"hidden\" id=\"claim-key\" name=\"public_key\">");
+        h.push_str("<input type=\"hidden\" id=\"claim-label\" name=\"label\">");
+        // Shown only once script has unhidden it, because the ceremony
+        // is what makes it work. Without script the reader falls through
+        // to the plain button below, which is the password route and
+        // still finishes.
+        h.push_str("<div id=\"claim-passkey\" hidden>");
+        h.push_str(
+            "<p><button class=\"go\" id=\"claim-go\" type=\"button\">\
+             Create my account with a passkey</button></p>",
+        );
+        h.push_str(
+            "<p class=\"note\">Your browser will ask for a fingerprint, face or device \
+             PIN, and that becomes how you sign in. No password is created and none is \
+             shown to you. If you later need one for git, the account page mints it.</p>",
+        );
+        h.push_str("<p id=\"claim-said\" class=\"note\" hidden></p>");
+        h.push_str("</div>");
+        h.push_str(
+            "<details><summary>Or create it with a password instead</summary>\
+             <p class=\"note\">A password is one secret in one place, which is a thing \
+             to lose. Shown once, and there is no reset.</p>",
+        );
+        h.push_str("<p><button type=\"submit\">Create my account with a password</button></p>");
+        h.push_str("</details>");
+    } else {
+        h.push_str(
+            "<p><button class=\"go\" type=\"submit\">Accept and create my account</button></p>",
+        );
+    }
     h.push_str("</form></section>");
+    if passkeys {
+        h.push_str(crate::ui::CEREMONY_SCRIPT);
+    }
     Page {
         status: 200,
         html: close(h),
-        scripted: false,
+        session: None,
+        scripted: passkeys,
     }
 }
 
-/// The page that hands over the credential, after a successful `POST`.
+/// The page that ends a redemption.
 ///
-/// The token is shown here and nowhere else — the node keeps only its
-/// hash — so this page's job is to make copying it the obvious next act
-/// and to say plainly that there is no second chance.
+/// `token` is `None` on the passwordless route (D75), and the difference
+/// is the whole page: with one, this hands over a secret shown here and
+/// nowhere else and its job is to make copying it the obvious next act;
+/// without one, there is nothing to copy, the reader is already signed
+/// in, and saying "keep this safe" about a thing that does not exist
+/// would be the page teaching a habit it just removed the need for.
 fn welcome(
     user: &str,
-    token: &str,
+    token: Option<&str>,
     grants: &[String],
     origin: Option<&str>,
     theme: Option<&str>,
@@ -386,20 +473,40 @@ fn welcome(
     let node = origin.unwrap_or("<this node>");
     let mut h = shell("choir: you're in", theme);
     body(&mut h, "You're in", user);
-    h.push_str("<section><h2>Your password</h2>");
-    h.push_str(
-        "<p class=\"lede\">Copy this now. It is shown once and this node keeps only a hash \
-         of it, so nobody — including the operator — can show it to you again.</p>",
-    );
-    h.push_str("<pre class=\"cmd\">");
-    h.push_str(&esc(token));
-    h.push_str("</pre>");
-    crate::ui::next_action(
-        &mut h,
-        "Put it in your password manager before you close this tab. If you lose it, ask for \
-         a new invite; there is no reset.",
-    );
-    h.push_str("</section>");
+    match token {
+        Some(token) => {
+            h.push_str("<section><h2>Your password</h2>");
+            h.push_str(
+                "<p class=\"lede\">Copy this now. It is shown once and this node keeps only \
+                 a hash of it, so nobody -- including the operator -- can show it to you \
+                 again.</p>",
+            );
+            h.push_str("<pre class=\"cmd\">");
+            h.push_str(&esc(token));
+            h.push_str("</pre>");
+            crate::ui::next_action(
+                &mut h,
+                "Put it in your password manager before you close this tab. If you lose it, \
+                 ask for a new invite; there is no reset.",
+            );
+            h.push_str("</section>");
+        }
+        None => {
+            h.push_str("<section><h2>No password</h2>");
+            h.push_str(
+                "<p class=\"lede\">Your passkey is your credential here, and you are signed \
+                 in on this browser already. There is nothing to copy and nothing to \
+                 lose.</p>",
+            );
+            crate::ui::next_action(
+                &mut h,
+                "Add a second passkey from your <a href=\"/account\">account page</a> if you \
+                 use more than one device -- a passkey lives on the device that made it, so \
+                 one passkey is one way in.",
+            );
+            h.push_str("</section>");
+        }
+    }
 
     h.push_str("<section><h2>Start working</h2><ol class=\"steps\">");
     let mut step = 1;
@@ -423,7 +530,16 @@ fn welcome(
         h.push('/');
         h.push_str(&esc(repo));
         h.push_str(".git</pre>");
-        h.push_str("<p class=\"mono\">password: the one above</p></li>");
+        h.push_str("<p class=\"mono\">password: ");
+        h.push_str(match token {
+            Some(_) => "the one above",
+            // Git speaks basic auth and cannot present a passkey, so the
+            // passwordless account still needs a secret for this one
+            // job -- minted when it is wanted rather than handed over
+            // unasked (D75).
+            None => "make one on your account page, under Tokens",
+        });
+        h.push_str("</p></li>");
         step += 1;
     }
     // The complaint this answers is the one every credential handed over
@@ -440,9 +556,17 @@ fn welcome(
          it. macOS and Windows come with somewhere; on Linux, run <code>git config \
          --global credential.helper</code> first to check you have one.</p>",
     );
-    h.push_str("<pre class=\"cmd\">");
-    h.push_str(&esc(&approve_command(node, user, token)));
-    h.push_str("</pre>");
+    match token {
+        Some(token) => {
+            h.push_str("<pre class=\"cmd\">");
+            h.push_str(&esc(&approve_command(node, user, token)));
+            h.push_str("</pre>");
+        }
+        None => h.push_str(
+            "<p class=\"note\">Make a token on your <a href=\"/account\">account page</a> \
+             first; that page prints this same line with it filled in.</p>",
+        ),
+    }
     h.push_str("</li>");
     step += 1;
 
@@ -458,16 +582,19 @@ fn welcome(
     h.push_str("</ol></section>");
 
     h.push_str("<section><h2>One more thing</h2>");
-    h.push_str(
-        "<p>Add a passkey and you can approve reviews from this browser with your \
-         fingerprint, face or hardware key, instead of pasting that password.</p>",
-    );
-    h.push_str("<p><span class=\"pill\"><a href=\"/account\">add a passkey</a></span> ");
+    if token.is_some() {
+        h.push_str(
+            "<p>Add a passkey and you can approve reviews from this browser with your \
+             fingerprint, face or hardware key, instead of pasting that password.</p>",
+        );
+    }
+    h.push_str("<p><span class=\"pill\"><a href=\"/account\">your account</a></span> ");
     h.push_str("<span class=\"pill\"><a href=\"/r/\">browse repositories</a></span></p>");
     h.push_str("</section>");
     Page {
         status: 200,
         html: close(h),
+        session: None,
         scripted: false,
     }
 }
@@ -495,7 +622,7 @@ fn with_user(node: &str, user: &str) -> String {
 /// The host is taken from the node URL rather than composed, because git
 /// matches credentials on exactly the `protocol` and `host` it was given
 /// -- an entry stored against the wrong one is silently never found.
-fn approve_command(node: &str, user: &str, token: &str) -> String {
+pub(crate) fn approve_command(node: &str, user: &str, token: &str) -> String {
     let (protocol, host) = node.split_once("://").unwrap_or(("https", node));
     format!(
         "printf 'protocol={protocol}\\nhost={host}\\nusername={user}\\npassword={token}\\n' \
@@ -511,7 +638,7 @@ pub(crate) fn get(
     store: Option<&Accounts>,
     id: Option<&str>,
     secret: Option<&str>,
-    ssh: bool,
+    offers: Offers,
     chrome: Chrome<'_>,
     origin: Option<&str>,
     now: u64,
@@ -529,7 +656,7 @@ pub(crate) fn get(
     // half-successful login, it is a request that makes no sense.
     match store.authenticate(id, secret) {
         Some(crate::accounts::Principal::Invite(id)) => match store.invite_summary(&id) {
-            Some(summary) => offer(&summary, &id, secret, ssh, chrome.theme, origin, now),
+            Some(summary) => offer(&summary, &id, secret, offers, chrome.theme, origin, now),
             // Defence in depth, and measured to be exactly that, the same
             // way `Accounts::redeem`'s retired-name check was. No request
             // can reach this arm: `authenticate` already refuses an
@@ -585,6 +712,34 @@ pub(crate) fn post(
             request.insert("ssh_key".to_string(), serde_json::Value::String(key));
         }
     }
+    // The name they picked, when the invite left the seat open (D75).
+    // Sent as typed: the store validates it, and a page that quietly
+    // repaired it would hand somebody an account under a name they did
+    // not choose, which is the one thing this field exists to prevent.
+    if let Some(user) = form_value(body, "user") {
+        request.insert("user".to_string(), serde_json::Value::String(user));
+    }
+    // The passkey the ceremony created, if it ran. Three fields the
+    // script filled into the same form, so the plain-form route and the
+    // scripted one are one `POST` to one endpoint.
+    if let (Some(credential_id), Some(public_key)) = (
+        form_value(body, "credential_id"),
+        form_value(body, "public_key"),
+    ) {
+        let mut key = serde_json::Map::new();
+        key.insert(
+            "credential_id".to_string(),
+            serde_json::Value::String(credential_id),
+        );
+        key.insert(
+            "public_key".to_string(),
+            serde_json::Value::String(public_key),
+        );
+        if let Some(label) = form_value(body, "label") {
+            key.insert("label".to_string(), serde_json::Value::String(label));
+        }
+        request.insert("passkey".to_string(), serde_json::Value::Object(key));
+    }
     let (status, answer) = store.redeem(&id, &serde_json::Value::Object(request));
     let parsed: serde_json::Value = serde_json::from_str(&answer).unwrap_or_default();
     if status != 200 {
@@ -608,13 +763,22 @@ pub(crate) fn post(
                 .collect()
         })
         .unwrap_or_default();
-    welcome(
-        parsed["user"].as_str().unwrap_or(&id),
-        parsed["token"].as_str().unwrap_or(""),
+    let user = parsed["user"].as_str().unwrap_or(&id).to_string();
+    let mut page = welcome(
+        &user,
+        parsed["token"].as_str(),
         &grants,
         origin,
         chrome.theme,
-    )
+    );
+    // Signed in already, on the passwordless route (D75). There is no
+    // credential for them to present, so a page that ended by saying
+    // "now sign in" would be a dead end; the session the node opens here
+    // is the one thing that makes the route finish.
+    if parsed["token"].is_null() {
+        page.session = Some(user);
+    }
+    page
 }
 
 /// A submission the node understood and refused, with the invite intact.
@@ -633,6 +797,7 @@ fn bad_submission(why: &str, theme: Option<&str>) -> Page {
     Page {
         status: 400,
         html: close(h),
+        session: None,
         scripted: false,
     }
 }
@@ -752,6 +917,7 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     Page {
         status: 200,
         html: close(h),
+        session: None,
         scripted: door.asking,
     }
 }
@@ -858,6 +1024,7 @@ fn waiting(summary: &crate::accounts::RequestSummary, theme: Option<&str>, now: 
     Page {
         status: 200,
         html: close(h),
+        session: None,
         scripted: false,
     }
 }

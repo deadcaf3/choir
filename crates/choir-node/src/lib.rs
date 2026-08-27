@@ -1431,7 +1431,11 @@ impl Node {
                             request,
                             accounts.as_deref(),
                             &public_path,
-                            ssh_enabled,
+                            join_page::Offers {
+                                ssh: ssh_enabled,
+                                passkeys,
+                            },
+                            &sessions,
                             scheme,
                             &root,
                         )
@@ -1708,6 +1712,23 @@ impl Node {
                 // of the API block because it is a page, not an endpoint,
                 // and it is gated by nothing but being authenticated: the
                 // only account it can ever show is the caller's own.
+                // D75. A passwordless account's one need for a
+                // secret: git and the CLI speak basic auth and cannot
+                // present a passkey. Minted here rather than at
+                // redemption, so the caller is somebody this node has
+                // already authenticated and is asking because something
+                // wanted one.
+                if request.url().split('?').next() == Some("/account/token") {
+                    let outcome = respond_account_token(
+                        request,
+                        accounts.as_deref(),
+                        &user,
+                        acl.as_deref(),
+                        scheme,
+                    );
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
                 if request.url().split('?').next().unwrap_or("") == "/account" {
                     // No `--read-only-browser` refusal here (D73).
                     // Enrolling a passkey writes to the accounts store and
@@ -1744,6 +1765,9 @@ impl Node {
                                 .check(&user, &acl::Scope::Node, acl::Level::Write)
                                 .is_none()
                         }),
+                        header(&request, "host")
+                            .map(|host| format!("{scheme}://{host}"))
+                            .as_deref(),
                         browse::Chrome {
                             site: None,
                             theme: chosen_theme(&request),
@@ -3098,10 +3122,13 @@ fn respond_join(
     mut request: tiny_http::Request,
     store: Option<&accounts::Accounts>,
     path: &str,
-    ssh: bool,
+    offers: join_page::Offers,
+    sessions: &session::Sessions,
     scheme: &'static str,
     root: &std::path::Path,
 ) -> std::io::Result<(u16, u64)> {
+    let join_page::Offers { ssh, passkeys } = offers;
+    let _ = ssh;
     let contact = operator_contact(root);
     let contact = contact.as_deref();
     let theme = chosen_theme(&request);
@@ -3136,7 +3163,7 @@ fn respond_join(
                 store,
                 join_page::param(&url, "i").as_deref(),
                 join_page::param(&url, "k").as_deref(),
-                ssh,
+                join_page::Offers { ssh, passkeys },
                 chrome,
                 origin.as_deref(),
                 join_page::now_unix_secs(),
@@ -3156,6 +3183,11 @@ fn respond_join(
     };
     let bytes = page.html.len() as u64;
     let scripted = page.scripted;
+    // A passwordless redemption ends signed in (D75): there is no
+    // credential for the reader to present afterwards, so the cookie is
+    // the only thing that makes the route finish rather than end at a
+    // page saying "now log in with the nothing you were given".
+    let opened = page.session.as_deref().map(|user| sessions.open(user));
     let mut response = tiny_http::Response::from_string(page.html)
         .with_status_code(page.status)
         .with_header(
@@ -3185,6 +3217,17 @@ fn respond_join(
             tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
                 .expect("static header"),
         );
+    if let Some(token) = opened.as_deref() {
+        let secure = if scheme == "https" { "; Secure" } else { "" };
+        let cookie = format!(
+            "{}={token}; Path=/; Max-Age=43200; SameSite=Lax; HttpOnly{secure}",
+            session::COOKIE
+        );
+        response = response.with_header(
+            tiny_http::Header::from_bytes(&b"Set-Cookie"[..], cookie.as_bytes())
+                .expect("set-cookie header"),
+        );
+    }
     // An invite link that reaches a search index is an invite spent by a
     // crawler. The header carries where a `<meta>` tag cannot: on the
     // redirect-free fetch a crawler actually makes.
@@ -3643,21 +3686,26 @@ fn respond_people(
             respond_people_result(request, if status == 200 { "declined" } else { "bad" })
         }
         Some("invite") => {
-            let (Some(name), Some(grant)) = (field("display_name"), grant()) else {
+            let Some(grant) = grant() else {
                 return respond_people_result(request, "bad");
             };
-            let (status, answer) = with_join_url(
-                store.invite(
-                    user,
-                    &serde_json::json!({ "display_name": name, "grants": [grant] }),
-                ),
-                origin.as_deref(),
-                "invite",
-            );
+            // A readable name is optional (D75): the seat stays open
+            // either way, and the person redeeming picks the username.
+            let name = field("display_name");
+            let mut body = serde_json::json!({ "grants": [grant] });
+            if let Some(name) = name.as_deref() {
+                body["display_name"] = serde_json::json!(name);
+            }
+            let (status, answer) =
+                with_join_url(store.invite(user, &body), origin.as_deref(), "invite");
             let parsed: serde_json::Value = serde_json::from_str(&answer).unwrap_or_default();
             match (status, parsed["join_url"].as_str()) {
                 (200, Some(link)) => {
-                    let page = people_page::minted(link, &name, chrome);
+                    let page = people_page::minted(
+                        link,
+                        name.as_deref().unwrap_or("whoever opens it"),
+                        chrome,
+                    );
                     respond_console(request, page)
                 }
                 _ => respond_people_result(request, "bad"),
@@ -3787,6 +3835,108 @@ fn write_operator_contact(root: &std::path::Path, value: &str) -> Result<(), Str
     }
     choir_fs::write_atomic_private(&path, format!("{value}\n").as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Mints the token an account uses for git and the CLI (D75).
+///
+/// `POST` only, same-origin only, and rendered directly rather than
+/// redirected to: the node keeps only a hash, so a redirect would drop
+/// the one copy of the secret that exists.
+fn respond_account_token(
+    request: tiny_http::Request,
+    store: Option<&accounts::Accounts>,
+    user: &str,
+    acl: Option<&acl::Effective>,
+    scheme: &'static str,
+) -> std::io::Result<(u16, u64)> {
+    let chrome = browse::Chrome {
+        site: None,
+        theme: chosen_theme(&request),
+        here: "/account",
+    };
+    let refuse = |request, title: &str, status: u16, reason: &'static str, next: &'static str| {
+        let html = ui::refusal(
+            title,
+            status,
+            &ui::Refusal {
+                code: "token",
+                error: reason,
+                expected: None,
+                actual: None,
+                next,
+            },
+            &[],
+            reader_chrome(&request),
+        );
+        respond_page(request, status, html, None)
+    };
+    if request.method().as_str() != "POST" {
+        return refuse(
+            request,
+            "Not a page",
+            405,
+            "A token is made by pressing the button on your account page.",
+            "Open /account and use the form there.",
+        );
+    }
+    if !same_origin(&request, scheme) {
+        return refuse(
+            request,
+            "Cross-origin write refused",
+            403,
+            "That form was submitted from another site.",
+            "Open this node's own account page and try again.",
+        );
+    }
+    let Some(store) = store else {
+        return refuse(
+            request,
+            "Account self-service is off",
+            503,
+            "This node was started without an accounts file.",
+            "Ask the operator to start the daemon with --accounts-file.",
+        );
+    };
+    let (status, answer) = store.mint_token(user);
+    let parsed: serde_json::Value = serde_json::from_str(&answer).unwrap_or_default();
+    let Some(token) = parsed["token"].as_str() else {
+        return refuse(
+            request,
+            "No token for this credential",
+            status,
+            "Only an issued account can hold a token, and yours is not one.",
+            "An operator credential from the auth file already is a password; use it.",
+        );
+    };
+    let _ = acl;
+    let node = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let page = account_page::minted(
+        token,
+        user,
+        node.as_deref(),
+        parsed["replaced"].as_bool().unwrap_or(false),
+        chrome,
+    );
+    let bytes = page.html.len() as u64;
+    let response = tiny_http::Response::from_string(page.html)
+        .with_status_code(page.status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-store"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    served(request, response, page.status, bytes)
 }
 
 /// Whether a state-changing request came from this node's own pages.

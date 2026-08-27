@@ -1,12 +1,19 @@
-//! D46: an account can be named by an opaque handle, with the readable
-//! name held beside it where revoking can delete it.
+//! D46 and D75: what a person is called here, and who decides it.
 //!
-//! The property every test here circles is the one that cannot be
-//! repaired later: whatever ends up as the *principal* is what
-//! `channel_for` turns into a channel, which `signing_hash` covers,
-//! which the log keeps forever. A display name that reached the
-//! principal by any route would be unrewritable, so these assert on
-//! where the readable name is **not**.
+//! The property every test circles is the one that cannot be repaired
+//! later: whatever ends up as the *principal* is what `channel_for`
+//! turns into a channel, which `signing_hash` covers, which the log
+//! keeps forever. A display name that reached the principal by any route
+//! would be unrewritable, so these assert on where the readable name is
+//! **not**.
+//!
+//! What changed at D75 is who chooses the permanent half. D46 stopped an
+//! operator from welding somebody's real name into the log by having the
+//! node mint an opaque handle instead, which is one step better and one
+//! step short: the person it is about still never got asked. The seat on
+//! an invite is now left open and the holder picks their own username on
+//! the page that redeems it. D46's rule is not weakened by that; it is
+//! the reason for it.
 
 use std::collections::BTreeSet;
 
@@ -30,10 +37,21 @@ fn store(tag: &str) -> (Accounts, std::path::PathBuf, std::path::PathBuf) {
 
 const NAME: &str = "Ada Lovelace";
 
-/// The whole point: the issuer supplies a person's name and the
-/// principal that comes back is not it.
+/// The invite id out of a mint, for the tests that go on to redeem one.
+fn invite_id(body: &str) -> String {
+    json(body)["invite"]
+        .as_str()
+        .expect("invite")
+        .split_once(':')
+        .expect("id:secret")
+        .0
+        .to_string()
+}
+
+/// The whole point of D75: the issuer supplies what to call somebody and
+/// gets back no principal at all, because that is not theirs to decide.
 #[test]
-fn an_invite_with_a_display_name_mints_a_handle_instead() {
+fn an_invite_with_a_display_name_leaves_the_username_to_its_holder() {
     let (store, _path, work) = store("mints");
     let (status, body) = store.invite(
         "alice",
@@ -43,20 +61,95 @@ fn an_invite_with_a_display_name_mints_a_handle_instead() {
     );
     assert_eq!(status, 200, "{body}");
     let issued = json(&body);
-    let user = issued["user"].as_str().expect("a principal");
-
-    assert_ne!(user, NAME, "the principal is the person's name");
     assert!(
-        !user.to_lowercase().contains("ada") && !user.to_lowercase().contains("lovelace"),
-        "the principal carries part of the name: {user}"
-    );
-    assert!(
-        user.len() == 12 && user.chars().all(|c| c.is_ascii_hexdigit()),
-        "a handle should be 12 hex characters, got {user}"
+        issued["user"].is_null(),
+        "the node decided a principal for somebody it has not met: {body}"
     );
     // Returned at issue because this is the only moment the issuer
-    // learns the pairing from the node.
+    // learns what was recorded.
     assert_eq!(issued["display_name"].as_str(), Some(NAME), "{body}");
+
+    // And the holder names themselves.
+    let (status, body) = store.redeem(&invite_id(&body), &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["user"].as_str(), Some("ada"), "{body}");
+    assert!(store.has_account("ada"));
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// An open seat cannot be redeemed without a name. There is no fallback
+/// that would quietly reintroduce a chosen-for-you principal.
+#[test]
+fn an_open_seat_refuses_to_pick_a_name_for_anybody() {
+    let (store, _path, work) = store("noname");
+    let (status, body) = store.invite("alice", &json(r#"{"grants":["agents/demo read"]}"#));
+    assert_eq!(status, 200, "{body}");
+    let id = invite_id(&body);
+
+    let (status, body) = store.redeem(&id, &json("{}"));
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("pick your name"), "{body}");
+    // And the invite is intact, so the repair is retrying with a name.
+    let (status, body) = store.redeem(&id, &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{body}");
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// A name somebody else holds, or held, is refused at the moment it is
+/// chosen -- which is the moment a person can act on the answer.
+#[test]
+fn a_username_already_spoken_for_is_refused_when_it_is_typed() {
+    let (store, _path, work) = store("taken");
+    let seat = |grants: &str| {
+        let (status, body) = store.invite("alice", &json(grants));
+        assert_eq!(status, 200, "{body}");
+        invite_id(&body)
+    };
+
+    let first = seat(r#"{"grants":["agents/demo read"]}"#);
+    let (status, body) = store.redeem(&first, &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{body}");
+
+    let second = seat(r#"{"grants":["agents/demo read"]}"#);
+    let (status, body) = store.redeem(&second, &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("taken"), "{body}");
+
+    // Revoked is not free either: the log still attributes that name's
+    // history to whoever held it.
+    let (status, body) = store.revoke(&json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{body}");
+    let third = seat(r#"{"grants":["agents/demo read"]}"#);
+    let (status, body) = store.redeem(&third, &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("never reused"), "{body}");
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
+/// A chosen name goes through the same grammar an issued one does, so
+/// nothing a person types can reach the log that an operator could not
+/// have written.
+#[test]
+fn a_chosen_username_is_graded_by_the_same_rule_as_an_issued_one() {
+    let (store, _path, work) = store("grammar");
+    for bad in [
+        "Ada Lovelace",
+        "ada/agent",
+        "invite-x",
+        "ask-x",
+        "open-seat",
+        "",
+        "@node",
+    ] {
+        let (status, body) = store.invite("alice", &json(r#"{"grants":["agents/demo read"]}"#));
+        assert_eq!(status, 200, "{body}");
+        let id = invite_id(&body);
+        let (status, body) = store.redeem(&id, &serde_json::json!({ "user": bad }));
+        assert_eq!(status, 400, "`{bad}` was accepted: {body}");
+    }
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -73,6 +166,8 @@ fn a_display_name_never_reaches_the_channel() {
             r#"{{"display_name":"{NAME}","grants":["agents/demo read"]}}"#
         )),
     );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = store.redeem(&invite_id(&body), &json(r#"{"user":"ada"}"#));
     assert_eq!(status, 200, "{body}");
     let user = json(&body)["user"]
         .as_str()
@@ -91,6 +186,10 @@ fn a_display_name_never_reaches_the_channel() {
 
 /// Two different decisions about what the log records forever, so
 /// sending both is a question the node must not answer by guessing.
+///
+/// Sending *neither* is no longer a refusal (D75): it is an open seat
+/// with nothing written down, which is exactly what a link handed to
+/// somebody you have not met yet is.
 #[test]
 fn naming_an_account_and_describing_it_are_not_both_allowed() {
     let (store, _path, work) = store("both");
@@ -101,16 +200,19 @@ fn naming_an_account_and_describing_it_are_not_both_allowed() {
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("not both"), "{body}");
 
-    // And neither is also a refusal, rather than an anonymous account.
     let (status, body) = store.invite("alice", &json(r#"{"grants":["agents/demo read"]}"#));
-    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        status, 200,
+        "an invite that names nobody is the ordinary one: {body}"
+    );
+    assert!(json(&body)["user"].is_null(), "{body}");
 
     std::fs::remove_dir_all(&work).ok();
 }
 
-/// `user` is the pre-D46 spelling and still means "this exact string is
-/// the principal". A bot or an operator credential wants it, and it must
-/// keep working unchanged.
+/// `user` still means "this exact string is the principal". A bot or an
+/// operator credential wants it, and it must keep working unchanged --
+/// including refusing to let the redeemer rename themselves out of it.
 #[test]
 fn an_explicit_user_is_still_the_principal_and_gains_no_display_name() {
     let (store, path, work) = store("explicit");
@@ -121,6 +223,12 @@ fn an_explicit_user_is_still_the_principal_and_gains_no_display_name() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(json(&body)["user"].as_str(), Some("buildbot"));
     assert!(json(&body)["display_name"].is_null(), "{body}");
+
+    // A `user` in the body is ignored, not honoured: the issuer decided.
+    let (status, out) = store.redeem(&invite_id(&body), &json(r#"{"user":"somebodyelse"}"#));
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(json(&out)["user"].as_str(), Some("buildbot"), "{out}");
+    assert!(!store.has_account("somebodyelse"));
 
     let on_disk = std::fs::read_to_string(&path).expect("store readable");
     assert!(
@@ -135,7 +243,7 @@ fn an_explicit_user_is_still_the_principal_and_gains_no_display_name() {
 /// "returned by a lookup" and "written down" are different promises and
 /// only the second survives a restart.
 #[test]
-fn a_handle_and_its_display_name_survive_a_reopen() {
+fn a_username_and_its_display_name_survive_a_reopen() {
     let (store, path, work) = store("reopen");
     let (status, body) = store.invite(
         "alice",
@@ -144,41 +252,29 @@ fn a_handle_and_its_display_name_survive_a_reopen() {
         )),
     );
     assert_eq!(status, 200, "{body}");
-    let user = json(&body)["user"]
-        .as_str()
-        .expect("a principal")
-        .to_string();
-    let invite = json(&body)["invite"].as_str().expect("invite").to_string();
 
     let on_disk = std::fs::read_to_string(&path).expect("store readable");
     assert!(on_disk.contains(NAME), "the display name was not persisted");
-    assert!(on_disk.contains(&user), "the handle was not persisted");
 
-    // Redeem, so the name has to travel from the invite to the account.
-    let (id, secret) = invite.split_once(':').expect("invite is id:secret");
-    let (status, body) = store.redeem(id, &json(&format!(r#"{{"secret":"{secret}"}}"#)));
-    assert_eq!(status, 200, "{body}");
+    let (status, out) = store.redeem(&invite_id(&body), &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{out}");
 
-    let reopened = Accounts::open(path.clone(), None, BTreeSet::new()).expect("store reopens");
-    assert!(reopened.has_account(&user), "the handle did not survive");
-    let on_disk = std::fs::read_to_string(&path).expect("store readable");
-    assert!(
-        on_disk.contains(NAME),
-        "the display name did not survive redemption: {on_disk}"
-    );
+    let reopened = Accounts::open(path, None, BTreeSet::new()).expect("store reopens");
+    assert!(reopened.has_account("ada"), "the username did not survive");
+    assert_eq!(reopened.display_name("ada").as_deref(), Some(NAME));
 
     std::fs::remove_dir_all(&work).ok();
 }
 
 /// The claim the whole decision rests on: revoking an account destroys
-/// the readable name while the handle -- the half the log already keeps
-/// forever -- survives as a retired entry that names nobody.
+/// the readable name while the username -- the half the log already
+/// keeps forever -- survives as a retired entry that names nobody.
 ///
 /// Asserted against the file on disk as well as the live store, because
 /// "not returned by a lookup" and "not written down" are different
 /// promises and only the second survives a restart.
 #[test]
-fn revoking_forgets_the_name_and_keeps_the_handle() {
+fn revoking_forgets_the_name_and_keeps_the_username() {
     let (store, path, work) = store("forget");
     let (status, body) = store.invite(
         "alice",
@@ -187,21 +283,15 @@ fn revoking_forgets_the_name_and_keeps_the_handle() {
         )),
     );
     assert_eq!(status, 200, "{body}");
-    let user = json(&body)["user"]
-        .as_str()
-        .expect("a principal")
-        .to_string();
-    let invite = json(&body)["invite"].as_str().expect("invite").to_string();
-    let (id, secret) = invite.split_once(':').expect("invite is id:secret");
-    let (status, body) = store.redeem(id, &json(&format!(r#"{{"secret":"{secret}"}}"#)));
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(store.display_name(&user).as_deref(), Some(NAME));
+    let (status, out) = store.redeem(&invite_id(&body), &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(store.display_name("ada").as_deref(), Some(NAME));
 
-    let (status, body) = store.revoke(&json(&format!(r#"{{"user":"{user}"}}"#)));
-    assert_eq!(status, 200, "{body}");
+    let (status, out) = store.revoke(&json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{out}");
 
     assert_eq!(
-        store.display_name(&user),
+        store.display_name("ada"),
         None,
         "the name outlived the account"
     );
@@ -210,14 +300,14 @@ fn revoking_forgets_the_name_and_keeps_the_handle() {
         !on_disk.contains(NAME) && !on_disk.contains("Lovelace"),
         "a revoked account left its holder's name on disk: {on_disk}"
     );
-    // The handle stays, because the log already carries it and a name
+    // The username stays, because the log already carries it and a name
     // that could be reissued would hand a second person the first
     // person's signed attribution.
     assert!(
-        on_disk.contains(&user),
-        "the handle should be retired, not forgotten: {on_disk}"
+        on_disk.contains("ada"),
+        "the username should be retired, not forgotten: {on_disk}"
     );
-    assert!(!store.has_account(&user));
+    assert!(!store.has_account("ada"));
 
     std::fs::remove_dir_all(&work).ok();
 }
@@ -225,23 +315,13 @@ fn revoking_forgets_the_name_and_keeps_the_handle() {
 /// The roster is the input `choir acl render` regenerates comments from,
 /// so it must pair only the accounts that have something to say.
 #[test]
-fn the_roster_pairs_handles_with_names_and_omits_the_rest() {
+fn the_roster_pairs_usernames_with_names_and_omits_the_rest() {
     let (store, _path, work) = store("roster");
 
     // Both invites are redeemed, because the roster reads *accounts*.
     // An earlier draft redeemed only one and asserted
     // `roster.is_empty() || ...`, which is satisfied by the roster never
     // being populated at all -- a test that passes by nothing happening.
-    let redeem = |body: &str| {
-        let issued = json(body);
-        let user = issued["user"].as_str().expect("a principal").to_string();
-        let pair = issued["invite"].as_str().expect("invite").to_string();
-        let (id, secret) = pair.split_once(':').expect("id:secret");
-        let (status, out) = store.redeem(id, &json(&format!(r#"{{"secret":"{secret}"}}"#)));
-        assert_eq!(status, 200, "{out}");
-        user
-    };
-
     let (status, body) = store.invite(
         "alice",
         &json(&format!(
@@ -249,21 +329,22 @@ fn the_roster_pairs_handles_with_names_and_omits_the_rest() {
         )),
     );
     assert_eq!(status, 200, "{body}");
-    let handle = redeem(&body);
+    let (status, out) = store.redeem(&invite_id(&body), &json(r#"{"user":"ada"}"#));
+    assert_eq!(status, 200, "{out}");
 
     let (status, body) = store.invite(
         "alice",
         &json(r#"{"user":"buildbot","grants":["agents/demo read"]}"#),
     );
     assert_eq!(status, 200, "{body}");
-    let bot = redeem(&body);
-    assert_eq!(bot, "buildbot");
+    let (status, out) = store.redeem(&invite_id(&body), &json("{}"));
+    assert_eq!(status, 200, "{out}");
 
     let roster = store.roster();
     assert_eq!(
-        roster.get(&handle).map(String::as_str),
+        roster.get("ada").map(String::as_str),
         Some(NAME),
-        "the handle with a name is missing from the roster: {roster:?}"
+        "the account with a name is missing from the roster: {roster:?}"
     );
     assert!(
         !roster.contains_key("buildbot"),
@@ -305,9 +386,12 @@ fn a_store_written_before_d46_still_loads() {
 /// that is the only way a deleted account can look like nothing. So a
 /// display name of twelve hex characters renders exactly as somebody
 /// else's deleted account, and the person it impersonates cannot correct
-/// the record — their name is precisely what was deleted. The refusal
+/// the record -- their name is precisely what was deleted. The refusal
 /// belongs here rather than in the renderer, which by then is holding
 /// two identical strings with no way to tell which is which.
+///
+/// Still enforced after D75, because accounts issued before it hold
+/// handles and those handles are exactly what cannot be taken back.
 #[test]
 fn a_display_name_spelled_like_a_handle_is_refused() {
     let (store, _path, work) = store("handle-shaped");

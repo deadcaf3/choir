@@ -163,6 +163,77 @@
   // back. D39 scoped a CBOR reader out deliberately, and the consequence
   // — enrolment trusts the authenticated channel rather than proving
   // possession — is recorded on `Accounts::enroll_passkey`.
+  // Making a credential, shared by enrolment and by D75's redemption so
+  // the two cannot differ in what they make. A passkey that can approve
+  // an operation but cannot open a session is the failure this shape
+  // exists to avoid, and one copy of it is how that stays true.
+  var create = function (user) {
+    return navigator.credentials.create({
+      publicKey: {
+        rp: { name: 'choir' },
+        user: { id: new TextEncoder().encode(user), name: user, displayName: user },
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        // ES256 only, because it is the one scheme the node verifies.
+        // Offering a second algorithm here would enrol keys refused at
+        // first use, which is the failure enrolment-time validation
+        // exists to prevent -- and the test that holds this line greps
+        // for the identifiers, so it stays out of the prose.
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+        // Discoverable, because sign-in offers no username to look a
+        // credential up by: the assertion's credential id is the only
+        // name in it. Both spellings, since the older one is what
+        // browsers predating `residentKey` understand and the two
+        // disagreeing is how a credential gets enrolled that can approve
+        // an operation but cannot open a session.
+        authenticatorSelection: {
+          userVerification: 'preferred',
+          residentKey: 'required',
+          requireResidentKey: true
+        },
+        timeout: 120000
+      }
+    }).then(function (c) {
+      var spki = c.response.getPublicKey && c.response.getPublicKey();
+      if (!spki) throw new Error('this browser did not return a public key');
+      return { id: c.id, key: b64url(spki) };
+    });
+  };
+
+  // Redeeming an invite into a passwordless account (D75). The username
+  // is the reader's own and travels in the form; the ceremony fills the
+  // three hidden fields beside it and submits the same form the plain
+  // route submits, so there is one endpoint and one code path whether or
+  // not this ran.
+  var claim = function () {
+    var box = document.getElementById('claim-passkey');
+    var go = document.getElementById('claim-go');
+    var form = document.getElementById('claim');
+    if (!box || !go || !form) return;
+    var say = sayer('claim-said');
+    box.hidden = false;
+    go.addEventListener('click', function () {
+      // The name is what the credential is made under, so it has to be
+      // decided before the authenticator is asked -- and a browser that
+      // saves it will save it against this name.
+      var field = document.getElementById('claim-user');
+      var user = field ? field.value.trim() : '';
+      if (field && !user) { say('Pick a username first.'); return; }
+      go.disabled = true;
+      say('Follow your browser\u2019s prompt...');
+      create(user || 'choir')
+        .then(function (made) {
+          document.getElementById('claim-credential').value = made.id;
+          document.getElementById('claim-key').value = made.key;
+          document.getElementById('claim-label').value = 'this browser';
+          form.submit();
+        })
+        .catch(function (e) {
+          go.disabled = false;
+          say('Not created: ' + e.message);
+        });
+    });
+  };
+
   var enrol = function () {
     var box = document.getElementById('enrol');
     var go = document.getElementById('enrol-go');
@@ -173,37 +244,10 @@
     go.addEventListener('click', function () {
       say('Follow your browser’s prompt...');
       settle(
-        navigator.credentials.create({
-          publicKey: {
-            rp: { name: 'choir' },
-            user: { id: new TextEncoder().encode(user), name: user, displayName: user },
-            challenge: crypto.getRandomValues(new Uint8Array(32)),
-            // ES256 only, because it is the one scheme the node
-            // verifies. Offering a second algorithm here would enrol
-            // keys refused at first use, which is the failure
-            // enrolment-time validation exists to prevent — and the
-            // test that holds this line greps for the identifiers, so
-            // it stays out of the prose.
-            pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-            // Discoverable, because sign-in offers no username to look
-            // a credential up by: the assertion's credential id is the
-            // only name in it. Both spellings, since the older one is
-            // what browsers predating `residentKey` understand and the
-            // two disagreeing is how a credential gets enrolled that
-            // can approve an operation but cannot open a session.
-            authenticatorSelection: {
-              userVerification: 'preferred',
-              residentKey: 'required',
-              requireResidentKey: true
-            },
-            timeout: 120000
-          }
-        }).then(function (c) {
-          var spki = c.response.getPublicKey && c.response.getPublicKey();
-          if (!spki) throw new Error('this browser did not return a public key');
+        create(user).then(function (made) {
           var label = document.getElementById('enrol-label').value || 'passkey';
           return post('/api/accounts/passkey', {
-            credential_id: c.id, public_key: b64url(spki), label: label
+            credential_id: made.id, public_key: made.key, label: label
           });
         }),
         say,
@@ -360,6 +404,7 @@
   // unconditionally.
   ask();
   if (!webauthn) return;
+  claim();
   verdict();
   comment();
   enrol();

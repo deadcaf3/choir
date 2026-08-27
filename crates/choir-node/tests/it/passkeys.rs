@@ -2721,3 +2721,154 @@ fn a_person_signs_in_with_a_password_on_our_page_and_lands_where_they_enrol_a_pa
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// D75, end to end: a stranger with a link becomes an account with a
+/// name they chose and a passkey, and no password is created anywhere.
+///
+/// The two halves this asserts are the two the user asked for. The
+/// username is the redeemer's -- the node no longer picks one, and the
+/// operator never typed one -- and the credential is an authenticator,
+/// so nothing on the route hands over a secret to keep.
+///
+/// The ceremony itself runs in a browser, which no test here has. What
+/// is driven instead is the `POST` the ceremony makes, with a real P-256
+/// key from `openssl` standing in for the authenticator's, which is the
+/// same substitution every other passkey test in this module makes.
+#[test]
+fn an_invite_becomes_an_account_with_a_chosen_name_and_no_password() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-passwordless");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.create_repo("agents/demo.git").expect("repo created");
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
+    node.enable_accounts(work.join("accounts.json"), None, None)
+        .expect("accounts enable");
+    node.enable_platform(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let form = |path: &str, args: &[&str]| -> (u16, String, String) {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-i", "-w", "\n%{http_code}"])
+            .args(args)
+            .arg(format!("{base}{path}"))
+            .output()
+            .expect("curl runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (rest, code) = text.rsplit_once('\n').expect("status line");
+        let (headers, body) = rest.split_once("\r\n\r\n").unwrap_or((rest, ""));
+        (
+            code.trim().parse().expect("numeric status"),
+            headers.to_string(),
+            body.to_string(),
+        )
+    };
+    let header_of = |headers: &str, name: &str| -> Option<String> {
+        headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+    };
+
+    // The operator mints a link and names nobody.
+    let (status, issued) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        r#"{"display_name":"Ada Lovelace","grants":["agents/demo.git write"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    assert_eq!(status, 200, "{issued}");
+    assert!(
+        issued["user"].is_null(),
+        "the operator was handed a principal to give away: {issued}"
+    );
+    let pair = issued["invite"].as_str().expect("a pair").to_string();
+    let (id, secret) = pair.split_once(':').expect("id:secret");
+
+    // The page asks for a name, offers the ceremony, and does not
+    // promise a password.
+    let (status, _, page) = form(&format!("/join?i={id}&k={secret}"), &[]);
+    assert_eq!(status, 200, "{page}");
+    assert!(page.contains("Pick your username"), "{page}");
+    assert!(page.contains("claim-go"), "no ceremony offered: {page}");
+    assert!(
+        !page.contains("shows you a password"),
+        "the page still promises a password: {page}"
+    );
+
+    // What the ceremony posts back.
+    let (public_key, _key_file) = credential(&work, "claim");
+    let body = format!(
+        "i={id}&k={secret}&user=ada&credential_id=cred-ada&public_key={public_key}&label=laptop"
+    );
+    let (status, headers, welcome) = form("/join", &["-X", "POST", "-d", &body]);
+    assert_eq!(status, 200, "{welcome}");
+    assert!(welcome.contains("No password"), "{welcome}");
+    assert!(
+        !welcome.contains("Copy this now"),
+        "a password was handed over anyway: {welcome}"
+    );
+    // Signed in already: there is no credential for them to present, so
+    // a page ending in "now log in" would be a dead end.
+    let cookie = header_of(&headers, "Set-Cookie").expect("a session cookie");
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    let jar: String = cookie.split(';').next().expect("cookie pair").to_string();
+
+    let (status, _, _) = form("/r/", &["-H", &format!("Cookie: {jar}")]);
+    assert_eq!(status, 200, "the redemption did not sign them in");
+
+    // The name is theirs, and the readable one the operator wrote is
+    // beside it rather than in it.
+    let (status, roster) =
+        crate::support::curl(&["-u", "alice:a", &format!("{base}/api/accounts")]);
+    assert_eq!(status, 200, "{roster}");
+    let account = roster["accounts"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["user"] == "ada"))
+        .unwrap_or_else(|| panic!("no account named `ada`: {roster}"));
+    assert_eq!(account["display_name"], "Ada Lovelace");
+    assert_eq!(account["passkeys"].as_array().map(Vec::len), Some(1));
+
+    // No password exists. Not "an unknown one" -- none: basic auth has
+    // no answer for this account whatever is presented.
+    let (status, _, _) = form("/r/", &["-u", "ada:"]);
+    assert_eq!(status, 401);
+    let (status, _, _) = form("/r/", &["-u", "ada:anything"]);
+    assert_eq!(status, 401);
+
+    // And git still needs one, so it is minted on request and once.
+    let (status, headers, minted) = form(
+        "/account/token",
+        &["-X", "POST", "-H", &format!("Cookie: {jar}")],
+    );
+    assert_eq!(status, 200, "{headers}{minted}");
+    let token = minted
+        .split("<pre class=\"cmd\">")
+        .nth(1)
+        .and_then(|rest| rest.split("</pre>").next())
+        .expect("a token on the page")
+        .to_string();
+    assert!(!token.is_empty(), "{minted}");
+    let (status, _, _) = form("/r/", &["-u", &format!("ada:{token}")]);
+    assert_eq!(status, 200, "the minted token does not authenticate");
+
+    std::fs::remove_dir_all(&work).ok();
+}

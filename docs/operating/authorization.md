@@ -179,6 +179,8 @@ curl -u "$OPERATOR" -X POST https://<HOST>/api/accounts/invite \
   -d '{"user":"bob","grants":["owner/demo read","owner/notes write"]}'
 ```
 
+That invite names nobody (D75). `display_name` records what to call them; the **username is theirs to pick** when they redeem, because it is the one string about a person the op log keeps forever and a signature covers. Send `{"user":"buildbot"}` instead when the name has to be exact, which is what a bot or a script wants.
+
 The response carries `invite`, an `id:secret` pair, once. Hand it over out of band. The holder redeems it; the invite *is* the credential, so it is presented as basic auth and reaches nothing else:
 
 ```bash
@@ -186,7 +188,9 @@ curl -u "<INVITE>" -X POST https://<HOST>/api/accounts/redeem \
   -d "{\"ssh_key\":\"$(cat ~/.ssh/id_ed25519.pub)\"}"
 ```
 
-That answers, once, with the token to clone with (`https://bob:<TOKEN>@<HOST>/owner/demo.git`) and registers the key for SSH. Invites expire (a day by default, `expires_in_secs` to choose) and are single use.
+That answers, once, with the token to clone with and registers the key for SSH. Invites expire (a day by default, `expires_in_secs` to choose) and are single use.
+
+**The browser route creates no password at all.** Opening the link in a browser gives a page that asks for a username and runs the passkey ceremony; the account is created with the passkey enrolled and no token, and the redemption opens a browser session. Git and the CLI still speak basic auth and cannot present a passkey, so a token is minted on request from the account page (`POST /account/token`), one per account, replacing any it had. A browser with no WebAuthn falls through to the same form and gets the password route.
 
 `GET /api/accounts` lists who holds what -- accounts, live invites and the pending request queue -- `POST /api/accounts/request/grant` with `{"request_id":"ask-...","grants":[...]}` answers one of those requests, `POST /api/accounts/request/decline` drops it, and `POST /api/accounts/revoke` with `{"user":"bob"}` deletes an account: the token stops authenticating on the next request, the grants leave the table, and the key leaves the generated `authorized_keys`. Revocation is deletion rather than a record, which is one reason none of this is in the op log: the log is append-only and cannot forget a credential.
 

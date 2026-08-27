@@ -13,7 +13,7 @@
 //! choir asks <api>
 //! choir grant <api> <request-id> <owner/repo> [read|write]
 //! choir decline <api> <request-id>
-//! choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]
+//! choir join <api> <invite-file> <key-file> [--user <name>] [--channel <name>] [--ssh-key <path>] [--token-file <path>]
 //! choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
 //! choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
 //! choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--onto <branch>] [reviewer]...
@@ -648,7 +648,7 @@ fn acl_render(api: &str, auth: AuthOptions<'_>, acl_file: &str) -> ! {
 /// started without `--invite-binds-keys` refuses the key and says so,
 /// and admission there still ends with an operator's edit.
 fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
-    let (mut channel, mut ssh_key, mut token_file) = (None, None, None);
+    let (mut channel, mut ssh_key, mut token_file, mut chosen_user) = (None, None, None, None);
     let mut index = 0;
     while index < rest.len() {
         let Some(value) = rest.get(index + 1).copied() else {
@@ -658,6 +658,10 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
             "--channel" if channel.is_none() => &mut channel,
             "--ssh-key" if ssh_key.is_none() => &mut ssh_key,
             "--token-file" if token_file.is_none() => &mut token_file,
+            // The name this account will hold forever (D75). Required by
+            // an invite that left the seat open, which is the ordinary
+            // kind: the node no longer picks on anybody's behalf.
+            "--user" if chosen_user.is_none() => &mut chosen_user,
             _ => usage(),
         };
         *slot = Some(value);
@@ -677,6 +681,9 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
     // second one the operator never saw.
     let key = load_key(key_file);
     let mut body = serde_json::json!({ "actor_key": hex_encode(&key.public_key_bytes()) });
+    if let Some(user) = chosen_user {
+        body["user"] = serde_json::json!(user);
+    }
     if let Some(channel) = channel {
         body["channel"] = serde_json::json!(channel);
     }

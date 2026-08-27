@@ -186,9 +186,9 @@ fn one_link_carries_somebody_from_stranger_to_account() {
         &format!("{}/api/accounts/request/grant", s.base),
     ]);
     assert_eq!(status, 200, "{answer}");
-    // The account name is minted by the node, never chosen by the asker.
-    let user = answer["user"].as_str().expect("a handle").to_string();
-    assert_ne!(user, "Ada", "the stranger chose the name the log will keep");
+    // No principal yet (D75): granting decides that somebody is in, not
+    // what they are called. They pick that themselves when they redeem.
+    assert!(answer["user"].is_null(), "{answer}");
     assert_eq!(answer["display_name"], "Ada");
 
     // The same address, unchanged, is now the invite.
@@ -204,16 +204,19 @@ fn one_link_carries_somebody_from_stranger_to_account() {
     // And it redeems, into an account that can reach the repository.
     // The form body is the link's own query string: the page posts back
     // the two halves it was reached with.
-    let form = link
-        .split_once("/join?")
-        .expect("a join link")
-        .1
-        .to_string();
+    let form = format!(
+        "{}&user=ada",
+        link.split_once("/join?").expect("a join link").1
+    );
     let (status, _, body) = get(&format!("{}/join", s.base), &["-X", "POST", "-d", &form]);
     assert_eq!(status, 200, "{body}");
     assert!(
         body.contains("You&#39;re in") || body.contains("You're in"),
         "{body}"
+    );
+    assert!(
+        body.contains("ada"),
+        "the name they picked is not theirs: {body}"
     );
     // The queue is empty again: a granted request is not still pending.
     assert!(s.queue().is_empty(), "{:?}", s.queue());

@@ -133,7 +133,7 @@ Auth on the CLI is flags, not env: `choir --auth-file ~/.choir/auth --auth-user 
 | Command | What it does |
 |:--|:--|
 | `choir key` | mint a key and print the line the operator registers; pass your channel name to print the bound form |
-| `choir join` | redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself |
+| `choir join` | redeem an operator's invite and mint your actor key in one step; --user names the account, which most invites leave for you to pick and which the op log then keeps forever; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself |
 | `choir workspace` | provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within |
 | `choir propose` | propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal |
 | `choir reviews` | your pending review queue |

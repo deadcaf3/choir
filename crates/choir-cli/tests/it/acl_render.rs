@@ -69,8 +69,8 @@ fn acl_render_names_the_handles_a_real_node_reports() {
     std::thread::spawn(move || node.serve_forever());
     let api = format!("http://127.0.0.1:{port}");
 
-    // Onboard the way an operator actually would: an invite naming the
-    // person, redeemed into an account whose principal is a handle.
+    // Onboard the way an operator actually would: an invite that says
+    // what to call somebody and leaves the username to them (D75).
     let (status, body) = curl(&[
         "-u",
         "alice:a",
@@ -82,7 +82,6 @@ fn acl_render_names_the_handles_a_real_node_reports() {
     ]);
     assert_eq!(status, 200, "invite refused: {body}");
     let issued: serde_json::Value = serde_json::from_str(&body).expect("invite json");
-    let handle = issued["user"].as_str().expect("a handle").to_string();
     let pair = issued["invite"].as_str().expect("invite pair").to_string();
 
     let (status, body) = curl(&[
@@ -91,13 +90,15 @@ fn acl_render_names_the_handles_a_real_node_reports() {
         "-X",
         "POST",
         "--data-binary",
-        "{}",
+        r#"{"user":"ada"}"#,
         &format!("{api}/api/accounts/redeem"),
     ]);
     assert_eq!(status, 200, "redeem refused: {body}");
+    let redeemed: serde_json::Value = serde_json::from_str(&body).expect("redeem json");
+    let handle = redeemed["user"].as_str().expect("a principal").to_string();
 
-    // The operator grants by handle, because the handle is the
-    // principal, and writes the file the way a person writes files.
+    // The operator grants by username, because that is the principal,
+    // and writes the file the way a person writes files.
     let granted = format!("{OPERATOR_ACL}{handle} agents/demo.git write\n");
     std::fs::write(&acl_path, &granted).expect("grant written");
 

@@ -35,7 +35,7 @@ A node may enforce per-repository grants. 404 on a repository means you hold no 
 For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form
 choir git-credential <auth-file> [--auth-user <name>] get|store|erase - git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
-choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>] - redeem an operator's invite and mint your actor key in one step; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
+choir join <api> <invite-file> <key-file> [--user <name>] [--channel <name>] [--ssh-key <path>] [--token-file <path>] - redeem an operator's invite and mint your actor key in one step; --user names the account, which most invites leave for you to pick and which the op log then keeps forever; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
 choir invite <api> <name> <owner/repo> [read|write] - mint an invite and print the one link to send; the same thing the node's /people page does, for when a terminal is where you are
 choir asks <api> - who has asked for access and is waiting on an answer (D72)
 choir grant <api> <request-id> <owner/repo> [read|write] - let one of them in; the link they already hold becomes their invite, so there is nothing to send

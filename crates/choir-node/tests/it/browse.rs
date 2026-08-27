@@ -1196,7 +1196,9 @@ fn a_review_page_names_the_person_behind_a_handle() {
         &format!("{base}/api/accounts/invite"),
     ]);
     assert_eq!(code, 200, "invite refused: {issued}");
-    let handle = issued["user"].as_str().expect("a handle").to_string();
+    // The seat is open (D75), so the principal exists only once its
+    // holder has picked it.
+    assert!(issued["user"].is_null(), "{issued}");
     let pair = issued["invite"].as_str().expect("invite pair").to_string();
     let (code, redeemed) = crate::support::curl(&[
         "-u",
@@ -1204,10 +1206,11 @@ fn a_review_page_names_the_person_behind_a_handle() {
         "-X",
         "POST",
         "--data-binary",
-        "{}",
+        r#"{"user":"ada"}"#,
         &format!("{base}/api/accounts/redeem"),
     ]);
     assert_eq!(code, 200, "redeem refused: {redeemed}");
+    let handle = redeemed["user"].as_str().expect("a principal").to_string();
 
     let clone = work.join("clone");
     let url = format!("http://alice:a@127.0.0.1:{port}/agents/one.git");
@@ -1226,8 +1229,8 @@ fn a_review_page_names_the_person_behind_a_handle() {
         .trim()
         .to_string();
 
-    // The handle is the reviewer seat, because the handle is the
-    // principal — which is exactly why the page has to resolve it.
+    // The username is the reviewer seat, because it is the principal --
+    // which is exactly why the page has to resolve it to a readable name.
     let request = ViewOp::new(OpKind::RequestReview {
         id: "r-handle".into(),
         target: choir_oplog::ContentHash::from_git_oid(&proposal).expect("a git oid"),

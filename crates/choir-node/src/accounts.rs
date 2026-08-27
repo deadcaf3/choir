@@ -68,6 +68,23 @@ pub const MAX_INVITE_SECS: u64 = 30 * 86_400;
 /// does.
 pub const INVITE_PREFIX: &str = "invite-";
 
+/// The name an open seat's grants are graded against (D75).
+///
+/// A grant's validity does not depend on who holds it --
+/// [`validate_grant`] uses the name only to build a line for
+/// [`Acl::parse`] and returns the `<target> <level>` half -- but it
+/// needs *a* name to build one. This is a legal username and can never
+/// be an account: [`validate_username`] refuses it, so nothing can
+/// redeem into it.
+const OPEN_SEAT: &str = "open-seat";
+
+/// Stood in for a missing token hash so the comparison in
+/// [`Accounts::authenticate`] runs over a fixed string either way (D75).
+///
+/// Never a hash of anything: it is not a valid [`ContentHash`] spelling,
+/// so no secret can hash to it.
+const NO_TOKEN: &str = "no-token";
+
 /// Prefix on an access-request id (D72), so an id says which table it
 /// belongs to without a lookup. Disjoint from [`INVITE_PREFIX`] because
 /// the two live in different maps and a reader comparing a claim link
@@ -159,7 +176,16 @@ struct Account {
     /// BLAKE3 of the token, never the token: the store is read by the
     /// process that serves requests, and a stolen store should not be a
     /// stolen credential.
-    token_hash: String,
+    ///
+    /// `None` on an account that has never had one (D75). A passwordless
+    /// account holds a passkey and nothing else, and the honest way to
+    /// say "there is no password" is to store no hash rather than a hash
+    /// of a secret nobody was ever shown. [`Accounts::authenticate`]
+    /// matches nothing for such an account, so basic auth simply has no
+    /// answer for it -- which is the point: the credential a browser
+    /// uses is the passkey, and one for git is minted when it is
+    /// actually wanted.
+    token_hash: Option<String>,
     /// Grants in the ACL file's own two-column spelling, e.g.
     /// `owner/repo read`.
     grants: Vec<String>,
@@ -227,11 +253,19 @@ struct Passkey {
 struct Invite {
     /// BLAKE3 of the secret half.
     secret_hash: String,
-    /// Account this invite creates when redeemed. Already the minted
-    /// handle when the issuer sent a `display_name` (D46) — the handle
-    /// is decided at issue rather than at redemption, so the invite and
-    /// the account it becomes name the same principal.
-    user: String,
+    /// Account this invite creates when redeemed, when the **issuer**
+    /// insisted on one -- a bot, a script, a name an operator needs to
+    /// be exact.
+    ///
+    /// `None` is an open seat, and it is the ordinary case (D75): the
+    /// person redeeming picks their own username. D46's rule that
+    /// nobody's real name is frozen into the op log by somebody else is
+    /// not weakened by that, it is the reason for it. The log keeps
+    /// `OpEntry::channel` forever and a signature covers it, so the one
+    /// string about a person that can never be withdrawn should be the
+    /// one they chose knowing that, rather than one an operator typed
+    /// on their behalf or one this node invented for them.
+    user: Option<String>,
     /// Readable name the redeemed account carries (D46), when the issuer
     /// gave one. Travels on the invite because the person redeeming it
     /// does not choose it — the issuer did.
@@ -306,9 +340,12 @@ pub struct RequestSummary {
 /// Deliberately not the whole stored invite: `secret_hash` has no business
 /// leaving the store, and `issued_at` says nothing a holder needs.
 pub struct InviteSummary {
-    /// The account name redemption will create. Chosen by the issuer at
-    /// minting, never by the holder.
-    pub user: String,
+    /// The account name redemption will create, when the issuer fixed
+    /// one at minting.
+    ///
+    /// `None` is the ordinary case (D75): an open seat, whose holder
+    /// picks their own username on the page that redeems it.
+    pub user: Option<String>,
     /// Readable name the account will carry (D46), when the issuer set one.
     pub display_name: Option<String>,
     /// The grants that account will be issued, as `<repo> <level>`.
@@ -565,7 +602,11 @@ impl Accounts {
         let presented = hash(secret);
         let state = self.state.read().expect("accounts read lock");
         if let Some(account) = state.accounts.get(user) {
-            if ct_eq(account.token_hash.as_bytes(), presented.as_bytes()) {
+            // A passwordless account (D75) matches nothing here, and
+            // the compare still runs against a fixed string so that
+            // "no password" and "wrong password" cost the same.
+            let stored = account.token_hash.as_deref().unwrap_or(NO_TOKEN);
+            if account.token_hash.is_some() && ct_eq(stored.as_bytes(), presented.as_bytes()) {
                 return Some(Principal::Account(user.to_string()));
             }
             return None;
@@ -578,6 +619,35 @@ impl Accounts {
             .then(|| Principal::Invite(user.to_string()))
     }
 
+    /// Why `user` cannot be issued, or `None` if it can.
+    ///
+    /// One answer for the two moments that ask it -- minting an invite
+    /// that fixes a name, and redeeming one into a name the holder
+    /// chose (D75). They used to be one copy each, and the second was
+    /// the one a person actually reads, since it is the one that
+    /// answers somebody typing a name into a box.
+    fn name_taken(&self, state: &State, user: &str) -> Option<String> {
+        if state.accounts.contains_key(user) {
+            return Some(format!("`{user}` is taken"));
+        }
+        if self.reserved.contains(user) {
+            return Some(format!(
+                "`{user}` is already an operator credential; the auth file owns that name"
+            ));
+        }
+        // Names are never reused. See `State::retired`: the log has this
+        // string frozen into every channel the old holder wrote under,
+        // and issuing it again transfers their attribution to somebody
+        // else with nothing able to tell them apart afterwards.
+        if state.retired.contains(user) {
+            return Some(format!(
+                "`{user}` was held by somebody else and is never reused: the op log still \
+                 attributes that name's history to whoever had it. Choose another."
+            ));
+        }
+        None
+    }
+
     /// Mints an invite for the account described by `body`, as `issuer`.
     ///
     /// Returns the API's `(status, json)`. The secret half is in the
@@ -585,13 +655,23 @@ impl Accounts {
     /// that is lost is reissued rather than recovered.
     #[must_use]
     pub fn invite(&self, issuer: &str, body: &serde_json::Value) -> (u16, String) {
-        // D46: which field names the account decides whether the log
-        // will carry a person's name forever. `user` is the pre-D46
-        // spelling and still means "this exact string is the principal",
-        // so it is what an operator credential or a bot wants.
-        // `display_name` mints an opaque handle and keeps the readable
-        // name in the store, where revoking can delete it.
-        let (user, display_name) = match (
+        // Which field names the account decides who chooses the one
+        // string about a person the op log can never withdraw.
+        //
+        // `user` still means "this exact string is the principal", which
+        // is what a bot or a script wants and is the only way an issuer
+        // fixes a name. `display_name` no longer mints a handle (D75):
+        // it records what to call somebody and leaves the seat open, so
+        // the person redeeming picks their own username. Neither is an
+        // open seat with nothing written down, which is what a link
+        // handed to somebody you have not met yet is.
+        //
+        // D46 is not weakened by that; it is the reason for it. The rule
+        // was that nobody's real name gets frozen into the log by
+        // somebody else. Minting a handle satisfied it by letting *this
+        // node* choose instead of the operator, which is one step better
+        // and one step short: the person themselves never got asked.
+        let (seat, display_name) = match (
             body.get("user").and_then(serde_json::Value::as_str),
             body.get("display_name").and_then(serde_json::Value::as_str),
         ) {
@@ -601,35 +681,31 @@ impl Accounts {
                      decisions about what the log records forever",
                 )
             }
-            (Some(user), None) => (user.to_string(), None),
+            (Some(user), None) => (Some(user.to_string()), None),
             (None, Some(name)) => {
                 if let Err(e) = validate_display_name(name) {
                     return bad_request(&e);
                 }
-                let state = self.state.read().expect("accounts read lock");
-                let taken = |candidate: &str| {
-                    state.accounts.contains_key(candidate)
-                        || state.retired.contains(candidate)
-                        || self.reserved.contains(candidate)
-                };
-                let Some(handle) = mint_handle(&taken) else {
-                    drop(state);
-                    return server_error("could not mint a free account handle");
-                };
-                drop(state);
-                (handle, Some(name.to_string()))
+                (None, Some(name.to_string()))
             }
-            (None, None) => return bad_request("`user` or `display_name` is required"),
+            (None, None) => (None, None),
         };
-        let user = user.as_str();
-        if let Err(e) = validate_username(user) {
-            return bad_request(&e);
+        if let Some(user) = seat.as_deref() {
+            if let Err(e) = validate_username(user) {
+                return bad_request(&e);
+            }
+            if self.reserved.contains(user) {
+                return bad_request(&format!(
+                    "`{user}` is already an operator credential; the auth file owns that name"
+                ));
+            }
         }
-        if self.reserved.contains(user) {
-            return bad_request(&format!(
-                "`{user}` is already an operator credential; the auth file owns that name"
-            ));
-        }
+        // An open seat has no user to grade a grant against yet, and
+        // `validate_grant` uses the name only to build a line for
+        // `Acl::parse` -- what it returns is the `<target> <level>` half,
+        // which no name appears in. So a placeholder is graded here and
+        // the real name is graded again at redemption, where it exists.
+        let grading_name = seat.as_deref().unwrap_or(OPEN_SEAT);
         let grants = match body.get("grants") {
             Some(serde_json::Value::Array(items)) => {
                 let mut grants = Vec::new();
@@ -637,7 +713,7 @@ impl Accounts {
                     let Some(text) = item.as_str() else {
                         return bad_request("each grant must be a string, `<repo|*> <read|write>`");
                     };
-                    match validate_grant(user, text) {
+                    match validate_grant(grading_name, text) {
                         Ok(grant) => grants.push(grant),
                         Err(e) => return bad_request(&e),
                     }
@@ -665,26 +741,25 @@ impl Accounts {
         };
 
         let mut state = self.state.write().expect("accounts write lock");
-        if state.accounts.contains_key(user) {
-            return conflict(&format!("`{user}` already has an account; revoke it first"));
-        }
-        // Names are never reused. See `State::retired`: the log has this
-        // string frozen into every channel the old holder wrote under,
-        // and issuing it again transfers their attribution to somebody
-        // else with nothing able to tell them apart afterwards.
-        if state.retired.contains(user) {
-            return conflict(&format!(
-                "`{user}` was revoked and is never reused: the op log still attributes that \
-                 name's history to whoever held it. Choose another name."
-            ));
-        }
         state
             .invites
             .retain(|_, invite| invite.expires_at > now_secs());
-        if state.invites.values().any(|invite| invite.user == user) {
-            return conflict(&format!(
-                "`{user}` already has an invite outstanding; revoke it first"
-            ));
+        // Only a seat somebody claimed can already be taken. An open one
+        // is checked at redemption instead, which is the only moment the
+        // name exists.
+        if let Some(user) = seat.as_deref() {
+            if let Some(taken) = self.name_taken(&state, user) {
+                return conflict(&taken);
+            }
+            if state
+                .invites
+                .values()
+                .any(|invite| invite.user.as_deref() == Some(user))
+            {
+                return conflict(&format!(
+                    "`{user}` already has an invite outstanding; revoke it first"
+                ));
+            }
         }
         let id = format!("{INVITE_PREFIX}{}", mint_secret());
         let secret = mint_secret();
@@ -693,7 +768,7 @@ impl Accounts {
             id.clone(),
             Invite {
                 secret_hash: hash(&secret),
-                user: user.to_string(),
+                user: seat.clone(),
                 display_name: display_name.clone(),
                 grants: grants.clone(),
                 expires_at,
@@ -709,13 +784,10 @@ impl Accounts {
             200,
             serde_json::json!({
                 "format_version": FORMAT_VERSION,
-                // The principal, which is the minted handle when the
-                // issuer sent a `display_name` (D46). Returned because
-                // this is the only moment the issuer learns it, and they
-                // need it to write an ACL line — the store is the only
-                // other place the pairing exists, and deleting the
-                // account is meant to destroy it.
-                "user": user,
+                // The principal, when the issuer fixed one. `null` on
+                // an open seat (D75), because the answer does not exist
+                // yet: the person redeeming has not picked it.
+                "user": seat,
                 "display_name": display_name,
                 "invite_id": id,
                 // The two halves as one basic-auth pair, because that is
@@ -912,22 +984,18 @@ impl Accounts {
                 r#"{"error":"no such request; it may have expired or been declined"}"#.to_string(),
             );
         };
-        let taken = |candidate: &str| {
-            state.accounts.contains_key(candidate)
-                || state.retired.contains(candidate)
-                || self.reserved.contains(candidate)
-        };
-        let Some(user) = mint_handle(&taken) else {
-            return server_error("could not mint a free account handle");
-        };
-        // Validated against the handle this grant just minted, not
-        // against a name from the body: `validate_grant` refuses a grant
-        // that would hand the store node-wide authority, and it can only
-        // do that if the user it is grading is the user that will hold
-        // it.
+        // The seat stays open (D75): the person who asked picks their
+        // own username when they redeem. Minting a handle here would be
+        // this node choosing the one string about them the op log can
+        // never withdraw, on behalf of somebody who is right there and
+        // can be asked.
+        //
+        // Grants are graded against the placeholder for the same reason
+        // `invite` does, and graded again at redemption once the name
+        // exists.
         let mut grants = Vec::new();
         for text in &raw_grants {
-            match validate_grant(&user, text) {
+            match validate_grant(OPEN_SEAT, text) {
                 Ok(grant) => grants.push(grant),
                 Err(e) => return bad_request(&e),
             }
@@ -939,7 +1007,7 @@ impl Accounts {
             id.to_string(),
             Invite {
                 secret_hash: request.secret_hash.clone(),
-                user: user.clone(),
+                user: None,
                 display_name: Some(request.display_name.clone()),
                 grants: grants.clone(),
                 expires_at,
@@ -955,7 +1023,8 @@ impl Accounts {
             200,
             serde_json::json!({
                 "format_version": FORMAT_VERSION,
-                "user": user,
+                // No name yet, and that is the design: they pick it.
+                "user": serde_json::Value::Null,
                 "display_name": request.display_name,
                 "invite_id": id,
                 "grants": grants,
@@ -1029,6 +1098,21 @@ impl Accounts {
             },
             Some(_) => return bad_request("`ssh_key` must be a string"),
         };
+        // The passkey a passwordless account is created with (D75).
+        //
+        // Enrolled *by* the redemption rather than after it, which is
+        // what makes the whole route passwordless: the invite link is
+        // the credential that authorizes this one act, and what it
+        // leaves behind is an account whose credential is an
+        // authenticator. There is no moment in between where a password
+        // has to exist for the person to sign in and enrol one.
+        let passkey = match body.get("passkey") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => match parse_enrolment(value) {
+                Ok(key) => Some(key),
+                Err(e) => return bad_request(&e),
+            },
+        };
         let mut state = self.state.write().expect("accounts write lock");
         let Some(invite) = state.invites.get(invite_id).cloned() else {
             return (404, error_json("no such invite"));
@@ -1038,29 +1122,55 @@ impl Accounts {
             let _ = self.commit(&state);
             return (403, error_json("this invite has expired"));
         }
-        if state.accounts.contains_key(&invite.user) {
-            return conflict("that account already exists");
+        // Who this becomes. The issuer decided only when they insisted
+        // (D75); otherwise the person redeeming is being asked, here,
+        // for the one string about them the op log can never withdraw.
+        let user = match invite.user.clone() {
+            Some(fixed) => fixed,
+            None => {
+                let Some(chosen) = body.get("user").and_then(serde_json::Value::as_str) else {
+                    return bad_request("`user` is required: this invite lets you pick your name");
+                };
+                let chosen = chosen.trim().to_string();
+                if let Err(e) = validate_username(&chosen) {
+                    return bad_request(&e);
+                }
+                chosen
+            }
+        };
+        // The auth file, the roster and the retired list can all have
+        // gained that name between minting and redemption -- and on an
+        // open seat none of them was ever consulted, because the name
+        // did not exist. Issuing anyway would create an account nothing
+        // can use: authentication consults the operator's file first, so
+        // it would be a credential that authenticates as somebody else.
+        if let Some(taken) = self.name_taken(&state, &user) {
+            return conflict(&taken);
         }
-        // The auth file can have gained that name between minting and
-        // redemption. Issuing anyway would create an account nothing can
-        // ever use, because authentication consults the operator's file
-        // first — a credential that authenticates as somebody else.
-        if self.reserved.contains(&invite.user) {
-            return conflict("that name became an operator credential; ask for a new invite");
+        if let Some(key) = passkey.as_ref() {
+            if credential_enrolled(&state, &key.credential_id) {
+                return conflict("that credential is already enrolled");
+            }
         }
-        // Defence in depth, and measured to be exactly that: no sequence
-        // of API calls can reach this line with a retired name, because
-        // `revoke` drops every invite naming the user in the same locked
-        // write that retires it, and `invite` refuses a retired name.
-        // Deleting this check leaves the whole suite green — proved by
-        // mutation on 2026-08-14 rather than assumed — so it is not a
-        // guard any test can be said to hold. What it does cover is the
-        // store edited by hand while the node is stopped, which D36 keeps
-        // as the emergency revocation path, and a future `revoke` that
-        // stops dropping invites. It is kept for the second reason more
-        // than the first: this is the line that would notice.
-        if state.retired.contains(&invite.user) {
-            return conflict("that name has been revoked and is never reused; ask for another");
+        if state
+            .invites
+            .iter()
+            .any(|(id, other)| id != invite_id && other.user.as_deref() == Some(user.as_str()))
+        {
+            return conflict(&format!(
+                "`{user}` is spoken for by an invite not yet redeemed"
+            ));
+        }
+        // The grants were graded against a placeholder when the seat was
+        // open, so they are graded again now that the name exists. An
+        // issuer cannot smuggle `@node` past the first check and have it
+        // land here, and this is the line that says so.
+        let mut grants = Vec::with_capacity(invite.grants.len());
+        for grant in &invite.grants {
+            match validate_grant(&user, grant) {
+                Ok(checked) => grants.push(checked),
+                Err(e) => return bad_request(&e),
+            }
         }
         // The bound channel always carries the account name as its
         // operator prefix. That is not decoration: the reviewer draw
@@ -1072,11 +1182,11 @@ impl Accounts {
         let channel = match actor_key.as_ref() {
             None => None,
             Some(_) => match body.get("channel") {
-                None | Some(serde_json::Value::Null) => Some(format!("{}/agent", invite.user)),
+                None | Some(serde_json::Value::Null) => Some(format!("{user}/agent")),
                 Some(serde_json::Value::String(channel)) => {
                     match channel.split_once('/') {
                         Some((prefix, suffix))
-                            if prefix == invite.user
+                            if prefix == user
                                 && !suffix.is_empty()
                                 && suffix.len() <= 32
                                 && suffix
@@ -1087,8 +1197,7 @@ impl Accounts {
                         }
                         _ => {
                             return bad_request(&format!(
-                                "`channel` must be `{}/<name>`, where <name> is letters, digits, `-` or `_`",
-                                invite.user
+                                "`channel` must be `{user}/<name>`, where <name> is letters, digits, `-` or `_`"
                             ))
                         }
                     }
@@ -1105,19 +1214,22 @@ impl Accounts {
                 return conflict(&e);
             }
         }
-        let token = mint_secret();
+        // A passkey and a token are alternatives, not a pair (D75).
+        // Minting one anyway "just in case" would leave a live password
+        // in the store that its holder has never seen and cannot rotate
+        // knowingly, which is the opposite of what the passwordless
+        // route is for. The account page mints one on request, when
+        // there is something -- git, the CLI -- that actually needs it.
+        let token = passkey.is_none().then(mint_secret);
         state.accounts.insert(
-            invite.user.clone(),
+            user.clone(),
             Account {
-                token_hash: hash(&token),
-                display_name: invite.display_name.clone(),
-                grants: invite.grants.clone(),
+                token_hash: token.as_deref().map(hash),
+                display_name: invite.display_name,
+                grants: grants.clone(),
                 ssh_keys: ssh_key.into_iter().collect(),
                 actor_key: channel.clone().zip(actor_key.clone()),
-                // Enrolment is a later, separately authenticated act:
-                // redemption proves you hold the invite, not that you
-                // hold an authenticator.
-                passkeys: Vec::new(),
+                passkeys: passkey.into_iter().collect(),
                 created_at: now_secs(),
             },
         );
@@ -1127,9 +1239,52 @@ impl Accounts {
         if let Err(e) = self.commit(&state) {
             return server_error(&e);
         }
-        // Moved rather than cloned: the record is already this function's
-        // own copy, and the store keeps its own.
-        let (user, grants) = (invite.user, invite.grants);
+        drop(state);
+        (
+            200,
+            serde_json::json!({
+                "format_version": FORMAT_VERSION,
+                "user": user,
+                // `null` on the passwordless route, and the caller must
+                // read it as "there is no password" rather than as a
+                // field it can go and look for elsewhere.
+                "token": token,
+                "grants": grants,
+                "channel": channel,
+                "actor_key_bound": actor_key.is_some(),
+                "note": "a token, when there is one, is shown once; the node stores only its hash.",
+            })
+            .to_string(),
+        )
+    }
+
+    /// Mints a fresh token for `user`, replacing any it had (D75).
+    ///
+    /// The credential git and the CLI need, for an account whose sign-in
+    /// credential is a passkey. Made on request rather than at
+    /// redemption, because a secret nobody asked for is a secret nobody
+    /// looks after -- and because the person who wants one is, by then,
+    /// somebody this node has already authenticated.
+    ///
+    /// **It replaces.** One account, one token, so a rotation is the
+    /// same act as a first mint and there is no set of live credentials
+    /// to keep track of. The caller is told, because the old one stops
+    /// working the moment this returns.
+    #[must_use]
+    pub fn mint_token(&self, user: &str) -> (u16, String) {
+        let mut state = self.state.write().expect("accounts write lock");
+        let Some(account) = state.accounts.get_mut(user) else {
+            return (
+                404,
+                error_json("only an issued account can hold a token; yours is not one"),
+            );
+        };
+        let replaced = account.token_hash.is_some();
+        let token = mint_secret();
+        account.token_hash = Some(hash(&token));
+        if let Err(e) = self.commit(&state) {
+            return server_error(&e);
+        }
         drop(state);
         (
             200,
@@ -1137,9 +1292,7 @@ impl Accounts {
                 "format_version": FORMAT_VERSION,
                 "user": user,
                 "token": token,
-                "grants": grants,
-                "channel": channel,
-                "actor_key_bound": actor_key.is_some(),
+                "replaced": replaced,
                 "note": "shown once; the node stores only its hash. Use it as the password in basic auth.",
             })
             .to_string(),
@@ -1160,7 +1313,9 @@ impl Accounts {
         let mut state = self.state.write().expect("accounts write lock");
         let had_account = state.accounts.remove(user).is_some();
         let before = state.invites.len();
-        state.invites.retain(|_, invite| invite.user != user);
+        state
+            .invites
+            .retain(|_, invite| invite.user.as_deref() != Some(user));
         let invites_dropped = before - state.invites.len();
         if !had_account && invites_dropped == 0 {
             return (404, error_json("no such account"));
@@ -1212,26 +1367,16 @@ impl Accounts {
     /// record, which is the case for an `--auth-file` operator.
     #[must_use]
     pub fn enroll_passkey(&self, user: &str, body: &serde_json::Value) -> (u16, String) {
-        let field = |name: &str| {
-            body.get(name)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+        let key = match parse_enrolment(body) {
+            Ok(key) => key,
+            Err(e) => return bad_request(&e),
         };
-        let (Some(credential_id), Some(public_key)) = (field("credential_id"), field("public_key"))
-        else {
-            return bad_request("`credential_id` and `public_key` are required");
-        };
-        let label = field("label").unwrap_or("passkey");
-        if let Err(e) = validate_passkey_id(credential_id) {
-            return bad_request(&e);
-        }
-        if let Err(e) = validate_label(label) {
-            return bad_request(&e);
-        }
-        if let Err(e) = validate_p256_spki(public_key) {
-            return bad_request(&e);
-        }
+        let (credential_id, public_key, label) = (
+            key.credential_id.clone(),
+            key.public_key.clone(),
+            key.label.clone(),
+        );
+        let _ = &public_key;
 
         let mut state = self.state.write().expect("accounts write lock");
         // Store-wide, not just this account's. A credential id names one
@@ -1243,11 +1388,7 @@ impl Accounts {
         // id together with their public key -- neither of which is secret,
         // and the roster prints both -- would let their next sign-in
         // verify correctly and open a session on the wrong account.
-        if state
-            .accounts
-            .values()
-            .any(|a| a.passkeys.iter().any(|k| k.credential_id == credential_id))
-        {
+        if credential_enrolled(&state, &credential_id) {
             return conflict("that credential is already enrolled");
         }
         let Some(account) = state.accounts.get_mut(user) else {
@@ -1262,12 +1403,7 @@ impl Accounts {
         if account.passkeys.len() >= MAX_PASSKEYS {
             return conflict("this account already holds the maximum number of passkeys");
         }
-        account.passkeys.push(Passkey {
-            credential_id: credential_id.to_string(),
-            public_key: public_key.to_string(),
-            label: label.to_string(),
-            created_at: now_secs(),
-        });
+        account.passkeys.push(key);
         let enrolled = account.passkeys.len();
         if let Err(e) = self.commit(&state) {
             return server_error(&e);
@@ -1404,6 +1540,21 @@ impl Accounts {
             .get(user)
             .map(|account| render_passkeys(&account.passkeys))
             .unwrap_or_default()
+    }
+
+    /// Whether `user` holds a token at all (D75).
+    ///
+    /// False for a passwordless account, and false for a name with no
+    /// account record. The account page asks so it can say "make one"
+    /// rather than "replace the one you have".
+    #[must_use]
+    pub fn has_token(&self, user: &str) -> bool {
+        self.state
+            .read()
+            .expect("accounts read lock")
+            .accounts
+            .get(user)
+            .is_some_and(|account| account.token_hash.is_some())
     }
 
     /// Whether this name has an account record at all, which is what
@@ -1752,6 +1903,12 @@ pub fn validate_username(user: &str) -> Result<(), String> {
     if user.starts_with(REQUEST_PREFIX) {
         return Err(format!("a username may not start with `{REQUEST_PREFIX}`"));
     }
+    // The placeholder an open seat's grants are graded against (D75).
+    // Refusing it here is what makes it safe to use as one: no
+    // redemption can land on the name a validity check borrowed.
+    if user == OPEN_SEAT {
+        return Err(format!("`{OPEN_SEAT}` is reserved"));
+    }
     Ok(())
 }
 
@@ -1833,37 +1990,57 @@ fn mint_secret() -> String {
 /// collision check is — so it can be raised later without a migration.
 const HANDLE_CHARS: usize = 12;
 
-/// A fresh account handle: opaque, and from the same OS-random source
-/// every other secret here comes from (D46).
+// Handles used to be minted here, for an issuer who sent a
+// `display_name` (D46). Nothing mints one any more: the person redeeming
+// picks their own username (D75), which satisfies D46's rule more
+// directly than choosing for them ever did. `HANDLE_CHARS` and
+// `looks_like_a_handle` stay, because accounts issued before D75 carry
+// handles and a display name must still not be spelled like one.
+
+/// One enrolment request, validated into the record it becomes.
 ///
-/// **Deliberately derived from nothing.** A handle computed from the
-/// person — a hash of their name or email — would be stable, which
-/// sounds like a feature and is the whole vulnerability: anyone holding
-/// a guess at the input can confirm it against the log forever, and the
-/// log is the thing we cannot take back. Random costs a collision check
-/// and buys the property.
+/// Shared by `POST /api/accounts/passkey` and by redemption (D75), which
+/// enrols the first passkey as part of creating the account. Two copies
+/// of these four checks would be two places for a credential id's length
+/// bound to be right.
+fn parse_enrolment(body: &serde_json::Value) -> Result<Passkey, String> {
+    let field = |name: &str| {
+        body.get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let (Some(credential_id), Some(public_key)) = (field("credential_id"), field("public_key"))
+    else {
+        return Err("`credential_id` and `public_key` are required".to_string());
+    };
+    let label = field("label").unwrap_or("passkey");
+    validate_passkey_id(credential_id)?;
+    validate_label(label)?;
+    validate_p256_spki(public_key)?;
+    Ok(Passkey {
+        credential_id: credential_id.to_string(),
+        public_key: public_key.to_string(),
+        label: label.to_string(),
+        created_at: now_secs(),
+    })
+}
+
+/// Whether any account on this node already holds `credential_id`.
 ///
-/// `taken` must answer for live accounts, retired handles **and**
-/// operator credentials from the auth file. Returns `None` if it cannot
-/// find a free handle, which the caller must treat as a refusal rather
-/// than fall back to a name.
-fn mint_handle(taken: &dyn Fn(&str) -> bool) -> Option<String> {
-    for _ in 0..8 {
-        let minted = mint_secret();
-        // `mint_secret` returns a self-describing hash, `<codec>-<hex>`
-        // (invariant 2). The codec byte is the same on every one of
-        // them, so it carries no entropy and only costs width here.
-        let handle: String = minted
-            .rsplit('-')
-            .next()?
-            .chars()
-            .take(HANDLE_CHARS)
-            .collect();
-        if handle.len() == HANDLE_CHARS && !taken(&handle) {
-            return Some(handle);
-        }
-    }
-    None
+/// Store-wide, not per account. A credential id names one credential on
+/// one authenticator, so the same id under two accounts is a claim that
+/// cannot be true of both. It also has a consequence at sign-in, where
+/// the credential id is the only name in the assertion and the account
+/// is looked up from it: scoped per account, enrolling somebody else's
+/// credential id together with their public key -- neither of which is
+/// secret, and the roster prints both -- would let their next sign-in
+/// verify correctly and open a session on the wrong account.
+fn credential_enrolled(state: &State, credential_id: &str) -> bool {
+    state
+        .accounts
+        .values()
+        .any(|a| a.passkeys.iter().any(|k| k.credential_id == credential_id))
 }
 
 /// BLAKE3 of a secret, hex, with its codec byte — the same envelope
@@ -1923,6 +2100,11 @@ fn render_state(state: &State) -> String {
         .map(|(user, account)| {
             let mut record = serde_json::json!({
                 "user": user,
+                // `null` on a passwordless account (D75). Written
+                // rather than omitted, unlike the fields above: this one
+                // is the difference between an account with a password
+                // and one without, and an operator reading the store to
+                // answer that question should find it stated.
                 "token_hash": account.token_hash,
                 "grants": account.grants,
                 "ssh_keys": account.ssh_keys,
@@ -1960,12 +2142,20 @@ fn render_state(state: &State) -> String {
             let mut record = serde_json::json!({
                 "invite_id": id,
                 "secret_hash": invite.secret_hash,
-                "user": invite.user,
                 "grants": invite.grants,
                 "expires_at": invite.expires_at,
                 "issued_by": invite.issued_by,
                 "issued_at": invite.issued_at,
             });
+            // Emitted only when the issuer fixed a seat (D75), so an
+            // open one renders the record it always did minus a key
+            // rather than plus a `null`.
+            if let Some(user) = invite.user.as_deref() {
+                record
+                    .as_object_mut()
+                    .expect("invite record is an object")
+                    .insert("user".into(), serde_json::json!(user));
+            }
             if let Some(name) = invite.display_name.as_deref() {
                 record
                     .as_object_mut()
@@ -2047,16 +2237,20 @@ fn parse_state(text: &str) -> Result<State, String> {
         .map(Vec::as_slice)
         .unwrap_or_default()
     {
-        let (Some(user), Some(token_hash)) = (
-            entry.get("user").and_then(serde_json::Value::as_str),
-            entry.get("token_hash").and_then(serde_json::Value::as_str),
-        ) else {
-            return Err("an account record is missing `user` or `token_hash`".to_string());
+        let Some(user) = entry.get("user").and_then(serde_json::Value::as_str) else {
+            return Err("an account record is missing `user`".to_string());
         };
+        // Absent on a passwordless account (D75), and that decodes as
+        // "there is no password" rather than as a broken record. Every
+        // account written before it has one, so this stays additive.
+        let token_hash = entry
+            .get("token_hash")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
         state.accounts.insert(
             user.to_string(),
             Account {
-                token_hash: token_hash.to_string(),
+                token_hash,
                 // Absent on every account issued before D46, and that
                 // decodes as `None` rather than as the username: the
                 // point of the field is that it can be deleted, and a
@@ -2089,20 +2283,23 @@ fn parse_state(text: &str) -> Result<State, String> {
         .map(Vec::as_slice)
         .unwrap_or_default()
     {
-        let (Some(id), Some(secret_hash), Some(user)) = (
+        let (Some(id), Some(secret_hash)) = (
             entry.get("invite_id").and_then(serde_json::Value::as_str),
             entry.get("secret_hash").and_then(serde_json::Value::as_str),
-            entry.get("user").and_then(serde_json::Value::as_str),
         ) else {
-            return Err(
-                "an invite record is missing `invite_id`, `secret_hash` or `user`".to_string(),
-            );
+            return Err("an invite record is missing `invite_id` or `secret_hash`".to_string());
         };
+        // Absent is an open seat (D75). Every invite written before it
+        // names one, so an older store decodes exactly as it always did.
+        let user = entry
+            .get("user")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
         state.invites.insert(
             id.to_string(),
             Invite {
                 secret_hash: secret_hash.to_string(),
-                user: user.to_string(),
+                user,
                 display_name: entry
                     .get("display_name")
                     .and_then(serde_json::Value::as_str)
