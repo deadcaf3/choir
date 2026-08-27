@@ -1088,6 +1088,25 @@ fn the_linux_installer_carries_the_same_policy_wiring() {
             source.contains("\"$TLS_KEY\" \"$ACL\""),
             "{path} never passes the ACL slot to its renderer"
         );
+        // D71's marker, held to the same standard and for the same reason
+        // the ACL is: an installer that reads a marker and forgets to pass
+        // it produces a node the operator believes has the feature on.
+        assert!(
+            source.contains("passkeys.enabled"),
+            "{path} never reads the WebAuthn marker"
+        );
+        assert!(
+            source.contains("\"$BEHIND_TLS_PROXY\" \"$WEBAUTHN\""),
+            "{path} never passes the WebAuthn slot to its renderer"
+        );
+        // And it refuses rather than quietly dropping the switch when the
+        // accounts file it depends on is missing. A marker an installer
+        // ignores is worse than one it rejects: the operator has said what
+        // they want and been told nothing.
+        assert!(
+            source.contains("passkeys are enrolled on issued accounts"),
+            "{path} accepts the WebAuthn marker without an accounts file"
+        );
     }
 }
 

@@ -35,6 +35,7 @@ BIN="$BIN_DIR/choir-node"
 CHOIR="$BIN_DIR/choir"
 POLICY_MARKER="$STATE/review-gates.enabled"
 SCOPE_MARKER="$STATE/scope-required.enabled"
+WEBAUTHN_MARKER="$STATE/passkeys.enabled"
 TLS_MARKER="$STATE/tls.enabled"
 PUBLIC_URL_FILE=$HOME/.choir-public-url
 PROTECTED_REFS="$STATE/protected-refs"
@@ -141,6 +142,20 @@ if [ -f "$PUBLIC_URL_FILE" ] && [ ! -f "$TLS_MARKER" ] \
   && case "$(sed -n 1p "$PUBLIC_URL_FILE")" in https://*) true ;; *) false ;; esac; then
   BEHIND_TLS_PROXY="behind-tls-proxy"
 fi
+# D71 WebAuthn, marker-driven like the scope gate: the ceremony page,
+# enrolment, and the browser write path are one switch, and it needs an
+# accounts file to be worth anything since a credential is enrolled on an
+# issued account. Refused rather than silently ignored when that file is
+# absent, because a marker an installer quietly drops is a feature an
+# operator believes they turned on.
+WEBAUTHN=""
+if [ -f "$WEBAUTHN_MARKER" ]; then
+  [ -n "$ACCOUNTS" ] || {
+    echo "$WEBAUTHN_MARKER is present but there is no $STATE/accounts.jsonl; passkeys are enrolled on issued accounts" >&2
+    exit 1
+  }
+  WEBAUTHN=on
+fi
 # TLS marker: two lines, cert path then key path, both readable by this
 # user. Once present, every reinstall keeps the public TLS bind — the
 # same one-way marker discipline as the review and scope gates, and the
@@ -171,16 +186,19 @@ if [ -f "$POLICY_MARKER" ]; then
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" > "$UNIT"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" > "$UNIT"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" > "$UNIT"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" > "$UNIT"
 fi
 if [ -n "$TLS_CERT" ]; then
   echo "TLS public bind enabled ($TLS_MARKER): serving 0.0.0.0:$PORT with $TLS_CERT"
+fi
+if [ -n "$WEBAUTHN" ]; then
+  echo "WebAuthn enabled ($WEBAUTHN_MARKER): browser sign-in and enrolment are offered"
 fi
 if [ -n "$ACL" ]; then
   echo "per-repository authorization enabled ($ACL): ungranted access is refused"

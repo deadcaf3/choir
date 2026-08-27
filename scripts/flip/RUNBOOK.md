@@ -72,6 +72,20 @@ step, not just a flag: every submitter must sign a scope from then on.
 `choir submit` (and every CLI verb, MCP included) and the bridge already
 do; anything hand-rolling `/api/submit` with `curl` must first read
 `log.node` and `log.head` from `GET /api/view` and sign them into the op.
+
+To offer browser sign-in (D39, D71), create `~/.choir/passkeys.enabled`
+(mode 0600) beside an existing `~/.choir/accounts.jsonl` and rerun the
+installer. The node then serves the ceremony page in place of the
+browser's own credential dialog, accepts enrolment on `/account`, and
+verifies assertions on the write path. The installer refuses the marker
+without an accounts file rather than dropping the switch quietly: a
+passkey is enrolled on an issued account, and a marker an installer
+ignores is a feature the operator believes they turned on.
+
+Removing the marker and reinstalling turns it back off, and every
+enrolled credential stays in the accounts file for when it is turned on
+again. Sessions do not survive either way: they are held in memory and a
+restart ends them.
 `/api/view.log.scope_required` reports whether the gate is on. Removing
 the marker and reinstalling returns to transport containment (loopback
 bind plus the auth token), which is D26's documented fallback, not a
