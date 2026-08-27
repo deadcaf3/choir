@@ -162,6 +162,16 @@ choir-node ./repos 8417 --auth-file ~/.choir/auth --acl-file ~/.choir/acl \
   --ssh-authorized-keys ./repos/.choir/authorized_keys
 ```
 
+### The console (D72)
+
+`/people` is the same three operations as a page, for a credential holding `@node write`: the queue of people asking for access, a button to let one of them in, and a form that mints an invite link to send. It renders plain forms and no script, because nothing it does reaches the op log.
+
+A stranger who reaches the node's front page can ask for access there. Nothing is sent to them and no address is collected: they keep the link the page gives them, and when you grant the request that same link becomes their invite. Each request costs a proof of work in the asker's browser, and the queue is capped at 64 unanswered requests, because the endpoint that fills it needs no credential.
+
+A `POST` whose `Origin` names another site is refused, on the console and on the JSON endpoints below. A browser holding cached Basic credentials will re-present them to any page that asks, so without that check a link could mint an invite in your name.
+
+### The same three by hand
+
 Mint an invite, as a credential holding `@node write`:
 
 ```bash
@@ -178,7 +188,7 @@ curl -u "<INVITE>" -X POST https://<HOST>/api/accounts/redeem \
 
 That answers, once, with the token to clone with (`https://bob:<TOKEN>@<HOST>/owner/demo.git`) and registers the key for SSH. Invites expire (a day by default, `expires_in_secs` to choose) and are single use.
 
-`GET /api/accounts` lists who holds what, and `POST /api/accounts/revoke` with `{"user":"bob"}` deletes an account: the token stops authenticating on the next request, the grants leave the table, and the key leaves the generated `authorized_keys`. Revocation is deletion rather than a record, which is one reason none of this is in the op log: the log is append-only and cannot forget a credential.
+`GET /api/accounts` lists who holds what -- accounts, live invites and the pending request queue -- `POST /api/accounts/request/grant` with `{"request_id":"ask-...","grants":[...]}` answers one of those requests, `POST /api/accounts/request/decline` drops it, and `POST /api/accounts/revoke` with `{"user":"bob"}` deletes an account: the token stops authenticating on the next request, the grants leave the table, and the key leaves the generated `authorized_keys`. Revocation is deletion rather than a record, which is one reason none of this is in the op log: the log is append-only and cannot forget a credential.
 
 Two rules worth knowing before you rely on it:
 

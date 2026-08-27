@@ -304,6 +304,7 @@ dependencies = [
  "choir-view",
  "pulldown-cmark",
  "serde_json",
+ "sha2",
  "tiny_http",
 ]
 

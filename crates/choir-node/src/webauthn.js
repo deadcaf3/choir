@@ -23,7 +23,10 @@
 
   // A browser without WebAuthn keeps the server-rendered page and its
   // `<noscript>` sentence naming the CLI, which is the whole fallback.
-  if (!window.PublicKeyCredential || !navigator.credentials) return;
+  // Checked at the bottom rather than here, because D72's ask ceremony
+  // needs no authenticator: it runs on a browser that has never heard of
+  // a passkey, which is most of the browsers that reach the front door.
+  var webauthn = !!(window.PublicKeyCredential && navigator.credentials);
 
   var hex = function (buf) {
     return Array.prototype.map.call(new Uint8Array(buf), function (b) {
@@ -259,6 +262,104 @@
     });
   };
 
+  // How many leading zero bits a digest shows, tested against what the
+  // node asked for. Byte at a time, because the answer is decided in the
+  // first non-zero byte and nothing here should be clever.
+  var leading = function (bytes, bits) {
+    var whole = bits >> 3;
+    for (var i = 0; i < whole; i++) if (bytes[i] !== 0) return false;
+    var rest = bits & 7;
+    return rest === 0 || (bytes[whole] >> (8 - rest)) === 0;
+  };
+
+  // D72's cost, paid here. `crypto.subtle.digest` is asynchronous per
+  // call, so a naive loop would be both slow and a frozen tab; this hashes
+  // a batch at a time, reports how far it has got, and yields to the event
+  // loop between batches so the page keeps repainting.
+  //
+  // The preimage is `challenge:nonce`, which is the spelling
+  // `choir_node::work::preimage` writes on the other side. A disagreement
+  // about that colon looks exactly like a browser that cannot compute.
+  var stamp = function (challenge, bits, progress) {
+    var enc = new TextEncoder();
+    var nonce = 0;
+    var step = function () {
+      var batch = [];
+      for (var i = 0; i < 256; i++) batch.push(nonce + i);
+      return Promise.all(batch.map(function (n) {
+        return crypto.subtle.digest('SHA-256', enc.encode(challenge + ':' + n));
+      })).then(function (digests) {
+        for (var j = 0; j < digests.length; j++) {
+          if (leading(new Uint8Array(digests[j]), bits)) return String(batch[j]);
+        }
+        nonce += batch.length;
+        progress(nonce);
+        return new Promise(function (done) { setTimeout(done, 0); }).then(step);
+      });
+    };
+    return step();
+  };
+
+  // Asking for access (D72). The form is rendered hidden and unhidden
+  // here, so a reader without script is never shown a button that cannot
+  // work -- they get the `<noscript>` sentence and the operator's address
+  // instead.
+  //
+  // On success this navigates to the claim link rather than printing it.
+  // The address bar is the one place a person already knows how to
+  // bookmark, and the page it lands on explains itself; a link rendered
+  // into a paragraph by this file would be the only copy of the request
+  // living somewhere nobody thinks to save.
+  var ask = function () {
+    var form = document.getElementById('ask');
+    var go = document.getElementById('ask-go');
+    if (!form || !go) return;
+    var say = sayer('ask-said');
+    if (!window.crypto || !crypto.subtle) {
+      // Every other refusal in this file is a sentence in the status
+      // line; this one has to leave the form hidden, because the button
+      // genuinely cannot be made to work here.
+      say('This browser cannot do the arithmetic this node asks for. Use the address above.');
+      return;
+    }
+    form.hidden = false;
+    go.addEventListener('click', function () {
+      var name = document.getElementById('ask-name').value.trim();
+      if (!name) { say('Say what to call you.'); return; }
+      go.disabled = true;
+      say('Working...');
+      fetch('/api/access/challenge', { method: 'POST', credentials: 'same-origin' })
+        .then(function (r) {
+          if (!r.ok) throw new Error('the node issued no challenge');
+          return r.json();
+        })
+        .then(function (issued) {
+          return stamp(issued.challenge, issued.bits, function (tried) {
+            say('Working... ' + tried.toLocaleString() + ' tries');
+          }).then(function (nonce) {
+            return post('/api/access', {
+              display_name: name,
+              about: document.getElementById('ask-about').value,
+              challenge: issued.challenge,
+              nonce: nonce
+            });
+          });
+        })
+        .then(function (r) {
+          return r.json().then(function (answer) {
+            if (r.ok && answer.join_url) { location.assign(answer.join_url); return; }
+            go.disabled = false;
+            say(answer.error || 'That was not accepted.');
+          });
+        })
+        .catch(function (e) { go.disabled = false; say('Not asked: ' + e.message); });
+    });
+  };
+
+  // D72's ask needs no authenticator, so it runs first and
+  // unconditionally.
+  ask();
+  if (!webauthn) return;
   verdict();
   comment();
   enrol();

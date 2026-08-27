@@ -228,7 +228,7 @@ collect. All five now exist and run in the ordinary suite.
 | Test | Claim | Where |
 |---|---|---|
 | BETA-01 | A review gate that cannot enforce anything is refused at startup, all three ways to configure one | `crates/choir-node/tests/it/review_gate_config.rs` |
-| BETA-02 | Under `--read-only-browser` no page renders a mutation control, the review page included | `crates/choir-node/tests/it/browse.rs`, `a_read_only_browser_renders_no_mutation_control_anywhere` |
+| BETA-02 | Under `--read-only-browser` no page renders a mutation control, the review page included, and `/api/prepare` is refused. The flag withholds authorship and not credentials (D73): signing in, enrolling a passkey and answering an access request still work | `crates/choir-node/tests/it/browse.rs`, `a_read_only_browser_renders_no_mutation_control_anywhere`; `crates/choir-node/tests/it/passkeys.rs`, `the_enrolment_page_works_under_a_read_only_browser` |
 | BETA-03 | `/healthz`, `/readyz` and `/metrics` each refuse an anonymous request | `crates/choir-node/tests/limits.rs`, `authenticated_health_readiness_and_metrics_report_independent_checks` |
 | BETA-04 | A private-beta ACL grants no beta user every repository | `scripts/flip/validate_beta_acl.sh`, tested in `crates/choir-cli/tests/it/install_policy.rs` |
 | BETA-05 | The manifest's ceilings are the unit's flags are the numbers the daemon parses | `crates/choir-node/tests/it/beta_limits.rs` |

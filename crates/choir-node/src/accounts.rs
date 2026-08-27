@@ -68,6 +68,46 @@ pub const MAX_INVITE_SECS: u64 = 30 * 86_400;
 /// does.
 pub const INVITE_PREFIX: &str = "invite-";
 
+/// Prefix on an access-request id (D72), so an id says which table it
+/// belongs to without a lookup. Disjoint from [`INVITE_PREFIX`] because
+/// the two live in different maps and a reader comparing a claim link
+/// against a log line should not have to guess which one they are
+/// holding.
+pub const REQUEST_PREFIX: &str = "ask-";
+
+/// How long an unanswered access request survives (D72).
+///
+/// Long, because the person who asked cannot be reminded and an operator
+/// who is away for three weeks should not come back to an empty queue.
+/// Finite, because an unanswered request is a row in a file that nobody
+/// is ever going to answer, and the alternative to a sweep is an
+/// operator deleting rows by hand.
+pub const REQUEST_TTL_SECS: u64 = 30 * 86_400;
+
+/// How long the invite a granted request becomes is good for (D72).
+///
+/// A week rather than [`DEFAULT_INVITE_SECS`]'s day: nobody is standing
+/// by. The asker learns they were granted by revisiting the link they
+/// were given, so the window has to survive them not looking for a
+/// while.
+pub const GRANTED_REQUEST_SECS: u64 = 7 * 86_400;
+
+/// The most unanswered requests this node holds at once (D72).
+///
+/// The endpoint that fills this table is the only one on the node an
+/// unauthenticated caller can use to write to disk, so it needs a
+/// ceiling that is not "the disk". Sixty-four is a queue a person can
+/// actually read; past that the honest answer to the sixty-fifth
+/// stranger is that the operator is not keeping up, which is what the
+/// refusal says.
+pub const MAX_PENDING_REQUESTS: usize = 64;
+
+/// Longest `about` line a request may carry (D72). One line, not a
+/// letter: the operator reads a queue of these, and the decision they
+/// are making is whether to let somebody in, not whether the essay was
+/// good.
+pub const MAX_ABOUT_CHARS: usize = 280;
+
 /// Most WebAuthn credentials one account may enrol (D39). A person has a
 /// laptop, a phone and a hardware key; a hundred is not a person with
 /// many devices, it is a store being filled by something automated.
@@ -207,6 +247,57 @@ struct Invite {
     issued_at: u64,
 }
 
+/// One access request nobody has answered yet (D72).
+///
+/// Deliberately not an [`Invite`] with empty grants. An invite is a
+/// decision already taken and a credential already live; this is neither,
+/// and the two must not be able to be confused by a lookup that forgets
+/// to check a flag. They are separate tables for the same reason
+/// `accounts` and `invites` are.
+///
+/// **It holds no way to reach the asker, on purpose.** An address here
+/// would be a stranger's personal data sitting in an operator's file
+/// forever, collected by an unauthenticated endpoint, to solve a problem
+/// the claim link already solves: the asker keeps the link and comes
+/// back to it, and it starts working when the operator says yes. Nothing
+/// is sent, so nothing needs to be stored to send it to.
+#[derive(Debug, Clone)]
+struct Request {
+    /// BLAKE3 of the secret half of the claim link.
+    secret_hash: String,
+    /// What the asker calls themselves. **Never a principal**: the
+    /// handle is minted when the operator grants, exactly as for an
+    /// invite issued with a `display_name` (D46), so a stranger cannot
+    /// choose the string the op log will carry forever.
+    display_name: String,
+    /// The one line the asker wrote about why.
+    about: String,
+    /// Unix seconds at asking.
+    asked_at: u64,
+    /// Unix seconds after which it is swept.
+    expires_at: u64,
+}
+
+/// One pending request, as the operator's queue and the asker's own
+/// waiting page read it (D72).
+///
+/// A copy rather than a borrow, for the same reason [`InviteSummary`] is
+/// one: the lock is released before anything is rendered.
+#[derive(Debug, Clone)]
+pub struct RequestSummary {
+    /// The request id. Half of the claim link, and the id the operator
+    /// grants against.
+    pub id: String,
+    /// What the asker called themselves.
+    pub display_name: String,
+    /// The one line they wrote.
+    pub about: String,
+    /// Unix seconds at asking.
+    pub asked_at: u64,
+    /// Unix seconds after which it is swept.
+    pub expires_at: u64,
+}
+
 /// What an invite promises its holder, read by the join page (D57).
 ///
 /// A copy rather than a borrow: the store's lock is released before the
@@ -233,6 +324,13 @@ pub struct InviteSummary {
 struct State {
     accounts: BTreeMap<String, Account>,
     invites: BTreeMap<String, Invite>,
+    /// Unanswered access requests (D72), keyed by request id.
+    ///
+    /// Additive on disk: absent from every store written before D72, and
+    /// that decodes as empty. Nothing here authorizes anything, which is
+    /// what makes an unauthenticated writer into this table safe to have
+    /// at all.
+    requests: BTreeMap<String, Request>,
     /// Names that have held an account and been revoked, and are
     /// therefore never issued again.
     ///
@@ -629,6 +727,274 @@ impl Accounts {
             })
             .to_string(),
         )
+    }
+
+    /// Records an access request and returns its claim link halves (D72).
+    ///
+    /// The one write on this node an unauthenticated caller can perform.
+    /// What makes that safe is that the row it writes authorizes
+    /// **nothing**: it is not a credential, it does not appear in
+    /// [`Accounts::acl`], and [`Accounts::authenticate`] will not return
+    /// it. Until an operator grants it, holding the secret proves only
+    /// that you are the person who asked.
+    ///
+    /// The queue is capped and swept here rather than by a timer, so the
+    /// bound holds without anything having to be running.
+    #[must_use]
+    pub fn request_access(&self, body: &serde_json::Value) -> (u16, String) {
+        let Some(display_name) = body.get("display_name").and_then(serde_json::Value::as_str)
+        else {
+            return bad_request("`display_name` is required: say what to call you");
+        };
+        if let Err(e) = validate_display_name(display_name) {
+            return bad_request(&e);
+        }
+        let about = body
+            .get("about")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if about.chars().count() > MAX_ABOUT_CHARS {
+            return bad_request(&format!(
+                "`about` must be at most {MAX_ABOUT_CHARS} characters"
+            ));
+        }
+        if about.chars().any(char::is_control) {
+            return bad_request("`about` must not contain control characters");
+        }
+
+        let now = now_secs();
+        let mut state = self.state.write().expect("accounts write lock");
+        state.requests.retain(|_, request| request.expires_at > now);
+        if state.requests.len() >= MAX_PENDING_REQUESTS {
+            // 503 rather than 429: the caller did nothing wrong and
+            // retrying in a minute will not help. The queue is full
+            // until a person empties it.
+            return (
+                503,
+                serde_json::json!({
+                    "error": "this node's request queue is full; try again once the operator \
+                              has worked through it",
+                })
+                .to_string(),
+            );
+        }
+        let id = format!("{REQUEST_PREFIX}{}", mint_secret());
+        let secret = mint_secret();
+        let expires_at = now.saturating_add(REQUEST_TTL_SECS);
+        state.requests.insert(
+            id.clone(),
+            Request {
+                secret_hash: hash(&secret),
+                display_name: display_name.trim().to_string(),
+                about,
+                asked_at: now,
+                expires_at,
+            },
+        );
+        if let Err(e) = self.commit(&state) {
+            return server_error(&e);
+        }
+        drop(state);
+        (
+            200,
+            serde_json::json!({
+                "format_version": FORMAT_VERSION,
+                "request_id": id,
+                // Both halves as one pair, the same shape an invite
+                // answers with, so the caller that builds a link out of
+                // one can build a link out of the other.
+                "request": format!("{id}:{secret}"),
+                "expires_at": expires_at,
+                "note": "keep the link; it becomes an invite if the operator grants it.",
+            })
+            .to_string(),
+        )
+    }
+
+    /// The request `id`, if it is pending and `secret` is its secret (D72).
+    ///
+    /// Deliberately **not** part of [`Accounts::authenticate`]. That
+    /// function answers "who is this", and the honest answer for a
+    /// pending request is nobody: it reaches no route, carries no grant
+    /// and passes no check. Keeping it out means no arm anywhere else on
+    /// this node has to remember to refuse it.
+    #[must_use]
+    pub fn pending_request(&self, id: &str, secret: &str) -> Option<RequestSummary> {
+        let presented = hash(secret);
+        let state = self.state.read().expect("accounts read lock");
+        let request = state.requests.get(id)?;
+        if request.expires_at <= now_secs() {
+            return None;
+        }
+        ct_eq(request.secret_hash.as_bytes(), presented.as_bytes()).then(|| RequestSummary {
+            id: id.to_string(),
+            display_name: request.display_name.clone(),
+            about: request.about.clone(),
+            asked_at: request.asked_at,
+            expires_at: request.expires_at,
+        })
+    }
+
+    /// Every pending request, oldest first, for the operator's queue (D72).
+    ///
+    /// Oldest first because a queue is worked from the front, and because
+    /// the id order is random — sorting by it would shuffle the list on
+    /// every render for no reason a reader could follow.
+    #[must_use]
+    pub fn pending_requests(&self) -> Vec<RequestSummary> {
+        let now = now_secs();
+        let state = self.state.read().expect("accounts read lock");
+        let mut rows: Vec<RequestSummary> = state
+            .requests
+            .iter()
+            .filter(|(_, request)| request.expires_at > now)
+            .map(|(id, request)| RequestSummary {
+                id: id.clone(),
+                display_name: request.display_name.clone(),
+                about: request.about.clone(),
+                asked_at: request.asked_at,
+                expires_at: request.expires_at,
+            })
+            .collect();
+        rows.sort_by_key(|row| (row.asked_at, row.id.clone()));
+        rows
+    }
+
+    /// Turns a pending request into a live invite, as `issuer` (D72).
+    ///
+    /// **The id and the secret hash are carried over unchanged.** That is
+    /// the whole mechanism: the link the asker already holds is the link
+    /// that starts working, so a grant needs no message sent, no address
+    /// stored, and no second artefact to lose.
+    ///
+    /// The account handle is minted here rather than at asking, so the
+    /// string the op log carries forever is chosen by this node at the
+    /// moment an operator said yes -- never by the stranger, and never
+    /// before anybody agreed to it (D46).
+    #[must_use]
+    pub fn grant_request(&self, issuer: &str, body: &serde_json::Value) -> (u16, String) {
+        let Some(id) = body.get("request_id").and_then(serde_json::Value::as_str) else {
+            return bad_request("`request_id` is required");
+        };
+        let ttl = match body.get("expires_in_secs") {
+            None => GRANTED_REQUEST_SECS,
+            Some(value) => match value.as_u64() {
+                Some(secs) if secs > 0 && secs <= MAX_INVITE_SECS => secs,
+                _ => {
+                    return bad_request(&format!(
+                        "`expires_in_secs` must be between 1 and {MAX_INVITE_SECS}"
+                    ))
+                }
+            },
+        };
+        let raw_grants = match body.get("grants") {
+            Some(serde_json::Value::Array(items)) if !items.is_empty() => {
+                let mut rows = Vec::new();
+                for item in items {
+                    let Some(text) = item.as_str() else {
+                        return bad_request("each grant must be a string, `<repo|*> <read|write>`");
+                    };
+                    rows.push(text.to_string());
+                }
+                rows
+            }
+            _ => return bad_request("`grants` is required and must be a non-empty array"),
+        };
+
+        let now = now_secs();
+        let mut state = self.state.write().expect("accounts write lock");
+        state.requests.retain(|_, request| request.expires_at > now);
+        let Some(request) = state.requests.get(id).cloned() else {
+            return (
+                404,
+                r#"{"error":"no such request; it may have expired or been declined"}"#.to_string(),
+            );
+        };
+        let taken = |candidate: &str| {
+            state.accounts.contains_key(candidate)
+                || state.retired.contains(candidate)
+                || self.reserved.contains(candidate)
+        };
+        let Some(user) = mint_handle(&taken) else {
+            return server_error("could not mint a free account handle");
+        };
+        // Validated against the handle this grant just minted, not
+        // against a name from the body: `validate_grant` refuses a grant
+        // that would hand the store node-wide authority, and it can only
+        // do that if the user it is grading is the user that will hold
+        // it.
+        let mut grants = Vec::new();
+        for text in &raw_grants {
+            match validate_grant(&user, text) {
+                Ok(grant) => grants.push(grant),
+                Err(e) => return bad_request(&e),
+            }
+        }
+        state.requests.remove(id);
+        state.invites.retain(|_, invite| invite.expires_at > now);
+        let expires_at = now.saturating_add(ttl);
+        state.invites.insert(
+            id.to_string(),
+            Invite {
+                secret_hash: request.secret_hash.clone(),
+                user: user.clone(),
+                display_name: Some(request.display_name.clone()),
+                grants: grants.clone(),
+                expires_at,
+                issued_by: issuer.to_string(),
+                issued_at: now,
+            },
+        );
+        if let Err(e) = self.commit(&state) {
+            return server_error(&e);
+        }
+        drop(state);
+        (
+            200,
+            serde_json::json!({
+                "format_version": FORMAT_VERSION,
+                "user": user,
+                "display_name": request.display_name,
+                "invite_id": id,
+                "grants": grants,
+                "expires_at": expires_at,
+                // No `invite` pair and no `join_url`: this node never
+                // held the secret half, only its hash, and the person who
+                // does hold it is already holding the link. Answering
+                // with a link here would mean minting a second secret and
+                // breaking the first one.
+                "note": "the link the asker already holds now works.",
+            })
+            .to_string(),
+        )
+    }
+
+    /// Drops a pending request (D72).
+    ///
+    /// The asker's link then renders exactly the page a link that was
+    /// never valid renders -- the one refusal the join page gives for
+    /// every reason an invite does not work. Declining says nothing
+    /// back: a node that distinguished "declined" from "never existed"
+    /// would let a stranger probe which of their guesses had been read.
+    #[must_use]
+    pub fn decline_request(&self, body: &serde_json::Value) -> (u16, String) {
+        let Some(id) = body.get("request_id").and_then(serde_json::Value::as_str) else {
+            return bad_request("`request_id` is required");
+        };
+        let mut state = self.state.write().expect("accounts write lock");
+        if state.requests.remove(id).is_none() {
+            return (
+                404,
+                r#"{"error":"no such request; it may have expired or been declined"}"#.to_string(),
+            );
+        }
+        if let Err(e) = self.commit(&state) {
+            return server_error(&e);
+        }
+        drop(state);
+        (200, r#"{"declined":true}"#.to_string())
     }
 
     /// Redeems `invite_id`, creating its account and minting its token.
@@ -1165,10 +1531,28 @@ impl Accounts {
                 })
             })
             .collect();
+        let requests: Vec<serde_json::Value> = state
+            .requests
+            .iter()
+            .filter(|(_, request)| request.expires_at > now)
+            .map(|(id, request)| {
+                serde_json::json!({
+                    "request_id": id,
+                    "display_name": request.display_name,
+                    "about": request.about,
+                    "asked_at": request.asked_at,
+                    "expires_at": request.expires_at,
+                })
+            })
+            .collect();
         serde_json::json!({
             "format_version": FORMAT_VERSION,
             "accounts": accounts,
             "invites": invites,
+            // D72's queue, so a client that reads this endpoint sees the
+            // whole of who is here and who is asking, rather than having
+            // to know about a second route.
+            "requests": requests,
             // Served so an operator can see why a name is refused before
             // they go looking for an override.
             "retired": state.retired,
@@ -1360,6 +1744,13 @@ pub fn validate_username(user: &str) -> Result<(), String> {
     }
     if user.starts_with(INVITE_PREFIX) {
         return Err(format!("a username may not start with `{INVITE_PREFIX}`"));
+    }
+    // Same reasoning one line up, for D72's table: an account whose name
+    // reads like a request id makes a claim link and a credential
+    // indistinguishable by eye, which is the only way anybody ever tells
+    // them apart in a chat window.
+    if user.starts_with(REQUEST_PREFIX) {
+        return Err(format!("a username may not start with `{REQUEST_PREFIX}`"));
     }
     Ok(())
 }
@@ -1584,12 +1975,31 @@ fn render_state(state: &State) -> String {
             record
         })
         .collect();
+    let requests: Vec<serde_json::Value> = state
+        .requests
+        .iter()
+        .map(|(id, request)| {
+            serde_json::json!({
+                "request_id": id,
+                "secret_hash": request.secret_hash,
+                "display_name": request.display_name,
+                "about": request.about,
+                "asked_at": request.asked_at,
+                "expires_at": request.expires_at,
+            })
+        })
+        .collect();
     format!(
         "{}\n",
         serde_json::json!({
             "format_version": FORMAT_VERSION,
             "accounts": accounts,
             "invites": invites,
+            // D72, and additive: a store written before it has no such
+            // key and parses as an empty queue. The version is not bumped
+            // because nothing here changes how an older field decodes,
+            // which is the test invariant 1 actually sets.
+            "requests": requests,
             "retired": state.retired,
         })
     )
@@ -1709,6 +2119,45 @@ fn parse_state(text: &str) -> Result<State, String> {
                     .to_string(),
                 issued_at: entry
                     .get("issued_at")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            },
+        );
+    }
+    for entry in value
+        .get("requests")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let (Some(id), Some(secret_hash), Some(display_name)) = (
+            entry.get("request_id").and_then(serde_json::Value::as_str),
+            entry.get("secret_hash").and_then(serde_json::Value::as_str),
+            entry
+                .get("display_name")
+                .and_then(serde_json::Value::as_str),
+        ) else {
+            return Err(
+                "a request record is missing `request_id`, `secret_hash` or `display_name`"
+                    .to_string(),
+            );
+        };
+        state.requests.insert(
+            id.to_string(),
+            Request {
+                secret_hash: secret_hash.to_string(),
+                display_name: display_name.to_string(),
+                about: entry
+                    .get("about")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                asked_at: entry
+                    .get("asked_at")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                expires_at: entry
+                    .get("expires_at")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or_default(),
             },

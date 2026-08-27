@@ -2408,3 +2408,118 @@ fn a_person_with_no_passkey_can_still_reach_the_page_that_enrols_one() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// D73. The private beta runs `--read-only-browser`, and that used to
+/// take the whole ceremony file with it: the flag withheld
+/// `/static/webauthn.js`, so every passkey control on the node was a
+/// button that loaded nothing. The manifest said `passkeys=enabled`
+/// beside a posture under which no browser could enrol one.
+///
+/// The flag now withholds authorship. What must still work is getting a
+/// credential and signing in with it; what must not is putting an
+/// operation in the log from a page, which
+/// `browse::a_read_only_browser_renders_no_mutation_control_anywhere`
+/// holds.
+#[test]
+fn the_enrolment_page_works_under_a_read_only_browser() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-readonly");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    let acl_path = work.join("acl");
+    std::fs::write(&acl_path, "alice @node write\nalice * write\n").expect("acl file");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.watch_acl_file(acl_path).expect("acl loads");
+    node.enable_passkeys();
+    node.enable_accounts(work.join("accounts.json"), None, None)
+        .expect("accounts enable");
+    node.disable_browser_writes();
+    node.enable_platform(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let fetch = |path: &str, args: &[&str]| -> (u16, String) {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-w", "\n%{http_code}"])
+            .args(args)
+            .arg(format!("{base}{path}"))
+            .output()
+            .expect("curl runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (body, code) = text.rsplit_once('\n').expect("status line");
+        (
+            code.trim().parse().expect("numeric status"),
+            body.to_string(),
+        )
+    };
+
+    // The file the ceremonies are written in.
+    let (status, script) = fetch("/static/webauthn.js", &[]);
+    assert_eq!(status, 200, "the ceremony file is withheld: {script}");
+    assert!(script.contains("navigator.credentials"), "{script}");
+
+    // The page that enrols one, seen by somebody who can hold one. The
+    // operator's own credential is written into the auth file rather
+    // than issued, so it is the wrong reader for this: it has no account
+    // record to enrol against, whatever the posture.
+    let (status, minted) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        r#"{"user":"bea","grants":["agents/demo.git read"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    assert_eq!(status, 200, "{minted}");
+    let pair = minted["invite"]
+        .as_str()
+        .expect("an invite pair")
+        .to_string();
+    let (status, redeemed) = crate::support::curl(&[
+        "-u",
+        &pair,
+        "-X",
+        "POST",
+        "-d",
+        "{}",
+        &format!("{base}/api/accounts/redeem"),
+    ]);
+    assert_eq!(status, 200, "{redeemed}");
+    let token = redeemed["token"].as_str().expect("a token").to_string();
+
+    let (status, page) = fetch("/account", &["-u", &format!("bea:{token}")]);
+    assert_eq!(status, 200, "the enrolment page is refused: {page}");
+    assert!(page.contains("/static/webauthn.js"), "no ceremony: {page}");
+    assert!(
+        page.contains("/api/accounts/passkey"),
+        "no enrolment: {page}"
+    );
+
+    // And the sign-in page a person with a passkey lands on (D71). It
+    // answers `401`: it is the unauthorized page rendered instead of the
+    // browser's own credential dialog, not a successful one.
+    let (status, signin) = fetch("/signin", &[]);
+    assert_eq!(status, 401, "{signin}");
+    assert!(signin.contains("/static/webauthn.js"), "{signin}");
+
+    // What the flag still withholds: the endpoint that prepares an
+    // operation for a browser to sign.
+    let (status, prepared) = fetch("/api/prepare", &["-u", "alice:a", "-X", "POST", "-d", "{}"]);
+    assert_eq!(
+        status, 403,
+        "browser authorship survived --read-only-browser: {prepared}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}

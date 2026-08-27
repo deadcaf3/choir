@@ -548,11 +548,27 @@ url)
   echo "$(api_base)/${2:-choir/choir.git}" | sed "s|://|://$(auth_user):$(auth_pass)@|"
   ;;
 
+people)
+  # D72's console. The three things this script used to be the only way
+  # to do -- see who is here, mint a link, answer somebody who asked --
+  # are a page now, so this command exists to open it rather than to do
+  # any of them. It prints the address in every case: a browser that does
+  # not open is not a reason to be left without the URL.
+  tunnel_up
+  url="$(api_base)/people"
+  echo "$url"
+  command -v open >/dev/null 2>&1 && open "$url"
+  ;;
+
 invite)
   # D57. Prints the join link and nothing else, because the link is the
   # whole artefact: it gets pasted into a chat window, and anything else
   # printed beside it invites pasting that too. The `id:secret` pair the
   # API also returns is for `curl -u`; it is not what a person receives.
+  #
+  # The same mint is a form on `./choirctl people`, which is the one to
+  # reach for: it lists the repositories rather than asking you to spell
+  # one, and it is where the queue of people asking to be let in is.
   [ $# -ge 3 ] || { echo "usage: choirctl invite <name> <owner/repo> [read|write]" >&2; exit 2; }
   tunnel_up
   level=${4:-write}
@@ -679,7 +695,8 @@ install-cli)
   mirror           push to the private Forgejo follower only
   url [repo]       clone/push URL including credentials
 
-  invite <name> <owner/repo> [read|write]        mint a link to paste
+  people           open the console: who is here, who is asking, invites
+  invite <name> <owner/repo> [read|write]        mint a link, no browser
 
   review <id> <oid> [repo:ref]                   open a landing review
   verdict <reviewer> <id> <verdict> [note]       cast a reviewer verdict

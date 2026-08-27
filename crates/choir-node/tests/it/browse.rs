@@ -2043,9 +2043,12 @@ fn a_page_tag_changes_with_the_build_as_well_as_the_commit() {
 /// its own note about a check that compared nothing to nothing.
 #[test]
 fn a_read_only_browser_renders_no_mutation_control_anywhere() {
-    /// Every page an authenticated reader can reach, `/account`
-    /// included: it is the passkey enrollment page, so it is both a page
-    /// in this sweep and the positive control for it.
+    /// Every page whose job is to *show* something. D73 narrowed what
+    /// this flag withholds to authorship, so the credential surfaces are
+    /// deliberately not in this list: `/account` enrols the passkey that
+    /// signs in, `/people` answers a request for access, and neither
+    /// writes an operation. They have their own assertion below, which is
+    /// that they still work.
     const PAGES: &[&str] = &[
         "/r/",
         "/r/agents/one",
@@ -2056,7 +2059,6 @@ fn a_read_only_browser_renders_no_mutation_control_anywhere() {
         "/r/agents/one/contribute",
         "/r/agents/one/search/main?q=lib&in=files",
         "/status",
-        "/account",
     ];
     /// Markup that only a write affordance emits.
     const CONTROLS: &[&str] = &[
@@ -2128,6 +2130,32 @@ fn a_read_only_browser_renders_no_mutation_control_anywhere() {
         CONTROLS.iter().any(|control| writable.contains(control)),
         "the review page renders no control even with browser writes enabled, \
          so the read-only assertion above holds for the wrong reason: {writable}"
+    );
+
+    // D73's other half, and the reason the flag was split. Under
+    // `--read-only-browser` a person must still be able to get a
+    // credential and use it: the file the ceremonies live in is served,
+    // and the page that enrols one renders its ceremony. Without this
+    // assertion the sweep above is satisfied by a node that has simply
+    // turned the browser off, which is what it used to mean.
+    let (_, _, script) = get(&format!("{base}/static/webauthn.js"), &[]);
+    assert!(
+        script.contains("navigator.credentials"),
+        "the ceremony file is withheld under --read-only-browser, so every \
+         passkey control on this node is a button that does nothing"
+    );
+    // This fixture runs no accounts store, so `/account` answers "no
+    // passkeys here" -- which is the point: it is no longer answering
+    // "browser writes are off". A node that does run them proves the
+    // other half, in `passkeys::the_enrolment_page_works_under_a_read_only_browser`.
+    let (status, _, account) = get(&format!("{base}/account"), &["-u", "alice:a"]);
+    assert_ne!(
+        status, 403,
+        "the enrolment page is still refused: {account}"
+    );
+    assert!(
+        !account.contains("browser_read_only"),
+        "the read-only posture still swallows the credential surface: {account}"
     );
 }
 

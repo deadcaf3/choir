@@ -80,6 +80,36 @@ pub(crate) struct Page {
     pub status: u16,
     /// The document.
     pub html: String,
+    /// Whether this document loads [`crate::ui::WEBAUTHN_JS`], and so
+    /// needs the CSP that permits it (D72).
+    ///
+    /// A field rather than a sniff of the HTML, and rather than a
+    /// decision the responder makes from the route: the page is the only
+    /// thing that knows whether it emitted a `<script>` tag, and a
+    /// responder guessing from the path is how a page grows a script the
+    /// header does not allow -- which is exactly how D71's sign-in page
+    /// shipped with a button that could not run.
+    pub scripted: bool,
+}
+
+/// What the front door can offer somebody who arrives with nothing (D72).
+///
+/// One struct rather than two arguments because they are one decision:
+/// what to tell a stranger. Passing them separately is what lets a page
+/// grow a third thing to say without anybody noticing the second was
+/// never wired up.
+pub(crate) struct Door<'a> {
+    /// The operator's contact, when they named one. Read from
+    /// `<root>/.choir/contact`; never compiled in.
+    pub contact: Option<&'a str>,
+    /// Whether this node takes access requests through the page.
+    ///
+    /// True when the node runs account self-service at all: a node that
+    /// can issue an invite can hold a queue of people asking for one, and
+    /// a separate switch would be a flag an operator has to find before
+    /// their front door does the thing the front door is for. An operator
+    /// who does not want to be asked does not publish the address.
+    pub asking: bool,
 }
 
 /// Opens the document and the brand header.
@@ -151,6 +181,7 @@ pub(crate) fn not_valid(status: u16, theme: Option<&str>) -> Page {
     Page {
         status,
         html: close(h),
+        scripted: false,
     }
 }
 
@@ -178,6 +209,7 @@ fn no_self_service(theme: Option<&str>) -> Page {
     Page {
         status: 200,
         html: close(h),
+        scripted: false,
     }
 }
 
@@ -335,6 +367,7 @@ fn offer(
     Page {
         status: 200,
         html: close(h),
+        scripted: false,
     }
 }
 
@@ -380,16 +413,39 @@ fn welcome(
         h.push_str(&step.to_string());
         h.push_str("</span>Clone <code>");
         h.push_str(&esc(repo));
+        // The username rides in the URL and the password does not. Git
+        // reads `user@host` as "do not ask me who", so this is one
+        // prompt instead of two -- and the token stays out of
+        // `git remote -v`, which is the whole reason the CLI has a
+        // credential helper rather than a URL builder.
         h.push_str("</code></h3><pre class=\"cmd\">git clone ");
-        h.push_str(&esc(node));
+        h.push_str(&esc(&with_user(node, user)));
         h.push('/');
         h.push_str(&esc(repo));
         h.push_str(".git</pre>");
-        h.push_str("<p class=\"mono\">username <b>");
-        h.push_str(&esc(user));
-        h.push_str("</b>, password the one above</p></li>");
+        h.push_str("<p class=\"mono\">password: the one above</p></li>");
         step += 1;
     }
+    // The complaint this answers is the one every credential handed over
+    // on a page produces within the hour: git asks for it again on the
+    // next push, and again after that. Git already knows how to remember
+    // it -- `credential approve` is the documented way to put a secret
+    // into whatever helper is configured -- and macOS and Windows ship
+    // one. Linux often does not, which is said rather than assumed.
+    h.push_str("<li><h3><span class=\"step\">");
+    h.push_str(&step.to_string());
+    h.push_str("</span>Stop being asked</h3>");
+    h.push_str(
+        "<p>Git will ask for that password on every push unless it has somewhere to keep \
+         it. macOS and Windows come with somewhere; on Linux, run <code>git config \
+         --global credential.helper</code> first to check you have one.</p>",
+    );
+    h.push_str("<pre class=\"cmd\">");
+    h.push_str(&esc(&approve_command(node, user, token)));
+    h.push_str("</pre>");
+    h.push_str("</li>");
+    step += 1;
+
     h.push_str("<li><h3><span class=\"step\">");
     h.push_str(&step.to_string());
     h.push_str("</span>Teach your agent</h3>");
@@ -412,7 +468,39 @@ fn welcome(
     Page {
         status: 200,
         html: close(h),
+        scripted: false,
     }
+}
+
+/// A node URL with the username in its authority, so git asks for one
+/// thing instead of two.
+///
+/// Only the username. The token stays out of every URL on this surface:
+/// a URL is what `git remote -v` prints, what a shell history keeps, and
+/// what somebody pastes into an issue when a clone fails.
+fn with_user(node: &str, user: &str) -> String {
+    match node.split_once("://") {
+        Some((scheme, rest)) => format!("{scheme}://{user}@{rest}"),
+        None => node.to_string(),
+    }
+}
+
+/// The one command that puts this token wherever git keeps secrets.
+///
+/// `git credential approve` reads the key-value form on stdin and hands
+/// it to the configured helper, which is the documented way to seed one
+/// without inventing a per-platform incantation. A `printf` rather than a
+/// heredoc so it survives being pasted into a shell that is not `sh`.
+///
+/// The host is taken from the node URL rather than composed, because git
+/// matches credentials on exactly the `protocol` and `host` it was given
+/// -- an entry stored against the wrong one is silently never found.
+fn approve_command(node: &str, user: &str, token: &str) -> String {
+    let (protocol, host) = node.split_once("://").unwrap_or(("https", node));
+    format!(
+        "printf 'protocol={protocol}\\nhost={host}\\nusername={user}\\npassword={token}\\n' \
+         | git credential approve"
+    )
 }
 
 /// `GET /join`.
@@ -458,7 +546,15 @@ pub(crate) fn get(
             // page for a dead invite.
             None => not_valid(200, chrome.theme),
         },
-        _ => not_valid(200, chrome.theme),
+        // Not an invite. It may still be a request nobody has answered
+        // (D72), which is a different thing to say than "this link is not
+        // valid" -- and the check is second because the moment a request
+        // is granted it becomes an invite under the same id, so the live
+        // credential must win.
+        _ => match store.pending_request(id, secret) {
+            Some(summary) => waiting(&summary, chrome.theme, now),
+            None => not_valid(200, chrome.theme),
+        },
     }
 }
 
@@ -537,6 +633,7 @@ fn bad_submission(why: &str, theme: Option<&str>) -> Page {
     Page {
         status: 400,
         html: close(h),
+        scripted: false,
     }
 }
 
@@ -545,7 +642,7 @@ fn bad_submission(why: &str, theme: Option<&str>) -> Page {
 /// Static by construction. It takes no store, no platform and no view, so
 /// there is nothing here that could later grow a repository name or a
 /// sequence number without someone adding a parameter on purpose.
-pub(crate) fn landing(theme: Option<&str>, contact: Option<&str>) -> Page {
+pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     let mut h = shell("choir", theme);
     h.insert_str(
         h.find("<title>").unwrap_or(h.len()),
@@ -639,9 +736,9 @@ pub(crate) fn landing(theme: Option<&str>, contact: Option<&str>) -> Page {
         "Have an invite link? Open it and it will set you up. Otherwise \
          <a href=\"/r/\">sign in</a> with the credentials you were given",
     );
-    match contact {
+    match door.contact {
         Some(contact) => {
-            sentence.push_str(", or ask for access: ");
+            sentence.push_str(", or write to ");
             sentence.push_str(&link_to(contact));
             sentence.push('.');
         }
@@ -649,9 +746,119 @@ pub(crate) fn landing(theme: Option<&str>, contact: Option<&str>) -> Page {
     }
     crate::ui::next_action_escaped(&mut h, &sentence);
     h.push_str("</section>");
+    if door.asking {
+        ask_section(&mut h, door.contact);
+    }
     Page {
         status: 200,
         html: close(h),
+        scripted: door.asking,
+    }
+}
+
+/// The form a stranger asks for access with (D72).
+///
+/// **It starts hidden and the script unhides it.** A form that only works
+/// with script must not be visible without it, because a person who fills
+/// in a dead form and presses a button that does nothing has been lied
+/// to. What a reader without script sees instead is the `<noscript>`
+/// sentence below, pointing at the operator's contact -- which is the
+/// same route, one step slower, and the reason the contact line is worth
+/// having on this page at all.
+///
+/// The cost is D72's proof of work, computed in the browser between the
+/// press and the post. It is named on the page rather than hidden: a
+/// button that takes several seconds and does not say why reads as a
+/// broken button.
+fn ask_section(h: &mut String, contact: Option<&str>) {
+    h.push_str("<section><h2>Ask for access</h2>");
+    h.push_str(
+        "<p class=\"lede\">Nobody is admitted automatically. This puts you on the \
+         operator's list; if they say yes, the link you get back turns into your \
+         invite.</p>",
+    );
+    h.push_str("<form id=\"ask\" hidden>");
+    h.push_str(
+        "<p><label for=\"ask-name\">What should we call you?</label><br>\
+         <input id=\"ask-name\" name=\"display_name\" maxlength=\"64\" \
+         autocomplete=\"nickname\" required></p>",
+    );
+    h.push_str(
+        "<p><label for=\"ask-about\">One line about what you want to do here</label><br>\
+         <input id=\"ask-about\" name=\"about\" maxlength=\"280\"></p>",
+    );
+    h.push_str(
+        "<p><button id=\"ask-go\" type=\"button\">Ask for access</button></p>\
+         <p id=\"ask-said\" hidden></p>",
+    );
+    h.push_str("</form>");
+    h.push_str("<noscript><p>");
+    match contact {
+        Some(contact) => {
+            h.push_str(
+                "Asking from this page needs JavaScript, because the node charges a few \
+                 seconds of your device's arithmetic instead of asking a third party \
+                 whether you are a person. Without it, write to ",
+            );
+            h.push_str(&link_to(contact));
+            h.push_str(" instead.");
+        }
+        None => h.push_str(
+            "Asking from this page needs JavaScript, because the node charges a few \
+             seconds of your device's arithmetic instead of asking a third party whether \
+             you are a person. This node's operator has published no other address.",
+        ),
+    }
+    h.push_str("</p></noscript>");
+    h.push_str("</section>");
+    // Declared and loaded in the same function, so `Page::scripted` and
+    // the tag cannot come apart. D71 shipped a page that said it offered
+    // a ceremony and never fetched the file that is the ceremony.
+    h.push_str(crate::ui::CEREMONY_SCRIPT);
+}
+
+/// The page somebody sees at their own claim link while nobody has
+/// answered it (D72).
+///
+/// **This page is the delivery channel.** Nothing is sent to the asker
+/// and no address was collected to send it to, so the whole mechanism is
+/// that they keep this link and come back to it: the moment an operator
+/// grants the request, the same address renders [`offer`] instead, and
+/// the invite behind it is live. So the one thing this page has to do
+/// well is make somebody save the address.
+fn waiting(summary: &crate::accounts::RequestSummary, theme: Option<&str>, now: u64) -> Page {
+    let mut h = shell("choir: asked", theme);
+    body(&mut h, "You asked", &summary.display_name);
+    h.push_str("<section><h2>Nobody has answered yet</h2>");
+    h.push_str(
+        "<p class=\"lede\">Your request is on the operator's list. There is no automatic \
+         answer and no notification: a person reads it and decides.</p>",
+    );
+    crate::ui::next_action(
+        &mut h,
+        "<b>Bookmark this page.</b> The address you are on is the only copy of your \
+         request, and when it is granted this same page becomes your invite. Lose it and \
+         you start again.",
+    );
+    h.push_str("</section>");
+
+    h.push_str("<section><h2>What they see</h2>");
+    h.push_str("<p class=\"mono\">");
+    h.push_str(&esc(&summary.display_name));
+    if !summary.about.is_empty() {
+        h.push_str(" &mdash; ");
+        h.push_str(&esc(&summary.about));
+    }
+    h.push_str("</p>");
+    h.push_str("<p>Nothing else. This node did not ask for an address and did not keep one.</p>");
+    h.push_str("<p class=\"mono\">expires ");
+    h.push_str(&esc(&expires_in_words(summary.expires_at, now)));
+    h.push_str("</p>");
+    h.push_str("</section>");
+    Page {
+        status: 200,
+        html: close(h),
+        scripted: false,
     }
 }
 
@@ -662,6 +869,11 @@ pub(crate) fn landing(theme: Option<&str>, contact: Option<&str>) -> Page {
 /// the form body of the same submission go through the same code. A
 /// secret that decodes one way in the link and another way in the form
 /// would be a link that renders and then refuses itself.
+pub(crate) fn param(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    form_value(query.split('#').next().unwrap_or(query), key)
+}
+
 /// The operator's contact, rendered as something a reader can act on.
 ///
 /// An address becomes a `mailto:`, anything already a URL becomes a link,
@@ -678,11 +890,6 @@ fn link_to(contact: &str) -> String {
     } else {
         text
     }
-}
-
-pub(crate) fn param(url: &str, key: &str) -> Option<String> {
-    let query = url.split_once('?')?.1;
-    form_value(query.split('#').next().unwrap_or(query), key)
 }
 
 /// Unix seconds now, for expiry arithmetic.
@@ -703,7 +910,7 @@ pub(crate) fn now_unix_secs() -> u64 {
 /// are ordinary base64. This is the narrower job — a body rather than a
 /// URL, and no path to protect — so it allows `/` and refuses what a page
 /// actually cannot survive: control characters and invalid UTF-8.
-fn form_value(body: &str, key: &str) -> Option<String> {
+pub(crate) fn form_value(body: &str, key: &str) -> Option<String> {
     body.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=')?;
         if name != key {
@@ -899,16 +1106,25 @@ mod tests {
 
     /// The landing page is the one page a stranger can always reach, so
     /// what it does *not* say is the specification.
+    /// A door that offers nothing but the two credentials, which is what
+    /// a node without account self-service has.
+    fn shut() -> super::Door<'static> {
+        super::Door {
+            contact: None,
+            asking: false,
+        }
+    }
+
     #[test]
     fn the_landing_page_names_nothing_about_this_node() {
-        let html = super::landing(None, None).html;
+        let html = super::landing(None, &shut()).html;
         assert!(html.contains("signed operation"), "{html}");
         assert!(!html.contains("<script"), "{html}");
         // Constant by construction: the only input is the palette, so
         // two renders with the same palette are the same bytes. If this
         // page ever grows a parameter, this is the test that argues
         // about it.
-        assert_eq!(html, super::landing(None, None).html);
+        assert_eq!(html, super::landing(None, &shut()).html);
         // And it states no fact about this node. Every such fact — the
         // log position, a repository count, a version — arrives as a
         // number, so "no digits in the body" is the mechanical form of
@@ -918,5 +1134,139 @@ mod tests {
             !text.chars().any(|c| c.is_ascii_digit()),
             "the landing page carries a number, which can only describe this node: {text}"
         );
+    }
+
+    /// D72. The form is useless without the script that pays the cost,
+    /// and the script is useless without the ids it looks for, so the
+    /// page that offers one must carry both.
+    #[test]
+    fn the_door_that_takes_requests_carries_the_form_and_the_script_that_runs_it() {
+        let page = super::landing(
+            None,
+            &super::Door {
+                contact: None,
+                asking: true,
+            },
+        );
+        assert!(page.scripted, "the page declares no script");
+        assert!(
+            page.html.contains(crate::ui::CEREMONY_SCRIPT),
+            "{}",
+            page.html
+        );
+        for id in ["ask", "ask-go", "ask-name", "ask-about", "ask-said"] {
+            assert!(
+                page.html.contains(&format!("\"{id}\"")),
+                "the page never emits {id}"
+            );
+            assert!(
+                crate::ui::WEBAUTHN_JS.contains(&format!("'{id}'")),
+                "the shared script never looks for {id}"
+            );
+        }
+        // Hidden until script unhides it: a form that cannot work must
+        // not be shown to somebody who would fill it in.
+        assert!(
+            page.html.contains("<form id=\"ask\" hidden>"),
+            "{}",
+            page.html
+        );
+        assert!(page.html.contains("<noscript>"), "{}", page.html);
+        // And it still says nothing about this node.
+        let text = main_text(&without_style(&page.html));
+        assert!(
+            !text.chars().any(|c| c.is_ascii_digit()),
+            "the door carries a number: {text}"
+        );
+    }
+
+    /// A node with no store cannot hold a queue, so its door must not
+    /// offer a button whose endpoint answers 503.
+    #[test]
+    fn a_door_that_takes_no_requests_offers_no_form() {
+        let page = super::landing(None, &shut());
+        assert!(!page.scripted);
+        assert!(!page.html.contains("ask-go"), "{}", page.html);
+        assert!(!page.html.contains("<script"), "{}", page.html);
+    }
+
+    /// The credential line has to be one git will actually find again.
+    /// Git matches on the exact `protocol` and `host` it was handed, so
+    /// an entry stored against a composed guess is one that is silently
+    /// never found -- which reads to the holder as "it asked me again".
+    #[test]
+    fn the_stored_credential_names_the_host_git_will_look_under() {
+        let line = super::approve_command("https://choir.example:8417", "bea", "t0ken");
+        assert!(line.contains("protocol=https"), "{line}");
+        assert!(line.contains("host=choir.example:8417"), "{line}");
+        assert!(line.contains("username=bea"), "{line}");
+        assert!(line.contains("password=t0ken"), "{line}");
+        assert!(line.ends_with("| git credential approve"), "{line}");
+        // A node reached over plain http must not be told to store a
+        // credential as if it were https: git would never match it.
+        let plain = super::approve_command("http://127.0.0.1:8417", "bea", "t0ken");
+        assert!(plain.contains("protocol=http\\n"), "{plain}");
+    }
+
+    /// The username belongs in the clone URL and the token never does.
+    #[test]
+    fn the_clone_url_carries_a_name_and_no_secret() {
+        assert_eq!(
+            super::with_user("https://choir.example", "bea"),
+            "https://bea@choir.example"
+        );
+        // Nothing to rewrite, and nothing invented.
+        assert_eq!(super::with_user("choir.example", "bea"), "choir.example");
+    }
+
+    /// The waiting page's whole job is to make somebody save the address
+    /// they are on, because it is the only copy of their request.
+    #[test]
+    fn the_waiting_page_tells_the_asker_to_keep_the_link() {
+        let page = super::waiting(
+            &crate::accounts::RequestSummary {
+                id: "ask-1".to_string(),
+                display_name: "Ada".to_string(),
+                about: "wants to read the queue crate".to_string(),
+                asked_at: 0,
+                expires_at: 86_400,
+            },
+            None,
+            0,
+        );
+        assert_eq!(page.status, 200);
+        assert!(page.html.contains("Bookmark"), "{}", page.html);
+        assert!(page.html.contains("Ada"), "{}", page.html);
+        assert!(
+            page.html.contains("wants to read the queue crate"),
+            "{}",
+            page.html
+        );
+        // It is not the invite page: nothing here redeems anything.
+        assert!(
+            !page.html.contains("<form method=\"post\""),
+            "{}",
+            page.html
+        );
+        assert!(!page.scripted);
+    }
+
+    /// The secret half of the claim link is in the reader's address bar
+    /// already; it must not also be in the page, where a screenshot or a
+    /// pasted "look at this" carries it.
+    #[test]
+    fn the_waiting_page_does_not_repeat_the_secret() {
+        let page = super::waiting(
+            &crate::accounts::RequestSummary {
+                id: "ask-secretish".to_string(),
+                display_name: "Ada".to_string(),
+                about: String::new(),
+                asked_at: 0,
+                expires_at: 86_400,
+            },
+            None,
+            0,
+        );
+        assert!(!page.html.contains("ask-secretish"), "{}", page.html);
     }
 }

@@ -416,14 +416,24 @@ fn read_only_browser_mode_refuses_browser_mutation_routes() {
         ]),
         403
     );
+    // D73. The flag withholds authorship, so the credential surface is
+    // not refused for being one: this fixture runs no passkeys, and
+    // `503` is that answer -- "this node does not offer them" -- rather
+    // than the `403` the read-only posture used to give.
     assert_eq!(
         status(&["-u", "alice:a", &format!("{}/account", node.base)]),
-        403
+        503
     );
+    // And the ceremony file is served, which is what makes signing in
+    // and D72's ask work under this posture. It was asserted here
+    // against `/assets/webauthn.js`, a path this node has never had, so
+    // the assertion held for a reason that had nothing to do with the
+    // flag.
     assert_eq!(
-        status(&[&format!("{}/assets/webauthn.js", node.base)]),
-        401,
-        "read-only beta mode must not leave even the unused browser-write asset anonymous"
+        status(&[&format!("{}/static/webauthn.js", node.base)]),
+        200,
+        "the ceremony file is withheld, so every passkey control on this node \
+         is a button that loads nothing"
     );
 }
 

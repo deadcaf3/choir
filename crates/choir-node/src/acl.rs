@@ -916,6 +916,13 @@ pub fn api_denial(
         ("POST", "/api/accounts/invite" | "/api/accounts/revoke") => {
             vec![(Scope::Node, Level::Write)]
         }
+        // D72. Answering a request is issuing an invite or refusing to,
+        // so it sits at exactly the authority issuing one does. Asking is
+        // not here at all: `POST /api/access` is pre-auth and never
+        // reaches this table.
+        ("POST", "/api/accounts/request/grant" | "/api/accounts/request/decline") => {
+            vec![(Scope::Node, Level::Write)]
+        }
         ("GET", "/api/accounts") => vec![(Scope::Node, Level::Read)],
         // Enrolling and removing a passkey act on the caller's own
         // account and no one else's (D39): the handler never reads a

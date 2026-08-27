@@ -826,7 +826,7 @@ fn bare(root: &Path, repo: &str) -> PathBuf {
 /// test on it. The grant check happens here rather than at either
 /// caller, so no caller can enumerate what it may not read by
 /// forgetting to filter.
-fn repositories(root: &Path, readable: &dyn Fn(&str) -> bool) -> Vec<String> {
+pub(crate) fn repositories(root: &Path, readable: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut repos: Vec<String> = Vec::new();
     if let Ok(owners) = std::fs::read_dir(root) {
         for owner in owners.flatten() {

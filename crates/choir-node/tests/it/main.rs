@@ -15,6 +15,7 @@
 
 mod support;
 
+mod access;
 mod accounts;
 mod acl;
 mod api;

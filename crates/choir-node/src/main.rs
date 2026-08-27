@@ -472,7 +472,12 @@ fn run() -> std::io::Result<()> {
     eprintln!("readiness: at least {ready_min_free_bytes} free storage bytes");
     if rest.iter().any(|arg| arg == "--read-only-browser") {
         node.disable_browser_writes();
-        eprintln!("browser: read-only; mutations require the signed CLI");
+        // Says what it withholds, because the two halves used to be one
+        // flag and the misreading cost a beta its sign-in page (D73).
+        eprintln!(
+            "browser: no authorship; ops require the signed CLI. \
+             Sign-in, passkeys and access requests are unaffected"
+        );
     }
     // One repository as the whole browser surface, for a node serving a
     // project's own domain. Validated against the same grammar a repo

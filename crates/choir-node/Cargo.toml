@@ -19,6 +19,12 @@ choir-sequencer = { path = "../choir-sequencer" }
 choir-view = { path = "../choir-view" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde_json = "1"
+# Not a new dependency to the workspace: `ed25519-dalek`, which
+# `choir-identity` already depends on, hashes through it, so this crate
+# names a crate that is already built and already vendored. D72's proof
+# of work needs the one hash function `crypto.subtle` offers a browser,
+# and SHA-256 is not BLAKE3.
+sha2 = "0.10"
 tiny_http = { version = "0.12", features = ["ssl-openssl"] }
 
 [lints]

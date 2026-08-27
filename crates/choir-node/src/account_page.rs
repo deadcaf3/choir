@@ -63,6 +63,7 @@ pub(crate) fn render(
     store: Option<&Accounts>,
     user: &str,
     in_session: bool,
+    console: bool,
     chrome: crate::browse::Chrome<'_>,
 ) -> Page {
     let mut h = String::with_capacity(4 * 1024);
@@ -84,7 +85,14 @@ pub(crate) fn render(
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(user));
     h.push_str("</h1><div class=\"sub\"><span class=\"pill\"><a href=\"/r/\">repositories</a>");
-    h.push_str("</span><span class=\"pill\"><a href=\"/\">node</a></span></div></header>");
+    h.push_str("</span><span class=\"pill\"><a href=\"/\">node</a></span>");
+    // The operator's console (D72), offered only to somebody who may use
+    // it. A link everybody can see and only one person can follow is a
+    // link that teaches most readers what they are not.
+    if console {
+        h.push_str("<span class=\"pill\"><a href=\"/people\">people</a></span>");
+    }
+    h.push_str("</div></header>");
     h.push_str("<main id=\"main\">");
 
     if in_session {
@@ -200,9 +208,15 @@ mod tests {
     /// out of a Basic-auth request does nothing a reader can see.
     #[test]
     fn signing_out_is_offered_only_to_a_session() {
-        let with = super::render(None, "alice", true, crate::browse::Chrome::default());
+        let with = super::render(None, "alice", true, false, crate::browse::Chrome::default());
         assert!(with.html.contains("/api/signout"));
-        let without = super::render(None, "alice", false, crate::browse::Chrome::default());
+        let without = super::render(
+            None,
+            "alice",
+            false,
+            false,
+            crate::browse::Chrome::default(),
+        );
         assert!(!without.html.contains("/api/signout"));
     }
 
@@ -211,7 +225,13 @@ mod tests {
     /// error page.
     #[test]
     fn the_page_distinguishes_no_store_from_no_account() {
-        let page = super::render(None, "alice", false, crate::browse::Chrome::default());
+        let page = super::render(
+            None,
+            "alice",
+            false,
+            false,
+            crate::browse::Chrome::default(),
+        );
         assert_eq!(page.status, 200);
         assert!(page.html.contains("does not run account self-service"));
         assert!(!page.html.contains("<script"), "no store, no ceremony");

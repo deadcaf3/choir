@@ -45,6 +45,7 @@ pub fn git_invocations() -> u64 {
     browse::GIT_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+mod people_page;
 pub mod portable;
 mod prepare;
 pub mod profile;
@@ -58,6 +59,7 @@ mod session;
 mod signin_page;
 pub mod ssh;
 mod ui;
+mod work;
 
 pub use platform::Platform;
 
@@ -476,6 +478,20 @@ impl Node {
     }
 
     /// Removes browser mutation controls and their preparation endpoint.
+    ///
+    /// **It withholds authorship, not credentials** (D73). A browser under
+    /// this flag renders no control that would put an operation in the op
+    /// log -- no verdict, no comment, no `/api/prepare` -- because that is
+    /// the launch gate D39 shipped behind and the thing an operator
+    /// switches on when they are ready for it.
+    ///
+    /// It does not withhold signing in, enrolling the passkey that signs
+    /// in, asking for access (D72), or the operator's console. None of
+    /// those reaches the log: the accounts store is a node-owned file and
+    /// revocation is deletion (D36). Withholding them was the same flag
+    /// doing two jobs, and the second job made the node's own manifest
+    /// untrue -- `passkeys=enabled` beside a posture that would not serve
+    /// the file the ceremony is written in.
     pub fn disable_browser_writes(&mut self) {
         self.browser_writes = false;
     }
@@ -1247,22 +1263,6 @@ impl Node {
                 platform.drain_lag_log();
             }
             let root = self.root.clone();
-            // The operator's contact, for the one page a stranger can
-            // reach. One line of `<root>/.choir/contact`, absent by
-            // default, and deliberately not a compiled-in constant: a
-            // personal identifier baked into a published binary cannot
-            // be taken back out of the copies of it, which is the same
-            // reason host addresses and owner names are placeholders in
-            // every tracked file here.
-            //
-            // Read at startup rather than per request: it changes when
-            // an operator edits it and restarts, like the bind address,
-            // and a file read on the one route an unauthenticated
-            // caller can reach is a syscall they get to schedule.
-            let contact = std::fs::read_to_string(root.join(".choir/contact"))
-                .ok()
-                .and_then(|text| text.lines().next().map(str::trim).map(str::to_string))
-                .filter(|line| !line.is_empty());
             let auth = self.auth.clone();
             let platform = self.platform.clone();
             let queue = self.queue.clone();
@@ -1308,7 +1308,16 @@ impl Node {
                 // suppressed because scripting is in fact enabled. A
                 // write path that silently disappears is worse than a
                 // public constant.
-                if browser_writes && request.url().split('?').next() == Some(ui::WEBAUTHN_JS_PATH) {
+                //
+                // Served whatever `--read-only-browser` says (D73). Each
+                // ceremony in the file asks whether its own element is on
+                // the page, and the pages decide that: a read-only browse
+                // surface renders no `#verdict` and no `#comment`, so the
+                // file that would drive them runs nothing. Withholding the
+                // file instead took sign-in and D72's ask down with them,
+                // which is a page whose button does nothing rather than a
+                // page that offers no button.
+                if request.url().split('?').next() == Some(ui::WEBAUTHN_JS_PATH) {
                     let outcome = respond_static_script(request);
                     // "anon" and not a name: no credential was
                     // evaluated on this path, and the request log must
@@ -1354,7 +1363,20 @@ impl Node {
                             | ("POST", "/api/signin/challenge")
                             | ("POST", "/api/signout")
                     );
+                // D72's queue. Public for the same reason the front
+                // door is: the caller holds no credential and the whole
+                // point is that they can ask for one. What keeps it from
+                // being an open registration is that it writes a row
+                // that authorizes nothing, behind a proof of work, into
+                // a capped table -- and that only an operator can turn
+                // one of those rows into an invite.
+                let asking_route = accounts.is_some()
+                    && matches!(
+                        (method, public_path.as_str()),
+                        ("POST", "/api/access") | ("POST", "/api/access/challenge")
+                    );
                 let public = signin_route
+                    || asking_route
                     || matches!((method, public_path.as_str()), ("GET" | "POST", "/join"))
                     || (method == "GET" && public_path == ui::CARD_PATH)
                     // The landing page replaces the challenge only for a
@@ -1383,6 +1405,15 @@ impl Node {
                             scheme,
                             api_body_limit,
                         )
+                    } else if asking_route {
+                        respond_access(
+                            request,
+                            &public_path,
+                            accounts.as_deref(),
+                            &sessions,
+                            scheme,
+                            api_body_limit,
+                        )
                     } else if public_path == ui::CARD_PATH {
                         respond_card(request)
                     } else {
@@ -1392,7 +1423,7 @@ impl Node {
                             &public_path,
                             ssh_enabled,
                             scheme,
-                            contact.as_deref(),
+                            &root,
                         )
                     };
                     // "anon", like the script constant above: no
@@ -1692,30 +1723,13 @@ impl Node {
                 // and it is gated by nothing but being authenticated: the
                 // only account it can ever show is the caller's own.
                 if request.url().split('?').next().unwrap_or("") == "/account" {
-                    if !browser_writes {
-                        let html = ui::refusal(
-                            "Browser writes are disabled",
-                            403,
-                            &ui::Refusal {
-                                code: "browser_read_only",
-                                error: "This beta keeps every browser page read-only.",
-                                expected: Some("a read-only browser session"),
-                                actual: Some("a passkey enrollment page"),
-                                next: "Use the signed CLI for mutations; the operator may enable browser writes after the WebAuthn launch gate is complete.",
-                            },
-                            &[],
-                            reader_chrome(&request),
-                        );
-                        let outcome = respond_page(request, 403, html, None);
-                        access.finish(log, &user, &outcome);
-                        return;
-                    }
-                    // Offering the ceremony while the switch is off would
-                    // serve a page whose one button answers 503. Checked
-                    // after the read-only refusal above, because a node
-                    // that has turned every browser page read-only has
-                    // said something broader than "not this ceremony", and
-                    // the broader answer is the one to give.
+                    // No `--read-only-browser` refusal here (D73).
+                    // Enrolling a passkey writes to the accounts store and
+                    // never to the op log, and it is the prerequisite for
+                    // signing in -- so refusing it under a posture that
+                    // also advertises `passkeys=enabled` left the one
+                    // credential a browser can hold unobtainable from a
+                    // browser.
                     if !passkeys {
                         let html = ui::refusal(
                             "Passkeys are not enabled",
@@ -1739,6 +1753,11 @@ impl Node {
                         accounts.as_deref(),
                         &user,
                         session_user_present,
+                        acl.as_deref().is_some_and(|table| {
+                            table
+                                .check(&user, &acl::Scope::Node, acl::Level::Write)
+                                .is_none()
+                        }),
                         browse::Chrome {
                             site: None,
                             theme: chosen_theme(&request),
@@ -1774,6 +1793,21 @@ impl Node {
                             .expect("static header"),
                         );
                     let outcome = served(request, response, page.status, bytes);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                // The operator's console (D72). A page, like `/account`
+                // above, and ahead of the API block for the same reason.
+                if request.url().split('?').next().unwrap_or("") == "/people" {
+                    let outcome = respond_people(
+                        request,
+                        accounts.as_deref(),
+                        acl.as_deref(),
+                        &user,
+                        &root,
+                        scheme,
+                        api_body_limit,
+                    );
                     access.finish(log, &user, &outcome);
                     return;
                 }
@@ -2946,8 +2980,10 @@ fn respond_join(
     path: &str,
     ssh: bool,
     scheme: &'static str,
-    contact: Option<&str>,
+    root: &std::path::Path,
 ) -> std::io::Result<(u16, u64)> {
+    let contact = operator_contact(root);
+    let contact = contact.as_deref();
     let theme = chosen_theme(&request);
     let chrome = browse::Chrome {
         site: None,
@@ -2987,9 +3023,19 @@ fn respond_join(
             )
         }
     } else {
-        join_page::landing(theme, contact)
+        join_page::landing(
+            theme,
+            &join_page::Door {
+                contact,
+                // A node with no store cannot hold a queue, so the front
+                // door does not offer a form whose one button would
+                // answer 503 (D72).
+                asking: store.is_some(),
+            },
+        )
     };
     let bytes = page.html.len() as u64;
+    let scripted = page.scripted;
     let mut response = tiny_http::Response::from_string(page.html)
         .with_status_code(page.status)
         .with_header(
@@ -3001,8 +3047,19 @@ fn respond_join(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
-                .expect("static header"),
+            // The page says which it needs, because it is the only thing
+            // that knows whether it emitted a `<script>` tag (D72). A
+            // responder deciding from the route is how D71's sign-in page
+            // shipped with a button the header would not let run.
+            tiny_http::Header::from_bytes(
+                &b"Content-Security-Policy"[..],
+                if scripted {
+                    SCRIPTED_PAGE_CSP
+                } else {
+                    BROWSER_CSP
+                },
+            )
+            .expect("static header"),
         )
         .with_header(
             tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
@@ -3018,6 +3075,76 @@ fn respond_join(
         );
     }
     served(request, response, page.status, bytes)
+}
+
+/// Serves D72's two pre-auth endpoints: issue a challenge, and take a
+/// request that solved it.
+///
+/// The order inside the `POST /api/access` arm is the security property.
+/// The challenge is spent **first**, from an in-memory table, before a
+/// single hash is computed: that makes the work verifiable exactly once
+/// per challenge issued, and it keeps a caller from turning one solved
+/// stamp into sixty-four rows. Verifying the stamp before spending the
+/// challenge would leave the same solution good until it expired.
+///
+/// Refusals here are deliberately not specific. A caller that sends a
+/// stale challenge, an unsolved nonce or a challenge this node never
+/// issued gets the same sentence, because the differences are only useful
+/// to somebody probing how the cost is checked.
+fn respond_access(
+    mut request: tiny_http::Request,
+    path: &str,
+    store: Option<&accounts::Accounts>,
+    sessions: &session::Sessions,
+    scheme: &'static str,
+    body_limit: std::num::NonZeroU64,
+) -> std::io::Result<(u16, u64)> {
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    if path == "/api/access/challenge" {
+        let challenge = sessions.issue_challenge();
+        return respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "challenge": challenge.to_hex(),
+                "bits": work::WORK_BITS,
+            })
+            .to_string(),
+        );
+    }
+    let body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
+        quota::Body::Complete(body) => body,
+        quota::Body::OverLimit { limit, size } => {
+            return respond_api_too_large(request, limit, size)
+        }
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return respond_json(request, 400, r#"{"error":"body must be JSON"}"#);
+    };
+    let refused = r#"{"error":"that stamp is not one this node issued and has not been spent; reload the page and try again"}"#;
+    let (Some(challenge), Some(nonce)) = (
+        json.get("challenge").and_then(serde_json::Value::as_str),
+        json.get("nonce").and_then(serde_json::Value::as_str),
+    ) else {
+        return respond_json(request, 400, refused);
+    };
+    let Some(parsed) = choir_hash::ContentHash::from_hex(challenge) else {
+        return respond_json(request, 400, refused);
+    };
+    if !sessions.spend_challenge(&parsed) {
+        return respond_json(request, 400, refused);
+    }
+    if !work::solved(challenge, nonce) {
+        return respond_json(request, 400, refused);
+    }
+    let (status, answer) = match store {
+        Some(store) => with_join_url(store.request_access(&json), origin.as_deref(), "request"),
+        None => (
+            503,
+            r#"{"error":"account self-service is not enabled on this node"}"#.to_string(),
+        ),
+    };
+    respond_json(request, status, &answer)
 }
 
 /// Sets or clears the theme cookie and sends the reader back where they
@@ -3259,6 +3386,314 @@ fn prepare_body(user: &str, req_body: &[u8]) -> (u16, String) {
 /// discussion, and the op log keeps every byte of it forever.
 const MAX_COMMENT_CHARS: usize = 4096;
 
+/// Serves the operator's console (D72), both the page and the three
+/// actions on it.
+///
+/// One function for `GET` and `POST` because they are one surface: the
+/// forms post back to the address that rendered them, which is what keeps
+/// the page and its actions from drifting into disagreeing about which
+/// grants exist.
+///
+/// Gated at `@node write`, the same authority
+/// [`crate::acl::api_denial`] requires to mint an invite through the API.
+/// It has to be: every button here is one of those calls.
+fn respond_people(
+    mut request: tiny_http::Request,
+    store: Option<&accounts::Accounts>,
+    acl: Option<&acl::Effective>,
+    user: &str,
+    root: &std::path::Path,
+    scheme: &'static str,
+    body_limit: std::num::NonZeroU64,
+) -> std::io::Result<(u16, u64)> {
+    let chrome = browse::Chrome {
+        site: None,
+        theme: chosen_theme(&request),
+        here: "/people",
+    };
+    let Some(store) = store else {
+        let html = ui::refusal(
+            "Account self-service is off",
+            503,
+            &ui::Refusal {
+                code: "accounts_disabled",
+                error: "This node was started without an accounts file.",
+                expected: Some("a node that issues credentials"),
+                actual: Some("the operator's console"),
+                next: "Start the daemon with --accounts-file to issue and answer invites here.",
+            },
+            &[],
+            reader_chrome(&request),
+        );
+        return respond_page(request, 503, html, None);
+    };
+    let denial = acl.and_then(|table| table.check(user, &acl::Scope::Node, acl::Level::Write));
+    if let Some(denial) = denial {
+        let html = ui::refusal(
+            "Not yours to see",
+            denial.status,
+            &ui::Refusal {
+                code: "forbidden",
+                error: "This page shows and changes who may reach this node.",
+                expected: Some("@node write"),
+                actual: Some("the grants you hold"),
+                next: "Ask the operator, who is whoever holds the node's own credential.",
+            },
+            &[],
+            reader_chrome(&request),
+        );
+        return respond_page(request, denial.status, html, None);
+    }
+    // What an operator may grant is what they may read, which for a
+    // `@node write` holder is everything on the node.
+    let repos = browse::repositories(root, &|_| true);
+
+    if request.method().as_str() != "POST" {
+        let said = match request.url().split_once("?said=") {
+            Some((_, code)) => said_in_words(code.split('&').next().unwrap_or("")),
+            None => "",
+        };
+        let page = people_page::render(
+            store,
+            &repos,
+            operator_contact(root).as_deref(),
+            said,
+            chrome,
+        );
+        return respond_console(request, page);
+    }
+    if !same_origin(&request, scheme) {
+        let html = ui::refusal(
+            "Cross-origin write refused",
+            403,
+            &ui::Refusal {
+                code: "cross_origin",
+                error: "That form was submitted from another site.",
+                expected: Some("a form on this node"),
+                actual: Some("a form somewhere else"),
+                next: "Open this node's own page and try again.",
+            },
+            &[],
+            reader_chrome(&request),
+        );
+        return respond_page(request, 403, html, None);
+    }
+    let body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {
+        quota::Body::Complete(body) => String::from_utf8_lossy(&body).into_owned(),
+        quota::Body::OverLimit { limit, size } => {
+            return respond_api_too_large(request, limit, size)
+        }
+    };
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let field = |key: &str| join_page::form_value(&body, key);
+    // `.git` is how the ACL spells a repository, and leaving it off is
+    // the mistake that grants nothing at all. Added here rather than
+    // refused: the select offers repository names, and there is one right
+    // answer.
+    let grant = || {
+        let repo = field("repo")?;
+        let level = field("level")?;
+        Some(format!("{repo}.git {level}"))
+    };
+    match field("action").as_deref() {
+        Some("grant") => {
+            let (Some(id), Some(grant)) = (field("request_id"), grant()) else {
+                return respond_people_result(request, "bad");
+            };
+            let (status, _) = store.grant_request(
+                user,
+                &serde_json::json!({ "request_id": id, "grants": [grant] }),
+            );
+            respond_people_result(request, if status == 200 { "granted" } else { "bad" })
+        }
+        Some("contact") => {
+            // Absent rather than empty is how the form spells "clear
+            // it", since `form_value` refuses a blank value.
+            let value = field("contact").unwrap_or_default();
+            match write_operator_contact(root, &value) {
+                Ok(()) => respond_people_result(request, "contact"),
+                Err(_) => respond_people_result(request, "bad"),
+            }
+        }
+        Some("decline") => {
+            let Some(id) = field("request_id") else {
+                return respond_people_result(request, "bad");
+            };
+            let (status, _) = store.decline_request(&serde_json::json!({ "request_id": id }));
+            respond_people_result(request, if status == 200 { "declined" } else { "bad" })
+        }
+        Some("invite") => {
+            let (Some(name), Some(grant)) = (field("display_name"), grant()) else {
+                return respond_people_result(request, "bad");
+            };
+            let (status, answer) = with_join_url(
+                store.invite(
+                    user,
+                    &serde_json::json!({ "display_name": name, "grants": [grant] }),
+                ),
+                origin.as_deref(),
+                "invite",
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&answer).unwrap_or_default();
+            match (status, parsed["join_url"].as_str()) {
+                (200, Some(link)) => {
+                    let page = people_page::minted(link, &name, chrome);
+                    respond_console(request, page)
+                }
+                _ => respond_people_result(request, "bad"),
+            }
+        }
+        _ => respond_people_result(request, "bad"),
+    }
+}
+
+/// The outcome of a console action, as a sentence.
+///
+/// Chosen from a fixed set here rather than echoed out of the query
+/// string, so the page cannot be made to say anything by a link somebody
+/// sends an operator.
+fn said_in_words(code: &str) -> &'static str {
+    match code {
+        "granted" => "Let in. The link they already hold now works.",
+        "declined" => "Declined. Their link says only that it is not valid.",
+        "contact" => "Saved. The front page offers it to anybody who arrives with nothing.",
+        "bad" => "That did not work. Nothing changed.",
+        _ => "",
+    }
+}
+
+/// Post/redirect/get for a console action, so a refresh does not repeat it.
+fn respond_people_result(request: tiny_http::Request, said: &str) -> std::io::Result<(u16, u64)> {
+    let location = format!("/people?said={said}");
+    let response = tiny_http::Response::empty(303)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Location"[..], location.as_bytes())
+                .expect("location header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        );
+    served(request, response, 303, 0)
+}
+
+/// Sends a console page with the headers every browser surface carries.
+///
+/// [`BROWSER_CSP`], not the scripted one: nothing on this page runs, and
+/// a header that allowed script here would be permission granted to a
+/// page that has no use for it.
+fn respond_console(
+    request: tiny_http::Request,
+    page: people_page::Page,
+) -> std::io::Result<(u16, u64)> {
+    let bytes = page.html.len() as u64;
+    let response = tiny_http::Response::from_string(page.html)
+        .with_status_code(page.status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-store"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        );
+    served(request, response, page.status, bytes)
+}
+
+/// The operator's contact, for the one page a stranger can reach.
+///
+/// One line of `<root>/.choir/contact`, absent by default, and
+/// deliberately not a compiled-in constant: a personal identifier baked
+/// into a published binary cannot be taken back out of the copies of it,
+/// which is the same reason host addresses and owner names are
+/// placeholders in every tracked file here.
+///
+/// Read per request rather than once at startup. That was the other way
+/// round until the console could edit it (D72), and a value an operator
+/// can change from a page but only see take effect after a restart is a
+/// control that appears not to work. The read is one small file on a
+/// route that is already rendering several kilobytes, behind the same
+/// public limiter as the rest of the pre-auth surface.
+fn operator_contact(root: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(root.join(".choir/contact"))
+        .ok()
+        .and_then(|text| text.lines().next().map(str::trim).map(str::to_string))
+        .filter(|line| !line.is_empty())
+}
+
+/// Where [`operator_contact`] reads from.
+fn contact_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(".choir/contact")
+}
+
+/// Sets or clears the operator's contact from the console (D72).
+///
+/// Written with the private-file primitive the rest of this node's own
+/// state uses, and validated first: the string lands on the page that
+/// answers anybody, so a control character in it would be a header or a
+/// second line in a file whose grammar is one line.
+///
+/// An empty submission removes the file rather than writing an empty
+/// one, because "no contact" and "a contact that is nothing" render the
+/// same and only one of them is a state somebody meant.
+fn write_operator_contact(root: &std::path::Path, value: &str) -> Result<(), String> {
+    let value = value.trim();
+    let path = contact_path(root);
+    if value.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        };
+    }
+    if value.chars().count() > 200 {
+        return Err("a contact must be at most 200 characters".to_string());
+    }
+    if value.chars().any(char::is_control) {
+        return Err(
+            "a contact must be one line and must not contain control characters".to_string(),
+        );
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    choir_fs::write_atomic_private(&path, format!("{value}\n").as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Whether a state-changing request came from this node's own pages.
+///
+/// **Absent means yes.** A browser sends `Origin` on every `POST`; a
+/// program does not, and `curl`, `choirctl` and every test in this
+/// workspace are programs. So a missing header is a non-browser client
+/// and passes, while a header naming somewhere else is a page on another
+/// site steering a browser that still holds a credential for this one.
+///
+/// It matters because of what a browser sends unasked. The session
+/// cookie is `SameSite=Lax` and so never rides a cross-site `POST`, but
+/// cached Basic credentials do -- an operator who authenticated with the
+/// auth file once has a browser that will re-present it to any page that
+/// asks. Without this check, a link could mint an invite in their name.
+fn same_origin(request: &tiny_http::Request, scheme: &'static str) -> bool {
+    let Some(origin) = header(request, "origin") else {
+        return true;
+    };
+    match header(request, "host") {
+        Some(host) => origin == format!("{scheme}://{host}"),
+        // No `Host` and an `Origin` that claims one: nothing to compare
+        // against, so refuse rather than guess.
+        None => false,
+    }
+}
+
 /// Serves one `/api/accounts...` request (D36).
 ///
 /// The ACL decides who may issue, revoke and read the roster, through the
@@ -3281,7 +3716,13 @@ const MAX_COMMENT_CHARS: usize = 4096;
 ///
 /// Anything that is not a successful mint passes straight through: an
 /// error body has no invite in it to link to.
-fn with_join_url(answer: (u16, String), origin: Option<&str>) -> (u16, String) {
+///
+/// `field` names the member holding the `id:secret` pair, because D72's
+/// access request answers with the same two halves under a different name
+/// and lands on the same page. One builder rather than two: the link
+/// grammar is `/join?i=&k=` in exactly one place, and a second copy is
+/// how the two would come to disagree.
+fn with_join_url(answer: (u16, String), origin: Option<&str>, field: &str) -> (u16, String) {
     let (status, body) = answer;
     if status != 200 {
         return (status, body);
@@ -3290,7 +3731,7 @@ fn with_join_url(answer: (u16, String), origin: Option<&str>) -> (u16, String) {
     else {
         return (status, body);
     };
-    let Some((id, secret)) = parsed["invite"].as_str().and_then(|p| p.split_once(':')) else {
+    let Some((id, secret)) = parsed[field].as_str().and_then(|p| p.split_once(':')) else {
         return (status, body);
     };
     let url = format!("{origin}/join?i={id}&k={secret}");
@@ -3326,6 +3767,11 @@ fn handle_accounts(
     };
     let method = request.method().as_str().to_string();
     let path = request.url().split('?').next().unwrap_or("").to_string();
+    // Issuing and revoking are the two calls on this node a hostile page
+    // would most like to make with somebody else's cached credential.
+    if method == "POST" && !same_origin(&request, scheme) {
+        return respond_json(request, 403, r#"{"error":"cross-origin write refused"}"#);
+    }
     // The address this operator actually reached the node on. The store
     // cannot know it — it has never seen a request — so the link is
     // assembled here, where the `Host` header is.
@@ -3359,7 +3805,7 @@ fn handle_accounts(
                 match (json, method.as_str(), path.as_str()) {
                     (None, _, _) => (400, r#"{"error":"body must be JSON"}"#.to_string()),
                     (Some(json), "POST", "/api/accounts/invite") => {
-                        with_join_url(store.invite(user, &json), origin.as_deref())
+                        with_join_url(store.invite(user, &json), origin.as_deref(), "invite")
                     }
                     (Some(json), "POST", "/api/accounts/redeem") => match invite {
                         Some(id) => store.redeem(id, &json),
@@ -3370,6 +3816,12 @@ fn handle_accounts(
                         ),
                     },
                     (Some(json), "POST", "/api/accounts/revoke") => store.revoke(&json),
+                    (Some(json), "POST", "/api/accounts/request/grant") => {
+                        store.grant_request(user, &json)
+                    }
+                    (Some(json), "POST", "/api/accounts/request/decline") => {
+                        store.decline_request(&json)
+                    }
                     (Some(_), "POST", "/api/accounts/passkey" | "/api/accounts/passkey/remove")
                         if !passkeys =>
                     {

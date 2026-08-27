@@ -493,6 +493,13 @@ fn exactly_the_intended_routes_answer_without_a_credential() {
         let (status, _, _) = get(&format!("{}{path}", s.base), &[]);
         assert_eq!(status, 200, "{path} was expected to be public");
     }
+    // D72's two, which are `POST` only: a `GET` of either is not a route.
+    for path in ["/api/access", "/api/access/challenge"] {
+        let (status, _, _) = get(&format!("{}{path}", s.base), &["-X", "POST", "-d", "{}"]);
+        assert_ne!(status, 401, "{path} was expected to be public");
+        let (status, _, _) = get(&format!("{}{path}", s.base), &[]);
+        assert_eq!(status, 401, "{path} answered a GET without a credential");
+    }
     // Everything else still meets the wall. `/status` and `/r/` are the
     // two that would leak the most if this list ever grew by accident.
     for path in ["/status", "/r/", "/api/view", "/llms.txt", "/account"] {
@@ -551,26 +558,51 @@ fn a_node_without_self_service_says_so_instead_of_blaming_the_link() {
 fn the_public_pages_execute_nothing_and_reach_nowhere() {
     let s = served("csp");
     let (id, secret) = s.invite(r#"{"user":"bea","grants":["agents/demo.git read"]}"#);
+    // The invite page is the one that must run nothing at all: its own
+    // address is a live credential, so a script on it is a script with a
+    // secret in `location`.
+    let (_, headers, body) = get(&s.join_url(&id, &secret), &[]);
+    let csp = header_value(&headers, "Content-Security-Policy").expect("a policy");
+    assert!(csp.contains("default-src 'none'"), "{csp}");
+    assert!(
+        csp.contains("form-action 'self'"),
+        "the form cannot submit: {csp}"
+    );
+    assert!(
+        !csp.contains("script-src"),
+        "the invite page licensed script: {csp}"
+    );
+    assert!(
+        !body.contains("<script"),
+        "the invite page carries script: {body}"
+    );
+
+    // The landing page runs D72's ask, and exactly that: one file off
+    // this origin, nothing inline, and nowhere to connect but here.
+    let (_, headers, body) = get(&format!("{}/", s.base), &[]);
+    let csp = header_value(&headers, "Content-Security-Policy").expect("a policy");
+    assert!(csp.contains("default-src 'none'"), "{csp}");
+    assert!(csp.contains("script-src 'self'"), "{csp}");
+    assert!(csp.contains("connect-src 'self'"), "{csp}");
+    assert!(
+        !csp.contains("unsafe-inline") || !csp.contains("script-src 'unsafe-inline'"),
+        "the landing page licensed inline script: {csp}"
+    );
+    assert!(
+        body.contains("<script src=\"/static/webauthn.js\""),
+        "the ask form has no script to run it: {body}"
+    );
+    assert!(
+        body.matches("<script").count() == 1,
+        "more than the one shared file: {body}"
+    );
+
     for url in [format!("{}/", s.base), s.join_url(&id, &secret)] {
-        let (_, headers, body) = get(&url, &[]);
-        let csp = header_value(&headers, "Content-Security-Policy").expect("a policy");
-        assert!(csp.contains("default-src 'none'"), "{csp}");
-        assert!(
-            csp.contains("form-action 'self'"),
-            "the form cannot submit: {csp}"
-        );
-        assert!(
-            !csp.contains("script-src"),
-            "a public page licensed script: {csp}"
-        );
+        let (_, headers, _) = get(&url, &[]);
         assert_eq!(
             header_value(&headers, "Referrer-Policy").as_deref(),
             Some("no-referrer"),
             "the invite secret can leak in a Referer header: {headers}"
-        );
-        assert!(
-            !body.contains("<script"),
-            "a public page carries script: {body}"
         );
     }
     // A crawler must be told not to index a page whose URL is a
@@ -709,7 +741,7 @@ fn the_front_door_names_the_operator_only_when_the_operator_named_themselves() {
 
     let silent = landing(None);
     assert!(
-        !silent.contains("ask for access"),
+        !silent.contains("write to"),
         "a node whose operator named nobody must offer no address"
     );
 
@@ -717,8 +749,8 @@ fn the_front_door_names_the_operator_only_when_the_operator_named_themselves() {
     // line reaches the page and is linked, never a particular person.
     let named = landing(Some("someone@example.invalid"));
     assert!(
-        named.contains("ask for access"),
-        "the invitation to ask is missing: {named}"
+        named.contains("write to"),
+        "the invitation to write is missing: {named}"
     );
     assert!(
         named.contains("mailto:someone@example.invalid"),
