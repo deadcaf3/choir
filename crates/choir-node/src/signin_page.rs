@@ -72,8 +72,15 @@ pub(crate) fn render(passkeys: bool, next: &str, chrome: crate::browse::Chrome<'
         h.push_str("<noscript><p class=\"note\">A passkey needs scripting, which is off in ");
         h.push_str("this browser. Everything here is also reachable with the credential you ");
         h.push_str("were issued, through the <code>choir</code> command line.</p></noscript>");
-        h.push_str("<p class=\"note\">No passkey yet? Enrol one from your account page after ");
-        h.push_str("signing in with the credential you were issued.</p>");
+        // The bootstrap, and the only way to a first passkey. Without a
+        // link here the ceremony is unreachable for anybody who does not
+        // already have one, which is everybody at first: this page
+        // replaced the browser's credential dialog, so there is no longer
+        // any route that asks for the issued credential by accident.
+        h.push_str("<p class=\"note\">No passkey yet? <a href=\"");
+        h.push_str(&esc(&format!("/signin/credential?next={next}")));
+        h.push_str("\">Sign in with the credential you were issued</a>, then enrol one ");
+        h.push_str("from your account page.</p>");
     } else {
         h.push_str("<p class=\"note\">This node does not offer passkeys, so there is no ");
         h.push_str("ceremony to run here. Use the credential you were issued, through the ");
@@ -139,6 +146,20 @@ mod tests {
         assert!(
             page.html.contains(crate::ui::CEREMONY_SCRIPT),
             "and the script that unhides it is loaded: {}",
+            page.html
+        );
+    }
+
+    /// A first passkey is enrolled by an authenticated caller, and this
+    /// page is what replaced the browser dialog that used to ask. Without
+    /// the bootstrap link there is no route left that asks for the issued
+    /// credential, so nobody without a passkey can ever get one.
+    #[test]
+    fn the_page_offers_the_only_route_to_a_first_passkey() {
+        let page = super::render(true, "/r/", crate::browse::Chrome::default());
+        assert!(
+            page.html.contains("/signin/credential?next=/r/"),
+            "no way to present an issued credential: {}",
             page.html
         );
     }

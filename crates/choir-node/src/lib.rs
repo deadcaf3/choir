@@ -1431,7 +1431,17 @@ impl Node {
                             // than trusted to not send `text/html`, since
                             // what a client sends is not a promise about
                             // what it can do with the answer.
+                            // `/signin/credential` is the deliberate way
+                            // back to the browser's own dialog, and the
+                            // only bootstrap there is: a passkey is
+                            // enrolled by an authenticated caller, and
+                            // before the first one exists the credential
+                            // the operator issued is the only thing a
+                            // person has. Replacing the challenge on every
+                            // route, as this first did, left no way to
+                            // present it and no way to enrol.
                             let wants_page = passkeys
+                                && !request.url().starts_with("/signin/credential")
                                 && !request.url().contains(".git")
                                 && header(&request, "accept")
                                     .is_some_and(|a| a.contains("text/html"));
@@ -1632,6 +1642,31 @@ impl Node {
                         return;
                     }
                     let outcome = handle_prepare(&user, acl.as_deref(), api_body_limit, request);
+                    access.finish(log, &user, &outcome);
+                    return;
+                }
+                // The bootstrap route (D71). Reaching this line at all
+                // means a credential was accepted, since the auth gate is
+                // above: the browser has now cached it for this origin and
+                // will send it onward, so there is nothing to do but
+                // forward to whatever was being asked for.
+                if request.url().split('?').next() == Some("/signin/credential") {
+                    let next = request
+                        .url()
+                        .split_once("?next=")
+                        .map(|(_, raw)| raw.split('&').next().unwrap_or("").to_string())
+                        .filter(|raw| raw.starts_with('/') && !raw.starts_with("//"))
+                        .unwrap_or_else(|| "/account".to_string());
+                    let response = tiny_http::Response::empty(303)
+                        .with_header(
+                            tiny_http::Header::from_bytes(&b"Location"[..], next.as_bytes())
+                                .expect("location header"),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                                .expect("static header"),
+                        );
+                    let outcome = served(request, response, 303, 0);
                     access.finish(log, &user, &outcome);
                     return;
                 }

@@ -2338,3 +2338,73 @@ fn a_passkey_opens_a_browser_session_and_the_challenge_is_spent() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The bootstrap: a person with no passkey can still get one (D71).
+///
+/// Enrolment acts on an authenticated caller, and the sign-in page
+/// replaced the browser's own credential dialog. Taken together that
+/// closed the only door: the ceremony needs a passkey to reach the page
+/// that enrols a passkey. `/signin/credential` is the deliberate way back
+/// to the challenge, and it is on the page precisely because no route
+/// asks for an issued credential by accident any more.
+#[test]
+fn a_person_with_no_passkey_can_still_reach_the_page_that_enrols_one() {
+    let work = std::env::temp_dir().join("choir-node-passkeys-bootstrap");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    std::fs::write(work.join("acl"), "alice @node write\nalice * write\n").expect("acl");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node = Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds");
+    let port = node.port();
+    node.watch_acl_file(work.join("acl")).expect("acl loads");
+    node.enable_passkeys();
+    node.enable_accounts(work.join("accounts.json"), None, None)
+        .expect("accounts enable");
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let headers = |args: &[&str]| {
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-D-", "-o", "/dev/null"])
+            .args(args)
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout).to_lowercase()
+    };
+
+    // An ordinary browser route answers with the page and no challenge:
+    // that is the change this test exists to bound.
+    let ordinary = headers(&["-H", "Accept: text/html", &format!("{base}/account")]);
+    assert!(
+        !ordinary.contains("www-authenticate"),
+        "a browser route must not raise the dialog any more: {ordinary}"
+    );
+
+    // The bootstrap route does raise it, even though it is a browser
+    // asking, because it is the one route whose whole purpose is to.
+    let bootstrap = headers(&[
+        "-H",
+        "Accept: text/html",
+        &format!("{base}/signin/credential"),
+    ]);
+    assert!(
+        bootstrap.contains("www-authenticate"),
+        "the bootstrap must ask for the issued credential: {bootstrap}"
+    );
+
+    // And with the credential it forwards to where the person was going,
+    // by which point the browser holds it for the origin.
+    let forwarded = headers(&[
+        "-u",
+        "alice:a",
+        "-H",
+        "Accept: text/html",
+        &format!("{base}/signin/credential?next=/account"),
+    ]);
+    assert!(forwarded.contains("303"), "{forwarded}");
+    assert!(forwarded.contains("location: /account"), "{forwarded}");
+
+    std::fs::remove_dir_all(&work).ok();
+}
