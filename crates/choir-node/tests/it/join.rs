@@ -615,3 +615,55 @@ fn minting_an_invite_answers_with_the_link_to_paste() {
     );
     std::fs::remove_dir_all(&s.work).ok();
 }
+
+/// An invite link is minted with the scheme the *world* reaches this node
+/// on, not the one its own listener speaks (D71).
+///
+/// The private beta terminates TLS at a reverse proxy and the node itself
+/// serves plaintext on loopback, so the scheme it was writing into every
+/// join link was `http`. An invite is a bearer credential carried in that
+/// URL: the recipient's first request would put it on the wire in
+/// cleartext, and only the redirect that followed would be encrypted.
+/// Found on a live node the day the proxy went in, which is the whole
+/// reason the declaration exists rather than a guess from the listener.
+#[test]
+fn an_invite_behind_a_tls_proxy_is_minted_as_an_https_link() {
+    let work = std::env::temp_dir().join("choir-node-join-proxy-scheme");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+    let acl_path = work.join("acl");
+    std::fs::write(&acl_path, "alice @node write\nalice * write\n").expect("acl file");
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let root = work.join("repos");
+    let mut node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds free port");
+    let port = node.port();
+    node.watch_acl_file(acl_path).expect("acl loads");
+    // Plaintext on loopback, exactly like the deployed node: the proxy in
+    // front is what holds the certificate.
+    node.behind_tls_proxy();
+    node.enable_accounts(work.join("accounts.json"), None, None)
+        .expect("accounts enable");
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    let (status, answer) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "--data-binary",
+        r#"{"user":"bob","grants":["agents/demo.git write"]}"#,
+        &format!("{base}/api/accounts/invite"),
+    ]);
+    assert_eq!(status, 200, "{answer}");
+    let join_url = answer["join_url"]
+        .as_str()
+        .expect("the invite carries a join_url");
+    assert!(
+        join_url.starts_with("https://"),
+        "a node behind a TLS proxy must mint https links, not {join_url}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}

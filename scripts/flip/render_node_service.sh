@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 18 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [private-beta-service-user]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 19 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [private-beta-service-user]" >&2
   exit 2
 fi
 
@@ -49,7 +49,14 @@ ACL=${16:-}
 # flag added to one and forgotten on the other is still a diff between
 # two files fed the same inputs.
 ACCOUNTS=${17:-}
-PRIVATE_BETA=${18:-}
+# Same contract as the plist renderer: any non-empty 18th argument says a
+# TLS-terminating proxy is in front, so the node writes its absolute URLs
+# and its cookies as https even though its own listener is plaintext on
+# loopback. Declared here rather than sniffed from X-Forwarded-Proto at
+# run time, because an invite link is a bearer credential and the node
+# cannot tell a header its proxy set from one a caller sent.
+BEHIND_TLS_PROXY=${18:-}
+PRIVATE_BETA=${19:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -62,6 +69,11 @@ if [ -n "$PRIVATE_BETA" ]; then
     || { echo "render_node_service.sh: private beta needs --require-scope" >&2; exit 2; }
   [ -z "$TLS_CERT$TLS_KEY" ] \
     || { echo "render_node_service.sh: private beta terminates TLS at the reverse proxy; direct node TLS is refused" >&2; exit 2; }
+  # The other half of that sentence. A beta node that refuses its own TLS
+  # because a proxy terminates it must also write its URLs as the scheme
+  # that proxy speaks, or every invite link it mints is http.
+  [ -n "$BEHIND_TLS_PROXY" ] \
+    || { echo "render_node_service.sh: private beta terminates TLS at a proxy, so it must be told it is behind one" >&2; exit 2; }
 fi
 
 # Same repos-file contract as the plist renderer: one repo per line,
@@ -87,6 +99,9 @@ if [ -n "$ACL" ]; then
 fi
 if [ -n "$ACCOUNTS" ]; then
   EXEC="$EXEC --accounts-file $ACCOUNTS"
+fi
+if [ -n "$BEHIND_TLS_PROXY" ]; then
+  EXEC="$EXEC --behind-tls-proxy"
 fi
 if [ -n "$PROTECTED_REFS" ]; then
   EXEC="$EXEC --require-assignment --protected-refs $PROTECTED_REFS --require-review"

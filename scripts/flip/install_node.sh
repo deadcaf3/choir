@@ -148,6 +148,14 @@ ACCOUNTS=""
 if [[ -f "$STATE/accounts.jsonl" ]]; then
   ACCOUNTS="$STATE/accounts.jsonl"
 fi
+# Derived the same way as the Linux installer: a public https route plus
+# no local TLS marker is the reverse-proxy deployment, and it decides
+# whether an invite link is minted https or http.
+BEHIND_TLS_PROXY=""
+if [[ -f "$PUBLIC_URL_FILE" && ! -f "$TLS_MARKER" ]] \
+  && [[ "$(sed -n 1p "$PUBLIC_URL_FILE")" == https://* ]]; then
+  BEHIND_TLS_PROXY="behind-tls-proxy"
+fi
 # TLS marker: two lines, cert path then key path -- same contract as the
 # Linux installer, same fail-closed refusal on a half-filled marker.
 TLS_CERT=""
@@ -175,13 +183,13 @@ if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" > "$PLIST"
 fi
 if [[ -n "$ACL" ]]; then
   echo "per-repository authorization enabled ($ACL): ungranted access is refused"

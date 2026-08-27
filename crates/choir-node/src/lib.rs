@@ -219,6 +219,12 @@ pub struct Node {
     /// The rounds running right now, so a second request for a target
     /// already in flight is refused rather than raced.
     queue_in_flight: std::sync::Arc<queue_api::InFlight>,
+    /// The scheme this node's own listener speaks, and by default the one
+    /// every absolute URL it builds is written with.
+    ///
+    /// [`Node::behind_tls_proxy`] overrides it, because a node that
+    /// terminates plaintext on loopback behind a proxy is reached over
+    /// https by everyone except the proxy.
     scheme: &'static str,
     /// Loopback secret handed to repo hooks via env so their callback to
     /// `/api/git-update` passes the auth gate without user credentials.
@@ -668,6 +674,27 @@ impl Node {
             path,
         }));
         Ok(())
+    }
+
+    /// Declares that a TLS-terminating proxy sits in front of this node,
+    /// so absolute URLs it builds are written `https` and the cookies it
+    /// sets carry `Secure`.
+    ///
+    /// Declared by the operator rather than read from
+    /// `X-Forwarded-Proto`, because the node cannot tell a header its
+    /// proxy set from one a client sent: trusting it would mean any
+    /// caller that can reach the node decides how its invite links are
+    /// spelled. The proxy this repository ships already *sets* that
+    /// header rather than appending to it, for the same reason
+    /// `X-Forwarded-For` is cleared there (D59), and a declaration needs
+    /// no such care.
+    ///
+    /// The defect this exists for: an invite is a bearer credential
+    /// carried in a URL, and behind the proxy the node was writing that
+    /// URL with `http`. The recipient's first request would carry the
+    /// credential in cleartext and only then be redirected.
+    pub fn behind_tls_proxy(&mut self) {
+        self.scheme = "https";
     }
 
     /// Turns on passkeys: WebAuthn enrolment and the browser write path

@@ -110,6 +110,7 @@ fn render_output(
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
     accounts: Option<&str>,
+    proxy: bool,
 ) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_plist.sh");
     let repos_path = repos_file(repos);
@@ -133,26 +134,31 @@ fn render_output(
     // in for an absent policy.
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope || tls.is_some() || acl.is_some() || accounts.is_some() {
+    } else if scope || tls.is_some() || acl.is_some() || accounts.is_some() || proxy {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
-    } else if tls.is_some() || acl.is_some() || accounts.is_some() {
+    } else if tls.is_some() || acl.is_some() || accounts.is_some() || proxy {
         command.arg("");
     }
     if let Some((cert, key)) = tls {
         command.args([cert, key]);
-    } else if acl.is_some() || accounts.is_some() {
+    } else if acl.is_some() || accounts.is_some() || proxy {
         command.args(["", ""]);
     }
     if let Some(path) = acl {
         command.arg(path);
-    } else if accounts.is_some() {
+    } else if accounts.is_some() || proxy {
         command.arg("");
     }
     if let Some(path) = accounts {
         command.arg(path);
+    } else if proxy {
+        command.arg("");
+    }
+    if proxy {
+        command.arg("behind-tls-proxy");
     }
     let output = command.output().expect("render plist");
     std::fs::remove_file(repos_path).ok();
@@ -160,7 +166,7 @@ fn render_output(
 }
 
 fn render(protected: Option<&str>, scope: bool) -> String {
-    render_tls(protected, scope, None, None, None)
+    render_tls(protected, scope, None, None, None, false)
 }
 
 fn render_tls(
@@ -169,8 +175,17 @@ fn render_tls(
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
     accounts: Option<&str>,
+    proxy: bool,
 ) -> String {
-    let output = render_output("owner/repo.git\n", protected, scope, tls, acl, accounts);
+    let output = render_output(
+        "owner/repo.git\n",
+        protected,
+        scope,
+        tls,
+        acl,
+        accounts,
+        proxy,
+    );
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 plist")
 }
@@ -235,6 +250,7 @@ fn render_unit_output(
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
     accounts: Option<&str>,
+    proxy: bool,
 ) -> std::process::Output {
     let script = repo_root().join("scripts/flip/render_node_service.sh");
     let repos_path = repos_file(repos);
@@ -255,26 +271,31 @@ fn render_unit_output(
     ]);
     if let Some(path) = protected {
         command.arg(path);
-    } else if scope || tls.is_some() || acl.is_some() || accounts.is_some() {
+    } else if scope || tls.is_some() || acl.is_some() || accounts.is_some() || proxy {
         command.arg("");
     }
     if scope {
         command.arg("require-scope");
-    } else if tls.is_some() || acl.is_some() || accounts.is_some() {
+    } else if tls.is_some() || acl.is_some() || accounts.is_some() || proxy {
         command.arg("");
     }
     if let Some((cert, key)) = tls {
         command.args([cert, key]);
-    } else if acl.is_some() || accounts.is_some() {
+    } else if acl.is_some() || accounts.is_some() || proxy {
         command.args(["", ""]);
     }
     if let Some(path) = acl {
         command.arg(path);
-    } else if accounts.is_some() {
+    } else if accounts.is_some() || proxy {
         command.arg("");
     }
     if let Some(path) = accounts {
         command.arg(path);
+    } else if proxy {
+        command.arg("");
+    }
+    if proxy {
+        command.arg("behind-tls-proxy");
     }
     let output = command.output().expect("render unit");
     std::fs::remove_file(repos_path).ok();
@@ -287,8 +308,17 @@ fn render_unit_tls(
     tls: Option<(&str, &str)>,
     acl: Option<&str>,
     accounts: Option<&str>,
+    proxy: bool,
 ) -> String {
-    let output = render_unit_output("owner/repo.git\n", protected, scope, tls, acl, accounts);
+    let output = render_unit_output(
+        "owner/repo.git\n",
+        protected,
+        scope,
+        tls,
+        acl,
+        accounts,
+        proxy,
+    );
     assert!(output.status.success());
     String::from_utf8(output.stdout).expect("UTF-8 unit")
 }
@@ -327,6 +357,7 @@ fn render_private_beta_full(
             "",
             acl,
             accounts,
+            "behind-tls-proxy",
             "choir",
         ])
         .output()
@@ -402,6 +433,15 @@ fn private_beta_service_is_loopback_only_fail_closed_and_hardened() {
     // browser write path both sit behind the accounts store, so the line
     // above would have turned them on too.
     assert!(!unit.contains("--passkeys"), "passkeys stay disabled");
+    // The other half of "TLS belongs at the reverse proxy": a node that
+    // refuses its own TLS because something in front terminates it must
+    // write its absolute URLs as the scheme that thing speaks. An invite
+    // is a bearer credential carried in a URL, so getting this wrong puts
+    // the credential on the wire in cleartext for one request.
+    assert!(
+        unit.contains("--behind-tls-proxy"),
+        "a beta node behind the proxy must know it is behind one"
+    );
     assert!(!unit.contains("--hooks-file"), "webhooks stay disabled");
     assert!(!unit.contains("--ssh-handoff"), "SSH stays disabled");
 }
@@ -569,76 +609,89 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
             ] {
                 for acl in [None, Some("/state/acl")] {
                     for accounts in [None, Some("/state/accounts.jsonl")] {
-                        let plist = plist_argv(&render_tls(protected, scope, tls, acl, accounts));
-                        let unit =
-                            unit_argv(&render_unit_tls(protected, scope, tls, acl, accounts));
+                        for proxy in [false, true] {
+                            let plist = plist_argv(&render_tls(
+                                protected, scope, tls, acl, accounts, proxy,
+                            ));
+                            let unit = unit_argv(&render_unit_tls(
+                                protected, scope, tls, acl, accounts, proxy,
+                            ));
 
-                        // Without this the whole test passes vacuously when a renderer
-                        // rejects its arguments and prints usage to stderr — which is
-                        // exactly how the first version of this check reported success
-                        // while comparing nothing to nothing.
-                        assert!(
-                            plist.len() >= 10,
-                            "extracted {} arguments; the renderer did not run",
-                            plist.len()
-                        );
-                        assert!(
-                            !unit.iter().any(String::is_empty),
-                            "unit ExecStart carries an empty argument (a spliced-in empty \
+                            // Without this the whole test passes vacuously when a renderer
+                            // rejects its arguments and prints usage to stderr — which is
+                            // exactly how the first version of this check reported success
+                            // while comparing nothing to nothing.
+                            assert!(
+                                plist.len() >= 10,
+                                "extracted {} arguments; the renderer did not run",
+                                plist.len()
+                            );
+                            assert!(
+                                !unit.iter().any(String::is_empty),
+                                "unit ExecStart carries an empty argument (a spliced-in empty \
                  policy leaves a double space): {unit:?}"
-                        );
-                        // Equality alone passes when both renderers drop the flag, so
-                        // its presence is pinned to the input, not to the sibling.
-                        assert_eq!(
-                            plist.iter().any(|arg| arg == "--require-scope"),
-                            scope,
-                            "--require-scope must appear exactly when the scope slot is set"
-                        );
-                        // The TLS pair and the bind are one decision: a public bind
-                        // must carry the cert pair, loopback must carry neither.
-                        assert_eq!(
-                            plist.iter().any(|arg| arg == "--tls-cert"),
-                            tls.is_some(),
-                            "--tls-cert must appear exactly when the tls slots are set"
-                        );
-                        let bind = plist
-                            .windows(2)
-                            .find(|pair| pair[0] == "--bind")
-                            .map(|pair| pair[1].clone())
-                            .expect("--bind is always rendered");
-                        assert_eq!(
-                            bind,
-                            if tls.is_some() {
-                                "0.0.0.0"
-                            } else {
-                                "127.0.0.1"
-                            },
-                            "the bind must flip with the TLS pair and only with it"
-                        );
-                        // The gate that decides which repositories a credential can
-                        // reach, pinned to its slot rather than to the sibling
-                        // renderer, so both dropping it cannot read as agreement.
-                        assert_eq!(
-                            plist.iter().any(|arg| arg == "--acl-file"),
-                            acl.is_some(),
-                            "--acl-file must appear exactly when the acl slot is set"
-                        );
-                        // D36 invite-only self-service. Pinned to its slot for the
-                        // same reason as the others, and worth its own line because
-                        // the deployed node ran for a day with this flag missing
-                        // from both renderers while its public landing page told
-                        // visitors to open the invite they were sent.
-                        assert_eq!(
-                            plist.iter().any(|arg| arg == "--accounts-file"),
-                            accounts.is_some(),
-                            "--accounts-file must appear exactly when the accounts slot is set"
-                        );
-                        assert_eq!(
-                            plist, unit,
-                            "launchd and systemd must start the node with identical \
+                            );
+                            // Equality alone passes when both renderers drop the flag, so
+                            // its presence is pinned to the input, not to the sibling.
+                            assert_eq!(
+                                plist.iter().any(|arg| arg == "--require-scope"),
+                                scope,
+                                "--require-scope must appear exactly when the scope slot is set"
+                            );
+                            // The TLS pair and the bind are one decision: a public bind
+                            // must carry the cert pair, loopback must carry neither.
+                            assert_eq!(
+                                plist.iter().any(|arg| arg == "--tls-cert"),
+                                tls.is_some(),
+                                "--tls-cert must appear exactly when the tls slots are set"
+                            );
+                            let bind = plist
+                                .windows(2)
+                                .find(|pair| pair[0] == "--bind")
+                                .map(|pair| pair[1].clone())
+                                .expect("--bind is always rendered");
+                            assert_eq!(
+                                bind,
+                                if tls.is_some() {
+                                    "0.0.0.0"
+                                } else {
+                                    "127.0.0.1"
+                                },
+                                "the bind must flip with the TLS pair and only with it"
+                            );
+                            // The gate that decides which repositories a credential can
+                            // reach, pinned to its slot rather than to the sibling
+                            // renderer, so both dropping it cannot read as agreement.
+                            assert_eq!(
+                                plist.iter().any(|arg| arg == "--acl-file"),
+                                acl.is_some(),
+                                "--acl-file must appear exactly when the acl slot is set"
+                            );
+                            // D36 invite-only self-service. Pinned to its slot for the
+                            // same reason as the others, and worth its own line because
+                            // the deployed node ran for a day with this flag missing
+                            // from both renderers while its public landing page told
+                            // visitors to open the invite they were sent.
+                            assert_eq!(
+                                plist.iter().any(|arg| arg == "--accounts-file"),
+                                accounts.is_some(),
+                                "--accounts-file must appear exactly when the accounts slot is set"
+                            );
+                            // Whether the node knows a proxy is in front decides how it
+                            // spells every absolute URL it mints, an invite link among
+                            // them, so it is pinned to its slot like the rest.
+                            assert_eq!(
+                                plist.iter().any(|arg| arg == "--behind-tls-proxy"),
+                                proxy,
+                                "--behind-tls-proxy must appear exactly when the proxy slot is set"
+                            );
+                            assert_eq!(
+                                plist, unit,
+                                "launchd and systemd must start the node with identical \
                  arguments; a flag added to one supervisor and not the other \
                  is a node running without the gate its operator configured"
-                        );
+                            );
+                        }
                     }
                 }
             }
@@ -663,6 +716,7 @@ fn a_half_tls_pair_is_refused_by_both_renderers() {
             Some((cert, key)),
             None,
             None,
+            false,
         );
         assert!(
             !plist.status.success(),
@@ -675,6 +729,7 @@ fn a_half_tls_pair_is_refused_by_both_renderers() {
             Some((cert, key)),
             None,
             None,
+            false,
         );
         assert!(
             !unit.status.success(),
@@ -734,6 +789,7 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
         None,
         None,
         None,
+        false,
     );
     assert!(plist_out.status.success());
     let unit_out = render_unit_output(
@@ -743,6 +799,7 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
         None,
         None,
         None,
+        false,
     );
     assert!(unit_out.status.success());
 
@@ -765,13 +822,13 @@ fn the_repos_file_renders_every_entry_and_refuses_an_empty_list() {
 
     for empty in ["", "# only a comment\n"] {
         assert!(
-            !render_output(empty, None, false, None, None, None)
+            !render_output(empty, None, false, None, None, None, false)
                 .status
                 .success(),
             "the plist renderer must refuse a repos list with no entries"
         );
         assert!(
-            !render_unit_output(empty, None, false, None, None, None)
+            !render_unit_output(empty, None, false, None, None, None, false)
                 .status
                 .success(),
             "the unit renderer must refuse a repos list with no entries"

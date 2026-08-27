@@ -66,4 +66,4 @@ sh "$HERE/render_node_service.sh" choir-node "$BIN" "$ROOT" "$PORT" \
   "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$LOG" "$STATE/repos.list" \
   "$STATE/newcomer-audit.jsonl" "$STATE/newcomer-adjudications.jsonl" \
   "$STATE/protected-refs" require-scope '' '' "$STATE/acl" \
-  "$BETA_ACCOUNTS" "$SERVICE_USER"
+  "$BETA_ACCOUNTS" behind-tls-proxy "$SERVICE_USER"

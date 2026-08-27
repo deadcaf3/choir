@@ -16,6 +16,7 @@
 //! [--quota-push-bytes n] [--quota-workspaces n]
 //! [--api-body-limit bytes] [--batch-limit operations] [--ready-min-free-bytes bytes]
 //! [--read-only-browser] [--site-repo owner/name] [--passkeys]
+//! [--behind-tls-proxy]
 //! [--bind addr] [--ssh-handoff path]
 //! [--accounts-file path [--ssh-authorized-keys path [--ssh-shim path]]]
 //! [--tls-cert cert.pem --tls-key key.pem]`. With no arguments it defaults
@@ -802,6 +803,16 @@ fn run() -> std::io::Result<()> {
     // signing with them unless something says otherwise. The private
     // beta's manifest says exactly that, and this is what makes the
     // sentence true rather than aspirational.
+    // A TLS-terminating proxy in front of a loopback node. Declared, not
+    // sniffed from X-Forwarded-Proto: the node cannot tell a header its
+    // proxy set from one a caller sent, and what depends on the answer is
+    // how an invite link is spelled. An invite is a bearer credential in
+    // a URL, so writing it `http` puts the credential on the wire in
+    // cleartext for one request before the redirect.
+    if rest.iter().any(|arg| arg == "--behind-tls-proxy") {
+        node.behind_tls_proxy();
+        eprintln!("proxy: absolute URLs and cookies written as https");
+    }
     if rest.iter().any(|arg| arg == "--passkeys") {
         node.enable_passkeys();
         eprintln!("passkeys: enrolment and browser signing enabled (D39)");

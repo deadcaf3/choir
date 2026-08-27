@@ -71,6 +71,16 @@ test.
    preserves `Authorization`, uses a 1 MiB default body ceiling, and gives Git
    a separate 512 MiB streaming route with request buffering disabled.
 
+   The node must be told it is behind this proxy (`--behind-tls-proxy`, which
+   the beta renderer always passes and the installers derive from a public
+   https route with no local TLS marker). Its own listener is plaintext on
+   loopback, so without that declaration every absolute URL it mints is
+   written `http` -- including the join link, which carries the invite secret
+   in its query string. The recipient's first request would put a bearer
+   credential on the wire in cleartext and only then be redirected. It is a
+   declaration rather than a reading of `X-Forwarded-Proto` because the node
+   cannot tell a header its proxy set from one a caller sent.
+
    It handles no client address (D59): no access log, no error log, no
    per-address limit zone, and `X-Forwarded-For` cleared rather than appended.
    Pre-auth rate limiting is therefore the node's own node-wide ceiling alone.

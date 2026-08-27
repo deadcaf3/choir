@@ -131,6 +131,16 @@ ACCOUNTS=""
 if [ -f "$STATE/accounts.jsonl" ]; then
   ACCOUNTS="$STATE/accounts.jsonl"
 fi
+# A TLS-terminating proxy in front of a loopback node, derived rather
+# than given its own marker: the route file already says the public base
+# is https, and no local TLS marker says this node is not the one
+# terminating it. That pair is exactly the reverse-proxy deployment, and
+# it is what decides whether an invite link is minted https or http.
+BEHIND_TLS_PROXY=""
+if [ -f "$PUBLIC_URL_FILE" ] && [ ! -f "$TLS_MARKER" ] \
+  && case "$(sed -n 1p "$PUBLIC_URL_FILE")" in https://*) true ;; *) false ;; esac; then
+  BEHIND_TLS_PROXY="behind-tls-proxy"
+fi
 # TLS marker: two lines, cert path then key path, both readable by this
 # user. Once present, every reinstall keeps the public TLS bind — the
 # same one-way marker discipline as the review and scope gates, and the
@@ -161,13 +171,13 @@ if [ -f "$POLICY_MARKER" ]; then
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$UNIT"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" > "$UNIT"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_service.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" > "$UNIT"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" > "$UNIT"
 fi
 if [ -n "$TLS_CERT" ]; then
   echo "TLS public bind enabled ($TLS_MARKER): serving 0.0.0.0:$PORT with $TLS_CERT"

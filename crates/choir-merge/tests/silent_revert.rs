@@ -22,10 +22,23 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 /// Runs git in `repo`, asserting it succeeded.
+///
+/// The operator's own config is neutralized rather than overridden
+/// setting by setting, the way `choir-node`'s restore tests do it. A
+/// scratch repository has no signing key, so a global `commit.gpgsign`
+/// turns every commit here into a pinentry prompt that a test run has
+/// nowhere to display; and enumerating the settings that could break a
+/// fixture is the kind of list that is only ever complete until the next
+/// one. This file set an identity and stopped there, so it passed on a
+/// machine with no global config and on one whose gpg-agent happened to
+/// hold a cached passphrase, which is how it stayed green until a
+/// background gate run had no terminal.
 fn git(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .expect("git runs");
     assert!(
