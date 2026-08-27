@@ -844,7 +844,17 @@ pub(crate) fn next_action_text(h: &mut String, text: &str) {
 }
 
 /// The shared body, taking markup that is already safe by construction.
-fn next_action_escaped(h: &mut String, html: &str) {
+///
+/// `pub(crate)` for the sentence that mixes a literal with operator data:
+/// the landing page's is part fixed prose, part a link built from the
+/// contact line, so neither [`next_action`] (literals only) nor
+/// [`next_action_text`] (escapes the markup away) fits.
+///
+/// **The caller owes the escaping.** Every dynamic fragment reaching this
+/// must have gone through [`esc`] first; the name is the reminder, and
+/// it is the only thing standing between operator input and the one page
+/// that answers anybody.
+pub(crate) fn next_action_escaped(h: &mut String, html: &str) {
     h.push_str("<div class=\"callout callout-note\"><span class=\"ico\">next</span><p>");
     h.push_str(html);
     h.push_str("</p></div>");

@@ -1247,6 +1247,22 @@ impl Node {
                 platform.drain_lag_log();
             }
             let root = self.root.clone();
+            // The operator's contact, for the one page a stranger can
+            // reach. One line of `<root>/.choir/contact`, absent by
+            // default, and deliberately not a compiled-in constant: a
+            // personal identifier baked into a published binary cannot
+            // be taken back out of the copies of it, which is the same
+            // reason host addresses and owner names are placeholders in
+            // every tracked file here.
+            //
+            // Read at startup rather than per request: it changes when
+            // an operator edits it and restarts, like the bind address,
+            // and a file read on the one route an unauthenticated
+            // caller can reach is a syscall they get to schedule.
+            let contact = std::fs::read_to_string(root.join(".choir/contact"))
+                .ok()
+                .and_then(|text| text.lines().next().map(str::trim).map(str::to_string))
+                .filter(|line| !line.is_empty());
             let auth = self.auth.clone();
             let platform = self.platform.clone();
             let queue = self.queue.clone();
@@ -1376,6 +1392,7 @@ impl Node {
                             &public_path,
                             ssh_enabled,
                             scheme,
+                            contact.as_deref(),
                         )
                     };
                     // "anon", like the script constant above: no
@@ -2929,6 +2946,7 @@ fn respond_join(
     path: &str,
     ssh: bool,
     scheme: &'static str,
+    contact: Option<&str>,
 ) -> std::io::Result<(u16, u64)> {
     let theme = chosen_theme(&request);
     let chrome = browse::Chrome {
@@ -2969,7 +2987,7 @@ fn respond_join(
             )
         }
     } else {
-        join_page::landing(theme)
+        join_page::landing(theme, contact)
     };
     let bytes = page.html.len() as u64;
     let mut response = tiny_http::Response::from_string(page.html)

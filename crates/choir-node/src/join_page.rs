@@ -545,7 +545,7 @@ fn bad_submission(why: &str, theme: Option<&str>) -> Page {
 /// Static by construction. It takes no store, no platform and no view, so
 /// there is nothing here that could later grow a repository name or a
 /// sequence number without someone adding a parameter on purpose.
-pub(crate) fn landing(theme: Option<&str>) -> Page {
+pub(crate) fn landing(theme: Option<&str>, contact: Option<&str>) -> Page {
     let mut h = shell("choir", theme);
     h.insert_str(
         h.find("<title>").unwrap_or(h.len()),
@@ -625,11 +625,29 @@ pub(crate) fn landing(theme: Option<&str>) -> Page {
          repositories themselves, their reviews, and the log every change is written \
          into.</p>",
     );
-    crate::ui::next_action(
-        &mut h,
+    // Everyone who is not already expected used to reach a dead end
+    // here: the page named the two things to do with a credential and
+    // said nothing at all to a person who has none, which is most people
+    // who follow a link to a node they have heard about.
+    //
+    // The address is not in this source and never should be. It is one
+    // line of the operator's own untracked state, read at render time,
+    // for the same reason host addresses and owner names are placeholders
+    // in every tracked file here: a personal identifier compiled into a
+    // published binary cannot be taken back out of the copies.
+    let mut sentence = String::from(
         "Have an invite link? Open it and it will set you up. Otherwise \
-         <a href=\"/r/\">sign in</a> with the credentials you were given.",
+         <a href=\"/r/\">sign in</a> with the credentials you were given",
     );
+    match contact {
+        Some(contact) => {
+            sentence.push_str(", or ask for access: ");
+            sentence.push_str(&link_to(contact));
+            sentence.push('.');
+        }
+        None => sentence.push('.'),
+    }
+    crate::ui::next_action_escaped(&mut h, &sentence);
     h.push_str("</section>");
     Page {
         status: 200,
@@ -644,6 +662,24 @@ pub(crate) fn landing(theme: Option<&str>) -> Page {
 /// the form body of the same submission go through the same code. A
 /// secret that decodes one way in the link and another way in the form
 /// would be a link that renders and then refuses itself.
+/// The operator's contact, rendered as something a reader can act on.
+///
+/// An address becomes a `mailto:`, anything already a URL becomes a link,
+/// and anything else is printed as text -- an operator who writes a chat
+/// handle or a room name gets it shown rather than turned into a broken
+/// link. Escaped either way: this string is operator input, and it lands
+/// on the one page that answers anybody.
+fn link_to(contact: &str) -> String {
+    let text = crate::ui::esc(contact);
+    if contact.starts_with("https://") || contact.starts_with("http://") {
+        format!("<a href=\"{text}\">{text}</a>")
+    } else if contact.contains('@') && !contact.contains(' ') {
+        format!("<a href=\"mailto:{text}\">{text}</a>")
+    } else {
+        text
+    }
+}
+
 pub(crate) fn param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
     form_value(query.split('#').next().unwrap_or(query), key)
@@ -865,14 +901,14 @@ mod tests {
     /// what it does *not* say is the specification.
     #[test]
     fn the_landing_page_names_nothing_about_this_node() {
-        let html = super::landing(None).html;
+        let html = super::landing(None, None).html;
         assert!(html.contains("signed operation"), "{html}");
         assert!(!html.contains("<script"), "{html}");
         // Constant by construction: the only input is the palette, so
         // two renders with the same palette are the same bytes. If this
         // page ever grows a parameter, this is the test that argues
         // about it.
-        assert_eq!(html, super::landing(None).html);
+        assert_eq!(html, super::landing(None, None).html);
         // And it states no fact about this node. Every such fact — the
         // log position, a repository count, a version — arrives as a
         // number, so "no digits in the body" is the mechanical form of

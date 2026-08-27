@@ -667,3 +667,63 @@ fn an_invite_behind_a_tls_proxy_is_minted_as_an_https_link() {
 
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// The landing page tells a stranger how to ask, and takes the address
+/// from operator state rather than from this source tree.
+///
+/// Before this it named the two things to do with a credential and said
+/// nothing to a person who has none, which is most people who follow a
+/// link to a node they have heard about: a public front door whose only
+/// advice assumed you were already expected.
+///
+/// The address is deliberately not compiled in. A personal identifier
+/// baked into a published binary cannot be taken back out of the copies,
+/// which is why every tracked file here writes host addresses and owner
+/// names as placeholders.
+#[test]
+fn the_front_door_names_the_operator_only_when_the_operator_named_themselves() {
+    let work = std::env::temp_dir().join("choir-node-join-contact");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let landing = |contact: Option<&str>| {
+        let root = work.join(match contact {
+            Some(_) => "with",
+            None => "without",
+        });
+        std::fs::create_dir_all(root.join(".choir")).expect("state dir");
+        if let Some(contact) = contact {
+            std::fs::write(root.join(".choir/contact"), format!("{contact}\n")).expect("contact");
+        }
+        let mut table = AuthTable::new();
+        table.insert("alice".into(), "a".into());
+        let node = Node::bind_with_auth(&root, 0, Some(table)).expect("node binds");
+        let port = node.port();
+        std::thread::spawn(move || node.serve_forever());
+        let out = std::process::Command::new("curl")
+            .args(["-s", &format!("http://127.0.0.1:{port}/")])
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let silent = landing(None);
+    assert!(
+        !silent.contains("ask for access"),
+        "a node whose operator named nobody must offer no address"
+    );
+
+    // A shape, not a real address: what is asserted is that the file's
+    // line reaches the page and is linked, never a particular person.
+    let named = landing(Some("someone@example.invalid"));
+    assert!(
+        named.contains("ask for access"),
+        "the invitation to ask is missing: {named}"
+    );
+    assert!(
+        named.contains("mailto:someone@example.invalid"),
+        "an address must become something a reader can act on: {named}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}
