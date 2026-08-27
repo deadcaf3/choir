@@ -81,7 +81,15 @@ pub(crate) fn render(passkeys: bool, next: &str, chrome: crate::browse::Chrome<'
     }
 
     h.push_str("</section></main>");
-    h.push_str("<footer>Every write here is a signed operation.</footer></body></html>");
+    h.push_str("<footer>Every write here is a signed operation.</footer>");
+    // Only when there is a ceremony to drive. A page with no controls
+    // pulling the script anyway would widen its own policy for nothing,
+    // and the test that checks which pages are allowed to run script
+    // reads exactly this.
+    if passkeys {
+        h.push_str(crate::ui::CEREMONY_SCRIPT);
+    }
+    h.push_str("</body></html>");
     Page {
         status: 401,
         html: h,
@@ -114,6 +122,25 @@ mod tests {
         assert_eq!(page.status, 401);
         assert!(!page.html.contains("signin-go"), "no switch, no button");
         assert!(page.html.contains("does not offer passkeys"));
+        assert!(!page.html.contains("<script"), "no ceremony, no script");
+    }
+
+    /// The control starts hidden and the shared script is what reveals
+    /// it, so a page carrying the markup without the tag renders a
+    /// sign-in page with no way to sign in.
+    ///
+    /// That is exactly what shipped: the page was right, the ceremony was
+    /// right, and the two were never introduced. A person opening it saw
+    /// an explanation of passkeys and no button.
+    #[test]
+    fn the_page_that_offers_the_ceremony_also_loads_it() {
+        let page = super::render(true, "/", crate::browse::Chrome::default());
+        assert!(page.html.contains("signin-go"), "the control is rendered");
+        assert!(
+            page.html.contains(crate::ui::CEREMONY_SCRIPT),
+            "and the script that unhides it is loaded: {}",
+            page.html
+        );
     }
 
     /// The status is 401 and not 200: the request that produced this page

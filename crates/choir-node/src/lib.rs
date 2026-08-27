@@ -1439,7 +1439,7 @@ impl Node {
                                 let next = request.url().split('?').next().unwrap_or("/");
                                 let next = if next.starts_with('/') { next } else { "/" };
                                 let page = signin_page::render(true, next, reader_chrome(&request));
-                                respond_page(request, page.status, page.html, None)
+                                respond_scripted_page(request, page.status, page.html)
                             } else {
                                 let body = "unauthorized\n";
                                 let response = tiny_http::Response::from_string(body)
@@ -2566,6 +2566,46 @@ fn respond_page(
     served(request, response, status, bytes)
 }
 
+/// A page that carries the ceremony script, under the policy that lets
+/// it run.
+///
+/// [`respond_page`] sends [`BROWSER_CSP`], which has no `script-src`
+/// at all -- correct for every refusal and every read-only page, and
+/// wrong for the one page whose entire purpose is a control the script
+/// reveals. Kept as a separate function rather than a flag on the
+/// other, so widening the policy is something a caller asks for by
+/// name.
+fn respond_scripted_page(
+    request: tiny_http::Request,
+    status: u16,
+    html: String,
+) -> std::io::Result<(u16, u64)> {
+    let bytes = html.len() as u64;
+    let response = tiny_http::Response::from_string(html)
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], SCRIPTED_PAGE_CSP)
+                .expect("static header"),
+        );
+    served(request, response, status, bytes)
+}
+
 /// A JSON body with a status, for the pre-auth ceremony that has no
 /// other responder to borrow.
 fn respond_json(
@@ -2671,7 +2711,7 @@ fn respond_signin(
             .unwrap_or_else(|| "/".to_string());
         let chrome = reader_chrome(&request);
         let page = signin_page::render(passkeys, &next, chrome);
-        return respond_page(request, page.status, page.html, None);
+        return respond_scripted_page(request, page.status, page.html);
     }
 
     let body = match quota::read_bounded(request.as_reader(), Some(body_limit))? {

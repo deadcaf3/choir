@@ -1517,7 +1517,13 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
     // fallback the digest path could reach on a host without `openssl`,
     // and it licenses every inline script on the page including one an
     // escaping miss put there.
-    for path in ["/r/agents/demo/review/r-csp", "/account"] {
+    // `/signin` is here because it shipped without either half: no
+    // script tag, and the read surface's policy that would have blocked
+    // one. What a person saw was a page explaining passkeys with no
+    // button, because the control starts hidden and the script is what
+    // reveals it. This loop is where that should have been caught, and it
+    // only checks pages it is told about.
+    for path in ["/r/agents/demo/review/r-csp", "/account", "/signin"] {
         let header = csp(path).unwrap_or_else(|| panic!("{path} sends no CSP"));
         // The whole directive, compared whole. Probing it for a
         // forbidden substring is how this test used to be written, and
@@ -1563,6 +1569,28 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
     // right, on a node that can now be framed.
     let read = csp("/").expect("the node page sends a CSP");
     let scripted = csp("/account").expect("the account page sends a CSP");
+    // Every page that carries the tag must also be served under the policy
+    // that lets it run. Read off the wire, both halves together, because a
+    // page with one and not the other renders perfectly and does nothing.
+    //
+    // `/account` is not in this list: for an `--auth-file` operator it
+    // returns before the ceremony, since that credential has no account
+    // record to enrol against, and a page with nothing to drive correctly
+    // loads nothing. `/signin` has no such case -- it offers the ceremony
+    // or says the node does not have one.
+    let body = std::process::Command::new("curl")
+        .args(["-s", &format!("{base}/signin")])
+        .output()
+        .expect("curl runs");
+    let body = String::from_utf8_lossy(&body.stdout);
+    assert!(
+        body.contains("/static/webauthn.js"),
+        "/signin is served under a scripted policy but loads no script"
+    );
+    assert!(
+        body.contains("signin-go"),
+        "/signin renders the control the script reveals"
+    );
     assert!(
         scripted.starts_with(&read),
         "the scripted policy no longer extends the read one:\n  {read}\n  {scripted}"
