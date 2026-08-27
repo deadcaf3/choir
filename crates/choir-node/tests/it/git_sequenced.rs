@@ -113,3 +113,61 @@ fn git_push_lands_in_the_op_log() {
     node.unblock();
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// A push still lands on a node that knows a TLS proxy is in front of it
+/// (D71).
+///
+/// `behind_tls_proxy` exists so invite links and cookies are written with
+/// the scheme the *world* reaches this node on. git's `pre-receive` hook
+/// is the other kind of caller entirely: it calls back to `127.0.0.1` on
+/// the node's own socket and never passes the proxy. When one field
+/// answered both questions, turning the declaration on made the hook
+/// speak TLS to a plaintext port, and every push hung in the handshake
+/// with the objects already transferred -- a node that accepts your data
+/// and then stops talking.
+///
+/// Found in production rather than here, which is why this test exists at
+/// the level it does: nothing short of a real push through a real hook
+/// would have caught it.
+#[test]
+fn a_push_lands_on_a_node_that_is_behind_a_proxy() {
+    let work = std::env::temp_dir().join(format!("choir-git-proxy-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let registry = Registry::new();
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    // Plaintext on loopback, told that something in front terminates TLS:
+    // exactly the deployed shape.
+    node.behind_tls_proxy();
+    node.enable_platform(
+        Platform::start(registry, Box::new(MemLog::new()), ActorKey::generate()).unwrap(),
+    );
+    let port = node.port();
+    node.create_repo("agents/demo.git").unwrap();
+    std::thread::spawn(move || node.serve_forever());
+    let url = format!("http://127.0.0.1:{port}/agents/demo.git");
+
+    let c1 = work.join("clone1");
+    assert!(git(&work, &["clone", "-q", &url, c1.to_str().unwrap()])
+        .status
+        .success());
+    std::fs::write(c1.join("f.txt"), "behind a proxy\n").unwrap();
+    git(&c1, &["add", "."]);
+    git(&c1, &["commit", "-q", "-m", "first"]);
+    let out = git(&c1, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        out.status.success(),
+        "push through a proxied node: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // And it reached the log, rather than merely not failing.
+    let refs = view(port)["refs"].clone();
+    assert!(
+        refs.get("agents/demo.git:refs/heads/main").is_some(),
+        "the push must be sequenced, not just accepted: {refs}"
+    );
+
+    std::fs::remove_dir_all(&work).ok();
+}

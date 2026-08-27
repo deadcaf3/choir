@@ -221,13 +221,23 @@ pub struct Node {
     /// The rounds running right now, so a second request for a target
     /// already in flight is refused rather than raced.
     queue_in_flight: std::sync::Arc<queue_api::InFlight>,
-    /// The scheme this node's own listener speaks, and by default the one
-    /// every absolute URL it builds is written with.
+    /// The scheme absolute URLs handed to *people* are written with:
+    /// invite links, page origins, and the `Secure` attribute on cookies.
     ///
-    /// [`Node::behind_tls_proxy`] overrides it, because a node that
-    /// terminates plaintext on loopback behind a proxy is reached over
-    /// https by everyone except the proxy.
+    /// [`Node::behind_tls_proxy`] sets it, because a node terminating
+    /// plaintext on loopback behind a proxy is reached over https by
+    /// everyone except the proxy.
     scheme: &'static str,
+    /// The scheme this node's own socket actually speaks.
+    ///
+    /// Separate from [`Node::scheme`] and never overridden, because the
+    /// two answer different questions and one field answering both is a
+    /// bug this repository has already shipped: git's `pre-receive` hook
+    /// calls back to `127.0.0.1` on this very socket, and when
+    /// `behind_tls_proxy` moved the single field the hook began speaking
+    /// TLS to a plaintext port and every push hung in the handshake.
+    /// Anything addressed to loopback uses this one.
+    listener_scheme: &'static str,
     /// Loopback secret handed to repo hooks via env so their callback to
     /// `/api/git-update` passes the auth gate without user credentials.
     internal_token: String,
@@ -402,6 +412,7 @@ impl Node {
         }
         std::fs::create_dir_all(root)?;
         let scheme = if tls.is_some() { "https" } else { "http" };
+        let listener_scheme = scheme;
         let server = match tls {
             Some((certificate, private_key)) => tiny_http::Server::https(
                 (addr, port),
@@ -427,6 +438,7 @@ impl Node {
             queue_in_flight: std::sync::Arc::new(queue_api::InFlight::default()),
             site_repo: None,
             scheme,
+            listener_scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
             keys_watch: None,
             acl_watch: None,
@@ -700,6 +712,9 @@ impl Node {
     /// URL with `http`. The recipient's first request would carry the
     /// credential in cleartext and only then be redirected.
     pub fn behind_tls_proxy(&mut self) {
+        // Only the public half. `listener_scheme` stays what this socket
+        // speaks, because the hook callbacks address loopback directly and
+        // never pass the proxy at all.
         self.scheme = "https";
     }
 
@@ -1071,10 +1086,23 @@ impl Node {
                 "  payload=$(printf '{\"repo\":\"%s\",\"refname\":\"%s\",\"old\":\"%s\",\"new\":\"%s\",\"user\":\"%s\",\"cert_status\":\"%s\",\"signer\":\"%s\"}' \\\n",
                 "    \"$CHOIR_REPO\" \"$3\" \"$1\" \"$2\" \"$CHOIR_USER\" \"$GIT_PUSH_CERT_STATUS\" \"$GIT_PUSH_CERT_SIGNER\")\n",
                 "  code=$(curl -sk -o \"$reply\" -w '%{http_code}' \\\n",
+                "    --connect-timeout 5 --max-time 30 \\\n",
                 "    -X POST -H \"X-Choir-Internal: $CHOIR_INTERNAL\" \\\n",
                 "    -d \"$payload\" \"$4\")\n",
                 // A connection that never completed reports 000, which
                 // falls through to the failure branch with the others.
+                //
+                // The timeouts are what make that sentence true. Without
+                // them curl waits forever, and this hook holds the push
+                // open while it does: the client has already sent every
+                // object and sits there with no output and no failure.
+                // That is exactly how a wrong scheme in this URL was
+                // experienced -- a TLS handshake against a plaintext
+                // port, hanging rather than refusing. A push that cannot
+                // reach the sequencer must be rejected, loudly and soon;
+                // it must never become a push that never ends. 30s is far
+                // above a healthy decision, which the gate holds under
+                // 100ms at p99, and far below a person's patience.
                 "  case \"$code\" in 2??) return 0 ;; *) return 1 ;; esac\n",
                 "}\n",
                 "reason() {\n",
@@ -1241,6 +1269,7 @@ impl Node {
             let authenticated = self.auth.is_some();
             let port = self.port;
             let scheme = self.scheme;
+            let listener_scheme = self.listener_scheme;
             let public_rate = std::sync::Arc::clone(&self.public_rate);
             let ssh_enabled = self.ssh_enabled;
             std::thread::spawn(move || {
@@ -1975,7 +2004,7 @@ impl Node {
                     return;
                 }
                 if request.url().starts_with("/api/") {
-                    let base_url = format!("{scheme}://127.0.0.1:{port}");
+                    let base_url = format!("{listener_scheme}://127.0.0.1:{port}");
                     // A hook callback carries the loopback secret rather
                     // than a user's grants, so it is not an ACL subject.
                     let acl_for_api = if internal_ok { None } else { acl.as_deref() };
@@ -2062,11 +2091,11 @@ impl Node {
                     if let Some(repo) = repo_from_path(request.url()) {
                         extra_env.push((
                             "CHOIR_API".to_string(),
-                            format!("{scheme}://127.0.0.1:{port}/api/git-update"),
+                            format!("{listener_scheme}://127.0.0.1:{port}/api/git-update"),
                         ));
                         extra_env.push((
                             "CHOIR_ABORT".to_string(),
-                            format!("{scheme}://127.0.0.1:{port}/api/git-abort"),
+                            format!("{listener_scheme}://127.0.0.1:{port}/api/git-abort"),
                         ));
                         extra_env.push(("CHOIR_REPO".to_string(), repo));
                         extra_env.push(("CHOIR_USER".to_string(), user.clone()));
