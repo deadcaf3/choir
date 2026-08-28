@@ -87,10 +87,40 @@ jobs:
       # variable against one without it, and nothing else moved. That
       # one file is also the only page GitHub serves from a path the
       # relative links were not written for.
+      #
+      # It is the repository path *only when there is no custom domain*.
+      # A custom domain serves this artifact from its own root, so
+      # `/choir/` there is a `<base href>` pointing at a directory that
+      # does not exist, and the 404 page's own links 404.
+      #
+      # The other two are D76's, and they exist because a published book
+      # has two kinds of link a checkout does not need. `REPO_BASE`
+      # repoints the links that leave the book -- `../README.md` and its
+      # seven siblings, which mdBook renders as paths above `src` and so
+      # outside the artifact -- at the commit being published, so they
+      # resolve instead of 404ing. `NODE_URL` is the other half of the
+      # site. Both name hosts, so both live here rather than in a tracked
+      # file, exactly as `site-url` does; a build without them renders
+      # the book unchanged, which is what every local build gets.
       - name: Build the book and the API documentation inside it
         env:
-          MDBOOK_OUTPUT__HTML__SITE_URL: /${{ github.event.repository.name }}/
+          MDBOOK_OUTPUT__HTML__SITE_URL: ${{ vars.DOCS_DOMAIN != '' && '/' || format('/{0}/', github.event.repository.name) }}
+          CHOIR_DOCS_REPO_BASE: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}
+          CHOIR_DOCS_NODE_URL: ${{ vars.NODE_URL }}
         run: cargo run -p choir-cli --bin choir -- docs
+
+      # The custom domain, written into the artifact rather than tracked,
+      # because the file is one line and that line is the host. The value
+      # is a repository variable (`DOCS_DOMAIN`); a fork or a checkout
+      # with none set publishes to the default Pages path and skips this
+      # step entirely.
+      #
+      # Setting the variable is not the whole job: the domain also has to
+      # be entered under Settings -> Pages and a DNS record has to point
+      # at it. `docs/private-beta-runbook.md` carries both steps.
+      - name: Point the artifact at the custom domain
+        if: vars.DOCS_DOMAIN != ''
+        run: printf '%s\n' '${{ vars.DOCS_DOMAIN }}' > book/CNAME
 
       - uses: actions/upload-pages-artifact@v5
         with:

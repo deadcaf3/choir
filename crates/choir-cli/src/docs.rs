@@ -186,6 +186,136 @@ explains how they fit is in <a href="../index.html">the book</a>.</p>
     )
 }
 
+/// The marker `docs/README.md` carries where a link to the node belongs.
+///
+/// An HTML comment, so a build that does not know the node's address
+/// renders nothing at all rather than a placeholder somebody has to
+/// explain. mdBook passes raw HTML through, and a comment is the one
+/// shape of it that is invisible until something replaces it.
+pub const NODE_LINK_MARKER: &str = "<!--node-link-->";
+
+/// Repoints the links that leave the book.
+///
+/// `docs/*.md` is read by three people (`book.toml` says so): somebody
+/// browsing the checkout, somebody reading the book, and `cargo doc`.
+/// The first and third want `../README.md`, because in a checkout that
+/// file is right there. The second gets a 404: mdBook renders `src` and
+/// nothing above it, so `../README.html` names a file the published
+/// artifact does not contain — twenty-one such links, from four pages.
+///
+/// Rather than making the pages worse for two readers to fix the third,
+/// the escaping links are repointed at the repository itself at publish
+/// time. `base` is a browsable tree URL (the workflow builds one from the
+/// commit it is publishing, so the link is pinned rather than tracking a
+/// branch), and it never appears in a tracked file — the same rule
+/// `site-url` follows.
+///
+/// `depth` is how many directories below the book root the page sits, so
+/// `index.html` is 0 and `using/workflow.html` is 1. A link escapes when
+/// it climbs further than that, and the first `..` past the book root is
+/// the step from `book/` to the checkout — which is why one is stripped
+/// before the rest becomes a repository path.
+///
+/// `.html` goes back to `.md` because mdBook rewrote it on the way in.
+/// Anything that was not a markdown link is left exactly as it was: a
+/// rewriter that guessed here would break the links that work.
+#[must_use]
+pub fn repoint_escaping_links(html: &str, depth: usize, base: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find("href=\"") {
+        out.push_str(&rest[..at + 6]);
+        rest = &rest[at + 6..];
+        let Some(end) = rest.find('"') else { break };
+        let href = &rest[..end];
+        match repoint_one(href, depth, base) {
+            Some(moved) => out.push_str(&moved),
+            None => out.push_str(href),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One `href`, or `None` when it stays where it is.
+fn repoint_one(href: &str, depth: usize, base: &str) -> Option<String> {
+    let (path, tail) = match href.find(['#', '?']) {
+        Some(at) => (&href[..at], &href[at..]),
+        None => (href, ""),
+    };
+    let climbs = path.split('/').take_while(|seg| *seg == "..").count();
+    // Not a climb, or a climb the book contains: nothing to do. The
+    // `depth + 1` is the book root itself — a page at depth 0 may climb
+    // once before it has left, and that once lands on the checkout.
+    if climbs == 0 || climbs <= depth || climbs > depth + 1 {
+        return None;
+    }
+    let target = path.split('/').skip(climbs).collect::<Vec<_>>().join("/");
+    let target = target.strip_suffix(".html")?;
+    Some(format!("{}/{target}.md{tail}", base.trim_end_matches('/')))
+}
+
+/// Puts a link to the node into the page that carries
+/// [`NODE_LINK_MARKER`].
+///
+/// The two halves of the site are on two hosts (D76), so neither can
+/// reach the other with a relative path and neither may name the other in
+/// a tracked file. The marker is tracked; the address is not.
+#[must_use]
+pub fn stamp_node_link(html: &str, node: &str) -> String {
+    let node = node.trim_end_matches('/');
+    html.replace(
+        NODE_LINK_MARKER,
+        &format!("<a class=\"api-link\" href=\"{node}\">The node itself &rarr;</a>"),
+    )
+}
+
+/// Applies both publish-time rewrites to every page mdBook rendered.
+///
+/// **`api/` is skipped by name**, not by running first. It is rustdoc's
+/// output, whose thousands of pages are full of `../` links that are
+/// already right; a rewriter with an opinion about them would be a
+/// second bug. Ordering alone does not skip them, because this runs
+/// against `book/` in place and a previous build's `api/` is still
+/// sitting there — the copy that replaces it happens further down.
+fn rewrite_pages(book: &Path, base: Option<&str>, node: Option<&str>) -> std::io::Result<()> {
+    fn walk(
+        dir: &Path,
+        depth: usize,
+        base: Option<&str>,
+        node: Option<&str>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                if depth == 0 && entry.file_name() == "api" {
+                    continue;
+                }
+                walk(&path, depth + 1, base, node)?;
+                continue;
+            }
+            if path.extension().is_none_or(|ext| ext != "html") {
+                continue;
+            }
+            let before = std::fs::read_to_string(&path)?;
+            let mut after = match base {
+                Some(base) => repoint_escaping_links(&before, depth, base),
+                None => before.clone(),
+            };
+            if let Some(node) = node {
+                after = stamp_node_link(&after, node);
+            }
+            if after != before {
+                std::fs::write(&path, after)?;
+            }
+        }
+        Ok(())
+    }
+    walk(book, 0, base, node)
+}
+
 fn tool_exists(tool: &str) -> bool {
     std::process::Command::new(tool)
         .arg("--version")
@@ -260,6 +390,20 @@ pub fn build(root: &Path) -> Result<Built, Failure> {
     let mut book = std::process::Command::new("mdbook");
     book.current_dir(root).arg("build");
     stage("mdbook build", book)?;
+
+    // The two publish-time rewrites (D76). Both come from the
+    // environment for the reason `site-url` does: they name hosts, and a
+    // host in a tracked file is the thing this repository does not do.
+    // Absent, which is every local build, the pages are left exactly as
+    // mdBook rendered them.
+    let base = std::env::var("CHOIR_DOCS_REPO_BASE").ok();
+    let node = std::env::var("CHOIR_DOCS_NODE_URL").ok();
+    rewrite_pages(
+        &root.join("book"),
+        base.as_deref().filter(|s| !s.is_empty()),
+        node.as_deref().filter(|s| !s.is_empty()),
+    )
+    .map_err(|e| Failure::Io(format!("cannot rewrite the book's links: {e}")))?;
 
     let metadata = std::process::Command::new("cargo")
         .current_dir(root)
@@ -424,5 +568,80 @@ mod tests {
         let html = api_index(&[]);
         assert!(html.contains("<ul>"), "the list is still well-formed");
         assert!(html.contains("</html>"));
+    }
+
+    const BASE: &str = "https://forge.invalid/o/choir/blob/abc123";
+
+    /// The four shapes the book actually contains, taken from the pages
+    /// that were broken: a climb from the root, a climb from one level
+    /// down, one with a fragment, and one that stays inside.
+    #[test]
+    fn a_link_that_leaves_the_book_is_repointed_at_the_repository() {
+        assert_eq!(
+            repoint_one("../DECISIONS.html", 0, BASE).as_deref(),
+            Some("https://forge.invalid/o/choir/blob/abc123/DECISIONS.md")
+        );
+        assert_eq!(
+            repoint_one("../../templates/README.html", 1, BASE).as_deref(),
+            Some("https://forge.invalid/o/choir/blob/abc123/templates/README.md")
+        );
+        assert_eq!(
+            repoint_one("../ERRORS.html#e_no_such_ref", 0, BASE).as_deref(),
+            Some("https://forge.invalid/o/choir/blob/abc123/ERRORS.md#e_no_such_ref")
+        );
+    }
+
+    /// A link inside the book is the common case and must not move. The
+    /// second of these is the one that would break a whole chapter: from
+    /// `using/workflow.html`, `../architecture.html` is a page the book
+    /// does contain.
+    #[test]
+    fn a_link_that_stays_inside_the_book_is_left_alone() {
+        assert_eq!(repoint_one("architecture.html", 0, BASE), None);
+        assert_eq!(repoint_one("../architecture.html", 1, BASE), None);
+        assert_eq!(repoint_one("operating/limits.html", 0, BASE), None);
+        assert_eq!(repoint_one("#start-here", 0, BASE), None);
+        assert_eq!(repoint_one("https://example.invalid/x", 0, BASE), None);
+    }
+
+    /// A climb past the checkout is not a repository path, and guessing
+    /// one would be a link to somewhere nobody named.
+    #[test]
+    fn a_link_that_leaves_the_checkout_too_is_left_alone() {
+        assert_eq!(repoint_one("../../../elsewhere.html", 0, BASE), None);
+    }
+
+    /// Only what mdBook rewrote on the way in comes back. A stylesheet or
+    /// an image that climbs is not a markdown page.
+    #[test]
+    fn only_a_page_mdbook_renamed_is_renamed_back() {
+        assert_eq!(repoint_one("../theme/custom.css", 0, BASE), None);
+    }
+
+    #[test]
+    fn the_rewrite_touches_hrefs_and_nothing_else() {
+        let html = "<p>see ../DECISIONS.html</p><a href=\"../DECISIONS.html\">x</a>";
+        let out = repoint_escaping_links(html, 0, BASE);
+        assert!(
+            out.contains("<p>see ../DECISIONS.html</p>"),
+            "prose was rewritten: {out}"
+        );
+        assert!(
+            out.contains("href=\"https://forge.invalid/o/choir/blob/abc123/DECISIONS.md\""),
+            "the link was not rewritten: {out}"
+        );
+    }
+
+    #[test]
+    fn the_node_link_replaces_its_marker_and_nothing_when_unmarked() {
+        let stamped = stamp_node_link(&format!("<p>{NODE_LINK_MARKER}</p>"), "https://n.invalid/");
+        assert!(
+            stamped.contains("href=\"https://n.invalid\""),
+            "the trailing slash survived: {stamped}"
+        );
+        assert!(!stamped.contains(NODE_LINK_MARKER));
+        // A page without the marker is returned unchanged, which is what
+        // makes it safe to run over every page in the book.
+        assert_eq!(stamp_node_link("<p>x</p>", "https://n.invalid"), "<p>x</p>");
     }
 }

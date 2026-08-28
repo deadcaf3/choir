@@ -815,8 +815,17 @@ form.omni input[type="search"]:focus{outline:0}
 form.omni input[type="search"]::-webkit-search-cancel-button{
   appearance:none}
 
-.chrome-nav{display:flex;align-items:center;gap:var(--sp-4);
-  white-space:nowrap;font-size:var(--fs-300)}
+/* Wraps for the same reason the rail above it does, and it did not have
+   to until it carried more than two links. With `account`, `people` and
+   `docs` on it (D76) this row measures about 480 CSS pixels rendered,
+   so it no longer fits a phone — and a flex row that cannot wrap is the
+   one item its wrapping parent cannot rescue, because the parent can
+   only move it to a line of its own, not break it. Each link keeps
+   `white-space:nowrap` so a break lands between them rather than inside
+   one. */
+.chrome-nav{display:flex;flex-wrap:wrap;align-items:center;
+  gap:var(--sp-2) var(--sp-4);font-size:var(--fs-300)}
+.chrome-nav>*{white-space:nowrap}
 .chrome-nav a{color:var(--muted);text-decoration:none}
 .chrome-nav a:hover{color:var(--accent-ink)}
 
