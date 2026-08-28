@@ -248,6 +248,12 @@
       "summary": "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest"
     },
     {
+      "agent_facing": false,
+      "args": "[<api>]",
+      "name": "node status",
+      "summary": "what the node is doing right now: health, the commit actually serving, the sequencer's position and its measured p99 against the 100 ms gate, and how much this credential can see; sections a narrower credential may not read say so rather than reading as an idle node"
+    },
+    {
       "agent_facing": true,
       "args": "[<api>]",
       "name": "doctor",

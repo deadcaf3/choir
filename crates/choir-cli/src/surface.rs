@@ -645,6 +645,16 @@ pub const COMMANDS: &[Command] = &[
         group: "reading the node",
     },
     Command {
+        name: "node status",
+        args: "[<api>]",
+        summary: "what the node is doing right now: health, the commit actually serving, the \
+                  sequencer's position and its measured p99 against the 100 ms gate, and how \
+                  much this credential can see; sections a narrower credential may not read \
+                  say so rather than reading as an idle node",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
         name: "doctor",
         args: "[<api>]",
         summary: "check everything the other commands assume: the binaries this workspace \

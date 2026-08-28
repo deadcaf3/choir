@@ -151,6 +151,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   withdraw a key binding; terminal, and the attribution row survives
 - `choir acl render <api> <acl-file>`  
   rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
+- `choir node status [<api>]`  
+  what the node is doing right now: health, the commit actually serving, the sequencer's position and its measured p99 against the 100 ms gate, and how much this credential can see; sections a narrower credential may not read say so rather than reading as an idle node
 - `choir doctor [<api>]`  
   check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails
 - `choir repair <log-file> --verify | --truncate-tail`  

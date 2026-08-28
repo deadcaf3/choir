@@ -18,6 +18,7 @@ mod install_policy;
 mod join;
 mod mcp;
 mod no_tty_block;
+mod node;
 mod propose;
 mod python;
 mod repair;

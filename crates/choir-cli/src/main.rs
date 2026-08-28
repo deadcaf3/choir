@@ -2152,7 +2152,16 @@ fn main() {
     // version of this printed a binding for an actor called `--help`.
     let asked = match args.iter().position(|a| is_help(a)) {
         Some(1) => Some(args[0].clone()),
-        Some(2) if args[0] == "acl" => Some(format!("{} {}", args[0], args[1])),
+        // Any two-word command, not just `acl render`: the table knows
+        // which names have a space in them, and a second list here is a
+        // second thing to forget when one is added.
+        Some(2)
+            if choir_cli::surface::COMMANDS
+                .iter()
+                .any(|c| c.name == format!("{} {}", args[0], args[1])) =>
+        {
+            Some(format!("{} {}", args[0], args[1]))
+        }
         _ => None,
     };
     if let Some(name) = asked {
@@ -2178,6 +2187,38 @@ fn main() {
             match rest.first() {
                 Some(name) => println!("{name} {hex}"),
                 None => println!("{hex}"),
+            }
+        }
+        // Two words, like `acl render`: `node` is a family rather than
+        // a command, and `choir node` alone should say so rather than
+        // guessing which member was meant.
+        ["node", "status", rest @ ..] if rest.len() <= 1 => {
+            let api = rest
+                .first()
+                .copied()
+                .map(str::to_string)
+                .or_else(configured_node);
+            let Some(api) = api else {
+                eprintln!(
+                    "choir node status: no node given and none configured\n\
+                     \n\
+                       write `node = <url>` to .choir/config, or pass the URL"
+                );
+                std::process::exit(2);
+            };
+            let style = choir_cli::style::Style::for_stdout();
+            match choir_cli::node::status(&api, auth.file.map(std::path::Path::new)) {
+                Ok((health, view)) => {
+                    print!(
+                        "{}",
+                        choir_cli::node::status_report(&api, health, &view, style)
+                    );
+                    std::process::exit(health.exit_code());
+                }
+                Err(error) => {
+                    eprintln!("{} {error}", style.red("choir node status:"));
+                    std::process::exit(1);
+                }
             }
         }
         // The only command that takes its node as an *optional*

@@ -41,6 +41,9 @@ pub mod docs;
 // intra-doc link, and a `///` here would resolve it in the wrong scope.
 pub mod doctor;
 pub mod mcp;
+// Same reason as `docs`: the module's own header carries intra-doc
+// links that must resolve in its scope, not this one.
+pub mod node;
 
 /// One-command proposal from a git checkout.
 pub mod propose;
