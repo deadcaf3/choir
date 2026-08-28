@@ -316,6 +316,16 @@ const APPEAL_MCP_SCHEMA: &str = r#"{
 /// Every `choir` subcommand, in help order.
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "init",
+        args: "[<state-dir>] [--port <n>] [--force]",
+        summary: "set up a node on this machine from nothing: a repository root, a credential \
+                  at 0600, an actor key the node will trust, and a .choir/config so the other \
+                  commands stop asking which node you mean; refuses and names what exists \
+                  rather than overwriting a token nothing can reissue",
+        agent_facing: false,
+        group: "getting started",
+    },
+    Command {
         name: "key",
         args: "<key-file> [name]",
         summary: "mint a key and print the line the operator registers; \

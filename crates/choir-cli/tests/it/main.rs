@@ -13,6 +13,7 @@ mod config;
 mod deploy;
 mod doctor;
 mod gate;
+mod init;
 mod insight;
 mod install_policy;
 mod join;

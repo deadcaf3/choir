@@ -52,6 +52,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
 
 **getting started**
 
+- `choir init [<state-dir>] [--port <n>] [--force]`  
+  set up a node on this machine from nothing: a repository root, a credential at 0600, an actor key the node will trust, and a .choir/config so the other commands stop asking which node you mean; refuses and names what exists rather than overwriting a token nothing can reissue
 - `choir key <key-file> [name]`  
   mint a key and print the line the operator registers; pass your channel name to print the bound form
 - `choir git-credential <auth-file> [--auth-user <name>] get|store|erase`  

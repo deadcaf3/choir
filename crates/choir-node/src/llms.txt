@@ -34,6 +34,7 @@ A node may enforce per-repository grants. 404 on a repository means you hold no 
 
 ## CLI
 For authenticated nodes: choir [--auth-file <path>] [--auth-user <name>] <command> ...
+choir init [<state-dir>] [--port <n>] [--force] - set up a node on this machine from nothing: a repository root, a credential at 0600, an actor key the node will trust, and a .choir/config so the other commands stop asking which node you mean; refuses and names what exists rather than overwriting a token nothing can reissue
 choir key <key-file> [name] - mint a key and print the line the operator registers; pass your channel name to print the bound form
 choir git-credential <auth-file> [--auth-user <name>] get|store|erase - git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
 choir join <api> <invite-file> <key-file> [--user <name>] [--channel <name>] [--ssh-key <path>] [--token-file <path>] - redeem an operator's invite and mint your actor key in one step; --user names the account, which most invites leave for you to pick and which the op log then keeps forever; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself

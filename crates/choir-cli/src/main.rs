@@ -2101,8 +2101,19 @@ fn configured_node() -> Option<String> {
 ///
 /// An explicit URL always wins: this only ever fills a gap.
 fn with_configured_node(args: &[String]) -> Vec<String> {
-    let Some(name) = args.first() else {
+    if args.is_empty() {
         return args.to_vec();
+    }
+    // A command name can be two words -- `acl render`, `node status`,
+    // `repo create` -- and the api follows the whole name, not the first
+    // word of it. Matching only `args[0]` meant every two-word command
+    // silently lost `.choir/config`: `choir repo create me/thing.git`
+    // was read as a one-word command with a repository where its node
+    // should be, and refused.
+    let two = (args.len() >= 2).then(|| format!("{} {}", args[0], args[1]));
+    let (name, words) = match two {
+        Some(two) if choir_cli::surface::COMMANDS.iter().any(|c| c.name == two) => (two, 2),
+        _ => (args[0].clone(), 1),
     };
     let takes_api = choir_cli::surface::COMMANDS
         .iter()
@@ -2110,7 +2121,7 @@ fn with_configured_node(args: &[String]) -> Vec<String> {
     if !takes_api {
         return args.to_vec();
     }
-    let given = args.get(1).map(String::as_str).unwrap_or("");
+    let given = args.get(words).map(String::as_str).unwrap_or("");
     if given.starts_with("http://") || given.starts_with("https://") {
         return args.to_vec();
     }
@@ -2118,9 +2129,9 @@ fn with_configured_node(args: &[String]) -> Vec<String> {
         return args.to_vec();
     };
     let mut filled = Vec::with_capacity(args.len() + 1);
-    filled.push(args[0].clone());
+    filled.extend(args[..words].iter().cloned());
     filled.push(node);
-    filled.extend(args[1..].iter().cloned());
+    filled.extend(args[words..].iter().cloned());
     filled
 }
 
@@ -2187,6 +2198,87 @@ fn main() {
             match rest.first() {
                 Some(name) => println!("{name} {hex}"),
                 None => println!("{hex}"),
+            }
+        }
+        // The first command anybody runs, so it takes no <api>: there
+        // is no node yet to name.
+        ["init", rest @ ..] if auth.is_empty() => {
+            let (mut dir, mut port, mut force) = (None, 8417u16, false);
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                match *arg {
+                    "--force" => force = true,
+                    "--port" => {
+                        let Some(value) = it.next().and_then(|v| v.parse().ok()) else {
+                            usage()
+                        };
+                        port = value;
+                    }
+                    other if !other.starts_with('-') && dir.is_none() => dir = Some(other),
+                    _ => usage(),
+                }
+            }
+            let style = choir_cli::style::Style::for_stdout();
+            // `HOME` describes the machine rather than carrying a
+            // setting of ours, which is the same reason `choir-queue`
+            // may read it. A state directory can still be given
+            // explicitly, and is the only way to get one elsewhere.
+            let state = match dir {
+                Some(dir) => std::path::PathBuf::from(dir),
+                None => match std::env::var_os("HOME") {
+                    Some(home) => std::path::PathBuf::from(home).join(".choir"),
+                    None => {
+                        eprintln!(
+                            "{} no HOME, so there is no default state directory\n\
+                             \n  choir init <state-dir>",
+                            style.red("choir init:")
+                        );
+                        std::process::exit(2);
+                    }
+                },
+            };
+            let plan = choir_cli::init::Plan::new(&state, port);
+            match choir_cli::init::run(&plan, force) {
+                Ok(made) => {
+                    let rows: Vec<(&str, String)> = vec![
+                        ("repos", plan.repos.display().to_string()),
+                        ("auth", format!("{} (0600)", plan.auth.display())),
+                        ("key", format!("{} (0600)", plan.key.display())),
+                        ("trusted", plan.trusted.display().to_string()),
+                        (
+                            "config",
+                            format!("{} -> {}", plan.config.display(), plan.node_url()),
+                        ),
+                    ];
+                    note("ready", &rows);
+                    if !made.replaced.is_empty() {
+                        eprintln!(
+                            "  {} replaced {} existing file(s); the previous credential is gone\n",
+                            style.red("--force:"),
+                            made.replaced.len()
+                        );
+                    }
+                    // The two commands that follow, because knowing what
+                    // was created is not the same as knowing what to do
+                    // with it.
+                    println!(
+                        "choir-node {} {} --auth-file {} --keys-file {}",
+                        plan.repos.display(),
+                        port,
+                        plan.auth.display(),
+                        plan.trusted.display()
+                    );
+                    eprintln!(
+                        "  {} run the line above, then:\n    choir repo create {} me/thing.git\n",
+                        style.dim("next"),
+                        plan.node_url()
+                    );
+                    let _ = made.user;
+                }
+                Err(error) => {
+                    eprintln!("{} {error}", style.red("choir init:"));
+                    std::process::exit(1);
+                }
             }
         }
         // The one command whose whole point is that the node is

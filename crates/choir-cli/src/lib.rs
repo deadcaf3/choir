@@ -40,6 +40,8 @@ pub mod docs;
 // Same reason as `docs` above: this module's own header carries an
 // intra-doc link, and a `///` here would resolve it in the wrong scope.
 pub mod doctor;
+// Same reason as `docs`: intra-doc links in the module's own header.
+pub mod init;
 pub mod mcp;
 // Same reason as `docs`: the module's own header carries intra-doc
 // links that must resolve in its scope, not this one.

@@ -2,6 +2,12 @@
   "api_version": 1,
   "commands": [
     {
+      "agent_facing": false,
+      "args": "[<state-dir>] [--port <n>] [--force]",
+      "name": "init",
+      "summary": "set up a node on this machine from nothing: a repository root, a credential at 0600, an actor key the node will trust, and a .choir/config so the other commands stop asking which node you mean; refuses and names what exists rather than overwriting a token nothing can reissue"
+    },
+    {
       "agent_facing": true,
       "args": "<key-file> [name]",
       "name": "key",

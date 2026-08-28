@@ -167,3 +167,68 @@ fn the_index_lists_every_command_under_a_heading() {
         );
     }
 }
+
+/// A two-word command name gets the configured node too.
+///
+/// The fill used to match the command name against `args[0]` alone, so
+/// every two-word command — `acl render`, `node status`, `repo create` —
+/// silently lost the config: `choir repo create me/thing.git` was read
+/// as a one-word command holding a repository where its node should be,
+/// and refused with "`repo` is not a choir command". A convenience that
+/// works for two thirds of the surface is worse than none, because the
+/// third that misses it looks broken.
+///
+/// Measured by whether the argument was *filled*, which is the same
+/// distinction the one-word tests draw: with a config the command runs
+/// and fails to connect, without one it cannot even parse. The refusal
+/// deliberately does not echo the address — curl errors can carry a
+/// private node name — so the exit code is what says which happened.
+#[test]
+fn a_two_word_command_gets_the_configured_node() {
+    let deep = tree("twoword", Some(DEAD));
+    let out = run_in(&deep, &["node", "status"]);
+    let text = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !text.contains("is not a choir command"),
+        "the two-word name should have resolved, not been split: {text}"
+    );
+    assert!(
+        !is_usage_error(&out),
+        "with a config the node argument is filled, so this should have run: {text}"
+    );
+}
+
+/// Without a config, the same command is a usage error.
+///
+/// The other half of the pair: this is what proves the test above is
+/// measuring the fill rather than something that would pass anyway.
+#[test]
+fn a_two_word_command_without_a_config_still_refuses() {
+    let deep = tree("twoword-none", None);
+    let out = run_in(&deep, &["node", "status"]);
+    assert!(
+        is_usage_error(&out),
+        "with nothing to fill from, it must say so: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// An explicit URL is not filled *around* for a two-word command.
+///
+/// The failure this guards is a double-fill: inserting the node after
+/// the name when the caller already gave one would shift their arguments
+/// right by one, and `repo create <url> <name>` would arrive as a
+/// four-argument command with the wrong things in each slot.
+#[test]
+fn an_explicit_node_is_not_filled_around_for_two_word_commands() {
+    let deep = tree("twoword-explicit", Some(DEAD));
+    let out = run_in(
+        &deep,
+        &["repo", "create", "http://127.0.0.1:2", "me/thing.git"],
+    );
+    assert!(
+        !is_usage_error(&out),
+        "the arguments should still match: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
