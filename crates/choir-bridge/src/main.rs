@@ -18,6 +18,14 @@
 //!   (created 0600 on first run if absent).
 //! - `label`: ref namespace prefix, e.g. `github/git/git`.
 //! - `--once`: single sync instead of a 60 s loop.
+//!
+//! Exit codes are the workspace's: **0** the operation succeeded, **1**
+//! it failed, **2** the arguments were wrong. Stated here because every
+//! subcommand already follows it and nothing said so — a convention that
+//! is only visible by reading twenty call sites is one the twenty-first
+//! gets wrong. The daemon loop is the exception that proves it: a
+//! transient fetch failure is logged and retried rather than exited on,
+//! because a follower that dies on a network blip stops following.
 
 use choir_bridge::github;
 

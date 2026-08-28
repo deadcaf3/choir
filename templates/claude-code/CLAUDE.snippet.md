@@ -52,6 +52,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir state <api> <channel>` — your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
 - `choir skill install [--into <dir>]` — install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
 - `choir view <api> [--limit <n>] [--offset <n>]` — the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest
+- `choir doctor [<api>]` — check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails
 <!-- /generated -->
 
 Signatures above are generated; these conventions are not, and they are

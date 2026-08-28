@@ -43,6 +43,11 @@
 //! answer is not decided yet and 4 = a check could not be run at all,
 //! which is our fault rather than the commit's and wants a re-run
 //! rather than a rewrite; see [`check_exit`].
+//!
+//! `choir doctor` reads the same two codes as everything else — 0
+//! nothing required is missing, 1 something is — so that `choir doctor
+//! && choir propose …` means what it looks like it means. A degraded
+//! but working machine exits 0; see [`choir_cli::doctor`].
 
 use choir_hash::ContentHash;
 use choir_identity::{ActorKey, Registry};
@@ -2174,6 +2179,18 @@ fn main() {
                 Some(name) => println!("{name} {hex}"),
                 None => println!("{hex}"),
             }
+        }
+        // The only command that takes its node as an *optional*
+        // argument. Everything else refuses without one; this one has
+        // to keep working on a machine that has no node yet, because
+        // "there is no node configured" is one of the things it reports.
+        ["doctor", rest @ ..] if rest.len() <= 1 => {
+            let configured = configured_node();
+            let api = rest.first().copied().map(str::to_string).or(configured);
+            let checks = choir_cli::doctor::run(api.as_deref(), auth.file);
+            let style = choir_cli::style::Style::for_stdout();
+            print!("{}", choir_cli::doctor::report(&checks, style));
+            std::process::exit(choir_cli::doctor::exit_code(&checks));
         }
         // The mode is required, never defaulted. A repair tool that
         // picks its own action is the one thing this must not be: the

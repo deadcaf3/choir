@@ -645,6 +645,18 @@ pub const COMMANDS: &[Command] = &[
         group: "reading the node",
     },
     Command {
+        name: "doctor",
+        args: "[<api>]",
+        summary: "check everything the other commands assume: the binaries this workspace \
+                  shells out to, the auth file and its mode, and whether a node answers; \
+                  each failure prints the command that fixes it, and a missing optional \
+                  tool warns rather than fails",
+        // The one command worth reaching for when nothing else works,
+        // so it is not gated on being an agent's habit.
+        agent_facing: true,
+        group: "operating a node",
+    },
+    Command {
         name: "repair",
         args: "<log-file> --verify | --truncate-tail",
         summary: "inspect a stopped node's op log, or repair a tail that was still being \

@@ -37,6 +37,9 @@ pub mod acl;
 // and, under the workspace's `deny`, failed `cargo doc` outright. The
 // module documents itself.
 pub mod docs;
+// Same reason as `docs` above: this module's own header carries an
+// intra-doc link, and a `///` here would resolve it in the wrong scope.
+pub mod doctor;
 pub mod mcp;
 
 /// One-command proposal from a git checkout.

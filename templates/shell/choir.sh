@@ -284,4 +284,10 @@ choir_skill() {
 choir_view() {
 	choir_run view "$@"
 }
+
+# choir doctor [<api>]
+#   check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails
+choir_doctor() {
+	choir_run doctor "$@"
+}
 # --- /generated ---

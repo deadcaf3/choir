@@ -109,6 +109,29 @@ impl HttpClient {
             .map(|response| (response.status, response.body))
     }
 
+    /// Sends a bare authenticated `GET` to one path on the node.
+    ///
+    /// For the operational endpoints that are not part of the tool
+    /// table: `/healthz` and its neighbours are authenticated like
+    /// everything else, but they carry no arguments and no MCP schema,
+    /// so they cannot be reached through [`request`]. Going through this
+    /// client rather than a fresh `curl` keeps one credential path in
+    /// the crate — the config-on-stdin that keeps a token off argv,
+    /// where `ps` would show it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport description, without reflecting the
+    /// credential or the node address.
+    ///
+    /// [`request`]: HttpClient::request
+    pub fn get(&self, path: &str) -> Result<(u16, String), String> {
+        let mut command = Command::new("curl");
+        command.args(["-sS", "-w", "\n%{http_code}", "--config", "-", "-X", "GET"]);
+        command.arg(format!("{}{path}", self.api));
+        self.run(command).map(|r| (r.status, r.body))
+    }
+
     fn call(&self, endpoint: &Endpoint, arguments: &Value) -> Result<HttpResponse, String> {
         let object = arguments
             .as_object()
@@ -190,6 +213,20 @@ impl HttpClient {
             }
         };
         command.arg(format!("{}{base_path}", self.api));
+        let response = self.run(command);
+        // Held until curl has exited: the body is a file curl reads, and
+        // dropping it earlier would delete the request out from under it.
+        drop(body_file);
+        response
+    }
+
+    /// Spawns a prepared `curl`, feeds it the credential on stdin, and
+    /// parses the status the `-w` format smuggled onto stdout.
+    ///
+    /// Every request in this crate ends here, which is the point: the
+    /// credential reaches curl exactly one way, and a caller cannot
+    /// accidentally put a token on argv where `ps` would show it.
+    fn run(&self, mut command: Command) -> Result<HttpResponse, String> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -210,7 +247,6 @@ impl HttpClient {
         let output = child
             .wait_with_output()
             .map_err(|_| "could not wait for curl".to_string())?;
-        drop(body_file);
         if !output.status.success() {
             // Name the likeliest fix, not just the failure. Two
             // readers reach this line and they are not the same person:

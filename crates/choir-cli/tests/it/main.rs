@@ -11,6 +11,7 @@ mod claude_hooks;
 mod cli;
 mod config;
 mod deploy;
+mod doctor;
 mod gate;
 mod insight;
 mod install_policy;
