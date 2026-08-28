@@ -18,8 +18,89 @@
 //! CSP forbids loading them, so an `<img>` would render as a broken icon
 //! on every README that has a badge or a screenshot. A link says what is
 //! there and can be followed.
+//!
+//! A fourth rule arrived with the route table: **a relative link is
+//! resolved against the repository, not against the page**. `[guide](
+//! docs/guide.md)` in the root README is a link to a file that is right
+//! there, and a browser on `/r/<owner>/<repo>` resolves it to
+//! `/r/<owner>/docs/guide.md` — a repository named `docs` under an owner
+//! named after this one. Every relative link in every README on this
+//! node was dead, and dead in a way that looked like a missing
+//! repository rather than a bad link.
 
 use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
+
+/// Where a README sits, so a relative link in it can be resolved.
+///
+/// Carried rather than derived, because a README renders at every level
+/// of the tree and `docs/guide.md` inside `src/README.md` means
+/// `src/docs/guide.md`.
+#[derive(Clone, Copy)]
+pub(crate) struct Base<'a> {
+    /// `owner/repo`, without the `.git`.
+    pub repo: &'a str,
+    /// The revision the page is being read at.
+    pub rev: &'a str,
+    /// The directory this README is in, `""` at the repository root, with
+    /// no leading or trailing slash.
+    pub dir: &'a str,
+}
+
+/// Resolves one relative destination against `base`, or `None` when it
+/// is not a relative path this should touch.
+///
+/// Left alone: anything with a scheme, anything already rooted at `/`
+/// (which is a path on this node and so already resolves), and a bare
+/// fragment or query, which addresses the page the reader is on.
+///
+/// Everything else becomes a `blob` URL. A relative link naming a
+/// *directory* still 404s — telling the two apart needs a `git` call per
+/// link, and the answer would be a lookup per README rather than per
+/// page — but a 404 on one link is what this replaces node-wide.
+fn resolve(dest: &str, base: Base<'_>) -> Option<String> {
+    if dest.is_empty() || dest.starts_with('/') || dest.starts_with(['#', '?']) {
+        return None;
+    }
+    // The same scheme test `linkable` makes, for the same reason: a colon
+    // inside a path is not a scheme.
+    if let Some(colon) = dest.find(':') {
+        let head = &dest[..colon];
+        if !head.contains('/') && !head.contains('?') && !head.contains('#') {
+            return None;
+        }
+    }
+    let (path, tail) = match dest.find(['#', '?']) {
+        Some(at) => (&dest[..at], &dest[at..]),
+        None => (dest, ""),
+    };
+    let mut segments: Vec<&str> = base
+        .dir
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                // A link that climbs past the repository root is not a
+                // path in this repository, and inventing one would point
+                // the reader at somebody else's.
+                segments.pop()?;
+            }
+            other => segments.push(other),
+        }
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    let joined = segments.join("/");
+    Some(format!(
+        "/r/{}/blob/{}/{}{tail}",
+        base.repo,
+        crate::browse::url_path(base.rev),
+        crate::browse::url_path(&joined)
+    ))
+}
 
 /// The filenames looked for at a repository root, in order of preference.
 ///
@@ -29,7 +110,7 @@ use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
 pub(crate) const NAMES: [&str; 4] = ["README.md", "README.markdown", "README", "readme.md"];
 
 /// Renders README source to the HTML fragment the repository page embeds.
-pub(crate) fn render(markdown: &str) -> String {
+pub(crate) fn render(markdown: &str, base: Base<'_>) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -40,13 +121,28 @@ pub(crate) fn render(markdown: &str) -> String {
     let mut html = String::with_capacity(markdown.len());
     pulldown_cmark::html::push_html(
         &mut html,
-        Parser::new_ext(markdown, options).filter_map(sanitize),
+        Parser::new_ext(markdown, options).filter_map(|event| sanitize(event, base)),
     );
     html
 }
 
 /// One event, as it is allowed to appear on the page — or `None`.
-fn sanitize(event: Event<'_>) -> Option<Event<'_>> {
+fn sanitize<'a>(event: Event<'a>, base: Base<'_>) -> Option<Event<'a>> {
+    /// The destination this link is served with: refused, resolved
+    /// against the repository, or exactly as written.
+    fn destination<'a>(dest: CowStr<'a>, base: Base<'_>) -> CowStr<'a> {
+        if !linkable(&dest) {
+            // An anchor with no destination rather than no anchor:
+            // dropping the tag here would leave its `TagEnd` to close
+            // an element that was never opened.
+            return CowStr::Borrowed("");
+        }
+        match resolve(&dest, base) {
+            Some(resolved) => CowStr::Boxed(resolved.into_boxed_str()),
+            None => dest,
+        }
+    }
+
     match event {
         // Rule 1. Both halves: `Html` is a block, `InlineHtml` is a span,
         // and dropping only one of them leaves the other as the hole.
@@ -58,14 +154,7 @@ fn sanitize(event: Event<'_>) -> Option<Event<'_>> {
             id,
         }) => Some(Event::Start(Tag::Link {
             link_type,
-            dest_url: if linkable(&dest_url) {
-                dest_url
-            } else {
-                // An anchor with no destination rather than no anchor:
-                // dropping the tag here would leave its `TagEnd` to close
-                // an element that was never opened.
-                CowStr::Borrowed("")
-            },
+            dest_url: destination(dest_url, base),
             title,
             id,
         })),
@@ -78,11 +167,7 @@ fn sanitize(event: Event<'_>) -> Option<Event<'_>> {
             ..
         }) => Some(Event::Start(Tag::Link {
             link_type: LinkType::Inline,
-            dest_url: if linkable(&dest_url) {
-                dest_url
-            } else {
-                CowStr::Borrowed("")
-            },
+            dest_url: destination(dest_url, base),
             title,
             id,
         })),
@@ -125,6 +210,14 @@ fn linkable(url: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The root README of `agents/demo` at `main`, which is where every
+    /// relative link in these tests is written from.
+    const ROOT: Base<'static> = Base {
+        repo: "agents/demo",
+        rev: "main",
+        dir: "",
+    };
+
     /// The rule that matters most, stated as the four shapes it has to
     /// cover: a block of HTML, an inline span, a script URL, and a script
     /// URL wearing whitespace to get past a naive check.
@@ -136,6 +229,7 @@ mod tests {
              [click](javascript:alert(1))\n\n\
              [sneaky](java\tscript:alert(1))\n\n\
              [data](data:text/html;base64,PHNjcmlwdD4=)\n",
+            ROOT,
         );
         assert!(!html.contains("<script"), "raw HTML block survived: {html}");
         assert!(!html.contains("onerror"), "inline HTML survived: {html}");
@@ -162,6 +256,7 @@ mod tests {
              ```rust\nfn main() {}\n```\n\n\
              [docs](https://example.invalid/a) and [rel](docs/guide.md)\n\n\
              | a | b |\n|---|---|\n| 1 | 2 |\n",
+            ROOT,
         );
         assert!(html.contains("<h1>"), "no heading: {html}");
         assert!(html.contains("<strong>bold</strong>"), "no bold: {html}");
@@ -173,8 +268,8 @@ mod tests {
             "an https link was refused: {html}"
         );
         assert!(
-            html.contains("href=\"docs/guide.md\""),
-            "a relative link was refused: {html}"
+            html.contains("href=\"/r/agents/demo/blob/main/docs/guide.md\""),
+            "a relative link was not resolved against the repository: {html}"
         );
     }
 
@@ -182,18 +277,87 @@ mod tests {
     /// something a reader can act on instead of a broken icon.
     #[test]
     fn an_image_becomes_a_link_carrying_its_alt_text() {
-        let html = render("![the architecture diagram](docs/arch.png)\n");
+        let html = render("![the architecture diagram](docs/arch.png)\n", ROOT);
         assert!(
             !html.contains("<img"),
             "an image tag reached the page: {html}"
         );
         assert!(
-            html.contains("href=\"docs/arch.png\""),
+            html.contains("href=\"/r/agents/demo/blob/main/docs/arch.png\""),
             "the image is not reachable at all: {html}"
         );
         assert!(
             html.contains("the architecture diagram"),
             "the alt text was dropped: {html}"
+        );
+    }
+
+    /// A README below the root resolves against its own directory, which
+    /// is the whole reason the base is carried rather than assumed.
+    #[test]
+    fn a_readme_in_a_subdirectory_resolves_against_that_directory() {
+        let base = Base {
+            dir: "src/net",
+            ..ROOT
+        };
+        let html = render("[sibling](client.rs) and [up](../lib.rs)\n", base);
+        assert!(
+            html.contains("href=\"/r/agents/demo/blob/main/src/net/client.rs\""),
+            "a sibling link did not stay in the directory: {html}"
+        );
+        assert!(
+            html.contains("href=\"/r/agents/demo/blob/main/src/lib.rs\""),
+            "a link climbing one level did not climb: {html}"
+        );
+    }
+
+    /// The three shapes that must not be rewritten, because each already
+    /// addresses something: an absolute URL, a path on this node, and a
+    /// heading on the page the reader is on.
+    #[test]
+    fn a_link_that_already_resolves_is_left_exactly_as_written() {
+        let html = render(
+            "[out](https://example.invalid/a) [abs](/r/agents/other) [here](#usage)\n",
+            ROOT,
+        );
+        assert!(
+            html.contains("href=\"https://example.invalid/a\""),
+            "{html}"
+        );
+        assert!(html.contains("href=\"/r/agents/other\""), "{html}");
+        assert!(html.contains("href=\"#usage\""), "{html}");
+    }
+
+    /// A fragment on a relative link survives the rewrite; a climb past
+    /// the repository root does not become a path in another one.
+    #[test]
+    fn a_fragment_is_kept_and_a_climb_out_of_the_repository_is_refused() {
+        let html = render("[a](docs/guide.md#install) [b](../../etc/passwd)\n", ROOT);
+        assert!(
+            html.contains("href=\"/r/agents/demo/blob/main/docs/guide.md#install\""),
+            "the fragment was lost: {html}"
+        );
+        assert!(
+            !html.contains("passwd\" ") && !html.contains("/r/agents/demo/blob/main/etc"),
+            "a link climbing out of the repository was given a path in it: {html}"
+        );
+    }
+
+    /// A name outside ASCII is encoded the way the listing encodes it —
+    /// otherwise the link a README renders and the link the listing
+    /// renders disagree about the same file.
+    ///
+    /// `?` and `#` are deliberately *not* in this test: in a URL they
+    /// start a query and a fragment, and a README author writing one
+    /// means the URL syntax. A filename containing either is reachable
+    /// from the listing, which knows it is holding a name rather than a
+    /// URL.
+    #[test]
+    fn a_relative_link_is_encoded_the_way_the_listing_encodes_one() {
+        let html = render("[c](docs/café.md)\n", ROOT);
+        assert!(
+            html.contains("href=\"/r/agents/demo/blob/main/docs/caf%C3%A9.md\""),
+            "a name outside ASCII was left unencoded: {html}"
         );
     }
 }

@@ -1572,8 +1572,30 @@ impl Node {
                         (method, public_path.as_str()),
                         ("POST", "/api/access") | ("POST", "/api/access/challenge")
                     );
+                // A live browser session, checked here as well as at the
+                // auth gate below. The front door is for people who hold
+                // nothing, and a session cookie is something: without
+                // this the branch fired for anybody signed in through
+                // D74's form, because that credential is a cookie and
+                // never an `Authorization` header — so the brand link,
+                // the "node" pill and the `303` that ends signing in all
+                // led back to a page telling the reader to sign in.
+                //
+                // A closure rather than a value, and last in the `&&`
+                // chain that uses it: this is a lock and a lookup, and
+                // every git request would otherwise pay for it to answer
+                // a question only two paths ask.
+                let in_session = || {
+                    session::cookie(header(&request, "Cookie").as_deref(), session::COOKIE)
+                        .is_some_and(|token| sessions.user(&token).is_some())
+                };
+                // A crawler asks for this by name and gets it whatever it
+                // holds, because a robots policy withheld behind a `401`
+                // is a robots policy nothing reads.
+                let robots_route = method == "GET" && public_path == ui::ROBOTS_PATH;
                 let public = signin_route
                     || asking_route
+                    || robots_route
                     || matches!((method, public_path.as_str()), ("GET" | "POST", "/join"))
                     || (method == "GET" && public_path == ui::CARD_PATH)
                     // The landing page replaces the challenge only for a
@@ -1585,7 +1607,8 @@ impl Node {
                     || (method == "GET"
                         && matches!(public_path.as_str(), "/" | "/index.html")
                         && authenticated
-                        && header(&request, "authorization").is_none());
+                        && header(&request, "authorization").is_none()
+                        && !in_session());
                 if public {
                     if let Some(retry) = public_rate.check() {
                         let outcome = respond_public_busy(request, retry);
@@ -1616,6 +1639,8 @@ impl Node {
                         )
                     } else if public_path == ui::CARD_PATH {
                         respond_card(request)
+                    } else if robots_route {
+                        respond_robots(request)
                     } else {
                         respond_join(
                             request,
@@ -1914,6 +1939,7 @@ impl Node {
                         accounts.as_deref(),
                         &user,
                         acl.as_deref(),
+                        &root,
                         scheme,
                     );
                     access.finish(log, &user, &outcome);
@@ -1946,15 +1972,17 @@ impl Node {
                         access.finish(log, &user, &outcome);
                         return;
                     }
+                    let console = acl.as_deref().is_some_and(|table| {
+                        table
+                            .check(&user, &acl::Scope::Node, acl::Level::Write)
+                            .is_none()
+                    });
+                    let docs = docs_url(&root);
                     let page = account_page::render(
                         accounts.as_deref(),
                         &user,
                         session_user_present,
-                        acl.as_deref().is_some_and(|table| {
-                            table
-                                .check(&user, &acl::Scope::Node, acl::Level::Write)
-                                .is_none()
-                        }),
+                        console,
                         header(&request, "host")
                             .map(|host| format!("{scheme}://{host}"))
                             .as_deref(),
@@ -1962,6 +1990,9 @@ impl Node {
                             site: None,
                             theme: chosen_theme(&request),
                             here: "/account",
+                            account: true,
+                            console,
+                            docs: docs.as_deref(),
                         },
                     );
                     let bytes = page.html.len() as u64;
@@ -2212,6 +2243,8 @@ impl Node {
                         &ui_cache,
                         &user,
                         acl.as_deref(),
+                        &root,
+                        passkeys,
                         request,
                     );
                     access.finish(log, &user, &outcome);
@@ -2277,6 +2310,7 @@ impl Node {
                                 site: site_repo.as_deref(),
                                 scheme,
                                 self_service: accounts.is_some(),
+                                passkeys,
                             },
                             &page,
                             request,
@@ -2683,6 +2717,15 @@ fn reader_chrome(request: &tiny_http::Request) -> browse::Chrome<'static> {
         // page that just refused them is a link back into a wall. The
         // empty string is the front door.
         here: "",
+        // A refusal offers no navigation of its own. Half of these pages
+        // are rendered for a caller who has not been identified yet, so
+        // "does this reader hold `@node write`" has no answer here, and
+        // guessing `false` would be a console link that vanishes on a
+        // 404 and reappears everywhere else. `ui::refusal` takes the
+        // links each refusal actually wants as its own argument.
+        account: false,
+        console: false,
+        docs: None,
     }
 }
 
@@ -3275,6 +3318,26 @@ fn respond_card(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
     served(request, response, 200, bytes)
 }
 
+/// Serves [`ui::ROBOTS`].
+///
+/// An hour rather than [`respond_card`]'s year: the card's bytes can only
+/// change with a new binary, but a crawl policy is the kind of thing an
+/// operator wants to take effect the same afternoon they change it, and
+/// a year-long cache on the wrong policy is not recallable.
+fn respond_robots(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
+    let bytes = ui::ROBOTS.len() as u64;
+    let response = tiny_http::Response::from_string(ui::ROBOTS)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=3600"[..])
+                .expect("static header"),
+        );
+    served(request, response, 200, bytes)
+}
+
 /// The most a pre-auth request body may be (D57).
 ///
 /// Two hex credentials and an ssh public key, with room to spare. It is
@@ -3321,6 +3384,7 @@ fn respond_join(
     let _ = ssh;
     let contact = operator_contact(root);
     let contact = contact.as_deref();
+    let docs = docs_url(root);
     let theme = chosen_theme(&request);
     let chrome = browse::Chrome {
         site: None,
@@ -3330,6 +3394,14 @@ fn respond_join(
         // address that did carry one would be carrying the invite secret
         // into an `href`.
         here: "",
+        // Nobody reading these pages has an account yet, which is what
+        // both of these link to.
+        account: false,
+        console: false,
+        // The book, though, is exactly what a stranger who has just read
+        // the front door wants next, and it is the one half of this site
+        // that needs no credential at all (D76).
+        docs: docs.as_deref(),
     };
     let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
     let url = request.url().to_string();
@@ -3368,6 +3440,7 @@ fn respond_join(
                 // door does not offer a form whose one button would
                 // answer 503 (D72).
                 asking: store.is_some(),
+                docs: docs.as_deref(),
             },
         )
     };
@@ -3759,10 +3832,17 @@ fn respond_people(
     scheme: &'static str,
     body_limit: std::num::NonZeroU64,
 ) -> std::io::Result<(u16, u64)> {
+    let docs = docs_url(root);
     let chrome = browse::Chrome {
         site: None,
         theme: chosen_theme(&request),
         here: "/people",
+        account: true,
+        // Reaching this page at all means holding `@node write`, which is
+        // what the console link is gated on — the refusal below is the
+        // path for everybody else.
+        console: true,
+        docs: docs.as_deref(),
     };
     let Some(store) = store else {
         let html = ui::refusal(
@@ -3992,6 +4072,27 @@ fn contact_path(root: &std::path::Path) -> std::path::PathBuf {
     root.join(".choir/contact")
 }
 
+/// Where this node's book is published, if its operator has said (D76).
+///
+/// One line of `<root>/.choir/docs-url`, absent by default, and read per
+/// request for the same two reasons [`operator_contact`] is: a host
+/// address compiled into a published binary cannot be taken back out of
+/// the copies of it, and a value an operator can set but only see take
+/// effect after a restart is a control that appears not to work.
+///
+/// Only an absolute `https://` or `http://` address is accepted. The
+/// value reaches an `href` on a page that answers anybody, so a relative
+/// string here would silently become a path on this node, and a
+/// `javascript:` one would be exactly the injection the rest of this
+/// surface is written to refuse.
+fn docs_url(root: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(root.join(".choir/docs-url"))
+        .ok()
+        .and_then(|text| text.lines().next().map(str::trim).map(str::to_string))
+        .filter(|line| line.starts_with("https://") || line.starts_with("http://"))
+        .filter(|line| !line.chars().any(char::is_control))
+}
+
 /// Sets or clears the operator's contact from the console (D72).
 ///
 /// Written with the private-file primitive the rest of this node's own
@@ -4037,12 +4138,21 @@ fn respond_account_token(
     store: Option<&accounts::Accounts>,
     user: &str,
     acl: Option<&acl::Effective>,
+    root: &std::path::Path,
     scheme: &'static str,
 ) -> std::io::Result<(u16, u64)> {
+    let docs = docs_url(root);
     let chrome = browse::Chrome {
         site: None,
         theme: chosen_theme(&request),
         here: "/account",
+        account: true,
+        console: acl.is_some_and(|table| {
+            table
+                .check(user, &acl::Scope::Node, acl::Level::Write)
+                .is_none()
+        }),
+        docs: docs.as_deref(),
     };
     let refuse = |request, title: &str, status: u16, reason: &'static str, next: &'static str| {
         let html = ui::refusal(
@@ -4549,6 +4659,8 @@ fn handle_ui(
     cache: &ui::UiCache,
     user: &str,
     acl: Option<&acl::Effective>,
+    root: &std::path::Path,
+    passkeys: bool,
     request: tiny_http::Request,
 ) -> std::io::Result<(u16, u64)> {
     let platform = match platform {
@@ -4586,6 +4698,18 @@ fn handle_ui(
     // edit to the ACL file invalidates a browser's copy of the page as
     // surely as a new op does.
     let reader = acl.map(|table| table.cache_key(user)).unwrap_or_default();
+    // The book's address is part of what this page renders, and it is a
+    // file an operator edits while the node runs (D76) -- so it belongs
+    // in the cache identity beside the grants, or the bar keeps the link
+    // it had when the page was first rendered. Folded into the reader
+    // key rather than added as a parameter to `etag` and `page`: both
+    // already take this string precisely so that "what this reader is
+    // shown" can grow without a third one.
+    let docs = docs_url(root);
+    let reader = match docs.as_deref() {
+        Some(url) => format!("{reader}\u{1f}{url}"),
+        None => reader,
+    };
     let seq = platform.view_seq();
     // Read once and used for both the tag and the render, so the page a
     // reader is handed resolved names against exactly the store state
@@ -4595,6 +4719,13 @@ fn handle_ui(
         site: None,
         theme: chosen_theme(&request),
         here: "/status",
+        account: passkeys,
+        console: acl.is_some_and(|table| {
+            table
+                .check(user, &acl::Scope::Node, acl::Level::Write)
+                .is_none()
+        }),
+        docs: docs.as_deref(),
     };
     let tag = ui::etag(seq, generation, &reader, chrome.theme);
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
@@ -4663,6 +4794,9 @@ struct BrowseContext<'a> {
     /// (D36). A page that tells a newcomer to redeem an invite on a node
     /// that issues none is sending them to a command that cannot work.
     self_service: bool,
+    /// Whether this node offers passkeys, which is what `/account`
+    /// renders for. See [`browse::Chrome::account`].
+    passkeys: bool,
 }
 
 /// The `/api/view` body this caller may see.
@@ -4693,6 +4827,7 @@ fn handle_browse(
         site,
         scheme,
         self_service,
+        passkeys,
     } = context;
     let readable = |repo: &str| match acl {
         Some(table) => table.allows_repo(user, repo, acl::Level::Read),
@@ -4715,6 +4850,7 @@ fn handle_browse(
     // from the connection rather than the request: a client cannot talk
     // this node into advertising `https` for a plaintext port.
     let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let docs = docs_url(root);
     let rendered = browse::render(
         root,
         page,
@@ -4728,6 +4864,13 @@ fn handle_browse(
             theme: chosen_theme(&request),
             here: request.url().split(['?', '#']).next().unwrap_or("/"),
             self_service,
+            account: passkeys,
+            console: acl.is_some_and(|table| {
+                table
+                    .check(user, &acl::Scope::Node, acl::Level::Write)
+                    .is_none()
+            }),
+            docs: docs.as_deref(),
         },
     );
     // Revalidation happens after the ACL check and before the body is

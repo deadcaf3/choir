@@ -981,6 +981,42 @@ pub(crate) const CARD: &[u8] = include_bytes!("card.png");
 /// and three spellings of a path is how one of them goes stale.
 pub(crate) const CARD_PATH: &str = "/static/card.png";
 
+/// Where [`ROBOTS`] is served, named once for the same reason
+/// [`CARD_PATH`] is.
+pub(crate) const ROBOTS_PATH: &str = "/robots.txt";
+
+/// The crawl policy, and the one file on this node written for a robot.
+///
+/// Everything but the front door is disallowed, which is a statement
+/// about *indexing* rather than about access — every one of those paths
+/// already answers `401` to a crawler, and a search result quoting a
+/// refusal page is the only thing crawling them could produce.
+///
+/// Two `Allow` lines carve out what D57 publishes on purpose. `/$`
+/// anchors to the landing page alone rather than the whole tree.
+/// [`CARD_PATH`] is there because the card exists to be fetched by
+/// somebody else's server when the address is pasted into a chat window,
+/// and a client that honours this file would render the grey rectangle
+/// the card was drawn to replace. Longest match wins (RFC 9309), so both
+/// beat the `Disallow: /` under them.
+///
+/// `/join` is named explicitly even though `Disallow: /` already covers
+/// it. An invite link that reaches an index is an invite spent by a
+/// crawler, and the route already says so per-response with
+/// `X-Robots-Tag`; saying it twice costs one line and closes the gap
+/// between a crawler that reads headers and one that only reads this.
+///
+/// Served to anybody, because a policy behind a credential is a policy
+/// no crawler ever sees, and its whole content is paths this node
+/// already publishes.
+pub(crate) const ROBOTS: &str = concat!(
+    "User-agent: *\n",
+    "Allow: /$\n",
+    "Allow: /static/card.png\n",
+    "Disallow: /join\n",
+    "Disallow: /\n",
+);
+
 pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
 
 /// The URL D39's client half is served from, in one place because the
@@ -1242,6 +1278,39 @@ mod tests {
             CEREMONY_SCRIPT.contains(" defer"),
             "the ceremonies run before the DOM exists"
         );
+    }
+
+    /// The crawl policy says what D57 decided, and the two constants
+    /// that name the same picture do not disagree.
+    ///
+    /// The card is the one that would fail silently: a chat client that
+    /// honours this file and finds the card disallowed renders the grey
+    /// rectangle the card exists to replace, and nobody sees a refusal
+    /// because there is no reader on that request.
+    #[test]
+    fn the_crawl_policy_publishes_the_front_door_and_nothing_behind_it() {
+        assert!(ROBOTS.starts_with("User-agent: *\n"), "{ROBOTS}");
+        assert!(
+            ROBOTS.contains("\nAllow: /$\n"),
+            "the landing page is not indexable: {ROBOTS}"
+        );
+        assert!(
+            ROBOTS.contains(&format!("\nAllow: {CARD_PATH}\n")),
+            "the social card is disallowed, so a preview renders nothing: {ROBOTS}"
+        );
+        assert!(
+            ROBOTS.contains("\nDisallow: /join\n"),
+            "an invite link may be indexed, which spends it: {ROBOTS}"
+        );
+        assert!(
+            ROBOTS.trim_end().ends_with("Disallow: /"),
+            "the catch-all is not last, so a longer rule cannot beat it: {ROBOTS}"
+        );
+        // It says nothing about this node. A repository name in a
+        // sitemap would be readable by anybody who resolves the DNS
+        // record, which is the property the landing page is built on.
+        assert!(!ROBOTS.contains("Sitemap"), "{ROBOTS}");
+        assert!(!ROBOTS.contains("/r/"), "{ROBOTS}");
     }
 
     /// ES256 only, because that is the one scheme the node can verify.

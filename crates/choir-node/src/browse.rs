@@ -521,7 +521,7 @@ fn safe_rev(rev: &str) -> Option<String> {
 /// Unreserved set per RFC 3986, which is the conservative choice: over-
 /// encoding costs a few bytes and always decodes back, while guessing at
 /// what a browser leaves alone does not.
-fn url_path(path: &str) -> String {
+pub(crate) fn url_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
@@ -752,6 +752,13 @@ pub(crate) struct Viewer<'a> {
     pub(crate) here: &'a str,
     /// Whether this node issues invites at all.
     pub(crate) self_service: bool,
+    /// Whether `/account` renders on this node. See [`Chrome::account`].
+    pub(crate) account: bool,
+    /// Whether this reader holds `@node write`. See [`Chrome::console`].
+    pub(crate) console: bool,
+    /// Where this node's book is, if its operator has said. See
+    /// [`Chrome::docs`].
+    pub(crate) docs: Option<&'a str>,
 }
 
 pub(crate) fn render(
@@ -769,8 +776,18 @@ pub(crate) fn render(
         self_service,
         theme,
         here,
+        account,
+        console,
+        docs,
     } = viewer;
-    let chrome = Chrome { site, theme, here };
+    let chrome = Chrome {
+        site,
+        theme,
+        here,
+        account,
+        console,
+        docs,
+    };
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
     // is handed git's own words — which name the absolute path git was
@@ -2113,7 +2130,14 @@ fn tree(
             h.push_str("<section class=\"readme\"><h2>");
             h.push_str(&esc(&name));
             h.push_str("</h2>");
-            h.push_str(&crate::readme::render(&body));
+            h.push_str(&crate::readme::render(
+                &body,
+                crate::readme::Base {
+                    repo,
+                    rev,
+                    dir: path,
+                },
+            ));
             h.push_str("</section>");
         } else if path.is_empty() {
             // An empty third pane reads as a broken layout. Saying what
@@ -3789,6 +3813,29 @@ pub(crate) struct Chrome<'a> {
     pub(crate) theme: Option<&'a str>,
     /// The address the palette links return to.
     pub(crate) here: &'a str,
+    /// Whether `/account` renders for this node, which is what decides
+    /// whether the bar links to it.
+    ///
+    /// The page is gated on `--passkeys` (D71), so a node without them
+    /// answers `503` there — and a bar that linked to it anyway would be
+    /// the dead link this module's own test forbids. It is not gated on
+    /// *this reader* having an account: the page is where a token for
+    /// git is minted (D75), and that is the step between signing in and
+    /// pushing anything, which nothing linked to before.
+    pub(crate) account: bool,
+    /// Whether this reader holds `@node write`, which is what `/people`
+    /// is gated on.
+    ///
+    /// An operator who cannot reach their own console except by typing
+    /// the path is the same defect as a dead link, one direction round.
+    pub(crate) console: bool,
+    /// Where the book for this node lives, if its operator has said.
+    ///
+    /// The other half of the site (D76). `None` on a node whose operator
+    /// has published none, because a link to nowhere is worse than no
+    /// link. The address is untracked operator state for the reason
+    /// every host address here is.
+    pub(crate) docs: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -3812,6 +3859,12 @@ pub(crate) struct Bar<'a> {
     /// the front door. Empty means "the front door", which is what a
     /// page rendered outside a request has.
     pub(crate) here: &'a str,
+    /// Whether to offer `/account`. See [`Chrome::account`].
+    pub(crate) account: bool,
+    /// Whether to offer `/people`. See [`Chrome::console`].
+    pub(crate) console: bool,
+    /// Where the book is, if anywhere. See [`Chrome::docs`].
+    pub(crate) docs: Option<&'a str>,
 }
 
 impl<'a> Bar<'a> {
@@ -3823,6 +3876,9 @@ impl<'a> Bar<'a> {
             site: false,
             theme: chrome.theme,
             here: chrome.here,
+            account: chrome.account,
+            console: chrome.console,
+            docs: chrome.docs,
         }
     }
 
@@ -3834,6 +3890,9 @@ impl<'a> Bar<'a> {
             site: false,
             theme: chrome.theme,
             here: chrome.here,
+            account: chrome.account,
+            console: chrome.console,
+            docs: chrome.docs,
         }
     }
 
@@ -3845,6 +3904,9 @@ impl<'a> Bar<'a> {
             site: chrome.site.is_some(),
             theme: chrome.theme,
             here: chrome.here,
+            account: chrome.account,
+            console: chrome.console,
+            docs: chrome.docs,
         }
     }
 
@@ -3856,6 +3918,9 @@ impl<'a> Bar<'a> {
             site: chrome.site.is_some(),
             theme: chrome.theme,
             here: chrome.here,
+            account: chrome.account,
+            console: chrome.console,
+            docs: chrome.docs,
         }
     }
 }
@@ -3914,12 +3979,33 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
     h.push_str("</form>");
 
     // The way out of a repository, which is the one navigation a reader
-    // cannot perform from the page body once they are deep in a tree.
+    // cannot perform from the page body once they are deep in a tree —
+    // and, since D74 put signing in on a page of our own, the way to the
+    // three destinations that finish the job. Before this the bar
+    // offered `repositories` and `node` and nothing else, so a person who
+    // had just signed in could reach every page about the *node* and no
+    // page about *themselves*: the account that mints the token git
+    // speaks was reachable only by typing `/account`.
     h.push_str("<nav class=\"chrome-nav\">");
     if bar.scope.is_some() && !bar.site {
         h.push_str("<a href=\"/r/\">repositories</a>");
     }
     h.push_str("<a href=\"/status\">node</a>");
+    if bar.account {
+        h.push_str("<a href=\"/account\">account</a>");
+    }
+    if bar.console {
+        h.push_str("<a href=\"/people\">people</a>");
+    }
+    if let Some(docs) = bar.docs {
+        // `rel="external"` and nothing else: the book is the other half
+        // of this site (D76) and is trusted, but it is a different
+        // origin, and a reader should be able to tell that from the
+        // markup as well as from the address.
+        h.push_str("<a class=\"docs\" rel=\"external\" href=\"");
+        h.push_str(&esc(docs));
+        h.push_str("\">docs</a>");
+    }
     theme_control(h, bar);
     h.push_str("</nav></div></div>");
 }

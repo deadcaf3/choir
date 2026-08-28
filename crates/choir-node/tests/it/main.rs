@@ -68,6 +68,7 @@ mod review_gate_config;
 mod review_outcomes;
 mod review_pruning;
 mod reviewer_conflict_config;
+mod routes;
 mod schema;
 mod search_api;
 mod signers_reload;

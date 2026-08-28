@@ -25,6 +25,49 @@ Writes from a browser exist in exactly one place, under its own decision (D39): 
 
 That client half is one same-origin file, `/static/webauthn.js`: no library, no build step, nothing from another host, and no page-embedded code. The two pages that use it are the only ones served with a `script-src 'self'` policy; every other page, including all of `/r/`, is served `default-src 'none'` and runs nothing at all. With scripting off, those two sections are a sentence naming the CLI rather than a control that cannot work.
 
+### The pages that are not repositories
+
+| URL | Anonymous | Signed in |
+|:--|:--|:--|
+| `/`, `/index.html` | the front page (D57) | the repository index |
+| `/signin` | the sign-in form (D74) | the same form |
+| `/join?i=&k=` | an invite to redeem (D57) | the same |
+| `/account` | `401` | passkeys, and the token git speaks (D71, D75) |
+| `/people` | `401` | the operator console — `@node write` only, `403` otherwise (D72) |
+| `/status` | `401` | node telemetry and the view |
+| `/p/<channel>` | `401` | one actor's standing (D63) |
+| `/robots.txt` | the crawl policy | the same |
+| `/static/card.png` | the social-preview card | the same |
+| `/llms.txt`, `/sync.md` | `401` | the machine-readable surface |
+
+A `401` on this surface is not a dead end. A request that asked for `text/html` and is not naming a `.git` path gets the sign-in page as the body (D74); everything else — git, `curl`, every API client — gets a bare `401` and a `WWW-Authenticate` challenge. `/signin` itself answers `401` with the form, deliberately and with no challenge header, because a challenge is what opens the browser dialog the page exists to replace.
+
+The complete table, with the expected status of every route for three readers, is `crates/choir-node/tests/it/routes.rs`. It is a test rather than a document: it crawls the surface anonymously and signed in, and fails on a link to a route it does not list or a route nothing reaches.
+
+### The other half of the site (D76)
+
+A node and this book are two halves of one site on two hosts: the node at the apex, the book on a `docs.` subdomain. Neither names the other in a tracked file, so each is told where the other is at run time.
+
+**Point the node at the book.** One line, no restart:
+
+```bash
+mkdir -p <root>/.choir
+printf 'https://<docs-host>\n' > <root>/.choir/docs-url
+```
+
+`<root>` is the repositories directory the daemon was started with. The value must be an absolute `http://` or `https://` address; anything else is ignored, because the string reaches an `href` on a page that answers anybody. With the file absent — the default — no `docs` link is rendered at all. It is read per request, so an edit takes effect on the next page load, the same way `<root>/.choir/contact` does.
+
+**Point the book at the node.** Two repository variables, read by `.github/workflows/pages.yml`:
+
+| Variable | Value | Effect |
+|:--|:--|:--|
+| `NODE_URL` | `https://<node-host>` | the book's front page links back to the node |
+| `DOCS_DOMAIN` | `<docs-host>` | writes `CNAME` into the Pages artifact, and switches `site-url` to `/` |
+
+Setting `DOCS_DOMAIN` is two of three steps: also enter the domain under **Settings → Pages**, and add a DNS `CNAME` record for `<docs-host>` pointing at the Pages host. With neither variable set, the book publishes to the default repository path exactly as before.
+
+The workflow also passes `CHOIR_DOCS_REPO_BASE`, which repoints the book's links to files outside `docs/` (`../README.md` and its siblings) at the commit being published. Those files are in the checkout but not in the artifact, so without it they 404 on the published site while working correctly for anybody reading the repository. Nothing here is needed for a local `choir docs`, which renders the book unchanged.
+
 ## Repository browsing
 
 `/r/` lists the repositories your credential may read, and each one browses:

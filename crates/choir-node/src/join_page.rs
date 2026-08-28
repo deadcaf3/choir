@@ -132,6 +132,13 @@ pub(crate) struct Door<'a> {
     /// their front door does the thing the front door is for. An operator
     /// who does not want to be asked does not publish the address.
     pub asking: bool,
+    /// Where this node's book is, when its operator has published one.
+    ///
+    /// Read from `<root>/.choir/docs-url` and never compiled in, for the
+    /// same reason `contact` is not. The other half of the site is the
+    /// only thing on it a stranger can read in full (D76), so the front
+    /// door is exactly where it belongs.
+    pub docs: Option<&'a str>,
 }
 
 /// Opens the document and the brand header.
@@ -897,9 +904,14 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     // for the same reason host addresses and owner names are placeholders
     // in every tracked file here: a personal identifier compiled into a
     // published binary cannot be taken back out of the copies.
+    // `/signin` and not `/r/`. The word "sign in" pointed at the
+    // repository index, which is behind the wall — so the one link on the
+    // one page a stranger can reach answered `401`, and the page that
+    // actually signs somebody in (D74) was reachable by typing its
+    // address and by no other route on this node.
     let mut sentence = String::from(
         "Have an invite link? Open it and it will set you up. Otherwise \
-         <a href=\"/r/\">sign in</a> with the credentials you were given",
+         <a href=\"/signin\">sign in</a> with the credentials you were given",
     );
     match door.contact {
         Some(contact) => {
@@ -910,6 +922,15 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
         None => sentence.push('.'),
     }
     crate::ui::next_action_escaped(&mut h, &sentence);
+    // The other half of the site (D76), and the only part of it a person
+    // with no credential can read all of. It sits under the sentence that
+    // names the two ways in rather than in the header, because a reader
+    // who is *not* getting in today is exactly who it is for.
+    if let Some(docs) = door.docs {
+        h.push_str("<p class=\"next-doc\"><a class=\"pill docs\" rel=\"external\" href=\"");
+        h.push_str(&esc(docs));
+        h.push_str("\">Read the documentation →</a></p>");
+    }
     h.push_str("</section>");
     if door.asking {
         ask_section(&mut h, door.contact);
@@ -1279,6 +1300,7 @@ mod tests {
         super::Door {
             contact: None,
             asking: false,
+            docs: None,
         }
     }
 
@@ -1313,6 +1335,7 @@ mod tests {
             &super::Door {
                 contact: None,
                 asking: true,
+                docs: None,
             },
         );
         assert!(page.scripted, "the page declares no script");

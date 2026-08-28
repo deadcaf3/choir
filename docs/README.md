@@ -11,10 +11,18 @@ convenience — it is what keeps these pages honest. The release gate runs
 stops compiling fails the build.
 
 <a class="api-link" href="api/index.html">API documentation →</a>
+<!--node-link-->
 
 Build both halves together with `choir docs`, which renders the book and
 puts rustdoc inside it at `/api/`. From a checkout without the CLI
 installed: `cargo run -p choir-cli -- docs --open`.
+
+The comment above is not stray markup. This book and a running node are
+two halves of one site on two hosts, so neither can reach the other with
+a relative link and neither may name the other in a tracked file. `choir
+docs` replaces that marker with a link to the node when the publishing
+workflow tells it the address, and with nothing when it does not, so a
+local build renders exactly what you see here.
 
 ## Start here
 
