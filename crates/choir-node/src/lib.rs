@@ -926,22 +926,7 @@ impl Node {
     ///
     /// Fails when the path exists or `git init` fails.
     pub fn create_repo(&self, name: &str) -> std::io::Result<()> {
-        let path = self.repo_path(name)?;
-        if path.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                name.to_string(),
-            ));
-        }
-        if !std::process::Command::new("git")
-            .args(["init", "--bare", "-q"])
-            .arg(&path)
-            .status()?
-            .success()
-        {
-            return Err(std::io::Error::other("git init failed"));
-        }
-        self.configure_repo(&path)
+        create_repo_in(&self.root, name).map(|_| ())
     }
 
     /// Brings an *existing* bare repo under this root back under the
@@ -984,32 +969,86 @@ impl Node {
         self.configure_repo(&path)
     }
 
+    /// Adopts every bare repository already under this node's root,
+    /// whatever put it there, and returns how many.
+    ///
+    /// Adoption is what installs the `pre-receive` hook, so until a
+    /// repository has been adopted it is served with **no hook** and
+    /// every push into it bypasses the sequencer, landing refs that no
+    /// op in the log ever records — invariants 5 and 6 both, broken
+    /// silently.
+    ///
+    /// That used to be reachable in ordinary operation, because
+    /// adoption only ever happened for repositories named in
+    /// `--create`. A repository restored from a bundle, moved in, or
+    /// created against a running node was listed nowhere and hooked
+    /// never. Walking the root closes the gap at its source: the
+    /// question "what is this node about to serve" is answered by the
+    /// filesystem, which is the same thing [`portable::export`] already
+    /// asks.
+    ///
+    /// Idempotent, and meant to run on every start: the one value
+    /// [`Node::adopt_repo`] does not overwrite is
+    /// `receive.certNonceSeed`, so an ordinary restart costs a few `git
+    /// config` calls and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the root cannot be walked, or when a repository under
+    /// it cannot be adopted. Both are fatal rather than skipped:
+    /// serving an unadopted repository is the exact failure this
+    /// prevents, so a node that cannot guarantee the hook must not
+    /// start.
+    pub fn adopt_existing_repos(&self) -> std::io::Result<usize> {
+        let found = crate::portable::repos(&self.root).map_err(|why| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("cannot list repositories under the root: {why}"),
+            )
+        })?;
+        for name in &found {
+            self.adopt_repo(name)?;
+        }
+        Ok(found.len())
+    }
+
     /// The configuration and hook shared by [`Node::create_repo`] and
     /// [`Node::adopt_repo`], applied to an initialized bare repo.
     fn configure_repo(&self, path: &Path) -> std::io::Result<()> {
-        // Seeded once and then left alone: `create_repo` reaches here with
-        // it unset, `adopt_repo` with it already set from whenever the repo
-        // was made, and re-seeding would invalidate every signed push
-        // holding a nonce from the old seed.
-        if !std::process::Command::new("git")
-            .args(["config", "--get", "receive.certNonceSeed"])
+        configure_repo_in(&self.root, path)
+    }
+}
+
+/// [`Node::configure_repo`], against a root rather than a bound node.
+///
+/// Split out because creating a repository needs nothing from a `Node`
+/// except where its repositories live, and the API handler that now
+/// creates them holds the root but not the node — the same reason
+/// `/api/queue/run` is routed outside the platform.
+fn configure_repo_in(root: &Path, path: &Path) -> std::io::Result<()> {
+    // Seeded once and then left alone: `create_repo` reaches here with
+    // it unset, `adopt_repo` with it already set from whenever the repo
+    // was made, and re-seeding would invalidate every signed push
+    // holding a nonce from the old seed.
+    if !std::process::Command::new("git")
+        .args(["config", "--get", "receive.certNonceSeed"])
+        .current_dir(path)
+        .stdout(std::process::Stdio::null())
+        .status()?
+        .success()
+        && !std::process::Command::new("git")
+            .args([
+                "config",
+                "receive.certNonceSeed",
+                &choir_identity::ActorKey::generate().actor_id().to_hex(),
+            ])
             .current_dir(path)
-            .stdout(std::process::Stdio::null())
             .status()?
             .success()
-            && !std::process::Command::new("git")
-                .args([
-                    "config",
-                    "receive.certNonceSeed",
-                    &choir_identity::ActorKey::generate().actor_id().to_hex(),
-                ])
-                .current_dir(path)
-                .status()?
-                .success()
-        {
-            return Err(std::io::Error::other("git config failed"));
-        }
-        let ok = std::process::Command::new("git")
+    {
+        return Err(std::io::Error::other("git config failed"));
+    }
+    let ok = std::process::Command::new("git")
             .args(["config", "http.receivepack", "true"])
             .current_dir(path)
             .status()?
@@ -1033,9 +1072,8 @@ impl Node {
             && std::process::Command::new("git")
                 .args(["config", "gpg.ssh.allowedSignersFile"])
                 .arg(
-                    self.root
-                        .canonicalize()
-                        .unwrap_or_else(|_| self.root.clone())
+                    root.canonicalize()
+                        .unwrap_or_else(|_| root.to_path_buf())
                         .join(".choir")
                         .join("allowed_signers"),
                 )
@@ -1069,25 +1107,25 @@ impl Node {
                 .current_dir(path)
                 .status()?
                 .success();
-        if !ok {
-            return Err(std::io::Error::other("git config failed"));
-        }
-        // The pre-receive hook routes every ref update of a push through
-        // the platform sequencer (pre-receive, not update: only
-        // pre-/post-receive see GIT_PUSH_CERT_* for signed pushes, and
-        // one invocation covers the whole push). Outside the daemon (no
-        // CHOIR_API) it is a no-op.
-        //
-        // Git applies no ref until this hook exits zero, so a refusal on
-        // the third ref of a push has already left two ops in the durable
-        // log for refs git will never create. Those refs are then stuck:
-        // the pusher's `old` is git's absent value while the view holds
-        // the stranded one, so every retry loses the CAS. Hence the
-        // retraction pass over what this push already had accepted, which
-        // is a compensating op rather than an erasure -- the log is
-        // append-only, and an aborted push belongs in the history.
-        let hook = path.join("hooks").join("pre-receive");
-        std::fs::write(
+    if !ok {
+        return Err(std::io::Error::other("git config failed"));
+    }
+    // The pre-receive hook routes every ref update of a push through
+    // the platform sequencer (pre-receive, not update: only
+    // pre-/post-receive see GIT_PUSH_CERT_* for signed pushes, and
+    // one invocation covers the whole push). Outside the daemon (no
+    // CHOIR_API) it is a no-op.
+    //
+    // Git applies no ref until this hook exits zero, so a refusal on
+    // the third ref of a push has already left two ops in the durable
+    // log for refs git will never create. Those refs are then stuck:
+    // the pusher's `old` is git's absent value while the view holds
+    // the stranded one, so every retry loses the CAS. Hence the
+    // retraction pass over what this push already had accepted, which
+    // is a compensating op rather than an erasure -- the log is
+    // append-only, and an aborted push belongs in the history.
+    let hook = path.join("hooks").join("pre-receive");
+    std::fs::write(
             &hook,
             concat!(
                 "#!/bin/sh\n",
@@ -1153,29 +1191,145 @@ impl Node {
                 "exit 0\n",
             ),
         )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
-        }
-        Ok(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
     }
+    Ok(())
+}
 
+/// `POST /api/repo` — create a repository on a running node.
+///
+/// Until this existed, a repository could only be made by naming it in
+/// `--create` at startup, so adding one to a live node meant stopping
+/// it. That is the whole reason this endpoint is here: a person who has
+/// just installed choir should be able to put a repository on their own
+/// instance without restarting the thing they just started.
+///
+/// Nothing is appended to the log. A repository is not modelled in the
+/// [`View`](choir_view::View) — `refs` is keyed by name and there is no
+/// repository entity — and `portable::export` already answers "which
+/// repositories exist" by walking the filesystem. Creating one is
+/// therefore a node-local act with no op to write, and adding an
+/// `OpKind` for it would be a format commitment bought for nothing. If
+/// repositories should later become first-class in the total order that
+/// stays open: the field would be additive, like every other.
+///
+/// The response carries the clone URL because the next thing the caller
+/// does is clone, and making them assemble it from the name and the
+/// base is how a trailing `.git` goes missing.
+fn create_repo_request(root: &Path, body: &[u8]) -> (u16, String) {
+    let refuse = |code: u16, error: &str, next: &str| {
+        (
+            code,
+            serde_json::json!({ "error": error, "next": next }).to_string(),
+        )
+    };
+    let Ok(request): Result<serde_json::Value, _> = serde_json::from_slice(body) else {
+        return refuse(
+            400,
+            "the request body is not JSON",
+            "POST {\"name\": \"owner/repo.git\"}",
+        );
+    };
+    let Some(name) = request["name"].as_str() else {
+        return refuse(
+            400,
+            "no `name` in the request",
+            "POST {\"name\": \"owner/repo.git\"}",
+        );
+    };
+    // A repository served without `.git` is one that `git clone` finds
+    // by a name the node does not use, so the suffix is required rather
+    // than guessed at. Appending it silently would make two spellings of
+    // one repository, which is how an ACL entry comes to govern nothing.
+    if !name.ends_with(".git") {
+        return refuse(
+            400,
+            "a repository name must end in `.git`",
+            "name it `owner/repo.git`",
+        );
+    }
+    match create_repo_in(root, name) {
+        Ok(_) => (
+            201,
+            serde_json::json!({ "format_version": 1, "name": name, "created": true }).to_string(),
+        ),
+        // Already there is not an error worth a 500: the caller asked
+        // for a repository to exist and it does. It is still not a 201,
+        // because a caller that would have pushed into an empty one
+        // needs to know it is not empty.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => refuse(
+            409,
+            "that repository already exists",
+            "clone it, or choose another name",
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => refuse(
+            400,
+            "that is not a legal repository name",
+            "use `owner/repo.git`, without `..`, `@` or `*`",
+        ),
+        Err(e) => (
+            500,
+            serde_json::json!({ "error": format!("could not create the repository: {e}") })
+                .to_string(),
+        ),
+    }
+}
+
+/// Creates a bare repository under `root` and brings it under the
+/// sequencer, against a root rather than a bound node.
+///
+/// The whole create path needs nothing from a [`Node`] but where its
+/// repositories live, which is what lets a request create one: the API
+/// handler holds the root and not the node.
+///
+/// # Errors
+///
+/// Fails when the name is not a legal repository name, when the path
+/// already exists, or when `git init` or a `git config` call fails.
+fn create_repo_in(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let path = repo_path_in(root, name)?;
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            name.to_string(),
+        ));
+    }
+    if !std::process::Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&path)
+        .status()?
+        .success()
+    {
+        return Err(std::io::Error::other("git init failed"));
+    }
+    configure_repo_in(root, &path)?;
+    Ok(path)
+}
+
+/// [`Node::repo_path`], against a root rather than a bound node.
+fn repo_path_in(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+    // `@` is reserved so a repository can never alias the ACL's
+    // `@node` pseudo-repository (D29); `*` likewise for its wildcard.
+    if name.split('/').any(|c| c == ".." || c.is_empty())
+        || name.starts_with('/')
+        || name.contains('@')
+        || name.contains('*')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bad repo name",
+        ));
+    }
+    Ok(root.join(name))
+}
+
+impl Node {
     /// Rejects path traversal and normalizes the repo path under root.
     fn repo_path(&self, name: &str) -> std::io::Result<PathBuf> {
-        // `@` is reserved so a repository can never alias the ACL's
-        // `@node` pseudo-repository (D29); `*` likewise for its wildcard.
-        if name.split('/').any(|c| c == ".." || c.is_empty())
-            || name.starts_with('/')
-            || name.contains('@')
-            || name.contains('*')
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "bad repo name",
-            ));
-        }
-        Ok(self.root.join(name))
+        repo_path_in(&self.root, name)
     }
 
     /// Serves requests until the process exits. Run on a dedicated thread.
@@ -4922,6 +5076,26 @@ fn handle_api(
                 }
             } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace/archive") {
                 provision::archive_workspace(root, p, user, &req_body)
+            } else if (method.as_str(), path.as_str()) == ("POST", "/api/repo") {
+                // Routed here rather than inside the platform for the
+                // same reason as `/api/workspace`: it needs the repo
+                // root, which the platform does not hold.
+                //
+                // Creating a repository is a write against the node
+                // itself rather than against any repository — there is
+                // no repository yet to be scoped to — so it asks for
+                // `@node` write, the same authority that governs the
+                // log and the attestation (D29).
+                let denial =
+                    acl.and_then(|table| table.check(user, &acl::Scope::Node, acl::Level::Write));
+                if let Some(denial) = denial {
+                    (
+                        denial.status,
+                        serde_json::json!({ "error": denial.reason }).to_string(),
+                    )
+                } else {
+                    create_repo_request(root, &req_body)
+                }
             } else if (method.as_str(), path.as_str()) == ("GET", "/api/ref-agreement") {
                 // Routed here rather than inside the platform for the
                 // same reason as `/api/workspace`: it needs the repo

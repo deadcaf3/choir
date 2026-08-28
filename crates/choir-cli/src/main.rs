@@ -2189,6 +2189,50 @@ fn main() {
                 None => println!("{hex}"),
             }
         }
+        // The one command whose whole point is that the node is
+        // already running: everything else about a repository assumes
+        // it exists, and until this there was no way to make one
+        // without stopping the daemon and naming it in `--create`.
+        ["repo", "create", api, name] => {
+            let client = match choir_cli::mcp::HttpClient::new(
+                api,
+                auth.file.map(std::path::Path::new),
+                auth.user,
+            ) {
+                Ok(client) => client,
+                Err(error) => {
+                    eprintln!("choir: {error}");
+                    std::process::exit(2);
+                }
+            };
+            let endpoint = choir_cli::surface::endpoint("POST", "/api/repo")
+                .expect("the repo endpoint is in the table");
+            let body = serde_json::json!({ "name": name });
+            match client.request(endpoint, &body) {
+                Ok((status, response)) => {
+                    // The clone URL is assembled here rather than by the
+                    // node, because the node does not know how the
+                    // caller reached it: behind a proxy its own base is
+                    // not the one that works from out here.
+                    //
+                    // On stderr, through `note`, because stdout is the
+                    // node's own JSON byte for byte -- read by agents,
+                    // by `jq` and by the tests. A convenience line
+                    // printed above it would break all three.
+                    if (200..300).contains(&status) {
+                        note(
+                            "repository created",
+                            &[("clone", format!("{}/{name}", api.trim_end_matches('/')))],
+                        );
+                    }
+                    finish(status, &response);
+                }
+                Err(error) => {
+                    eprintln!("choir: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         // Two words, like `acl render`: `node` is a family rather than
         // a command, and `choir node` alone should say so rather than
         // guessing which member was meant.

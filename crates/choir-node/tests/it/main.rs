@@ -18,6 +18,7 @@ mod support;
 mod access;
 mod accounts;
 mod acl;
+mod adoption;
 mod api;
 mod assignment;
 mod auth;

@@ -459,7 +459,24 @@ fn log_refs(log: &Path) -> Result<BTreeMap<String, BTreeMap<String, String>>, St
 }
 
 /// Bare repositories under `root`, as `owner/name.git` paths.
-fn repos(root: &Path) -> Result<Vec<String>, String> {
+///
+/// Public because the export is not the only caller that needs to know
+/// what is actually on disk. Startup needs it too: a repository can
+/// arrive without ever being named in `--create` — restored from a
+/// bundle, or created against a running node — and one that is served
+/// without being adopted is served with no `pre-receive` hook, which
+/// means every push into it bypasses the sequencer.
+///
+/// A directory counts as a repository when its name ends `.git` and it
+/// holds a `HEAD` file, so a half-written directory is not mistaken for
+/// one. `.choir` is skipped, and symlinks are never followed: a link out
+/// of the root would otherwise let an export copy, or a startup adopt,
+/// whatever it pointed at.
+///
+/// # Errors
+///
+/// Returns a description when a directory under `root` cannot be read.
+pub fn repos(root: &Path) -> Result<Vec<String>, String> {
     let mut found = Vec::new();
     let mut stack = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, prefix)) = stack.pop() {

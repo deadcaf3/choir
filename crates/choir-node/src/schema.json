@@ -249,6 +249,12 @@
     },
     {
       "agent_facing": false,
+      "args": "<api> <owner/repo.git>",
+      "name": "repo create",
+      "summary": "create a repository on a running node, hooked into the sequencer from its first push, without restarting anything; needs a node-wide write grant, answers 409 rather than an error when it already exists, and prints the clone URL because cloning is what happens next"
+    },
+    {
+      "agent_facing": false,
       "args": "[<api>]",
       "name": "node status",
       "summary": "what the node is doing right now: health, the commit actually serving, the sequencer's position and its measured p99 against the 100 ms gate, and how much this credential can see; sections a narrower credential may not read say so rather than reading as an idle node"
@@ -784,6 +790,16 @@
       "name": null,
       "path": "/sync.md",
       "purpose": "The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them",
+      "query_parameters": []
+    },
+    {
+      "agent_facing": false,
+      "documented_as": "/api/repo",
+      "input_schema": null,
+      "method": "POST",
+      "name": null,
+      "path": "/api/repo",
+      "purpose": "Create a repository on a running node, with the `pre-receive` hook that puts its pushes in the sequencer's order; needs a node-wide write grant, because there is no repository yet to be scoped to. Nothing is appended to the log: a repository is not a value in the view, and which ones exist is answered by the filesystem, as the export already does",
       "query_parameters": []
     },
     {

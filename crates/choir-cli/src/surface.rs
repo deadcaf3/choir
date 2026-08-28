@@ -645,6 +645,16 @@ pub const COMMANDS: &[Command] = &[
         group: "reading the node",
     },
     Command {
+        name: "repo create",
+        args: "<api> <owner/repo.git>",
+        summary: "create a repository on a running node, hooked into the sequencer from its \
+                  first push, without restarting anything; needs a node-wide write grant, \
+                  answers 409 rather than an error when it already exists, and prints the \
+                  clone URL because cloning is what happens next",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
         name: "node status",
         args: "[<api>]",
         summary: "what the node is doing right now: health, the commit actually serving, the \
@@ -842,6 +852,16 @@ pub const ENDPOINTS: &[Endpoint] = &[
         path: "/sync.md",
         purpose: "The sync contract, in full: cursor semantics and how to verify a page's \
                   hash chain and author signatures without trusting the node serving them",
+        mcp: None,
+    },
+    Endpoint {
+        method: "POST",
+        path: "/api/repo",
+        purpose: "Create a repository on a running node, with the `pre-receive` hook that \
+                  puts its pushes in the sequencer's order; needs a node-wide write grant, \
+                  because there is no repository yet to be scoped to. Nothing is appended to \
+                  the log: a repository is not a value in the view, and which ones exist is \
+                  answered by the filesystem, as the export already does",
         mcp: None,
     },
     Endpoint {

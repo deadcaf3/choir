@@ -1007,6 +1007,16 @@ fn run() -> std::io::Result<()> {
     if push_bytes.is_some() || max_workspaces.is_some() {
         eprintln!("quota: exempt exactly where the rate limit is — the loopback hook callback and any holder of an @node grant");
     }
+    // Every repository already on disk is adopted before any `--create`
+    // is read, whatever put it there. The reasoning is on
+    // `Node::adopt_existing_repos`; the short version is that adoption
+    // installs the `pre-receive` hook, and a repository nobody
+    // remembered to list was previously served without one.
+    match node.adopt_existing_repos() {
+        Ok(0) => {}
+        Ok(n) => eprintln!("adopted {n} repositories already on disk"),
+        Err(e) => return Err(e),
+    }
     let mut create_next = false;
     for a in rest {
         if create_next {
