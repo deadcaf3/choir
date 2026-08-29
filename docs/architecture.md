@@ -4,19 +4,17 @@ choir is an agent-first code collaboration platform. Many agents work on one
 repository at once, a single-writer sequencer puts every change in one total
 order, and merge conflicts are first-class values rather than errors.
 
-This page is the map: the layers, which crate implements each one, and what
-travels between them. Every crate's own `//!` header assumes you have read
-it.
+This page maps the layers, the crate that implements each, and what travels
+between them. Every crate's `//!` header assumes it.
 
-## The one-paragraph version
+## The model
 
-A change is not a diff against a branch. It is a **signed operation**
-appended to an **append-only log**. One writer thread per repository decides
-the order, stamps a sequence number, and appends. Every other structure in
-the system — the set of refs, the review queue, who holds which workspace —
-is a **fold over that log**, recomputed rather than stored. That is what
-makes undo a pure function of position, and what makes two agents racing the
-same ref a compare-and-swap rather than a lock.
+A change is a **signed operation** appended to an **append-only log**. One
+writer thread per repository decides the order, stamps a sequence number and
+appends. Every other structure, the set of refs, the review queue and who
+holds which workspace, is a **fold over that log**, recomputed rather than
+stored. Undo is therefore a pure function of position, and two agents racing
+the same ref get a compare-and-swap.
 
 ## Layers
 
@@ -48,15 +46,12 @@ stack) and `choir-spike` (the Phase-0 gate binary). One is neither:
 `choir-fs`, the durable-file primitives — atomic writes and a working-
 directory lock — that the binaries share.
 
-Crate names are written here as plain code rather than as links on purpose.
-No crate depends on all fourteen others, so a workspace-wide map cannot be
-expressed in rustdoc links that resolve; each crate's own header links the
-crates it actually depends on, and those links are checked by the gate.
+Each crate's own header links the crates it depends on, and the gate checks
+those links.
 
 ## What one operation does
 
-An agent submitting a change walks the whole stack. Following one operation
-end to end is the fastest way to see how the crates fit.
+An agent submitting a change walks the whole stack.
 
 ```text
   agent
@@ -84,32 +79,29 @@ end to end is the fastest way to see how the crates fit.
   ref landed → webhook        --hooks-file            D32
 ```
 
-Two properties fall out of that shape, and both are load-bearing:
+Two properties of that shape are load-bearing:
 
 - **The order is decided in exactly one place.** Round-robin fairness
-  decides who is *asked* next; it never decides who lands first. The writer
-  still stamps `seq` one at a time, alone, and appends in the order it
-  decided.
+  decides who is *asked* next. The writer stamps `seq` one at a time, alone,
+  and appends in the order it decided.
 - **Every check before the writer is advisory about identity.** The actor
-  key the fairness queue buckets on is a *claim*; the signature is verified
-  on the writer thread. That is enough to bound an honest flooder and
-  nothing more, and nothing in front of the writer may ever become
-  load-bearing for authorization.
+  key the fairness queue buckets on is a *claim*, and the signature is
+  verified on the writer thread. It bounds an honest flooder.
+
+> [!IMPORTANT]
+> Nothing in front of the writer may become load-bearing for authorization.
 
 ## A conflict is a value
 
-Most of this system is ordinary. The part that is not is that
-`choir-view`'s `TreeEntry` has a `Conflict` variant, and a commit
-containing one is a **valid commit** — it hashes, it is signed, it is
-appended, and an agent can keep working on top of it.
+`choir-view`'s `TreeEntry` has a `Conflict` variant, and a commit containing
+one is a **valid commit**: it hashes, it is signed, it is appended, and an
+agent can keep working on top of it.
 
-That is why the merge queue never blocks: a change that conflicts is evicted
-from the speculative train as a first-class conflict rather than parked
-behind a lock, and the queue keeps moving. It is also why
-`choir-merge` is a *pipeline* of strategies rather than one merge
-algorithm — trivial merge, then line merge, then optionally Mergiraf as a
-subprocess — and why a strategy declining is a normal outcome rather than an
-error.
+The merge queue therefore never blocks. A change that conflicts is evicted
+from the speculative train as a first-class conflict and the queue keeps
+moving. `choir-merge` is a *pipeline* of strategies for the same reason:
+trivial merge, then line merge, then Mergiraf as an optional subprocess,
+each free to decline as a normal outcome.
 
 ## Replay purity
 
@@ -118,34 +110,27 @@ exactly the state the node is serving. That is promoted to a contract (D40),
 and three things follow from it:
 
 1. **Derived data is never a durability barrier.** The request log, the
-   decision journal and the lag log are all one-way records nothing replays.
-   A journal that could block the single writer would be a durability
-   barrier wearing an observability costume.
+   decision journal and the lag log are one-way records nothing replays.
 2. **Some projections are folded out of the log rather than persisted.** The
    per-user workspace tally that `--quota-workspaces` enforces is one: a
-   restart rebuilds it from the same log that rebuilds everything else, so
-   the ceiling survives a restart with no new file and no second durability
-   barrier.
-3. **Some state is deliberately outside the log.** Accounts and credentials
-   are (D36), because the log is append-only and cannot forget a credential,
-   and revoking one has to be deletion rather than a record.
+   restart rebuilds it from the same log that rebuilds everything else.
+3. **Accounts and credentials sit outside the log (D36).** The log is
+   append-only, and revoking a credential has to be deletion.
 
 ## What the format versions are for
 
-`FORMAT_VERSION` appears in `choir-store`, `choir-oplog` and
-`choir-view`, and the one-way rows of `DECISIONS.md` are mostly about
-those three numbers. The rule the workspace holds itself to:
+`FORMAT_VERSION` appears in `choir-store`, `choir-oplog` and `choir-view`,
+and the one-way rows of `DECISIONS.md` are mostly about those three numbers.
+Three rules govern them:
 
-- Hashes are **self-describing** — a codec byte names the hash function — so
-  a future hash migration adds a codec instead of rewriting every stored
-  identifier.
-- A field that will be needed later is present from day one rather than
-  added later. `OpEntry::witnesses` has existed since the first entry, empty,
-  so the D16 swap to a witnessed log is a value change and not a format
-  change.
-- Adding an operation variant is **one-way for readers**: the feature can
-  stop being written at any time, but the first accepted entry of that shape
-  permanently ends replay compatibility with earlier binaries.
+- Hashes are **self-describing**: a codec byte names the hash function, so a
+  hash migration adds a codec rather than rewriting every stored identifier.
+- A field that will be needed later is present from day one.
+  `OpEntry::witnesses` has existed since the first entry, empty, making the
+  D16 swap to a witnessed log a value change.
+- Adding an operation variant is **one-way for readers**. The first accepted
+  entry of that shape permanently ends replay compatibility with earlier
+  binaries.
 
 ## Where to go next
 

@@ -2,143 +2,111 @@
 
 ## Status and launch hold
 
-This runbook defines the first private beta. It is not a declaration that a
-host is ready. Keep production DNS unpublished and the production firewall
-closed to all non-operator source addresses until every go-live receipt in the
-last section is attached to the release record. Staging should be reachable
-only through the operator VPN or an explicit source allowlist.
+Keep production DNS unpublished and the production firewall closed to all
+non-operator source addresses until every go-live receipt below is attached to
+the release record. Reach staging only over the operator VPN or an allowlist.
 
-The beta application is the server-rendered UI in `choir-node`. Do not build or
-deploy a separate frontend. Any anonymous marketing site belongs on a separate
-host and origin.
+The beta application is the server-rendered UI in `choir-node`. Deploy no
+separate frontend; an anonymous marketing site needs its own host and origin.
 
 ## Product boundary
 
 Enabled:
 
-- Authenticated node dashboard, repository browser, commits, diffs, and review
-  pages.
+- Authenticated dashboard, repository browser, commits, diffs, review pages.
 - Git smart HTTP clone and push through the reverse proxy.
 - Signed CLI operations, operator-issued credentials, repository ACLs, scoped
   operations, assigned reviewers, and protected-ref review gates.
 - Authenticated health, readiness, and Prometheus-format metrics endpoints.
-- Invite-only self-service accounts (D36), which is how a beta user is given a
-  credential. The manifest carries `accounts=enabled`, and the renderer takes
-  its answer from that file rather than from a flag an operator could set
-  against it.
-- Sign-in on the node's own page (D71, D74): every unauthenticated browser is
-  offered a page rather than the browser's own credential dialog. It carries a
-  username and password form for the credential a person was issued, and a
-  passkey button for somebody who has enrolled one; the session either opens is
-  an opaque token held in memory. A first password sign-in by an account with no
-  passkey lands on `/account`, which is where one is enrolled. Every non-browser
-  client -- git, `curl`, the CLI -- still meets `401` and a `WWW-Authenticate`
-  challenge. It is a switch of its own
-  (`--passkeys`), separate from the accounts file, because enrolment, the
-  ceremony page and the browser write path all read that one store; the
-  manifest carries `passkeys=enabled` and the renderer refuses that line
-  without `accounts=enabled`, since a passkey is enrolled on an issued
-  account. Browser *writes* remain off: signing in is not a mutation.
+- Invite-only self-service accounts (D36) are how a beta user is given a
+  credential; the manifest carries `accounts=enabled` and the renderer reads it.
+- Sign-in on the node's own page (D71, D74): an unauthenticated browser gets a
+  username and password form plus a passkey button, and the session is an
+  opaque token held in memory. A first password sign-in by an account with no
+  passkey lands on `/account`, where one is enrolled. Non-browser clients (git,
+  `curl`, the CLI) meet `401` and a `WWW-Authenticate` challenge. Passkeys are
+  their own switch (`--passkeys`); the renderer refuses `passkeys=enabled`
+  without `accounts=enabled`. Browser writes remain off.
 
-Unsupported for this beta:
+Out of scope: anonymous access, browser mutations, SSH, webhooks, the bridge,
+a separate SPA, and a consumer login experience.
 
-- Anonymous access of any kind.
-- Browser mutations, SSH, webhooks, and the bridge.
-- A consumer login experience or a separate SPA.
-
-The launch objectives are 99.5 percent monthly availability, a one-hour RPO,
-and a four-hour RTO. The initial administrative ceiling is 25 provisioned beta
-users and 10 concurrent interactive sessions. Per-user limits are 512 MiB per
-Git push, eight workspaces, 120 API requests per minute, and 60 Git requests per
-minute. Treat the user and concurrency figures as an initial operating cap,
-not a measured capacity claim. Raise them only after a recorded staging load
-test.
+Launch objectives: 99.5 percent monthly availability, a one-hour RPO, a
+four-hour RTO. The initial ceiling is 25 provisioned beta users and 10
+concurrent interactive sessions. Per-user limits are 512 MiB per Git push,
+eight workspaces, 120 API requests per minute, and 60 Git requests per minute.
+Raise the user and concurrency caps only after a recorded staging load test.
 
 ## Host and network
 
 1. Provision one supported Linux VM with at least twice the forecast beta data,
    encrypted persistent storage, inode and disk monitoring, and a dedicated
-   system account such as `choir` with `/usr/sbin/nologin`. Keep the repository
-   root, policy state, logs, release archive, and backup staging paths on
-   explicitly monitored filesystems.
-2. Install the checksummed artifact under a versioned release directory. Point
-   `/opt/choir/current` at that directory. Never build on the production host.
-3. Populate the service user's state directory outside this repository. It must
-   contain `auth`, `keys`, `reviewers`, `protected-refs`, `repos.list`, `acl`,
-   the three adjudication/audit JSONL files, and an exact copy of
-   `scripts/flip/private-beta.manifest`. Set the directory to mode 0700 and all
-   credential and policy files to mode 0600.
+   system account such as `choir` with `/usr/sbin/nologin`. Keep repository
+   root, policy state, logs, release archive and backup staging monitored.
+2. Install the checksummed artifact under a versioned release directory and
+   point `/opt/choir/current` at it. Never build on the production host.
+3. Populate the service user's state directory outside this repository with
+   `auth`, `keys`, `reviewers`, `protected-refs`, `repos.list`, `acl`, the
+   three adjudication/audit JSONL files, and an exact copy of
+   `scripts/flip/private-beta.manifest`. Directory mode 0700, its files 0600.
 4. Render the system service with
-   `scripts/flip/render_private_beta_service.sh`. This refuses missing ACL,
+   `scripts/flip/render_private_beta_service.sh`, which refuses missing ACL,
    scope, review gates, policy, or the beta manifest. Install the output as a
-   system unit only after review. The generated node binds to `127.0.0.1`,
+   system unit only after review. The generated node binds `127.0.0.1` and
    enables the read-only browser boundary, request and decision logging,
-   limits, quotas, readiness disk floor, and systemd hardening.
+   limits, quotas, the readiness disk floor, and systemd hardening.
 5. Render the TLS proxy with `scripts/flip/render_beta_nginx.sh <domain>
-   <node-port> <tls-cert> <tls-key>`. Review it with `nginx -t` before
+   <node-port> <tls-cert> <tls-key>` and review it with `nginx -t` before
    installation. It redirects HTTP to HTTPS, sets HSTS and security headers,
    preserves `Authorization`, uses a 1 MiB default body ceiling, and gives Git
    a separate 512 MiB streaming route with request buffering disabled.
 
-   The node must be told it is behind this proxy (`--behind-tls-proxy`, which
-   the beta renderer always passes and the installers derive from a public
-   https route with no local TLS marker). Its own listener is plaintext on
-   loopback, so without that declaration every absolute URL it mints is
-   written `http` -- including the join link, which carries the invite secret
-   in its query string. The recipient's first request would put a bearer
-   credential on the wire in cleartext and only then be redirected. It is a
-   declaration rather than a reading of `X-Forwarded-Proto` because the node
-   cannot tell a header its proxy set from one a caller sent.
+   Pass `--behind-tls-proxy`, set by the beta renderer and derived by the
+   installers from a public https route. Without it every absolute URL the node
+   mints is written `http`, including the join link carrying the invite secret.
 
-   It handles no client address (D59): no access log, no error log, no
-   per-address limit zone, and `X-Forwarded-For` cleared rather than appended.
-   Pre-auth rate limiting is therefore the node's own node-wide ceiling alone.
-   Do not add a per-address zone to restore per-client fairness, and do not
-   restore the access log to diagnose an incident; the node's `--request-log`
-   is the record to read, and it carries the authenticated user rather than an
-   address.
+   The proxy handles no client address (D59), so pre-auth rate limiting is the
+   node's node-wide ceiling alone. Diagnose incidents from the node's
+   `--request-log`, which carries the authenticated user.
 
-   Prove that after installation rather than assuming it. `nginx -t` checks
-   syntax and cannot show where a request error would be written. Make one
-   deliberately failing request over TLS, then confirm no file under the proxy's
-   log directory gained a line naming an address. Repeat it once for a failed
-   TLS handshake, which is logged on a different path from a failed request.
+   > [!WARNING]
+   > Do not add a per-address limit zone and do not restore the proxy access
+   > log.
 
-The host firewall must expose only 80 and 443 through the beta allowlist during
-pre-launch. The node port must not be reachable on any non-loopback interface.
-Verify this both with `ss -lntp` on the host and a connection attempt from a
-separate machine. Do not use the legacy direct-TLS installer for this beta.
+   Prove that after installation; `nginx -t` checks syntax only. Send one
+   failing request over TLS and one failed TLS handshake, logged on a different
+   path, then confirm no file under the proxy's log directory names an address.
+
+Expose only 80 and 443 through the beta allowlist during pre-launch. Confirm
+the node port is unreachable off loopback, with `ss -lntp` on the host and a
+connection attempt from a separate machine.
+
+> [!WARNING]
+> Do not use the legacy direct-TLS installer for this beta.
 
 ## Access and policy
 
-Create credentials on an operator workstation, never in the checkout. Deliver
-each credential through the approved secret-sharing system. Give each beta user
-only their named repositories in `acl`; there must be no wildcard beta-user
-grant. Keep a separate operator credential with the node-wide audit grant and
-repository ownership needed for recovery. Test a denied repository as well as
-an allowed one from the public hostname.
+Create credentials on an operator workstation, never in the checkout, and
+deliver each through the approved secret-sharing system. Give each beta user
+only their named repositories in `acl`, with no wildcard grant, and keep an
+operator credential with the node-wide audit grant and repository ownership a
+recovery needs. Test a denied and an allowed repository from the public host.
 
-Register every signed-operation key in `keys`. The reviewer pool must contain
-at least two eligible operators with registered keys. A reviewer needs no more
-than `read` on the repository under review (D55): verdicts, comments and
-viewing receipts authorize at that level, so do not grant `write` merely to
-draw somebody into a review. Name every protected ref
-in `protected-refs`. The private-beta service always enables required
-assignment, required review, and required scope. A missing or malformed policy
-must stop rendering or startup rather than relax a gate.
+Register every signed-operation key in `keys` and every protected ref in
+`protected-refs`. The reviewer pool needs at least two eligible operators with
+registered keys; `read` is enough for a reviewer (D55), so do not grant `write`
+to draw somebody into a review. The service always enables required assignment,
+review and scope, and a missing or malformed policy stops rendering or startup.
 
-The browser must return 403 for `/account` and `/api/prepare`. Review pages must
-show no browser mutation controls. Perform mutations with the signed CLI.
+The browser must return 403 for `/account` and `/api/prepare`, and review pages
+must show no mutation control. Perform mutations with the signed CLI.
 
 ## Backup and recovery
 
 Run `pull_backup.sh` hourly to encrypted off-host storage. It publishes a new
 copy only after transport checksum, append-only prefix, format version,
-sequence, parent-chain, and recomputed-hash verification. It also carries the
-node fingerprint, ref attestation, complete Git bundles, ACL, repository list,
-review policy and adjudication files, and the private-beta configuration
-manifest. It deliberately excludes authentication tokens, private keys, and
-TLS keys.
+sequence, parent-chain, and recomputed-hash verification. For its contents and
+the secrets you supply, see [Restoring from a backup](runbook-restore.md).
 
 Store the node identity key separately in the approved encrypted secret store.
 Retain at least 24 hourly, 14 daily, and 8 weekly generations. Run
@@ -146,89 +114,73 @@ Retain at least 24 hourly, 14 daily, and 8 weekly generations. Run
 90 minutes or any verification fails.
 
 Once before launch and once per release cycle, restore onto a clean host with
-`restore_from_backup.sh`. Supply the recovered node key and a newly issued
-operator auth file from the secret store. The rehearsal must finish within four
-hours and prove the full log chain, policy files, ref attestation, GUI, clone,
-and a canary push. A second operator must perform at least one rehearsal using
-only this runbook and the secret store.
+`restore_from_backup.sh`, supplying the recovered node key and a newly issued
+operator auth file. The rehearsal must finish within four hours and prove the
+full log chain, policy files, ref attestation, GUI, clone, and a canary push.
+A second operator must rehearse once from this runbook and the secret store.
 
 ## Delivery and rollback
 
 CI uses Rust 1.97.1 and must pass formatting, workspace tests, Clippy and
 rustdoc with warnings denied, the Phase-0 spike, generated-file freshness, and
 RustSec audit. `build_private_beta_artifact.sh` builds with `--locked`, stamps
-the commit, emits SHA-256 checksums and CycloneDX SBOMs, and packages a versioned
+the commit, and emits SHA-256 checksums, CycloneDX SBOMs and a versioned
 artifact.
 
-`private-beta-release.yml` is manual. It repeats the fail-closed gate, deploys
+`private-beta-release.yml` is manual: it repeats the fail-closed gate, deploys
 the same artifact to staging, and runs the smoke tests. Production promotion is
-a separate protected environment approval. Configure required reviewers on that
-environment before the workflow is enabled.
+a separate protected environment approval; configure its required reviewers
+before enabling the workflow.
 
-`smoke_private_beta.sh` is what issues receipt 3, so what it does *not* check
-matters as much as what it does:
+`smoke_private_beta.sh` issues receipt 3:
 
 ```bash
 smoke_private_beta.sh <https-base> <auth-file> <owner/repo.git> \
   [--push-canary] [--denied <owner/repo.git>]
 ```
 
-It probes anonymously first - `/healthz`, `/readyz`, `/metrics`, `/api/schema`,
-`/api/view`, the repository page and a git fetch must all answer 401 - then
+It probes anonymously first: `/healthz`, `/readyz`, `/metrics`, `/api/schema`,
+`/api/view`, the repository page and a git fetch must all answer 401. It then
 repeats the reachable ones with credentials, sends one byte over the API body
-ceiling expecting 413, and clones. `/` is deliberately outside both lists: it is
-the public landing page and answers 200 to anybody, so fetching it with
-credentials proves nothing about authentication. Pass `--denied` a repository
-the credential must not reach and the denied half of the ACL is covered too; the
-allowed half is the clone.
+ceiling expecting 413, and clones. Pass `--denied` a repository the credential
+must not reach to cover the denied half of the ACL; the clone covers the
+allowed half. `smoke_script::a_node_serving_anonymously_fails_the_smoke_script`
+in `crates/choir-node/tests/it/` runs it against a real node over real TLS.
 
-Until 2026-08-26 the script only ever sent credentials. A node that came up with
-authentication switched off passed every check it made, and said so. That is now
-a test: `smoke_script::a_node_serving_anonymously_fails_the_smoke_script` in
-`crates/choir-node/tests/it/`, which runs the shipped script against a real node
-over real TLS.
-
-Four of receipt 3's items cannot be sourced from outside the host and must be
-read off the node instead of waited for here: scope and review policy, quotas,
-and request logging all need either a second identity or the host's own
-filesystem. Oversized *git* requests are a fifth: the shipped ceiling is 512 MiB
-per request, and a smoke test is not the place to send half a gigabyte over the
-wire. All five are covered by the test suite against a local node; what the
-public hostname adds is only that the proxy does not alter them.
+Read five of receipt 3's items off the node rather than the public hostname:
+scope policy, review policy, quotas, request logging, and oversized git
+requests, whose ceiling is 512 MiB per request. The test suite covers all five
+against a local node; the hostname adds only that the proxy does not alter them.
 
 `deploy_private_beta.sh` installs into a new release directory, archives the
 current symlink target, switches atomically, and restores the old target if the
-service restart fails. `rollback_private_beta.sh` is the one-command rollback.
-Rehearse both scripts in staging and record the active commit reported by the
-node before and after rollback.
+restart fails. `rollback_private_beta.sh` is the one-command rollback. Rehearse
+both in staging, recording the node's active commit before and after rollback.
 
 ## Monitoring and deliberate alert tests
 
-Probe `/healthz`, `/readyz`, and `/metrics` with an operator credential. Never
-make these Choir routes anonymous. Readiness checks the live log format and
-chain, sequencer durability, a real write-and-sync storage probe, free disk, and
-repository/ref agreement.
+Probe `/healthz`, `/readyz`, and `/metrics` with an operator credential.
+Readiness checks the live log format and chain, sequencer durability, a real
+write-and-sync storage probe, free disk, and repository/ref agreement.
 
-Alert on process restart loops, readiness failure, durability errors, latency
-gate breaches, 401/429/5xx spikes, disk and inode exhaustion, certificate expiry
-inside 21 days, and backup age beyond 90 minutes. Five of those come from the
-node's own `/metrics` - `scripts/flip/choir-alerts.rules.yml` holds those
-expressions, and a test asserts every metric they name is one a live node
-still exports. The other four cannot, and
-`docs/operating/observability.md` says where each one has to be sourced
-instead. Check that list before looking for a metric that is not coming.
-Its thresholds are unmeasured starting points, not observations; revise
-them against the first fortnight of real traffic. Before launch, deliberately
-trigger each alert in staging. Use an invalid credential for 401, a staging-only
-low rate limit for 429, the impossible readiness disk floor for readiness, a
-stopped backup timer for stale backup, and the supervisor test fixture for a
-durability exit. Do not fill a production filesystem to test disk alerts.
+> [!WARNING]
+> Never make these Choir routes anonymous.
+
+Nine alerts are critical; [Observability](operating/observability.md) names
+each and says where to source it. Revise the unmeasured thresholds in
+`scripts/flip/choir-alerts.rules.yml` against the first fortnight of traffic.
+
+Before launch, deliberately trigger each alert in staging: an invalid
+credential for 401, a staging-only low rate limit for 429, the impossible
+readiness disk floor for readiness, a stopped backup timer for stale backup,
+and the supervisor test fixture for a durability exit.
+
+> [!CAUTION]
+> Do not fill a production filesystem to test disk alerts.
 
 ## The BETA-0n tests
 
-Receipt 1 below names five focused tests. They had names and nothing else
-for as long as the receipt existed, which is a receipt nobody could
-collect. All five now exist and run in the ordinary suite.
+Receipt 1 below names five focused tests. All five run in the ordinary suite.
 
 | Test | Claim | Where |
 |---|---|---|
@@ -239,56 +191,30 @@ collect. All five now exist and run in the ordinary suite.
 | BETA-05 | The manifest's ceilings are the unit's flags are the numbers the daemon parses | `crates/choir-node/tests/it/beta_limits.rs` |
 | BETA-06 | Each readiness sub-check fails on its own, and the others stay true | `crates/choir-node/tests/limits.rs`, the three `_alone_makes_the_node_unready` tests |
 
-BETA-06 is past what receipt 1 names, and is here because the gap it
-covers was found looking for the five. `/readyz` reports five checks and
-only the free-space floor had ever been driven to a refusal; the rest
-were asserted on the healthy path, where a check that has stopped
-looking at anything is indistinguishable from a passing one. Receipt 5's
-readiness alert is only as good as that endpoint.
-
-BETA-04's rule is narrower than "no wildcards", and the narrowness is the
-whole of it. The scope column takes three forms and two are wide: `*` is
-every repository, `@node` is the node itself -- the op log, the ref
-attestation, and ops naming no repository -- and `*` never matches
-`@node`. The ACL section above requires the second, for the operator
-credential holding the node-wide audit grant a recovery needs. So the
-operator's grant and a beta user's over-grant are already distinguishable
-in the file, and only `*` has no legitimate use in a beta: it reaches
-every repository including other beta users', and names none of them, so
-nobody reading the file sees who was exposed.
-
-The check is `validate_beta_acl.sh`, a sibling of
-`validate_review_policy.sh` and pure the same way, called by
-`render_private_beta_service.sh` before it renders anything. It is
-deliberately not called by the general installers: a node that is not a
-private beta may want `*`, and this is a beta rule, not an ACL rule.
+BETA-04 refuses `*` alone; `@node` stays legitimate for the operator credential
+holding the node-wide audit grant a recovery needs, and `*` never matches
+`@node`. `render_private_beta_service.sh` calls `validate_beta_acl.sh` first.
 
 ## Go-live receipts
 
-Production remains network-closed until the release record contains all of the
-following:
+Production stays network-closed until the release record contains:
 
-1. The BETA-0n focused tests above and the full CI gate are green for the exact
-   artifact commit.
-2. Host-local and remote evidence proves the node listens only on loopback and
+1. The BETA-0n tests above and the full CI gate green for the artifact commit.
+2. Host-local and remote evidence that the node listens only on loopback and
    all application access crosses the hardened TLS proxy.
-3. Public-hostname smoke receipts cover authentication, allowed and denied ACL
-   access, scope and review policy, quotas, request logging, oversized API and
-   Git requests, GUI, clone, and a canary push.
-4. An off-host backup and clean-host restore meet the one-hour RPO and four-hour
-   RTO, with policy equivalence and the node identity recovered from the
-   approved secret store.
+3. Public-hostname smoke receipts covering authentication, allowed and denied
+   ACL access, scope and review policy, quotas, request logging, oversized API
+   and Git requests, GUI, clone, and a canary push.
+4. An off-host backup and clean-host restore meeting the one-hour RPO and
+   four-hour RTO, with policy equivalence and the node identity recovered from
+   the approved secret store.
 5. CI rejection, staging-first promotion, every critical alert, atomic
-   deployment, and one-command rollback have each been exercised.
-
-Only after those receipts are reviewed may the firewall allow invited beta
-users and production DNS be published. Authentication does not replace this
-launch hold.
+   deployment, and one-command rollback each exercised.
 
 ## Inviting somebody (D57)
 
-Mint an invite as the operator. The username and the grants are frozen
-here, by you, and nothing the recipient does can change either:
+Mint an invite as the operator; you freeze the username and grants, and the
+recipient changes neither:
 
 ```sh
 curl -u <operator> -X POST \
@@ -296,26 +222,16 @@ curl -u <operator> -X POST \
   https://<host>/api/accounts/invite
 ```
 
-The response carries `join_url`. **That is the whole thing you send** —
-paste it into the chat and nothing else. It opens a page that shows them
-what they are accepting, and one button that creates the account and
-shows a password once.
+Send the response's `join_url` and nothing else. It opens a page showing what
+the recipient is accepting, and one button that creates the account and shows a
+password once.
 
-Four properties worth knowing, because they change how you handle a link:
+| Property | What it means for handling the link |
+|---|---|
+| Preview-safe | Chat clients fetch the link to build a card; only the button spends it. |
+| Single use, 24 hours by default | Pass `expires_in_secs` to shorten it. A link that has sat in a channel for a day is already dead. |
+| Bearer credential | Anyone who can read the channel can redeem it, for the name and the grants you chose. `POST /api/accounts/revoke` removes the account and any outstanding invite together. Treat the channel as the boundary. |
+| Never `@node` | The store refuses to issue node scope, so an invite cannot mint an auditor or a rate-limit exemption. Node-wide authority stays in the ACL file, edited by hand (D36). |
 
-- **A preview is harmless.** Chat clients fetch the link to build a card;
-  fetching never spends it. Only the button does.
-- **Single use, and 24 hours by default.** Pass `expires_in_secs` to
-  shorten it. A link that has sat in a channel for a day is already dead.
-- **It is a bearer credential.** Anyone who can read the channel can
-  redeem it. That is bounded — they get the name and the grants you
-  chose, and `POST /api/accounts/revoke` removes the account and any
-  outstanding invite together — but treat the channel as the boundary.
-- **Never `@node`.** The store refuses to issue node scope, so an invite
-  cannot mint an auditor or a rate-limit exemption. Node-wide authority
-  stays in the ACL file where you edit it by hand (D36).
-
-The invite id appears in the request log as the `user` for a redemption
-attempt, which is deliberate: it attributes the attempt without naming
-the account it would create. The secret never appears, because it travels
-in a query string and the log records only paths.
+The request log records a redemption attempt under the invite id as `user`,
+attributing it without naming the account it would create or the secret.

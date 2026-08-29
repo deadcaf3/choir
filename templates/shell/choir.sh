@@ -148,7 +148,7 @@ choir_checkpoint() {
 }
 
 # choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...
-#   propose from a git checkout in one command: create the change, push the commits, checkpoint the revision and request review; the node and repository come from the git remote, and the branch name is the change identity, so re-running after an amend updates the same proposal
+#   create a change, push its commits and request review; run it from a git checkout, which is where the node and the repository come from, the revision is checkpointed on the way, and the branch name is the change identity, so re-running after an amend updates the same proposal
 choir_propose() {
 	choir_run propose "$@"
 }
@@ -268,7 +268,7 @@ choir_triage() {
 }
 
 # choir state <api> <channel>
-#   your bounded next-actions document: verdicts you owe, what your changes need, what you are waiting on, each with a command and its risk
+#   list what you owe and what you are waiting on; bounded, and every row carries the command that answers it and that command's risk
 choir_state() {
 	choir_run state "$@"
 }
@@ -280,7 +280,7 @@ choir_skill() {
 }
 
 # choir view <api> [--limit <n>] [--offset <n>]
-#   the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest
+#   read the materialized view, its ref-state attestation and the node's health counters; map-shaped sections page 200 rows at a time, with `<section>_omitted` and `paging.next` describing the rest
 choir_view() {
 	choir_run view "$@"
 }
