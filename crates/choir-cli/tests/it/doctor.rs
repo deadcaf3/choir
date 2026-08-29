@@ -174,3 +174,22 @@ fn a_malformed_node_url_is_a_finding() {
         "should say what a URL must start with:\n{out}"
     );
 }
+
+/// `choir node serve` execs `choir-node`, so its absence is worth
+/// reporting before a service manager discovers it and retries every two
+/// seconds. A warning, not a failure: a machine that only ever talks to
+/// somebody else's node needs no daemon at all, and failing there would
+/// tell a healthy client install that it is broken.
+#[test]
+fn the_daemon_is_reported_but_never_required() {
+    let checks = choir_cli::doctor::run(None, None);
+    let daemon = checks
+        .iter()
+        .find(|c| c.name == "choir-node")
+        .expect("the daemon is checked");
+    assert_ne!(
+        daemon.status,
+        choir_cli::doctor::Status::Fail,
+        "a missing daemon must not fail a client install"
+    );
+}

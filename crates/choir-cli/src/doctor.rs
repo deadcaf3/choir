@@ -362,9 +362,40 @@ pub fn run(api: Option<&str>, auth: Option<&str>) -> Vec<Check> {
     let curl = checks
         .iter()
         .any(|c| c.name == "curl" && c.status == Status::Pass);
+    checks.push(daemon_check());
     checks.push(auth_check(auth));
     checks.push(node_check(api, auth, curl));
     checks
+}
+
+/// Whether `choir node serve` has a daemon to exec.
+///
+/// A warning rather than a failure: a machine that only ever talks to
+/// somebody else's node needs no `choir-node` at all, and failing there
+/// would tell a perfectly healthy client install that it is broken. It
+/// is here because `serve` and `install` both depend on it, and finding
+/// out at install time — from a service manager that then retries every
+/// two seconds — is the worst place to find out.
+fn daemon_check() -> Check {
+    match crate::serve::find_daemon() {
+        Ok(path) => {
+            let where_ = path.display().to_string();
+            if crate::supervise::in_build_directory(&path) {
+                // Not a failure either: running from a build tree is
+                // exactly right in a checkout. It is only a unit
+                // pointing at one that breaks, and `node install`
+                // refuses that on its own.
+                Check::warn("choir-node", format!("{where_} (a build directory)")).with_fix(
+                    "fine for a checkout; `choir node install` refuses it, so install \
+                     the pair before supervising one",
+                )
+            } else {
+                Check::pass("choir-node", where_)
+            }
+        }
+        Err(_) => Check::warn("choir-node", "not beside `choir` or on PATH")
+            .with_fix("only needed to run a node yourself: cargo build --release -p choir-node"),
+    }
 }
 
 /// Renders the checks as the report the command prints.
