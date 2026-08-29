@@ -345,6 +345,25 @@ img,svg,canvas{max-width:100%}
 body{background:var(--ground);color:var(--ink);margin:0 auto;
   padding:var(--sp-10) var(--sp-6) var(--sp-20);max-width:var(--page-max)}
 
+/* The pages that are one column of prose and one control rather than a
+   tool's readout: the front door, signing in, asking, and redeeming an
+   invite. The width above is sized for the browse surface, where a file
+   table and a two-pane review earn every column they get. Those pages
+   are the reason it is wide, and they are not these.
+
+   On a wide display the tool width put a two-field form in the corner of
+   a card as wide as the screen and ran its sentences past any reasonable
+   line length, which is most of why this flow read as unfinished. The
+   measure is the token the docs prose already uses, because that is what
+   these pages are.
+
+   Which pages get it is decided by one thing: whether the page carries
+   the chrome bar. The account page reads as a task and does not take
+   this, because it draws that bar and a search box with five links
+   beside it does not fit the measure. A page wearing the tool's chrome
+   is on the tool surface whatever else is on it. */
+body.task{max-width:var(--measure)}
+
 /* skip link */
 .skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
   z-index:var(--z-palette);padding:var(--sp-2) var(--sp-4);
@@ -687,8 +706,19 @@ section.readme td,section.readme th{padding:var(--sp-2) var(--sp-3)}
    ------------------------------------------------------------------ */
 ol.steps{list-style:none;padding:var(--sp-0);margin:var(--sp-5) var(--sp-0);
   display:grid;gap:var(--sp-4)}
+/* `min-width` because the step is a grid item and its automatic minimum
+   size is its min-content width, which the command inside it sets: a
+   `pre` never wraps, so its min-content is the whole line. Without this
+   the longest command widens the track past the card and the step hangs
+   off its right edge.
+
+   The `overflow-x:auto` on the command block below does not prevent it,
+   which is the part worth writing down: that rule zeroes the automatic
+   minimum size of the box it is on, and the box it is on is not the grid
+   item. The step is. Once the step may shrink, the command scrolls
+   inside it, which is what that rule was for. */
 ol.steps>li{background:var(--surface);border:var(--border);
-  border-radius:var(--r-md);padding:var(--sp-4) var(--sp-5)}
+  border-radius:var(--r-md);padding:var(--sp-4) var(--sp-5);min-width:0}
 ol.steps h3{display:flex;align-items:center;gap:var(--sp-3);
   font-size:var(--fs-500);color:var(--strong);letter-spacing:var(--tr-heading);
   margin:var(--sp-0) var(--sp-0) var(--sp-2)}
@@ -928,6 +958,37 @@ textarea{display:block;width:100%;max-width:var(--measure);
   background:var(--raise);border:var(--border);border-radius:var(--r-md);
   padding:var(--sp-2) var(--sp-3);resize:vertical}
 textarea::placeholder{color:var(--faint)}
+/* The text fields, which had nothing at all. A textarea was drawn and a
+   button was drawn, and the control between them was left to the
+   browser: a grey well about nine characters wide with a system border,
+   sitting on a card this sheet had drawn. It was the first thing on the
+   sign-in page a reader saw and the only thing on it this node had not
+   authored, which is why the page every person meets exactly once looked
+   like the least finished one here.
+
+   Capped at the search token for the reason that token already carries:
+   a field, not a banner. A username is short, and a control as wide as
+   the card claims otherwise. A cap rather than a width so the field
+   still shrinks on a narrow screen. The search box itself is excluded
+   because it is a flex child of its own control and sized there. */
+input:not([type="search"]){width:100%;max-width:var(--search);
+  font:inherit;font-size:var(--fs-400);color:var(--ink);
+  background:var(--raise);border:var(--border);border-radius:var(--r-md);
+  padding:var(--sp-2) var(--sp-3)}
+input:not([type="search"])::placeholder{color:var(--faint)}
+input:not([type="search"]):focus-visible{border-color:var(--accent-line);
+  box-shadow:var(--accent-glow);outline:0}
+/* The dropdown, for the same reason and in the same pass. The comment on
+   the button rule below claims those were the last controls here the
+   system drew; the two dropdowns on the console are what made that
+   false. Sized by its own content rather than by a token, because what
+   it holds is a repository name and the operator picking one wants to
+   read it. */
+select{font:inherit;font-size:var(--fs-300);color:var(--ink);
+  background:var(--raise);border:var(--border);border-radius:var(--r-md);
+  padding:var(--sp-1) var(--sp-2)}
+select:focus-visible{border-color:var(--accent-line);
+  box-shadow:var(--accent-glow);outline:0}
 textarea:focus-visible{border-color:var(--accent-line);
   box-shadow:var(--accent-glow);outline:0}
 
