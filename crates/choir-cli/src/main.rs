@@ -185,10 +185,27 @@ fn invoked_command() -> Option<String> {
         index += 2;
     }
     let first = args.get(index)?.clone();
-    // `acl render` is the one two-word command, and a reader who typed
-    // only half of it should be told about the half they typed.
-    if first == "acl" && args.get(index + 1).map(String::as_str) == Some("render") {
-        return Some("acl render".to_string());
+    // A reader who typed a two-word command should be told about the
+    // command they typed, not about its first word. Read from the
+    // surface table rather than listed here: this was written when `acl
+    // render` was the only two-word name and hardcoded it, so by the
+    // time there were eight, `choir repo list` with no node configured
+    // answered "`repo` is not a choir command" — naming a word the
+    // reader had not got wrong, and suggesting `repo url`.
+    if let Some(second) = args.get(index + 1) {
+        let two = format!("{first} {second}");
+        if choir_cli::surface::COMMANDS.iter().any(|c| c.name == two) {
+            return Some(two);
+        }
+    }
+    // One word that is only ever the first half of a two-word name is
+    // still worth naming as such: `choir repo` is not a mistyped
+    // command, it is an unfinished one.
+    if choir_cli::surface::COMMANDS
+        .iter()
+        .any(|c| c.name.starts_with(&format!("{first} ")))
+    {
+        return Some(first);
     }
     Some(first)
 }
@@ -217,10 +234,32 @@ fn usage() -> ! {
                 eprint!("{help}");
             }
             None => {
-                eprintln!("{} `{}` is not a choir command.", style.red("choir:"), name);
-                let names = choir_cli::surface::COMMANDS.iter().map(|c| c.name);
-                if let Some(near) = choir_cli::style::nearest(&name, names) {
-                    eprintln!("       did you mean {}?", style.cyan(near));
+                // A word that only ever begins a two-word name is an
+                // unfinished command, not a wrong one, and the useful
+                // answer is the list of its halves rather than the
+                // nearest string to it. `choir repo` used to suggest
+                // `repo url`, which is one of the three things it could
+                // have meant and no more likely than the others.
+                let under: Vec<&str> = choir_cli::surface::COMMANDS
+                    .iter()
+                    .map(|c| c.name)
+                    .filter(|n| n.starts_with(&format!("{name} ")))
+                    .collect();
+                if under.is_empty() {
+                    eprintln!("{} `{}` is not a choir command.", style.red("choir:"), name);
+                    let names = choir_cli::surface::COMMANDS.iter().map(|c| c.name);
+                    if let Some(near) = choir_cli::style::nearest(&name, names) {
+                        eprintln!("       did you mean {}?", style.cyan(near));
+                    }
+                } else {
+                    eprintln!(
+                        "{} `{}` is not a command on its own. It has:",
+                        style.red("choir:"),
+                        name
+                    );
+                    for one in under {
+                        eprintln!("         {}", style.cyan(one));
+                    }
                 }
                 eprintln!("       {} lists every command.", style.cyan("choir --help"));
             }

@@ -232,3 +232,57 @@ fn an_explicit_node_is_not_filled_around_for_two_word_commands() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A two-word command with no node configured must be refused as
+/// *itself*, not as its first word.
+///
+/// `invoked_command` hardcoded `acl render` as "the one two-word
+/// command". By the time there were eight, `choir repo list` on a
+/// machine with no `.choir/config` answered "`repo` is not a choir
+/// command" — naming a word the reader had not got wrong, and then
+/// suggesting `repo url`, which is one of three things it could have
+/// meant and no likelier than the others.
+#[test]
+fn a_two_word_command_is_refused_by_its_whole_name() {
+    let dir = tree("two-word-refusal", None);
+    for (words, spec) in [
+        (["repo", "list"], "<api>"),
+        (["repo", "create"], "<api> <owner/repo.git>"),
+        (["acl", "render"], "<api> <acl-file>"),
+    ] {
+        let out = run_in(&dir, &words);
+        let text = String::from_utf8_lossy(&out.stderr);
+        let name = words.join(" ");
+        assert!(is_usage_error(&out), "{name}: {text}");
+        assert!(text.contains(&name), "{name} should be named: {text}");
+        assert!(text.contains(spec), "{name} should print its spec: {text}");
+        assert!(
+            !text.contains("is not a choir command"),
+            "{name} is a choir command: {text}"
+        );
+    }
+}
+
+/// Half of a two-word name is unfinished, not wrong, and the useful
+/// answer is its halves rather than the nearest string to it.
+#[test]
+fn a_command_prefix_lists_what_it_has() {
+    let dir = tree("prefix", None);
+    let out = run_in(&dir, &["repo"]);
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(is_usage_error(&out));
+    assert!(text.contains("not a command on its own"), "{text}");
+    for one in ["repo create", "repo list", "repo url"] {
+        assert!(text.contains(one), "{one} should be offered: {text}");
+    }
+}
+
+/// A genuinely unknown word still gets the old treatment.
+#[test]
+fn an_unknown_word_is_still_an_unknown_command() {
+    let dir = tree("unknown", None);
+    let out = run_in(&dir, &["frobnicate"]);
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(is_usage_error(&out));
+    assert!(text.contains("is not a choir command"), "{text}");
+}
