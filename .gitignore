@@ -32,3 +32,7 @@ __pycache__/
 # The built documentation: `choir docs` renders it from `docs/` and the
 # crates, and both halves regenerate from source.
 /book
+
+# Claude Code worktree whitelist: names private paths (internal/) and is
+# per-machine tooling config, like CLAUDE.md above.
+.worktreeinclude
