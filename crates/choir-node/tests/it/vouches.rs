@@ -286,10 +286,10 @@ fn a_per_repository_reader_is_shown_no_part_of_the_graph() {
     assert_eq!(landed["_status"], 200, "{landed}");
 
     // ...and cannot write one either. `docs/operating/authorization.md`
-    // tells operators that an agent granted a single repository is
-    // outside the graph entirely, which is a claim about the ACL and so
-    // is asserted here rather than believed: a vouch is node-scoped at
-    // `read`, and a repository grant is not a node-wide one.
+    // tells operators that `@node auditor` is what puts somebody in the
+    // web of trust, which is a claim about the ACL and so is asserted
+    // here rather than believed: a vouch is node-scoped at `read`, and a
+    // repository grant is not a node-wide one.
     let denied = post(
         &base,
         "bob:b",

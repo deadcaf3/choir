@@ -391,10 +391,10 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "propose",
         args: "<key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...",
-        summary: "propose from a git checkout in one command: create the change, push the \
-                  commits, checkpoint the revision and request review; the node and repository \
-                  come from the git remote, and the branch name is the change identity, so \
-                  re-running after an amend updates the same proposal",
+        summary: "create a change, push its commits and request review; run it from a git \
+                  checkout, which is where the node and the repository come from, the \
+                  revision is checkpointed on the way, and the branch name is the change \
+                  identity, so re-running after an amend updates the same proposal",
         agent_facing: true,
         group: "changing code",
     },
@@ -611,8 +611,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "state",
         args: "<api> <channel>",
-        summary: "your bounded next-actions document: verdicts you owe, what your changes \
-                  need, what you are waiting on, each with a command and its risk",
+        summary: "list what you owe and what you are waiting on; bounded, and every row \
+                  carries the command that answers it and that command's risk",
         agent_facing: true,
         group: "changing code",
     },
@@ -640,7 +640,13 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "view",
         args: "<api> [--limit <n>] [--offset <n>]",
-        summary: "the materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate — every map-shaped section bounded to 200 rows by default, with `<section>_omitted` counting what was left out and `paging.next` naming the request that fetches the rest",
+        // The endpoint row in `docs/using/cli.md` enumerates every
+        // section this returns and is the reference for them. This line
+        // named all eight, which made it the longest summary in the
+        // table by a factor of four and a second copy of that list.
+        summary: "read the materialized view, its ref-state attestation and the node's \
+                  health counters; map-shaped sections page 200 rows at a time, with \
+                  `<section>_omitted` and `paging.next` describing the rest",
         agent_facing: true,
         group: "reading the node",
     },
@@ -1114,7 +1120,14 @@ pub fn readme_cheatsheet() -> String {
     let mut out = String::from("| Command | What it does |\n|:--|:--|\n");
     for name in DAY_ONE {
         if let Some(c) = COMMANDS.iter().find(|c| &c.name == name) {
-            out.push_str(&format!("| `choir {}` | {} |\n", c.name, c.summary));
+            // First clause only, for the reason `usage_in` takes it: the
+            // clauses after the first are caveats, and a caveat in a
+            // table cell wraps the row to three lines and stops the
+            // table being scannable. This is the shortest of the three
+            // renderings and the one read first, so it is the one that
+            // can least afford them.
+            let short = first_clause(c.summary, 64);
+            out.push_str(&format!("| `choir {}` | {} |\n", c.name, short));
         }
     }
     out.push_str("\nFull surface, every command and every endpoint: [`docs/using/cli.md`](docs/using/cli.md).\n");
