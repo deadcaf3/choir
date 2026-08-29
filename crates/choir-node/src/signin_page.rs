@@ -70,7 +70,7 @@ pub(crate) fn render(
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir: sign in</title>");
     h.push_str(crate::ui::STYLE);
-    h.push_str("</head><body>");
+    h.push_str("</head><body class=\"task\">");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     h.push_str("<header class=\"top\"><h1>Sign in</h1><div class=\"sub\">");
     h.push_str("<span class=\"pill\"><a href=\"/\">node</a></span></div></header>");

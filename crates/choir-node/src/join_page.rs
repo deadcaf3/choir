@@ -161,7 +161,7 @@ fn shell(title: &str, theme: Option<&str>) -> String {
 
 /// Closes the head, opens the body, and writes the brand header.
 fn body(h: &mut String, headline: &str, sub: &str) {
-    h.push_str("</head><body>");
+    h.push_str("</head><body class=\"task\">");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(headline));
@@ -354,14 +354,18 @@ fn offer(
         h.push_str(&esc(user));
         h.push_str("</td></tr>");
     }
-    h.push_str("<tr>");
+    // Every row opens and closes itself. These used to chain: each one
+    // left its last cell open and the next one closed it, which works
+    // right up until a row becomes optional. In D75 the row above did,
+    // and this one went on closing a cell that might never have been
+    // opened -- so with a display name the name was written twice, and
+    // without one the table opened a row it never filled.
     if let Some(name) = summary.display_name.as_deref() {
-        h.push_str("<td>shown as</td><td>");
+        h.push_str("<tr><td>shown as</td><td>");
         h.push_str(&esc(name));
-        h.push_str("</td></tr><tr><td>shown as</td><td>");
-        h.push_str(&esc(name));
+        h.push_str("</td></tr>");
     }
-    h.push_str("</td></tr><tr><td>invited by</td><td class=\"mono\">");
+    h.push_str("<tr><td>invited by</td><td class=\"mono\">");
     h.push_str(&esc(&summary.issued_by));
     h.push_str("</td></tr><tr><td>expires</td><td>");
     h.push_str(&esc(&expires_in_words(summary.expires_at, now)));
