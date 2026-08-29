@@ -2953,6 +2953,69 @@ fn main() {
             print!("{}", choir_cli::doctor::report(&checks, style));
             std::process::exit(choir_cli::doctor::exit_code(&checks));
         }
+        // Exit 3 is its own outcome and not a failure: "the backup is
+        // fine and something only you can supply is missing" is the
+        // documented recovery path — stop, supply it, re-run — and
+        // collapsing it into 1 would make that indistinguishable from a
+        // corrupt backup.
+        ["backup", "restore", src, root] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let (src, root) = (std::path::Path::new(src), std::path::Path::new(root));
+            if !src.is_dir() {
+                eprintln!(
+                    "{} no backup directory at {}",
+                    style.red("choir backup restore:"),
+                    src.display()
+                );
+                std::process::exit(2);
+            }
+            let daemon = match choir_cli::serve::find_daemon() {
+                Ok(daemon) => daemon,
+                Err(error) => {
+                    eprintln!("{} {error}", style.red("choir backup restore:"));
+                    std::process::exit(1);
+                }
+            };
+            // The restored node's own credential, in its own root. Not
+            // the caller's: a restore is building somebody else's node,
+            // and the credential it will serve with lives beside the
+            // log it will serve.
+            let auth = auth
+                .file
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| root.join(".choir/auth"));
+            let mut say = |line: &str| eprintln!("  {} {line}", style.dim("restore:"));
+            match choir_cli::restore::run(src, root, &daemon, &auth, &mut say) {
+                Ok(done) => {
+                    // On stdout, and not through `note`, which prints
+                    // only to a terminal. This is the receipt: it is
+                    // read once, on a bad day, and pasted into an
+                    // incident log, so it has to survive a pipe.
+                    println!(
+                        "restore: {} ops replayed, {} repos unbundled, canary landed at seq {}",
+                        done.ops, done.repos, done.ops
+                    );
+                    println!(
+                        "restore: the canary ref is {} in {} — it is evidence, delete it when you no longer want it",
+                        done.canary, done.landed_in
+                    );
+                    println!(
+                        "restore: root is {} — start it under your supervisor:",
+                        root.display()
+                    );
+                    println!("  choir node install --state {}", root.display());
+                }
+                Err(refusal) => {
+                    let tag = if refusal.code == 3 {
+                        style.red("choir backup restore: DECIDE")
+                    } else {
+                        style.red("choir backup restore:")
+                    };
+                    eprintln!("{tag} {}", refusal.message);
+                    std::process::exit(refusal.code);
+                }
+            }
+        }
         // A backup you can only verify by asking the thing it is a
         // backup of is not a backup, so nothing here opens a connection.
         ["backup", "verify", dir] => {

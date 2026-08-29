@@ -506,19 +506,20 @@ sync)
   ;;
 
 verify-backup)
-  # Pull the offsite copy back and check it. The mirror leg reports that
-  # it wrote a backup; this is the only thing that reports the backup is
-  # restorable.
-  sh "$HERE/scripts/flip/verify_backup.sh" "${2:-}"
+  # Delegates. The checks are `choir backup verify` now, because the
+  # release ships `choir` and has never shipped this script -- a beta
+  # user following docs/runbook-restore.md had no ./choirctl to run.
+  # scripts/flip/verify_backup.sh stays on disk as the shell fallback;
+  # nothing calls it.
+  "$(choir_bin)" backup verify "${2:-$HOME/choir-backup}"
   ;;
 
 restore-from-backup)
-  # Backup -> a running node, with the proof attached. Everything this
-  # needs is in the backup directory and the target root, so unlike the
-  # legs above it makes no ssh connection and does not care which side of
-  # the D20 host move this machine is on.
+  # Delegates, for the same reason as verify-backup above. Exit codes are
+  # unchanged and load-bearing: 3 still means an operator decision, and
+  # the runbook still tells you to supply the secret and re-run.
   [ $# -ge 3 ] || { echo "usage: choirctl restore-from-backup <backup-dir> <target-root>" >&2; exit 2; }
-  sh "$HERE/scripts/restore_from_backup.sh" "$2" "$3"
+  "$(choir_bin)" backup restore "$2" "$3"
   ;;
 
 pull-backup)
@@ -701,11 +702,11 @@ install-cli)
   review <id> <oid> [repo:ref]                   open a landing review
   verdict <reviewer> <id> <verdict> [note]       cast a reviewer verdict
   abandon <id>     settle a stale incomplete review as lapsed-unapproved
-  verify-backup    pull the offsite copy back and check all six ways
+  verify-backup    check a backup is restorable (-> choir backup verify)
   pull-backup      fetch the log copy from the node host (remote mode)
   schedule-backup [secs]   pull-backup on a launchd interval (default 3600)
   restore-from-backup <backup-dir> <target-root>
-                   rebuild a node from a backup and prove it accepts a write
+                   rebuild a node and prove it (-> choir backup restore)
 
 Port is $PORT (override with CHOIR_PORT).
 Runbooks: scripts/flip/RUNBOOK.md (install), docs/runbook-restore.md (restore)

@@ -772,6 +772,17 @@ pub const COMMANDS: &[Command] = &[
         group: "operating a node",
     },
     Command {
+        name: "backup restore",
+        args: "<backup-dir> <target-root>",
+        summary: "turn a backup back into a node, and refuse to say it worked until the \
+                  restored node has accepted a real push: it reads and refuses before it \
+                  writes a byte, unbundles the git objects before the first boot, then \
+                  rehearses on a port it picks itself and proves the append chained onto \
+                  what it replayed; exit 3 means a secret only you can supply is missing",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
         name: "repair",
         args: "<log-file> --verify | --truncate-tail",
         summary: "inspect a stopped node's op log, or repair a tail that was still being \

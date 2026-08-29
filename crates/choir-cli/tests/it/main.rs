@@ -25,6 +25,7 @@ mod node;
 mod propose;
 mod python;
 mod repair;
+mod restore;
 mod runner;
 mod serve;
 mod skill;

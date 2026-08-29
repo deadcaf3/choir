@@ -1489,15 +1489,22 @@ fn the_backup_is_verified_by_pulling_it_back_not_by_having_written_it() {
     );
 }
 
-/// The same properties, pinned on the pair `choirctl` actually runs.
+/// The same properties, pinned on the pair that actually runs.
 ///
 /// There are two backup families in this repository — `scripts/` and
 /// `scripts/flip/` — and every test above this one reads the first while
-/// `choirctl pull-backup` and `choirctl verify-backup` run the second.
-/// That gap is not theoretical: the flip pull shipped no `refs.snapshot`
-/// for its whole life, so the restore's D25 attestation check silently
-/// skipped on every backup an operator has ever taken, and nothing here
-/// noticed. A property is only pinned on the implementation that runs.
+/// the pull leg runs the second. That gap is not theoretical: the flip
+/// pull shipped no `refs.snapshot` for its whole life, so the restore's
+/// D25 attestation check silently skipped on every backup an operator
+/// has ever taken, and nothing here noticed. A property is only pinned
+/// on the implementation that runs.
+///
+/// Which is now split. The pull is still shell, because it ssh's to a
+/// specific host. The checks and the restore are `choir backup verify`
+/// and `choir backup restore`, so their half of this test reads the
+/// Rust — asserting against `scripts/flip/verify_backup.sh` would pin
+/// the properties on a file nothing calls, which is the exact failure
+/// this test was written to prevent.
 #[test]
 fn the_backup_pair_choirctl_runs_is_pinned_too() {
     let strip = |path: &str| -> String {
@@ -1564,11 +1571,15 @@ fn the_backup_pair_choirctl_runs_is_pinned_too() {
         );
     }
 
-    let verify = strip("scripts/flip/verify_backup.sh");
     // Three that stop a restore booting, six that leave it enforcing
     // less than the node it replaces. Both sets are reported; only the
     // first fails, because a node that protects no ref has no
     // protected-refs file to back up.
+    let checked: Vec<&str> = choir_cli::backup::REQUIRED_POLICY
+        .iter()
+        .chain(choir_cli::backup::OPTIONAL_POLICY)
+        .copied()
+        .collect();
     for needed in [
         "keys",
         "reviewers",
@@ -1581,29 +1592,53 @@ fn the_backup_pair_choirctl_runs_is_pinned_too() {
         "private-beta.manifest",
     ] {
         assert!(
-            verify.contains(needed),
-            "verify-backup stopped looking for {needed}; a restore can enforce less without saying so"
+            checked.contains(&needed),
+            "backup verify stopped looking for {needed}; a restore can enforce less without saying so"
         );
     }
-    assert!(
-        verify.contains("--verify-log") && verify.contains("CONTAINS A CREDENTIAL"),
-        "verify-backup must run the release verifier and fail a backup holding a credential"
+    // The same nine, demanded again of the restore, which is the one
+    // that has to boot a daemon with them. Compared as sets rather than
+    // counted: two lists of nine that disagree about *which* nine is
+    // exactly the drift this pins, and a length check would miss it.
+    let mut restored: Vec<&str> = choir_cli::restore::REQUIRED
+        .iter()
+        .chain(choir_cli::restore::OPTIONAL)
+        .copied()
+        .collect();
+    let mut checked_sorted = checked.clone();
+    restored.sort_unstable();
+    checked_sorted.sort_unstable();
+    assert_eq!(
+        checked_sorted, restored,
+        "verify and restore disagree about what a backup holds"
     );
     assert!(
-        verify.contains("refs.snapshot"),
-        "verify-backup must say whether the attestation is there; a skipped proof reads like a passed one"
+        choir_cli::backup::is_secret("auth") && choir_cli::backup::is_secret("node.key"),
+        "backup verify must fail a backup holding a credential"
+    );
+    // A skipped proof reads like a passed one, so the attestation is
+    // reported either way rather than checked only when present.
+    assert!(
+        choir_cli::backup::verify(std::path::Path::new("/nonexistent"), None)
+            .iter()
+            .all(|c| c.status == choir_cli::doctor::Status::Fail),
+        "a directory that is not a backup must not pass anything"
     );
 
     let driver = std::fs::read_to_string(repo_root().join("choirctl")).expect("choirctl");
-    for wired in [
-        "scripts/flip/pull_backup.sh",
-        "scripts/flip/verify_backup.sh",
-        "scripts/restore_from_backup.sh",
-        "scripts/push_mirror.sh",
-    ] {
+    for wired in ["scripts/flip/pull_backup.sh", "scripts/push_mirror.sh"] {
         assert!(
             driver.contains(wired),
             "choirctl no longer names {wired}, so nothing runs it"
+        );
+    }
+    // The two that moved. `choirctl` delegates rather than keeping a
+    // second implementation, so a reader with the old muscle memory
+    // reaches the code the release actually ships.
+    for wired in ["backup verify", "backup restore"] {
+        assert!(
+            driver.contains(wired),
+            "choirctl no longer delegates to `choir {wired}`"
         );
     }
 

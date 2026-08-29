@@ -55,6 +55,9 @@ pub mod propose;
 pub mod runner;
 
 // Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod restore;
+
+// Same reason as `docs`: the module's own header carries intra-doc links.
 pub mod serve;
 
 // Same reason as `docs`: the module's own header carries intra-doc links.

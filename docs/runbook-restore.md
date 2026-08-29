@@ -21,11 +21,8 @@ policy archive — are not failures.
 Then restore:
 
 ```bash
-./choirctl restore-from-backup ~/choir-backup /srv/choir-repos
+choir backup restore ~/choir-backup /srv/choir-repos
 ```
-
-(`restore-from-backup` is still `scripts/restore_from_backup.sh`, and is
-not in the release tarball. Run it from a checkout.)
 
 Expect it to stop the first time, and re-run it after supplying what it
 asked for: a target root holding this backup's log unchanged is treated
@@ -244,3 +241,7 @@ that was never re-armed:
 ./choirctl pull-backup          # still shell: it ssh's to the node host
 choir backup verify ~/choir-backup
 ```
+
+`pull-backup` is the one leg still in shell, because it ssh's to a
+specific host. Both the checks and the restore are `choir` commands and
+ship in the release.
