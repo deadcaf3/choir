@@ -177,6 +177,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   what the node is doing right now: health, the commit actually serving, the sequencer's position and its measured p99 against the 100 ms gate, and how much this credential can see; sections a narrower credential may not read say so rather than reading as an idle node
 - `choir doctor [<api>]`  
   check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails
+- `choir backup verify <backup-dir>`  
+  whether a backup can be restored from, which is a different claim from whether one was written; checks the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, and refuses a backup that carries a key or a credential — every check local, nothing asked of the node it is a copy of
 - `choir repair <log-file> --verify | --truncate-tail`  
   inspect a stopped node's op log, or repair a tail that was still being written; `--verify` walks the hash chain and changes nothing, `--truncate-tail` quarantines the partial record to a sidecar before cutting, and damage anywhere but the tail is refused rather than patched over
 

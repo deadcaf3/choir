@@ -29,6 +29,9 @@
 
 /// Regenerating the readable half of an ACL file (D46).
 pub mod acl;
+
+// Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod backup;
 // Deliberately no `///` here, unlike some of its neighbours. A doc
 // comment written on the `pub mod` line is merged with the module's own
 // `//!` header, and the merged text resolves its intra-doc links in

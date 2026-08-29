@@ -2953,6 +2953,24 @@ fn main() {
             print!("{}", choir_cli::doctor::report(&checks, style));
             std::process::exit(choir_cli::doctor::exit_code(&checks));
         }
+        // A backup you can only verify by asking the thing it is a
+        // backup of is not a backup, so nothing here opens a connection.
+        ["backup", "verify", dir] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let dir = std::path::Path::new(dir);
+            if !dir.is_dir() {
+                eprintln!(
+                    "{} {} is not a directory",
+                    style.red("choir backup verify:"),
+                    dir.display()
+                );
+                std::process::exit(2);
+            }
+            let daemon = choir_cli::serve::find_daemon().ok();
+            let checks = choir_cli::backup::verify(dir, daemon.as_deref());
+            print!("{}", choir_cli::doctor::report(&checks, style));
+            std::process::exit(i32::from(!choir_cli::backup::restorable(&checks)));
+        }
         // The mode is required, never defaulted. A repair tool that
         // picks its own action is the one thing this must not be: the
         // difference between "tell me what is wrong" and "change my log"

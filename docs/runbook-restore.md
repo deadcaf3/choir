@@ -4,9 +4,28 @@ You have a backup directory written by `scripts/flip/pull_backup.sh` and no
 working node. This turns the first into the second, and refuses to say it
 worked until the restored node has accepted a write.
 
+First, satisfy yourself the backup is one you can restore *from*. That is
+a different claim from "a backup was written", and it is the one that
+matters here:
+
+```bash
+choir backup verify ~/choir-backup
+```
+
+Every check it makes is local: it opens no connection and reads nothing
+from the node, because a backup you can only verify by asking the thing
+it is a copy of is not a backup. It exits 0 when the copy is restorable
+and 1 when it is not, and warnings — no attestation, no ACL in the
+policy archive — are not failures.
+
+Then restore:
+
 ```bash
 ./choirctl restore-from-backup ~/choir-backup /srv/choir-repos
 ```
+
+(`restore-from-backup` is still `scripts/restore_from_backup.sh`, and is
+not in the release tarball. Run it from a checkout.)
 
 Expect it to stop the first time, and re-run it after supplying what it
 asked for: a target root holding this backup's log unchanged is treated
@@ -222,6 +241,6 @@ the first thing that goes wrong after a restore is usually the backup
 that was never re-armed:
 
 ```bash
-./choirctl pull-backup
-./choirctl verify-backup
+./choirctl pull-backup          # still shell: it ssh's to the node host
+choir backup verify ~/choir-backup
 ```

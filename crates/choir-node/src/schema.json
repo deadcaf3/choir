@@ -321,6 +321,12 @@
     },
     {
       "agent_facing": false,
+      "args": "<backup-dir>",
+      "name": "backup verify",
+      "summary": "whether a backup can be restored from, which is a different claim from whether one was written; checks the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, and refuses a backup that carries a key or a credential — every check local, nothing asked of the node it is a copy of"
+    },
+    {
+      "agent_facing": false,
       "args": "<log-file> --verify | --truncate-tail",
       "name": "repair",
       "summary": "inspect a stopped node's op log, or repair a tail that was still being written; `--verify` walks the hash chain and changes nothing, `--truncate-tail` quarantines the partial record to a sidecar before cutting, and damage anywhere but the tail is refused rather than patched over"

@@ -761,6 +761,17 @@ pub const COMMANDS: &[Command] = &[
         group: "operating a node",
     },
     Command {
+        name: "backup verify",
+        args: "<backup-dir>",
+        summary: "whether a backup can be restored from, which is a different claim from \
+                  whether one was written; checks the four files, the manifest checksum, the \
+                  hash chain, the policy archive and every git bundle, and refuses a backup \
+                  that carries a key or a credential — every check local, nothing asked of \
+                  the node it is a copy of",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
         name: "repair",
         args: "<log-file> --verify | --truncate-tail",
         summary: "inspect a stopped node's op log, or repair a tail that was still being \

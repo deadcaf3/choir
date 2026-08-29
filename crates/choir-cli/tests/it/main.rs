@@ -5,6 +5,7 @@
 //! fixed ports in here.
 
 mod acl_render;
+mod backup;
 mod batch;
 mod check_exit_codes;
 mod claude_hooks;
