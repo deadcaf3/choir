@@ -61,11 +61,74 @@ use choir_view::{
 struct AuthOptions<'a> {
     file: Option<&'a str>,
     user: Option<&'a str>,
+    /// Whether either flag was actually given.
+    ///
+    /// Separate from the two options because [`AuthOptions::file_for`]
+    /// fills `file` in from the layout `choir init` wrote, and the
+    /// commands that refuse to take a credential at all — `init`,
+    /// `join`, `key`, `git-credential` — must keep asking "did the
+    /// reader pass one", not "is there one".
+    explicit: bool,
 }
 
-impl AuthOptions<'_> {
+/// The credential `choir init` wrote, found once.
+///
+/// A `OnceLock` rather than a lookup per call: every command that
+/// reaches the node asks, and the answer is a `stat` on a path that
+/// cannot change while the process runs.
+static DEFAULT_AUTH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// `~/.choir/auth` if it exists, or whatever `.choir/config` names.
+///
+/// `HOME` describes the machine rather than carrying a setting of ours,
+/// the same reason `choir init` may read it.
+fn discovered_auth_file() -> Option<String> {
+    if let Some(named) = configured("auth") {
+        return Some(named);
+    }
+    let path = std::path::PathBuf::from(std::env::var_os("HOME")?)
+        .join(".choir")
+        .join("auth");
+    path.exists().then(|| path.display().to_string())
+}
+
+/// Whether a bearer token may be sent to this node without being asked
+/// for by name.
+///
+/// Loopback, or the node `.choir/config` points at. An explicit
+/// `--auth-file` is the reader saying which credential goes where and
+/// is never second-guessed; this is only about the *implicit* one, and
+/// an implicit credential must not follow a URL that merely happened to
+/// be typed after a command that takes one.
+fn may_hold_credential(api: &str) -> bool {
+    let rest = api.split_once("://").map_or(api, |(_, rest)| rest);
+    let host = rest.split('/').next().unwrap_or("");
+    let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
+    if matches!(name, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
+        return true;
+    }
+    configured("node").is_some_and(|node| node.trim_end_matches('/') == api.trim_end_matches('/'))
+}
+
+impl<'a> AuthOptions<'a> {
     fn is_empty(self) -> bool {
-        self.file.is_none() && self.user.is_none()
+        !self.explicit
+    }
+
+    /// The credential to use when talking to `api`.
+    ///
+    /// What was given, else the one `choir init` wrote — so the command
+    /// that creates a node and the commands that read it agree without
+    /// a path being typed in between. Before this, every one of them
+    /// answered 401 on a node the same tool had just set up.
+    fn file_for(self, api: &str) -> Option<&'a str> {
+        if self.file.is_some() {
+            return self.file;
+        }
+        if !may_hold_credential(api) {
+            return None;
+        }
+        DEFAULT_AUTH.get_or_init(discovered_auth_file).as_deref()
     }
 }
 
@@ -331,7 +394,7 @@ fn http(
 ) -> (u16, String) {
     let client = match choir_cli::mcp::HttpClient::new(
         api,
-        auth.file.map(std::path::Path::new),
+        auth.file_for(api).map(std::path::Path::new),
         auth.user,
     ) {
         Ok(client) => client,
@@ -394,7 +457,7 @@ fn operator_call(
         .unwrap_or_else(|| panic!("{path} is in the endpoint table"));
     let client = match choir_cli::mcp::HttpClient::new(
         api,
-        auth.file.map(std::path::Path::new),
+        auth.file_for(api).map(std::path::Path::new),
         auth.user,
     ) {
         Ok(client) => client,
@@ -562,7 +625,7 @@ fn acl_render(api: &str, auth: AuthOptions<'_>, acl_file: &str) -> ! {
         .expect("the accounts roster is in the endpoint table");
     let client = match choir_cli::mcp::HttpClient::new(
         api,
-        auth.file.map(std::path::Path::new),
+        auth.file_for(api).map(std::path::Path::new),
         auth.user,
     ) {
         Ok(client) => client,
@@ -1753,8 +1816,9 @@ fn runner(config_file: &str, auth: AuthOptions<'_>) -> ! {
         // chose them at install time, and a scheduler's environment is
         // not a place to pick up an identity from.
         let auth = AuthOptions {
-            file: config.auth_file.as_deref().or(auth.file),
+            file: config.auth_file.as_deref().or(auth.file_for(&config.api)),
             user: config.auth_user.as_deref().or(auth.user),
+            explicit: true,
         };
         let id = &request.identity;
 
@@ -1945,7 +2009,14 @@ fn parse_auth(args: &[String]) -> (AuthOptions<'_>, &[String]) {
         eprintln!("choir: --auth-user needs --auth-file");
         std::process::exit(2);
     }
-    (AuthOptions { file, user }, &args[index..])
+    (
+        AuthOptions {
+            file,
+            user,
+            explicit: index > 0,
+        },
+        &args[index..],
+    )
 }
 
 fn workspace_body(repo: &str, name: &str, rest: &[&str]) -> serde_json::Value {
@@ -2065,7 +2136,150 @@ fn current_change_revision(
 /// Walking up rather than reading one fixed path means a checkout can
 /// name the node it belongs to, which is the same thing a git remote
 /// does and needs no explaining to anybody who has used one.
+/// What `choir node serve` and `choir node install` were told, after
+/// defaults.
+///
+/// One parser for both because they describe the same node: a
+/// supervised node and a hand-started one must be the same command with
+/// the same arguments, and two parsers is how they stop being.
+struct NodeOptions {
+    state: std::path::PathBuf,
+    port: u16,
+    create: Vec<String>,
+    extra: Vec<String>,
+}
+
+/// Parses the options both node-starting commands take.
+///
+/// Everything after `--` belongs to the daemon and is not looked at, so
+/// a daemon flag this side has never heard of still reaches it. Without
+/// that, every new daemon flag would be a reason to stop using these
+/// commands and go back to spelling out the whole invocation.
+fn node_options(command: &str, rest: &[&str]) -> NodeOptions {
+    let (mine, extra) = match rest.iter().position(|a| *a == "--") {
+        Some(at) => (&rest[..at], &rest[at + 1..]),
+        None => (rest, &rest[rest.len()..]),
+    };
+    let mut state: Option<String> = None;
+    let mut port: Option<u16> = None;
+    let mut create: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < mine.len() {
+        let name = mine[i];
+        let Some(value) = mine.get(i + 1) else {
+            eprintln!("{command}: {name} needs a value");
+            std::process::exit(2);
+        };
+        match name {
+            "--state" => state = Some((*value).to_string()),
+            "--create" => create.push((*value).to_string()),
+            "--port" => match value.parse::<u16>() {
+                Ok(n) => port = Some(n),
+                Err(_) => {
+                    eprintln!("{command}: --port needs a port number, not {value:?}");
+                    std::process::exit(2);
+                }
+            },
+            other => {
+                eprintln!(
+                    "{command}: unknown option {other:?}\n\n  \
+                     daemon flags go after `--`: {command} -- {other} ..."
+                );
+                std::process::exit(2);
+            }
+        }
+        i += 2;
+    }
+    NodeOptions {
+        state: state
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(state_dir),
+        // The configured node names the port every client command will
+        // use, so reading it back is what keeps the daemon and its
+        // clients agreeing without the port being written down twice.
+        port: port
+            .or_else(|| {
+                configured_node()
+                    .as_deref()
+                    .and_then(choir_cli::serve::port_of)
+            })
+            .unwrap_or(8417),
+        create,
+        extra: extra.iter().map(|a| (*a).to_string()).collect(),
+    }
+}
+
+/// `~/.choir`, the layout `choir init` writes.
+///
+/// `HOME` describes the machine rather than carrying a setting of ours,
+/// which is the same reason `choir init` may read it.
+fn state_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".choir")
+}
+
+/// The home directory the service manager keeps its units under.
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// The service manager, or a refusal naming what this machine is.
+fn supervisor(command: &str) -> choir_cli::supervise::Supervisor {
+    match choir_cli::supervise::Supervisor::detect() {
+        Some(supervisor) => supervisor,
+        None => {
+            eprintln!(
+                "{command}: no service manager known for {}\n\n  \
+                 run it in the foreground instead: choir node serve",
+                std::env::consts::OS
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Runs one service-manager command, reporting the ones that matter.
+///
+/// `launchctl bootout` on a job that is not loaded fails, and that
+/// failure is the normal case on a first install — so a step is allowed
+/// to fail only when the caller says which one.
+fn run_step(argv: &[String], allow_failure: bool) -> bool {
+    let Some((program, args)) = argv.split_first() else {
+        return true;
+    };
+    match std::process::Command::new(program).args(args).output() {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            if !allow_failure {
+                let text = String::from_utf8_lossy(&out.stderr);
+                eprintln!("  {} {}", argv.join(" "), text.trim());
+            }
+            allow_failure
+        }
+        Err(error) => {
+            if !allow_failure {
+                eprintln!("  {}: {error}", argv.join(" "));
+            }
+            allow_failure
+        }
+    }
+}
+
 fn configured_node() -> Option<String> {
+    configured("node")
+}
+
+/// One key out of the nearest `.choir/config`.
+///
+/// Generalised from the `node` lookup when the credential gained the
+/// same need: a checkout that names its node and a checkout that names
+/// the credential for it are the same question asked twice, and two
+/// parsers for one file is one of them drifting.
+fn configured(want: &str) -> Option<String> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
         if let Ok(text) = std::fs::read_to_string(dir.join(".choir/config")) {
@@ -2075,7 +2289,7 @@ fn configured_node() -> Option<String> {
                     continue;
                 }
                 if let Some((key, value)) = line.split_once('=') {
-                    if key.trim() == "node" {
+                    if key.trim() == want {
                         let value = value.trim();
                         if !value.is_empty() {
                             return Some(value.to_string());
@@ -2260,14 +2474,19 @@ fn main() {
                     }
                     // The two commands that follow, because knowing what
                     // was created is not the same as knowing what to do
-                    // with it.
-                    println!(
-                        "choir-node {} {} --auth-file {} --keys-file {}",
-                        plan.repos.display(),
-                        port,
-                        plan.auth.display(),
-                        plan.trusted.display()
-                    );
+                    // with it. On stdout so `$(choir init)` is the
+                    // command it names; the commentary around it is not.
+                    //
+                    // `choir node serve`, not the daemon's own argv:
+                    // this printed the six-flag `choir-node` line until
+                    // there was a command that derived those flags, and
+                    // a first run that begins by pasting paths teaches
+                    // the paths rather than the tool.
+                    let serve = match dir {
+                        Some(_) => format!("choir node serve --state {}", state.display()),
+                        None => "choir node serve".to_string(),
+                    };
+                    println!("{serve}");
                     eprintln!(
                         "  {} run the line above, then:\n    choir repo create {} me/thing.git\n",
                         style.dim("next"),
@@ -2288,7 +2507,7 @@ fn main() {
         ["repo", "create", api, name] => {
             let client = match choir_cli::mcp::HttpClient::new(
                 api,
-                auth.file.map(std::path::Path::new),
+                auth.file_for(api).map(std::path::Path::new),
                 auth.user,
             ) {
                 Ok(client) => client,
@@ -2328,6 +2547,328 @@ fn main() {
         // Two words, like `acl render`: `node` is a family rather than
         // a command, and `choir node` alone should say so rather than
         // guessing which member was meant.
+        // Everything after `--` belongs to the daemon, so a flag this
+        // command has never heard of is still reachable. The split is
+        // done here rather than in `serve::plan` because only this side
+        // sees the raw argv.
+        ["node", "serve", rest @ ..] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let options = node_options("choir node serve", rest);
+            let layout = choir_cli::serve::Layout::new(&options.state, options.port);
+            let port = options.port;
+            let program = match choir_cli::serve::find_daemon() {
+                Ok(program) => program,
+                Err(error) => {
+                    eprintln!("{} {error}", style.red("choir node serve:"));
+                    std::process::exit(1);
+                }
+            };
+            let invocation =
+                match choir_cli::serve::plan(program, &layout, &options.create, &options.extra) {
+                    Ok(invocation) => invocation,
+                    Err(error) => {
+                        eprintln!("{} {error}", style.red("choir node serve:"));
+                        std::process::exit(1);
+                    }
+                };
+            if choir_cli::serve::port_taken(port) {
+                eprintln!(
+                    "{} something is already listening on 127.0.0.1:{port}\n\n  \
+                     is it yours?  choir node status\n  \
+                     use another:  choir node serve --port <n>",
+                    style.red("choir node serve:")
+                );
+                std::process::exit(1);
+            }
+            // On stderr: stdout belongs to the daemon from the next line
+            // onwards, and a reader piping it should not receive ours.
+            eprintln!("{}", style.dim(&invocation.display()));
+            eprintln!("{} {}", style.dim("serving"), layout.port);
+            eprintln!("{}", style.red(&choir_cli::serve::exec(&invocation)));
+            std::process::exit(1);
+        }
+        ["repo", "list", api] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let client = match choir_cli::mcp::HttpClient::new(
+                api,
+                auth.file_for(api).map(std::path::Path::new),
+                auth.user,
+            ) {
+                Ok(client) => client,
+                Err(error) => {
+                    eprintln!("{} {error}", style.red("choir repo list:"));
+                    std::process::exit(2);
+                }
+            };
+            let (status, body) = match client.get("/api/repos") {
+                Ok(answer) => answer,
+                Err(error) => {
+                    eprintln!("{} {error}", style.red("choir repo list:"));
+                    std::process::exit(1);
+                }
+            };
+            if status != 200 {
+                eprintln!("{} {status}: {body}", style.red("choir repo list:"));
+                std::process::exit(1);
+            }
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let names: Vec<&str> = answer["repos"]
+                .as_array()
+                .map(|a| a.iter().filter_map(serde_json::Value::as_str).collect())
+                .unwrap_or_default();
+            for name in &names {
+                println!("{name}");
+            }
+            // The two empty answers are different problems, and a bare
+            // blank line does not say which one this is.
+            if names.is_empty() {
+                if answer["narrowed"].as_bool().unwrap_or(false) {
+                    eprintln!(
+                        "  {}\n",
+                        style.dim("no repositories this credential can read")
+                    );
+                } else {
+                    eprintln!(
+                        "  {}\n    choir repo create {api} me/thing.git\n",
+                        style.dim("no repositories on this node yet — make one:")
+                    );
+                }
+            }
+        }
+        // The credential is deliberately not in the URL. A clone URL is
+        // pasted into shells, screenshots and issue trackers, and a
+        // token in one is a token in all three; the credential helper
+        // line beside it does the same job and leaves no copy behind.
+        ["repo", "url", api, name] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let name = if name.ends_with(".git") {
+                (*name).to_string()
+            } else {
+                format!("{name}.git")
+            };
+            let url = format!("{}/{name}", api.trim_end_matches('/'));
+            println!("{url}");
+            let credential = auth
+                .file_for(api)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}/auth", state_dir().display()));
+            eprintln!(
+                "\n  {}\n    git clone {url}\n    git -C {} config credential.helper \\\n      \
+                 '!choir git-credential {credential}'\n",
+                style.dim("clone it, then teach git the credential:"),
+                name.trim_end_matches(".git")
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("repo")
+            );
+        }
+        // The unit runs `choir node serve`, so it names a command
+        // rather than a configuration: a daemon flag changing later
+        // never means re-rendering supervision, which is how a plist
+        // that lints clean and restarts cleanly ends up launching
+        // yesterday's arguments.
+        ["node", "install", rest @ ..] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let command = "choir node install";
+            let options = node_options(command, rest);
+            let supervisor = supervisor(command);
+            // Refused rather than warned about: a unit pointing into a
+            // build directory breaks on the next `cargo clean`, and it
+            // breaks at reboot, which is the moment nobody is watching.
+            let Ok(exe) = std::env::current_exe() else {
+                eprintln!(
+                    "{} cannot find my own path",
+                    style.red(&format!("{command}:"))
+                );
+                std::process::exit(1);
+            };
+            if choir_cli::supervise::in_build_directory(&exe) {
+                eprintln!(
+                    "{} this `choir` lives in a build directory:\n    {}\n\n  \
+                     a unit pointing there stops working at the next `cargo clean`,\n  \
+                     and it stops working at reboot. install it first:\n\n    \
+                     cargo build --release -p choir-cli -p choir-node\n    \
+                     cp target/release/choir target/release/choir-node ~/.local/bin/",
+                    style.red(&format!("{command}:")),
+                    exe.display()
+                );
+                std::process::exit(1);
+            }
+            // The same refusal `serve` makes, made before a unit exists
+            // rather than after the service manager has started failing
+            // to run it every ten seconds.
+            let layout = choir_cli::serve::Layout::new(&options.state, options.port);
+            if !layout.missing().is_empty() {
+                eprintln!(
+                    "{} no node in {} yet\n\n  create one: choir init",
+                    style.red(&format!("{command}:")),
+                    options.state.display()
+                );
+                std::process::exit(1);
+            }
+            let home = home_dir();
+            let unit = supervisor.unit_path(&home);
+            if let Some(parent) = unit.parent() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "{} create {}: {error}",
+                        style.red(&format!("{command}:")),
+                        parent.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let body = supervisor.render(&exe, &options.state, options.port, &options.extra);
+            if let Err(error) = choir_fs::write_atomic(&unit, body) {
+                eprintln!(
+                    "{} write {}: {error}",
+                    style.red(&format!("{command}:")),
+                    unit.display()
+                );
+                std::process::exit(1);
+            }
+            let steps = supervisor.commands(choir_cli::supervise::Action::Install, &home);
+            // The teardown step fails when nothing is loaded, which is
+            // exactly the first-install case.
+            let last = steps.len().saturating_sub(1);
+            for (at, step) in steps.iter().enumerate() {
+                if !run_step(step, at != last) {
+                    eprintln!(
+                        "{} the service manager refused",
+                        style.red(&format!("{command}:"))
+                    );
+                    std::process::exit(1);
+                }
+            }
+            note(
+                "installed",
+                &[
+                    ("unit", unit.display().to_string()),
+                    ("runs", format!("{} node serve", exe.display())),
+                    ("state", options.state.display().to_string()),
+                    ("log", layout.log.display().to_string()),
+                ],
+            );
+            eprintln!("  {} choir node status\n", style.dim("check it"));
+        }
+        ["node", "stop"] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let supervisor = supervisor("choir node stop");
+            let home = home_dir();
+            for step in supervisor.commands(choir_cli::supervise::Action::Stop, &home) {
+                if !run_step(&step, false) {
+                    eprintln!("{} nothing was running", style.red("choir node stop:"));
+                    std::process::exit(1);
+                }
+            }
+            eprintln!(
+                "stopped — the unit is still installed, so it returns at next login\n  \
+                 to end it: choir node uninstall"
+            );
+        }
+        // Torn down and re-bootstrapped, never kicked: a restart
+        // relaunches the definition the service manager cached, so a
+        // unit whose arguments changed restarts cleanly into the old
+        // ones.
+        ["node", "restart"] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let command = "choir node restart";
+            let supervisor = supervisor(command);
+            let home = home_dir();
+            let unit = supervisor.unit_path(&home);
+            if !unit.exists() {
+                eprintln!(
+                    "{} nothing is installed here\n\n  install it: choir node install",
+                    style.red(&format!("{command}:"))
+                );
+                std::process::exit(1);
+            }
+            let steps = supervisor.commands(choir_cli::supervise::Action::Install, &home);
+            let last = steps.len().saturating_sub(1);
+            for (at, step) in steps.iter().enumerate() {
+                if !run_step(step, at != last) {
+                    eprintln!(
+                        "{} the service manager refused",
+                        style.red(&format!("{command}:"))
+                    );
+                    std::process::exit(1);
+                }
+            }
+            eprintln!("restarted {}", unit.display());
+        }
+        // The state directory is kept. It holds the keys, the
+        // repositories and the op log, and no command of ours deletes
+        // those — an uninstall that took the data with it would be the
+        // one mistake this whole tool cannot undo.
+        ["node", "uninstall"] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let supervisor = supervisor("choir node uninstall");
+            let home = home_dir();
+            let unit = supervisor.unit_path(&home);
+            for step in supervisor.commands(choir_cli::supervise::Action::Uninstall, &home) {
+                run_step(&step, true);
+            }
+            match std::fs::remove_file(&unit) {
+                Ok(()) => eprintln!("uninstalled {}", unit.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("nothing was installed at {}", unit.display());
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} remove {}: {error}",
+                        style.red("choir node uninstall:"),
+                        unit.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+            eprintln!(
+                "  {} {} — keys, repositories and the op log\n",
+                style.dim("kept"),
+                state_dir().display()
+            );
+        }
+        ["node", "logs", rest @ ..] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let (lines, rest) = match rest.split_first() {
+                Some((first, tail)) if !first.starts_with('-') => match first.parse::<usize>() {
+                    Ok(n) => (n, tail),
+                    Err(_) => {
+                        eprintln!("choir node logs: <lines> must be a number, not {first:?}");
+                        std::process::exit(2);
+                    }
+                },
+                _ => (30, rest),
+            };
+            let options = node_options("choir node logs", rest);
+            let log = choir_cli::serve::Layout::new(&options.state, options.port).log;
+            match std::fs::read_to_string(&log) {
+                Ok(text) => {
+                    let all: Vec<&str> = text.lines().collect();
+                    for line in all.iter().skip(all.len().saturating_sub(lines)) {
+                        println!("{line}");
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!(
+                        "{} no log at {}\n\n  \
+                         a node started by hand writes to your terminal, not here;\n  \
+                         the log is written by a supervised node: choir node install",
+                        style.red("choir node logs:"),
+                        log.display()
+                    );
+                    std::process::exit(1);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "{} {}: {error}",
+                        style.red("choir node logs:"),
+                        log.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
         ["node", "status", rest @ ..] if rest.len() <= 1 => {
             let api = rest
                 .first()
@@ -2343,7 +2884,7 @@ fn main() {
                 std::process::exit(2);
             };
             let style = choir_cli::style::Style::for_stdout();
-            match choir_cli::node::status(&api, auth.file.map(std::path::Path::new)) {
+            match choir_cli::node::status(&api, auth.file_for(&api).map(std::path::Path::new)) {
                 Ok((health, view)) => {
                     print!(
                         "{}",
@@ -2364,7 +2905,11 @@ fn main() {
         ["doctor", rest @ ..] if rest.len() <= 1 => {
             let configured = configured_node();
             let api = rest.first().copied().map(str::to_string).or(configured);
-            let checks = choir_cli::doctor::run(api.as_deref(), auth.file);
+            // The effective credential, not merely a given one: the
+            // check that reports "no auth file" must not report it about
+            // a node whose credential this command would have used.
+            let effective = api.as_deref().and_then(|api| auth.file_for(api));
+            let checks = choir_cli::doctor::run(api.as_deref(), effective.or(auth.file));
             let style = choir_cli::style::Style::for_stdout();
             print!("{}", choir_cli::doctor::report(&checks, style));
             std::process::exit(choir_cli::doctor::exit_code(&checks));

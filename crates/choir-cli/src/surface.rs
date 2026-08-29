@@ -665,6 +665,80 @@ pub const COMMANDS: &[Command] = &[
         group: "operating a node",
     },
     Command {
+        name: "repo list",
+        args: "<api>",
+        summary: "the repositories on a node this credential can read, one per line; an ACL \
+                  narrows the list rather than refusing it, and the command says which of \
+                  the two empty answers it is giving",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "repo url",
+        args: "<api> <owner/repo.git>",
+        summary: "the clone URL for a repository, with the one line of git configuration \
+                  that makes pushing to it work; the credential is never put in the URL, \
+                  because a URL is pasted into shells, screenshots and issue trackers and \
+                  a token in one is a token in all three",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "node serve",
+        args: "[--state <dir>] [--port <n>] [--create <owner/repo.git>] [-- <daemon flags>]",
+        summary: "run the node in this terminal, deriving its repository root, credential and \
+                  trusted-key file from the layout `choir init` wrote, so starting one takes \
+                  the same arguments as creating one — none; execs the daemon rather than \
+                  wrapping it, so signals and the exit code reach the real process",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "node install",
+        args: "[--state <dir>] [--port <n>] [-- <daemon flags>]",
+        summary: "hand the node to this machine's service manager — a launchd agent on macOS, \
+                  a systemd user unit on Linux — so it survives a logout, a crash and a \
+                  reboot; the unit runs `choir node serve`, so a flag changing later never \
+                  means re-rendering it",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "node stop",
+        args: "",
+        summary: "stop the supervised node for this boot, leaving the unit in place so it \
+                  returns at next login; `node uninstall` is the one that ends it",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "node restart",
+        args: "",
+        summary: "reload the unit and start it again, which is how a rebuilt binary reaches \
+                  the running node; the unit is torn down and re-bootstrapped rather than \
+                  kicked, because a kick relaunches the arguments the service manager \
+                  cached rather than the ones on disk",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "node uninstall",
+        args: "",
+        summary: "stop the node and remove its unit so it does not come back; the state \
+                  directory is kept, because the keys, the repositories and the op log are \
+                  in it and no command of ours deletes those",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
+        name: "node logs",
+        args: "[<lines>] [--state <dir>]",
+        summary: "the tail of the node's log, wherever this machine's service manager was \
+                  told to write it; defaults to the last 30 lines",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
         name: "node status",
         args: "[<api>]",
         summary: "what the node is doing right now: health, the commit actually serving, the \
@@ -862,6 +936,16 @@ pub const ENDPOINTS: &[Endpoint] = &[
         path: "/sync.md",
         purpose: "The sync contract, in full: cursor semantics and how to verify a page's \
                   hash chain and author signatures without trusting the node serving them",
+        mcp: None,
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/repos",
+        purpose: "Which repositories this credential can see, from the filesystem rather than \
+                  the view — a repository is not an entity in the view, and `portable::repos` \
+                  already answers which ones exist by walking the root. Narrowed rather than \
+                  refused, like the other aggregate reads: `narrowed` says whether an ACL was \
+                  applied, so \"you can see none\" is distinguishable from \"there are none\".",
         mcp: None,
     },
     Endpoint {

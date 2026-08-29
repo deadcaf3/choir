@@ -924,6 +924,13 @@ pub fn api_denial(
             vec![(Scope::Node, Level::Write)]
         }
         ("GET", "/api/accounts") => vec![(Scope::Node, Level::Read)],
+        // Nothing required, because this one narrows itself: the handler
+        // filters the list to the repositories the caller can read, so a
+        // grant requirement here would be a second, coarser answer to
+        // the same question. A `@node read` requirement in particular
+        // would be exactly wrong — it would hide the listing from every
+        // reader who holds one repository, which is who it is for.
+        ("GET", "/api/repos") => Vec::new(),
         // Enrolling and removing a passkey act on the caller's own
         // account and no one else's (D39): the handler never reads a
         // user from the body, so there is no scope here to check that

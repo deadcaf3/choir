@@ -51,6 +51,12 @@ pub mod node;
 pub mod propose;
 pub mod runner;
 
+// Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod serve;
+
+// Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod supervise;
+
 /// Colour, and the "did you mean" a refusal needs to be useful.
 pub mod style;
 pub mod surface;

@@ -37,6 +37,7 @@ The signed-operation API is the primary agent path: it carries actor identity an
 | `GET /api/profile?channel=X` | One actor's standing, counted out of the view you may already see: the keys bound to them and how many ops ago, changes they own, reviews they were assigned and the verdicts they gave, approvals slashed, checks they reported. It is a reading of `/api/view` and never a wider one -- two callers with different grants get different numbers about the same actor, which is the point. `vouches` names the operator whose graph it is (a vouch is between operators, so `ops/agent` reads `ops`), who vouches for them and whether each edge points both ways. D24 wants key age, vouches, scoped grants and bonds for Sybil resistance; two of the four are reported here as inputs, because a score would be a weighting of one against the other that nobody has measured. Scoped grants exist since D66 and are absent from this reading on purpose: a time-locked grant lives in the node's authorization files rather than in the log, so nothing counted out of the view can see one |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
 | `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures without trusting the node serving them |
+| `GET /api/repos` | Which repositories this credential can see, from the filesystem rather than the view — a repository is not an entity in the view, and `portable::repos` already answers which ones exist by walking the root. Narrowed rather than refused, like the other aggregate reads: `narrowed` says whether an ACL was applied, so "you can see none" is distinguishable from "there are none". |
 | `POST /api/repo` | Create a repository on a running node, with the `pre-receive` hook that puts its pushes in the sequencer's order; needs a node-wide write grant, because there is no repository yet to be scoped to. Nothing is appended to the log: a repository is not a value in the view, and which ones exist is answered by the filesystem, as the export already does |
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
 | `POST /api/accounts/invite` | Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one. A grant may carry its own deadline, `owner/repo write until=<unix seconds>` (D66); the invite's expiry bounds redemption, never what redemption hands over |
@@ -156,6 +157,22 @@ The signed-operation API is the primary agent path: it carries actor identity an
   rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
 - `choir repo create <api> <owner/repo.git>`  
   create a repository on a running node, hooked into the sequencer from its first push, without restarting anything; needs a node-wide write grant, answers 409 rather than an error when it already exists, and prints the clone URL because cloning is what happens next
+- `choir repo list <api>`  
+  the repositories on a node this credential can read, one per line; an ACL narrows the list rather than refusing it, and the command says which of the two empty answers it is giving
+- `choir repo url <api> <owner/repo.git>`  
+  the clone URL for a repository, with the one line of git configuration that makes pushing to it work; the credential is never put in the URL, because a URL is pasted into shells, screenshots and issue trackers and a token in one is a token in all three
+- `choir node serve [--state <dir>] [--port <n>] [--create <owner/repo.git>] [-- <daemon flags>]`  
+  run the node in this terminal, deriving its repository root, credential and trusted-key file from the layout `choir init` wrote, so starting one takes the same arguments as creating one — none; execs the daemon rather than wrapping it, so signals and the exit code reach the real process
+- `choir node install [--state <dir>] [--port <n>] [-- <daemon flags>]`  
+  hand the node to this machine's service manager — a launchd agent on macOS, a systemd user unit on Linux — so it survives a logout, a crash and a reboot; the unit runs `choir node serve`, so a flag changing later never means re-rendering it
+- `choir node stop `  
+  stop the supervised node for this boot, leaving the unit in place so it returns at next login; `node uninstall` is the one that ends it
+- `choir node restart `  
+  reload the unit and start it again, which is how a rebuilt binary reaches the running node; the unit is torn down and re-bootstrapped rather than kicked, because a kick relaunches the arguments the service manager cached rather than the ones on disk
+- `choir node uninstall `  
+  stop the node and remove its unit so it does not come back; the state directory is kept, because the keys, the repositories and the op log are in it and no command of ours deletes those
+- `choir node logs [<lines>] [--state <dir>]`  
+  the tail of the node's log, wherever this machine's service manager was told to write it; defaults to the last 30 lines
 - `choir node status [<api>]`  
   what the node is doing right now: health, the commit actually serving, the sequencer's position and its measured p99 against the 100 ms gate, and how much this credential can see; sections a narrower credential may not read say so rather than reading as an idle node
 - `choir doctor [<api>]`  

@@ -1199,6 +1199,42 @@ fn configure_repo_in(root: &Path, path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `GET /api/repos` — which repositories this credential can see.
+///
+/// Answered from the filesystem rather than from the view, for the same
+/// reason [`create_repo_request`] writes no op: a repository is not an
+/// entity in the [`View`](choir_view::View), and `portable::repos`
+/// already answers "which ones exist" by walking the root.
+///
+/// Narrowed rather than refused, the way the other aggregate reads are:
+/// a reader granted one repository has a legitimate view of that
+/// repository, and a list that answered 403 because it also contains
+/// somebody else's would make the grant useless. With no ACL table
+/// configured every repository is listed, because with no table there
+/// is no one to narrow to.
+fn repos_request(root: &Path, acl: Option<&acl::Effective>, user: &str) -> (u16, String) {
+    // A root that cannot be walked is a broken node, not an empty one,
+    // and saying "no repositories" to that question is the answer that
+    // sends somebody looking in the wrong place.
+    let found = match portable::repos(root) {
+        Ok(found) => found,
+        Err(error) => return (500, serde_json::json!({ "error": error }).to_string()),
+    };
+    let mut names: Vec<String> = found
+        .into_iter()
+        .filter(|name| acl.is_none_or(|t| t.allows_repo(user, name, acl::Level::Read)))
+        .collect();
+    names.sort();
+    let body = serde_json::json!({
+        "format_version": 1,
+        "repos": names,
+        // Named so a caller can tell "you can see none" from "there are
+        // none", which are the same empty list and different problems.
+        "narrowed": acl.is_some(),
+    });
+    (200, body.to_string())
+}
+
 /// `POST /api/repo` — create a repository on a running node.
 ///
 /// Until this existed, a repository could only be made by naming it in
@@ -5076,6 +5112,11 @@ fn handle_api(
                 }
             } else if (method.as_str(), path.as_str()) == ("POST", "/api/workspace/archive") {
                 provision::archive_workspace(root, p, user, &req_body)
+            } else if (method.as_str(), path.as_str()) == ("GET", "/api/repos") {
+                // Routed here rather than inside the platform for the
+                // same reason as `/api/repo`: it needs the repo root,
+                // which the platform does not hold.
+                repos_request(root, acl, user)
             } else if (method.as_str(), path.as_str()) == ("POST", "/api/repo") {
                 // Routed here rather than inside the platform for the
                 // same reason as `/api/workspace`: it needs the repo

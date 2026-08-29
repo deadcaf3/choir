@@ -155,7 +155,7 @@ pub fn exit_code(checks: &[Check]) -> i32 {
 /// pass-through `choir-queue` already relies on. Walking it here rather
 /// than shelling out to `which` costs no subprocess and gives the same
 /// answer the failing `Command::new` would have got.
-fn on_path(tool: &str) -> Option<PathBuf> {
+pub fn on_path(tool: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(tool))

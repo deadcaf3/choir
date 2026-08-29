@@ -66,12 +66,26 @@ fn a_fresh_machine_gets_a_working_layout() {
     );
 
     // stdout is the command that starts the node, so it can be piped
-    // into a shell or a unit file. The human guidance is on stderr.
+    // into a shell. The human guidance is on stderr.
+    //
+    // `choir node serve`, not the daemon's own six-flag invocation: a
+    // first run that begins by pasting paths teaches the paths rather
+    // than the tool, and the paths are all derivable from the layout
+    // this command just wrote.
     assert!(
-        out.contains("choir-node"),
+        out.contains("choir node serve"),
         "stdout should be runnable: {out}"
     );
-    assert!(out.contains("--auth-file"), "{out}");
+    assert!(
+        !out.contains("--auth-file"),
+        "the daemon's flags are derived, not printed: {out}"
+    );
+    // A state directory that is not the default has to be carried, or
+    // the printed line starts a different node than the one just made.
+    assert!(
+        out.contains(state.to_str().unwrap()),
+        "a non-default state directory must be named: {out}"
+    );
 }
 
 /// Secrets are 0600; the public key list is not.

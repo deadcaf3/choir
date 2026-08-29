@@ -48,13 +48,16 @@ A review page shows what commit lands on what ref, who was asked and what each s
 ## Git compatibility path
 
 ```bash
-# after choirctl install:
-git clone "$(./choirctl url owner/repo.git)"
-# or manually:
-# git clone http://choir:<token>@127.0.0.1:8417/owner/demo.git
+choir repo url owner/repo.git      # prints the URL, and the git config for the credential
+git clone http://127.0.0.1:8417/owner/repo.git
+git -C repo config credential.helper '!choir git-credential ~/.choir/auth'
 
 git push origin HEAD:main
 ```
+
+The credential is deliberately not in the URL. A clone URL is pasted into
+shells, screenshots and issue trackers, and a token in one is a token in
+all three; the helper line does the same job and leaves no copy behind.
 
 Pushes are CAS-sequenced. On rejection: fetch, rebase/merge, push again. **Never force-push** over a sequencer rejection.
 

@@ -11,7 +11,7 @@ node's own rejection table and is the authority on any `code` field.
 | Node refuses bind address | Non-loopback without TLS | Add `--tls-cert` / `--tls-key`, or stay on `127.0.0.1` / SSH tunnel |
 | `/api/view` → 401 | Auth enabled (expected) | Pass `-u user:token` or `--auth-file` / `--auth-user` |
 | Browser asks for a username/password | Auth is mandatory on every endpoint, including public TLS binds | Enter a user and token from `--auth-file`. Nothing is served anonymously by design |
-| Push not in `/api/view` | Repo created without `--create` | Recreate via node/`choirctl` so `pre-receive` exists |
+| Push not in `/api/view` | Repository served without its `pre-receive` hook | `choir repo create <owner/repo.git>`, or restart the node — one adopts it, the other hooks what is already there |
 | `unknown_key` | Key not in `--keys-file` | `choir key … [channel] >> keys-file` (hot-reloaded) |
 | `bad_signature` | Signature does not cover the bytes sent; key **is** trusted | Re-sign the exact `(channel, payload)`. Registering a key does not help. Unexpected → someone replayed a signature |
 | `stale_head` | CAS lost the race | Re-read `/api/view`, rebase on `actual`, resubmit |

@@ -11,20 +11,36 @@ policy behind each flag has its own page: `docs/operating/authorization.md`,
 `docs/operating/limits.md`, `docs/operating/webhooks.md`,
 `docs/operating/observability.md` and `docs/operating/transports.md`.
 
-The daemon serves **git smart-HTTP** and the **platform API** on one port (default **8417**). Repos must be created with `--create` (or the installer) so the `pre-receive` hook is installed; a bare repo made any other way is **not** sequenced. With no arguments, the binary uses `./repos` and port 8417; configured invocations must supply both `<repo-root>` and `<port>` before any flags.
+The daemon serves **git smart-HTTP** and the **platform API** on one port (default **8417**). Every repository is served with a `pre-receive` hook or it is not sequenced, so make them with `choir repo create` against a running node, or `--create` at startup; a bare repository that arrives any other way — restored from a bundle, copied in — is adopted and hooked at the next start. With no arguments, the binary uses `./repos` and port 8417; configured invocations must supply both `<repo-root>` and `<port>` before any flags.
 
-## Option A: macOS dogfood (supervised)
+## Option A: your own machine, supervised
+
+Four commands, and none of them needs a path. `choir init` writes the
+layout under `~/.choir`; every command after it derives what it needs
+from that layout, so the flags below are the ones you choose, not the
+ones you have to remember.
 
 ```bash
-./choirctl install-cli          # put `choir` on your PATH as a real binary
-./choirctl install              # build, mint ~/.choir secrets, load launchd
-./choirctl status
-./choirctl url                  # clone/push URL with credentials
-./choirctl logs
-# ./choirctl stop | uninstall   # stop keeps data under ~/.choir
+choir init                      # mint ~/.choir: credential, key, trusted keys, config
+choir node install              # hand it to launchd (macOS) or systemd (Linux)
+choir node status               # health, the commit serving, sequencer position
+choir repo create me/thing.git  # a repository on the running node
+choir repo url me/thing.git     # the clone URL, and the git config to go with it
+choir node logs                 # the tail of the daemon log
+# choir node restart | stop | uninstall   -- uninstall keeps ~/.choir
 ```
 
-Override port with `CHOIR_PORT`. Full flip procedure: `scripts/flip/RUNBOOK.md`.
+`choir node install` writes a unit that runs `choir node serve`, so a
+daemon flag changing later never means re-rendering it. Pass daemon
+flags after `--`, and they are recorded in the unit:
+
+```bash
+choir node install -- --acl-file ~/.choir/acl --rate-limit-api 60
+```
+
+Override the port with `choir init --port <n>`; every command afterwards
+reads it back out of `.choir/config`. Full flip procedure:
+`scripts/flip/RUNBOOK.md`.
 
 ## Option A2: private beta behind a TLS proxy
 
@@ -32,21 +48,27 @@ For the private beta, keep `choir-node` bound to `127.0.0.1` and terminate TLS a
 
 See [`docs/private-beta-runbook.md`](../private-beta-runbook.md) for the network hold, service and proxy renderers, backups, CI packaging, staging promotion, monitoring, rollback, and go-live receipts. Every Choir route remains authenticated. A separate anonymous marketing page must use another host and origin.
 
-## Option B: any Unix (foreground)
+## Option B: any Unix, in the foreground
 
 ```bash
-mkdir -p /tmp/choir-repos ~/.choir
-# user:token per line, mode 0600
-printf 'choir:%s\n' "$(openssl rand -hex 32)" > ~/.choir/auth && chmod 600 ~/.choir/auth
-: > ~/.choir/keys && chmod 600 ~/.choir/keys
-cargo run -p choir-cli -- key ~/.choir/agent.key myop/agent >> ~/.choir/keys
-printf '# reviewer channels, one per line\n' > ~/.choir/reviewers && chmod 600 ~/.choir/reviewers
+choir init                                  # the same layout, without a service manager
+choir node serve                            # runs here, in this terminal
+choir node serve -- --reviewers-file ~/.choir/reviewers   # any daemon flag, after `--`
+```
 
-cargo run -p choir-node -- /tmp/choir-repos 8417 \
+`choir node serve` derives the repository root, the port, the credential
+and the trusted-key file from what `choir init` wrote, then **execs** the
+daemon — so the process you signal, the process the supervisor watches
+and the process in `ps` are all `choir-node` itself.
+
+The daemon can still be run directly, and everything `serve` derives can
+be spelled out instead. It is the same binary either way:
+
+```bash
+choir-node /tmp/choir-repos 8417 \
   --create owner/demo.git \
   --auth-file ~/.choir/auth \
-  --keys-file ~/.choir/keys \
-  --reviewers-file ~/.choir/reviewers
+  --keys-file ~/.choir/keys
 ```
 
 Useful flags: `--bind`, `--tls-cert` / `--tls-key`, `--acl-file <file>` (required before a second credential), `--request-log <file>` and `--rate-limit-api` / `--rate-limit-git` (also required before a second credential), `--quota-push-bytes` / `--quota-workspaces`, `--api-body-limit`, `--batch-limit`, `--ready-min-free-bytes`, `--read-only-browser`, `--journal <file>`, `--require-assignment`, `--protected-refs <file>`, `--require-review`, `--reviewer-conflict-graph <file>` with `--reviewer-conflict-distance <hops>`, `--review-retention <count>`, and `--review-lapse-after-secs <seconds>`. Authenticated operations endpoints are `/healthz`, `/readyz`, and `/metrics`. Flag reference: module docs at the top of `crates/choir-node/src/main.rs`, or `agents.md`.

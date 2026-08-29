@@ -44,7 +44,7 @@ A change here is not a diff against a branch. It is a **signed operation** appen
 
 **OS / filesystem**
 
-- **macOS (APFS):** supported. Fast CoW workspaces via `clonefile` / `cp -Rc`. Dogfood installer uses **launchd** (`./choirctl`).
+- **macOS (APFS):** supported. Fast CoW workspaces via `clonefile` / `cp -Rc`. `choir node install` uses **launchd**.
 - **Linux:** supported. Prefer a **btrfs** volume for workspace snapshots (Phase-0 gate used btrfs). Without CoW, provisioning still works but is slower.
 - **Non-loopback bind** requires TLS (`--tls-cert` + `--tls-key`). Plain HTTP is loopback-only by design.
 
@@ -96,26 +96,31 @@ cargo test --workspace               # hermetic: no network, no external service
 
 The daemon serves **git smart-HTTP** and the **platform API** on one port (default **8417**).
 
-**macOS, supervised:**
+**Supervised** — launchd on macOS, systemd on Linux:
 
 ```bash
-./choirctl install-cli   # put `choir` on your PATH as a real binary
-./choirctl install       # build, mint ~/.choir secrets, load launchd
-./choirctl status
-./choirctl url           # clone/push URL with credentials
+choir init                      # mint ~/.choir: credential, key, trusted keys, config
+choir node install              # hand it to this machine's service manager
+choir node status               # health, the commit serving, sequencer position
+choir repo create me/thing.git
+choir repo url me/thing.git     # the clone URL, and the git config to go with it
 ```
 
-**Any Unix, foreground:**
+**Foreground**, anywhere:
 
 ```bash
-mkdir -p /tmp/choir-repos ~/.choir
-printf 'choir:%s\n' "$(openssl rand -hex 32)" > ~/.choir/auth && chmod 600 ~/.choir/auth
-cargo run -p choir-node -- /tmp/choir-repos 8417 --create owner/demo.git --auth-file ~/.choir/auth
+choir init
+choir node serve
 ```
 
-Repos must be created with `--create` (or the installer) so the `pre-receive` hook is installed; a bare repo made any other way is **not** sequenced.
+Neither takes a path. `choir init` writes the layout; every command after
+it derives the repository root, the port, the credential and the
+trusted-key file from that layout, and daemon flags you *do* want go
+after `--`.
 
-A browser at the bare address gets a front page rather than a password box: what this is, and the three commands it takes to join. Everything behind it needs a credential. Backups run from the same script, once the node lives on its own host — `./choirctl pull-backup` copies the log, the node fingerprint, the policy files and one git bundle per repository to a disk that cannot be lost with the original, and `./choirctl verify-backup` checks that copy offline. Neither ever carries a key or a token.
+Every repository is served with a `pre-receive` hook or it is not sequenced. `choir repo create` makes one against a running node; `--create` makes one at startup; a bare repository that arrives any other way is adopted and hooked at the next start.
+
+A browser at the bare address gets a front page rather than a password box: what this is, and the three commands it takes to join. Everything behind it needs a credential. Backups run from the same script, once the node lives on its own host — `./choirctl pull-backup` copies the log, the node fingerprint, the policy files and one git bundle per repository to a disk that cannot be lost with the original, and `./choirctl verify-backup` checks that copy offline. Neither ever carries a key or a token. (These two are still shell; the rest of `choirctl` is now `choir`.)
 
 > [!WARNING]
 > **Without `--acl-file`, every credential reaches every repository.** The auth file authenticates and nothing else. Read [Authorization](docs/operating/authorization.md) before issuing a second credential.

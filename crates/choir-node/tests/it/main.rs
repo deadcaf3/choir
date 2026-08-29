@@ -59,6 +59,7 @@ mod provenance;
 mod quotas;
 mod reconcile_refs;
 mod rejections;
+mod repos;
 mod require_scope_config;
 mod restore;
 mod resync;
