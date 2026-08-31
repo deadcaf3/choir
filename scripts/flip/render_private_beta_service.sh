@@ -49,7 +49,7 @@ grep -Eq '^[[:space:]]*[^#[:space:]]' "$STATE/acl" \
   || fail "ACL has no grants; add beta users explicitly"
 grep -Eq '^[[:space:]]*[^#[:space:]]' "$STATE/repos.list" \
   || fail "repos.list has no repositories"
-sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$STATE/protected-refs"
+sh "$HERE/validate_review_policy.sh" "$STATE/keys" "$STATE/reviewers" "$STATE/protected-refs" "$STATE/acl"
 sh "$HERE/validate_beta_acl.sh" "$STATE/acl"
 
 # D36 self-service, governed by the manifest rather than by this script's

@@ -1168,19 +1168,40 @@ fn both_installers_refuse_before_stopping_a_running_node() {
 }
 
 fn validate(keys: &str, reviewers: &str, protected: &str) -> std::process::ExitStatus {
-    let work = std::env::temp_dir().join(format!("choir-policy-{}", std::process::id()));
+    validate_with_acl(keys, reviewers, protected, None)
+}
+
+fn validate_with_acl(
+    keys: &str,
+    reviewers: &str,
+    protected: &str,
+    acl: Option<&str>,
+) -> std::process::ExitStatus {
+    // The pid alone no longer separates two of these: the merged harness
+    // runs its modules as threads of one process, so a second caller
+    // would delete the first one's directory mid-run.
+    let work = std::env::temp_dir().join(format!(
+        "choir-policy-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("keys"), keys).unwrap();
     std::fs::write(work.join("reviewers"), reviewers).unwrap();
     std::fs::write(work.join("protected"), protected).unwrap();
+    let mut args = vec![
+        work.join("keys"),
+        work.join("reviewers"),
+        work.join("protected"),
+    ];
+    if let Some(acl) = acl {
+        std::fs::write(work.join("acl"), acl).unwrap();
+        args.push(work.join("acl"));
+    }
     let status = std::process::Command::new("sh")
         .arg(repo_root().join("scripts/flip/validate_review_policy.sh"))
-        .args([
-            work.join("keys"),
-            work.join("reviewers"),
-            work.join("protected"),
-        ])
+        .args(&args)
         .stderr(std::process::Stdio::null())
         .status()
         .expect("validate review policy");
@@ -1190,26 +1211,81 @@ fn validate(keys: &str, reviewers: &str, protected: &str) -> std::process::ExitS
 
 #[test]
 fn review_policy_validation_fails_closed() {
-    let keys = "operator/writer aa\nreview-a/agent bb\nreview-a/second dd\nreview-b/agent cc\n";
+    let keys = "operator/writer aa\nreview-a/agent bb\nreview-a/second dd\n\
+                review-b/agent cc\nreview-c/agent ee\n";
+    let protected = "owner/repo.git:refs/heads/main\n";
+
+    // Three distinct operators is the smallest drawable quorum: an
+    // approval needs two, and the author's own operator is never drawn.
     assert!(validate(
         keys,
-        "review-a/agent\nreview-b/agent\n",
-        "owner/repo.git:refs/heads/main\n"
+        "review-a/agent\nreview-b/agent\nreview-c/agent\n",
+        protected
     )
     .success());
-    assert!(!validate(
+    // Two used to pass here, and rendered a unit whose reviews could be
+    // opened and assigned but never reach weight two.
+    assert!(!validate(keys, "review-a/agent\nreview-b/agent\n", protected).success());
+    assert!(!validate(keys, "review-a/agent\nreview-a/second\n", protected).success());
+    assert!(!validate(keys, "review-a/agent\nreview-b/missing\n", protected).success());
+    assert!(!validate(keys, "review-a/agent\nreview-b/agent\nreview-c/agent\n", "").success());
+}
+
+/// D42: a repository with an owner is landed on by that owner without a
+/// reviewer ever being drawn, so demanding a pool for it refuses a
+/// configuration the daemon supports — the one a person working alone on
+/// their own repository has.
+#[test]
+fn an_owned_repository_needs_no_reviewer_pool() {
+    let keys = "operator/writer aa\n";
+    let protected = "owner/repo.git:refs/heads/main\n";
+    let empty_pool = "# nobody\n";
+
+    assert!(validate_with_acl(
         keys,
-        "review-a/agent\nreview-a/second\n",
-        "owner/repo.git:refs/heads/main\n"
+        empty_pool,
+        protected,
+        Some("solo owner/repo.git own\n")
     )
     .success());
-    assert!(!validate(
+    // `*` is how `Effective::has_owner` covers every repository.
+    assert!(validate_with_acl(keys, empty_pool, protected, Some("solo * own\n")).success());
+
+    // Weaker grants are not the owner basis, and neither is an owner of
+    // some other repository.
+    assert!(!validate_with_acl(
         keys,
-        "review-a/agent\nreview-b/missing\n",
-        "owner/repo.git:refs/heads/main\n"
+        empty_pool,
+        protected,
+        Some("solo owner/repo.git write\n")
     )
     .success());
-    assert!(!validate(keys, "review-a/agent\nreview-b/agent\n", "").success());
+    assert!(!validate_with_acl(
+        keys,
+        empty_pool,
+        protected,
+        Some("solo other/repo.git own\n")
+    )
+    .success());
+
+    // One owned repository does not license an unowned one: every
+    // protected repository has to clear, or the pool rule applies.
+    assert!(!validate_with_acl(
+        keys,
+        empty_pool,
+        "owner/repo.git:refs/heads/main\nowner/other.git:refs/heads/main\n",
+        Some("solo owner/repo.git own\n")
+    )
+    .success());
+
+    // A named reviewer still has to have a bound key, owner or not.
+    assert!(!validate_with_acl(
+        keys,
+        "review-a/agent\n",
+        protected,
+        Some("solo owner/repo.git own\n")
+    )
+    .success());
 }
 
 /// The mirror push makes two round trips to a VM ~275 ms away, and a
@@ -2122,8 +2198,14 @@ fn the_beta_renderer_reads_the_accounts_decision_from_the_manifest() {
     private("auth", "alice:token\n");
     // Two fields exactly: the validator binds a reviewer to a key by
     // `$1 == name && NF == 2`.
-    private("keys", "alice/laptop AAAA\nbob/laptop BBBB\n");
-    private("reviewers", "alice/laptop\nbob/laptop\n");
+    private(
+        "keys",
+        "alice/laptop AAAA\nbob/laptop BBBB\ncarol/laptop CCCC\n",
+    );
+    // Three operators, because this node has no owner for the protected
+    // repository and so lands on the quorum basis: an approval needs two
+    // distinct operators and the author's own is never drawn.
+    private("reviewers", "alice/laptop\nbob/laptop\ncarol/laptop\n");
     private("protected-refs", "owner/repo.git:refs/heads/main\n");
     private("acl", "alice @node write\nalice owner/repo.git write\n");
     for name in [

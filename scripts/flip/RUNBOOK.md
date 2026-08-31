@@ -58,9 +58,13 @@ To persistently require assigned review for protected refs, create
 `~/.choir/review-gates.enabled` and `~/.choir/protected-refs`, both mode 0600,
 then rerun `choirctl install`. The protected-ref file carries one namespaced
 pattern per line, for example `<owner>/<repo>.git:refs/heads/main`. The installer
-fails closed unless the reviewer pool has at least two prefixes, every reviewer
-has a bound key, and the protected-ref file is non-empty. Removing the marker
-and reinstalling deliberately returns to the ungated policy.
+fails closed unless the protected-ref file is non-empty, every reviewer named
+has a bound key, and one of the two landing bases is reachable: either the ACL
+grants `own` over every protected repository, so its owner lands it alone
+(D42), or the reviewer pool holds at least three prefixes. Three, not two,
+because an approval needs two distinct operators and a draw never takes the
+author's own -- a pool of two deadlocks whenever the author is in it. Removing
+the marker and reinstalling deliberately returns to the ungated policy.
 
 To close replay (D26), create `~/.choir/scope-required.enabled` (mode 0600)
 and rerun the installer. The node then admits only ops whose signed payload
