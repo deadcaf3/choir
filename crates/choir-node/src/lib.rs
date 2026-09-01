@@ -2598,10 +2598,37 @@ fn not_modified(tag: &str, csp: &[u8]) -> tiny_http::Response<std::io::Empty> {
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         )
 }
+
+/// The referrer policy every response on this surface carries.
+///
+/// **`same-origin`, and it may not be `no-referrer`.** It was
+/// `no-referrer` in ten hand-typed copies, and that value silently
+/// disabled every browser write path on this node. The Fetch standard
+/// sets a non-`GET` request's `Origin` header from the referrer policy:
+/// under `no-referrer` the origin is serialized as the string `null`,
+/// for same-origin submissions as much as for cross-site ones. So every
+/// form on this surface posted `Origin: null`, `same_origin` compared it
+/// against this node's own address, refused, and told the reader their
+/// form came from another site. Sign-in, the operator console's four
+/// forms and the account page were all unreachable from a browser while
+/// every `curl` path stayed green, because a command-line client applies
+/// no referrer policy and sends the header the check expects.
+///
+/// `same-origin` keeps the privacy this was for and stops defeating the
+/// check. A `Referer` is still withheld from every other site, which is
+/// the property `/join` depends on: its URL carries an invite secret in
+/// the query string. What changes is that a *same-origin* request keeps
+/// its real `Origin`, and only a genuinely cross-site one is nulled --
+/// which is the request `same_origin` exists to refuse.
+///
+/// One constant rather than a copy per responder, for the reason
+/// [`BROWSER_CSP`] gives: a value carrying a constraint this subtle,
+/// hand-typed ten times, is a value that drifts.
+const REFERRER_POLICY: &[u8] = b"same-origin";
 
 /// The policy every page on the browser surface carries.
 ///
@@ -2695,7 +2722,7 @@ fn respond_static_script(request: tiny_http::Request) -> std::io::Result<(u16, u
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         );
     served(request, response, 200, bytes)
@@ -2876,7 +2903,7 @@ fn respond_page(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         )
         // The palette is chosen by a cookie, so two readers of the same
@@ -2925,7 +2952,7 @@ fn respond_scripted_page(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         )
         .with_header(
@@ -3496,7 +3523,7 @@ fn respond_join(
             .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         );
     if let Some(token) = opened.as_deref() {
@@ -3643,7 +3670,7 @@ fn respond_theme(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         );
     served(request, response, 303, 0)
@@ -4059,7 +4086,7 @@ fn respond_console(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         );
     served(request, response, page.status, bytes)
@@ -4252,7 +4279,7 @@ fn respond_account_token(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         );
     served(request, response, page.status, bytes)
@@ -4797,7 +4824,7 @@ fn handle_ui(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         );
     served(request, response, 200, page.len() as u64)
@@ -4954,7 +4981,7 @@ fn handle_browse(
             .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..])
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
                 .expect("static header"),
         );
     if let Some(tag) = rendered.etag {

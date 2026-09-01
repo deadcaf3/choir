@@ -533,7 +533,12 @@ fn private_beta_proxy_leaves_the_content_policy_to_the_node() {
     for required in [
         "add_header Strict-Transport-Security",
         "add_header X-Frame-Options DENY",
-        "add_header Referrer-Policy no-referrer",
+        // `same-origin`, and not `no-referrer`: the Fetch standard
+        // derives a non-GET request's `Origin` from the referrer policy,
+        // and `no-referrer` nulls it on same-origin submissions too,
+        // which makes the node refuse its own forms. The proxy's copy
+        // must not reintroduce the value the node stopped sending.
+        "add_header Referrer-Policy same-origin",
         "add_header Permissions-Policy",
         "add_header X-Content-Type-Options nosniff",
     ] {

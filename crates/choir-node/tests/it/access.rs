@@ -624,3 +624,47 @@ fn the_sign_in_refusal_names_what_it_compared() {
 
     std::fs::remove_dir_all(&s.work).ok();
 }
+
+/// The referrer policy may not be one that nulls a same-origin `Origin`.
+///
+/// This is the pairing that broke every browser write path on this node
+/// while every `curl` test stayed green. The Fetch standard derives a
+/// non-`GET` request's `Origin` header from the referrer policy, and
+/// `no-referrer` serializes it as `null` for same-origin submissions as
+/// much as for cross-site ones -- so the node's own security header made
+/// its own CSRF check refuse its own forms. A command-line client
+/// applies no referrer policy, so no test that drives this surface with
+/// `curl` can observe it. This one asserts the header instead.
+#[test]
+fn the_referrer_policy_does_not_null_the_origin_of_our_own_forms() {
+    let s = served("referrerpolicy");
+
+    // Every page a form is submitted from, and the pre-auth pages beside
+    // them: one weak copy is all it takes, since the policy is a
+    // property of the document the form lives in.
+    for path in ["/signin", "/people", "/account", "/"] {
+        let (_, headers, _) = get(&format!("{}{path}", s.base), &["-u", "alice:a"]);
+        let policy = headers
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("Referrer-Policy")
+                    .then(|| value.trim().to_string())
+            })
+            .unwrap_or_else(|| panic!("{path} carries no Referrer-Policy:\n{headers}"));
+
+        // The three the standard nulls a same-origin non-GET origin
+        // under. `no-referrer` unconditionally; the other two only on an
+        // https -> http downgrade, which is a shape this node can be put
+        // behind a proxy into.
+        assert!(
+            !matches!(
+                policy.as_str(),
+                "no-referrer" | "no-referrer-when-downgrade" | "strict-origin"
+            ),
+            "{path} carries `{policy}`, which nulls the Origin header on \
+             a same-origin form POST and so refuses this node's own forms"
+        );
+    }
+    std::fs::remove_dir_all(&s.work).ok();
+}

@@ -597,11 +597,17 @@ fn the_public_pages_execute_nothing_and_reach_nowhere() {
         "more than the one shared file: {body}"
     );
 
+    // `same-origin`, not `no-referrer`, and the difference is not a
+    // weakening: a `Referer` is still withheld from every other site,
+    // which is the whole property here, because this URL carries the
+    // invite secret in its query string. `no-referrer` additionally
+    // nulls the `Origin` header on every non-GET request, same-origin
+    // ones included, which is what broke every form on this surface.
     for url in [format!("{}/", s.base), s.join_url(&id, &secret)] {
         let (_, headers, _) = get(&url, &[]);
         assert_eq!(
             header_value(&headers, "Referrer-Policy").as_deref(),
-            Some("no-referrer"),
+            Some("same-origin"),
             "the invite secret can leak in a Referer header: {headers}"
         );
     }
