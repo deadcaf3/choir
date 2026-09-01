@@ -3080,16 +3080,35 @@ fn respond_signin(
     // The form (D74). Plain `POST`, so it works with scripting off and a
     // browser's password manager can offer to keep what was typed.
     if path == "/signin" {
-        if !same_origin(&request, scheme) {
+        if let Some((expected, found)) = origin_mismatch(&request, scheme) {
+            // `null` is not somebody else's address, it is no address:
+            // a browser sends it after following a redirect that crossed
+            // origins, and the redirect this node's own reader hits is
+            // `http` -> `https`, which a 308 performs with the POST
+            // intact. So the sign-in page was loaded over `http`, its
+            // relative form posted to `http`, and the browser arrived
+            // here with its origin erased. Saying "another site" for
+            // that is what sent a reader hunting an attacker.
+            let opaque = found == "null";
             let html = ui::refusal(
                 "Cross-origin sign-in refused",
                 403,
                 &ui::Refusal {
                     code: "cross_origin",
-                    error: "That form was submitted from another site.",
-                    expected: Some("this node's own sign-in page"),
-                    actual: Some("a form somewhere else"),
-                    next: "Open this node's address and sign in there.",
+                    error: if opaque {
+                        "That form was loaded over http and redirected here, which erases \
+                         the browser's record of where it came from."
+                    } else {
+                        "That form did not come from this node's own sign-in page."
+                    },
+                    expected: Some(&expected),
+                    actual: Some(&found),
+                    next: if opaque {
+                        "Load the address under `expected` directly, with https, and sign \
+                         in from that page."
+                    } else {
+                        "Open the address under `expected` and sign in there."
+                    },
                 },
                 &[],
                 reader_chrome(&request),
@@ -4253,14 +4272,31 @@ fn respond_account_token(
 /// auth file once has a browser that will re-present it to any page that
 /// asks. Without this check, a link could mint an invite in their name.
 fn same_origin(request: &tiny_http::Request, scheme: &'static str) -> bool {
-    let Some(origin) = header(request, "origin") else {
-        return true;
-    };
+    origin_mismatch(request, scheme).is_none()
+}
+
+/// The two sides of a failed [`same_origin`], as the reader should see
+/// them: what the node required, and what it was sent.
+///
+/// `None` when the request is same-origin, so a caller reads it as the
+/// refusal itself rather than as a detail beside one.
+///
+/// Both halves are the node's own address and the browser's own address.
+/// Neither is a secret, and withholding them was not buying anything: the
+/// page said "a form somewhere else" for a request that came from this
+/// node's own sign-in page over the wrong scheme, which sends the reader
+/// looking for an attacker instead of at their address bar. A refusal
+/// that cannot be acted on is a refusal that gets reported as a bug.
+fn origin_mismatch(request: &tiny_http::Request, scheme: &'static str) -> Option<(String, String)> {
+    let origin = header(request, "origin")?;
     match header(request, "host") {
-        Some(host) => origin == format!("{scheme}://{host}"),
+        Some(host) => {
+            let expected = format!("{scheme}://{host}");
+            (origin != expected).then_some((expected, origin))
+        }
         // No `Host` and an `Origin` that claims one: nothing to compare
         // against, so refuse rather than guess.
-        None => false,
+        None => Some(("this node's own address".to_string(), origin)),
     }
 }
 

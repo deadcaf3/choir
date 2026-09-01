@@ -562,3 +562,65 @@ fn the_operator_sets_the_front_pages_contact_from_the_console() {
 
     std::fs::remove_dir_all(&s.work).ok();
 }
+
+/// The sign-in refusal names both addresses, and says what `null` means.
+///
+/// A 403 that reads "a form somewhere else" for a request that came from
+/// this node's own page over `http` is a refusal nobody can act on: it
+/// sends the reader looking for an attacker rather than at their address
+/// bar. `Origin: null` is the case that actually happens -- a browser
+/// erases the origin when it follows a redirect across schemes, and the
+/// `http` -> `https` redirect in front of a node is exactly such a
+/// redirect, performed with the POST intact by a 308.
+#[test]
+fn the_sign_in_refusal_names_what_it_compared() {
+    let s = served("signinorigin");
+
+    let refusal = |origin: &str| -> String {
+        let (status, _, body) = get(
+            &format!("{}/signin", s.base),
+            &[
+                "-X",
+                "POST",
+                "-H",
+                &format!("Origin: {origin}"),
+                "-d",
+                "user=alice&secret=a",
+            ],
+        );
+        assert_eq!(status, 403, "{body}");
+        body
+    };
+
+    // Somebody else's address is quoted back rather than paraphrased.
+    let body = refusal("https://evil.example");
+    assert!(
+        body.contains("https://evil.example"),
+        "the refusal does not name the origin it refused:\n{body}"
+    );
+    assert!(
+        body.contains("127.0.0.1"),
+        "the refusal does not name the address it expected:\n{body}"
+    );
+
+    // An erased origin is a different situation and gets different words.
+    let body = refusal("null");
+    assert!(
+        body.contains("redirected") && body.contains("http"),
+        "an opaque origin is still described as another site:\n{body}"
+    );
+    assert!(
+        !body.contains("did not come from this node"),
+        "the opaque case took the generic branch:\n{body}"
+    );
+
+    // The page still works when the browser sends no origin at all,
+    // which is every non-browser client and is not a refusal.
+    let (status, _, _) = get(
+        &format!("{}/signin", s.base),
+        &["-X", "POST", "-d", "user=alice&secret=a"],
+    );
+    assert_ne!(status, 403, "a request with no Origin was refused");
+
+    std::fs::remove_dir_all(&s.work).ok();
+}
