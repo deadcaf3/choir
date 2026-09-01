@@ -72,6 +72,12 @@ fn close(mut h: String) -> String {
 /// the wrong owner mints an invite to nothing, and leaving the `.git`
 /// off used to mint an invite granting nothing at all. A list cannot be
 /// misspelled.
+///
+/// `read` is selected because both callers hand authority to somebody
+/// who does not have it yet, and the level nobody thought about should
+/// be the smaller one. Defaulting to `write` made the safe choice the
+/// one an operator had to remember, which is backwards for the common
+/// case: somebody invited to look at the work.
 fn grant_controls(h: &mut String, repos: &[String], id_prefix: &str) {
     h.push_str("<label for=\"");
     h.push_str(id_prefix);
@@ -93,8 +99,8 @@ fn grant_controls(h: &mut String, repos: &[String], id_prefix: &str) {
     h.push_str("<select id=\"");
     h.push_str(id_prefix);
     h.push_str("-level\" name=\"level\">");
-    h.push_str("<option value=\"read\">read</option>");
-    h.push_str("<option value=\"write\" selected>write</option>");
+    h.push_str("<option value=\"read\" selected>read</option>");
+    h.push_str("<option value=\"write\">write</option>");
     h.push_str("</select> ");
 }
 
