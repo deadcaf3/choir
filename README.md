@@ -8,7 +8,7 @@
 
 <br/>
 
-![Rust](https://img.shields.io/badge/rust-1.94.1_·_edition_2021-B7410E?style=flat-square&logo=rust&logoColor=white)
+![Rust](https://img.shields.io/badge/rust-1.97.1_·_edition_2021-B7410E?style=flat-square&logo=rust&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-4C72B0?style=flat-square)
 ![Status](https://img.shields.io/badge/status-research_prototype-8A8A8A?style=flat-square)
 ![Tests](https://img.shields.io/badge/tests-hermetic-2E8B57?style=flat-square)
@@ -51,7 +51,7 @@ A change is a **signed operation** appended to an append-only log. One writer th
 
 ## Requirements
 
-Rust 1.94.1, pinned in `rust-toolchain.toml`, edition 2021. Install it with [rustup](https://rustup.rs/).
+Rust 1.97.1, pinned in `rust-toolchain.toml`, edition 2021. Install it with [rustup](https://rustup.rs/).
 
 | Tool | Purpose |
 |:--|:--|
@@ -73,8 +73,9 @@ Rust 1.94.1, pinned in `rust-toolchain.toml`, edition 2021. Install it with [rus
 
 ## Build
 
+From a checkout of this repository:
+
 ```bash
-git clone <this-repo> && cd choir
 cargo build --release -p choir-node -p choir-cli
 export PATH="$PWD/target/release:$PATH"
 ```
@@ -204,6 +205,12 @@ That builds `book/`, with the API documentation inside it at `book/api/`, so a l
 | Every command and endpoint | [The CLI and HTTP API](docs/using/cli.md) |
 | To wire a coding agent | [`templates/`](templates/README.md) · [`agents.md`](agents.md) |
 | Something is broken | [Troubleshooting](docs/reference/troubleshooting.md) · [`ERRORS.md`](ERRORS.md) |
+
+---
+
+## Contributing
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the gate lanes, the invariants that are one-way doors, and the conventions that look like omissions and are not. Security reports go to [`SECURITY.md`](SECURITY.md), never to a public issue.
 
 ---
 
