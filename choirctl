@@ -8,6 +8,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE=$HOME/.choir
+# The pull destination, spelled once. `pull_backup.sh` defaults to the
+# same path; two spellings of it drifted apart and `status` spent a week
+# reporting NEVER PULLED at a directory nothing ever wrote.
+BACKUP=$HOME/choir-backup
 LABEL=com.choir.node
 PORT=${CHOIR_PORT:-8417}
 
@@ -365,8 +369,8 @@ if lag["log_write_failures"]:
   echo "view:   $view"
   if remote_node; then
     # The backup relation is inverted: this machine holds the pull.
-    if [ -f "$HOME/choir-oplog/ops.jsonl" ]; then
-      echo "backup: $(wc -l < "$HOME/choir-oplog/ops.jsonl" | tr -d ' ') ops pulled, last $(date -r "$HOME/choir-oplog/ops.jsonl" '+%F %H:%M')"
+    if [ -f "$BACKUP/ops.jsonl" ]; then
+      echo "backup: $(wc -l < "$BACKUP/ops.jsonl" | tr -d ' ') ops pulled, last $(date -r "$BACKUP/ops.jsonl" '+%F %H:%M')"
     else
       echo "backup: NEVER PULLED — run: ./choirctl pull-backup"
     fi
@@ -511,7 +515,7 @@ verify-backup)
   # user following docs/runbook-restore.md had no ./choirctl to run.
   # scripts/flip/verify_backup.sh stays on disk as the shell fallback;
   # nothing calls it.
-  "$(choir_bin)" backup verify "${2:-$HOME/choir-backup}"
+  "$(choir_bin)" backup verify "${2:-$BACKUP}"
   ;;
 
 restore-from-backup)
