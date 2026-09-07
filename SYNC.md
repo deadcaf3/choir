@@ -6,8 +6,10 @@ the only endpoint you need to build a replica, and this file is what
 another implementation should be written against.
 
 Two things are specified here: what the cursor means, and how to check
-that the pages you were handed really are the chain — without trusting
-the node that served them.
+that the pages you were handed really are the chain. That check is a
+replay: it makes a served page checkable against what you already hold.
+It is not an inclusion proof, so it catches a node that contradicts your
+copy, not one that shows two readers two consistent-looking histories.
 
 Every node serves this file at `GET /sync.md`, so an agent that can
 reach a node can read the contract without cloning anything.

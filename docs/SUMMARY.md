@@ -4,6 +4,7 @@
 
 ---
 
+- [Why choir exists](why.md)
 - [Architecture](architecture.md)
 
 # Operating a node

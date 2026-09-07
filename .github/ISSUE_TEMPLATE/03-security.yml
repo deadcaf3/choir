@@ -1,0 +1,34 @@
+name: I think I found a security issue
+description: Read this first. Do not file it here.
+title: "Do not submit this form"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Please close this form.
+
+        Security reports do not go in the public issue tracker. Opening
+        one here publishes the vulnerability to everybody, including
+        anyone running a node, before there is a fix for them to take.
+
+        **Report it privately instead**, either way:
+
+        1. **Security → Advisories → Report a vulnerability** in this
+           repository, which opens a private thread with the maintainer.
+        2. The contact named in `SECURITY.md`, in the repository root.
+
+        `SECURITY.md` also carries what is in scope, what is explicitly
+        not, and what to expect after you send it.
+
+        Thank you for finding it. Please close this tab without
+        submitting.
+
+  - type: checkboxes
+    id: understood
+    attributes:
+      label: Confirm
+      options:
+        - label: >
+            I understand this form is a redirect, and I will report
+            privately rather than submit it.
+          required: true

@@ -6,7 +6,17 @@
 
 **many agents on one repository · one total order from a single-writer sequencer · merge conflicts as first-class values**
 
-<br/>
+</div>
+
+```bash
+cargo run -p choir-demo       # see it work, narrated
+cargo test --workspace        # hermetic suite, no network
+./gate                        # every release check, fails closed
+```
+
+New here? [**Why choir exists**](docs/why.md) is the five-minute version.
+
+<div align="center">
 
 ![Rust](https://img.shields.io/badge/rust-1.97.1_·_edition_2021-B7410E?style=flat-square&logo=rust&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-4C72B0?style=flat-square)
@@ -37,11 +47,11 @@ A change is a **signed operation** appended to an append-only log. One writer th
 | Single-writer sequencer | Assigns one total order per repository. A racing push is answered with a compare-and-swap. | `git push` |
 | Signed operation log | Every write carries its author's signature over a hash chain. | `choir submit` |
 | Conflicts as values | An unresolved merge is a committed state that later work builds on. | `choir propose` |
-| Ordinary git | Clone, fetch and push over git smart-HTTP or SSH. | `git clone` |
+| Ordinary git | Clone, fetch and push over git smart-HTTP or SSH. Not LFS, not sequenced submodules, and no force-push over a rejection. | `git clone` |
 | Copy-on-write workspaces | An isolated tree per change, snapshot-backed on APFS and btrfs. | `choir workspace` |
 | Review and landing | Proposals, drawn reviewers, weighted approval, and a record of what authorized each landing. | `choir propose`, `choir verdict` |
 | Authorization | Per-repository grants, ownership, key rotation and invite-based accounts. | `choir invite`, `choir bind` |
-| Offline verification | Replays a log's hash chain and signatures without trusting the node that served it. | `choir log --verify` |
+| Offline verification | Replays a log's hash chain and signatures locally, so a served page is checkable against the one you hold. | `choir log --verify` |
 | Browser surface | Server-rendered repository browsing, review pages and account self-service. | `choir-node` |
 | Backup and restore | Copies the log, the node fingerprint, the policy files and one git bundle per repository, then checks the copy can be restored from. | `choir backup verify` |
 | Node lifecycle | Mints the layout, hands the daemon to launchd or systemd, and reports what it is serving. | `choir init`, `choir node` |
@@ -169,6 +179,8 @@ Workspace, propose, review and land in full: [**The contribution workflow**](doc
 **Does a git client need changes?**
 No. `git clone`, `git fetch` and `git push` work over HTTPS and SSH. The sequencer runs in the `pre-receive` hook, so a push is answered by ordinary git machinery.
 
+Three things do not come along. Git LFS has no server here, so an LFS-backed repository clones without its objects. Submodules are ordinary gitlinks and are not sequenced: the parent repository's pointer is ordered, the submodule's own history stays with whatever host holds it. And a force-push over a compare-and-swap rejection is refused rather than obeyed, because that rejection is the total order answering; integrate and push again.
+
 **What happens when two agents push the same ref?**
 The later one is answered with a compare-and-swap rejection naming the head it lost to. Integrate and retry. See [`stale_head`](ERRORS.md).
 
@@ -178,8 +190,8 @@ Into the log, as a committed state that later operations build on. A strategy de
 **How does an agent get a credential?**
 An operator runs `choir invite` and sends the link. The holder runs `choir join`, which redeems the invite and mints their actor key in one step.
 
-**Can a log be verified without trusting the node?**
-Yes. `choir log --verify` walks the hash chain, recomputes every hash and verifies the signatures whose keys you hold. The contract is [`SYNC.md`](SYNC.md).
+**How much of a served log can a reader check?**
+`choir log --verify` walks the hash chain, recomputes every hash and verifies the signatures whose keys you hold, so any page you are served is replayable and checkable against the one you already hold. It is not a transparency log: there are no inclusion proofs, so a node that served two divergent histories to two readers is caught by those readers comparing notes, not by either one alone. The contract is [`SYNC.md`](SYNC.md).
 
 **What does a backup contain?**
 The operation log, the node fingerprint, the policy files and one git bundle per repository, carrying no key and no token. [Restoring from a backup](docs/runbook-restore.md) covers the ordering rules and the secrets you supply yourself.
@@ -203,7 +215,7 @@ That builds `book/`, with the API documentation inside it at `book/api/`, so a l
 | To run a node | [Running a node](docs/operating/running-a-node.md) |
 | To get a change reviewed and landed | [The contribution workflow](docs/using/workflow.md) |
 | Every command and endpoint | [The CLI and HTTP API](docs/using/cli.md) |
-| To wire a coding agent | [`templates/`](templates/README.md) · [`agents.md`](agents.md) |
+| To wire a coding agent | [`templates/`](templates/README.md) · [`AGENTS.md`](AGENTS.md) |
 | Something is broken | [Troubleshooting](docs/reference/troubleshooting.md) · [`ERRORS.md`](ERRORS.md) |
 
 ---

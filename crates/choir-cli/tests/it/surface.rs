@@ -500,7 +500,7 @@ fn local_only_files_stay_ignored() {
         String::from_utf8_lossy(&tracked.stdout)
     );
 
-    for public in ["agents.md", "DECISIONS.md", "LICENSE-MIT", "LICENSE-APACHE"] {
+    for public in ["AGENTS.md", "DECISIONS.md", "LICENSE-MIT", "LICENSE-APACHE"] {
         let check = std::process::Command::new("git")
             .args(["check-ignore", "--no-index", public])
             .current_dir(&root)
@@ -509,12 +509,12 @@ fn local_only_files_stay_ignored() {
         assert!(!check.status.success(), "public file is ignored: {public}");
     }
     assert!(
-        root.join("agents.md").is_file(),
-        "generated agents.md is missing"
+        root.join("AGENTS.md").is_file(),
+        "generated AGENTS.md is missing"
     );
     assert!(
         !root.join("AGENT_GUIDE.md").exists(),
-        "the transport brief requires the root artifact to remain agents.md"
+        "the transport brief requires the root artifact to remain AGENTS.md"
     );
 }
 
@@ -612,11 +612,11 @@ fn every_command_appears_in_the_agent_facing_docs() {
     for c in surface::COMMANDS {
         assert!(llms.contains(c.name), "llms.txt omits `{}`", c.name);
         if c.agent_facing {
-            assert!(agents.contains(c.name), "agents.md omits `{}`", c.name);
+            assert!(agents.contains(c.name), "AGENTS.md omits `{}`", c.name);
         }
     }
     for e in surface::ENDPOINTS {
-        assert!(agents.contains(e.path), "agents.md omits `{}`", e.path);
+        assert!(agents.contains(e.path), "AGENTS.md omits `{}`", e.path);
         assert!(llms.contains(e.path), "llms.txt omits `{}`", e.path);
     }
 }
