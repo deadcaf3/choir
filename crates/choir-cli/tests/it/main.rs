@@ -14,6 +14,7 @@ mod config;
 mod credential;
 mod deploy;
 mod doctor;
+mod first_run;
 mod gate;
 mod init;
 mod insight;

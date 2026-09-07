@@ -95,6 +95,32 @@ impl HttpClient {
         })
     }
 
+    /// Builds a client for `api` from a credential already in hand.
+    ///
+    /// The invite in a join link is the one credential this crate never
+    /// reads from a file: it arrives inside a URL somebody was sent in a
+    /// chat window. Writing it to a temporary file first so that
+    /// [`HttpClient::new`] could read it back would put a live secret on
+    /// disk for the length of one request, which is exactly the shape
+    /// this constructor exists to avoid. It still reaches `curl` over
+    /// stdin, never on an argv.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description when `api` is not an http(s) URL.
+    pub fn with_credential(api: &str, user: &str, token: &str) -> Result<Self, String> {
+        if !(api.starts_with("http://") || api.starts_with("https://")) {
+            return Err("<api> must start with http:// or https://".to_string());
+        }
+        Ok(Self {
+            api: api.trim_end_matches('/').to_string(),
+            credentials: Some(Credentials {
+                user: user.to_string(),
+                token: token.to_string(),
+            }),
+        })
+    }
+
     /// Sends one request described by the shared endpoint table.
     ///
     /// This is also used by the ordinary CLI so its authenticated HTTP

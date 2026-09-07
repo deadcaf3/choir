@@ -129,8 +129,8 @@ choir_key() {
 	choir_run key "$@"
 }
 
-# choir join <api> <invite-file> <key-file> [--user <name>] [--channel <name>] [--ssh-key <path>] [--token-file <path>]
-#   redeem an operator's invite and mint your actor key in one step; --user names the account, which most invites leave for you to pick and which the op log then keeps forever; writes the issued token to an auth file at 0600, and on a node started with --invite-binds-keys the key is registered by the redemption itself
+# choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]
+#   redeem the one link an operator sent you and set this machine up in one step: an actor key at ~/.choir/agent.key, the issued token at ~/.choir/auth (0600), a git credential helper scoped to that node so `git clone` and `git push` need no token in the URL, and the node's URL in ~/.choir/config so no later command has to be told it; --user names the account, which most invites leave for you to pick and which the op log then keeps forever -- the link form asks for it on the terminal when the invite left it open, and refuses rather than guessing when there is no terminal to ask; the three-argument form is the agent's, takes the invite from a file, answers with JSON and touches neither git nor your home directory; on a node started with --invite-binds-keys the key is registered by the redemption itself
 choir_join() {
 	choir_run join "$@"
 }
@@ -147,8 +147,8 @@ choir_checkpoint() {
 	choir_run checkpoint "$@"
 }
 
-# choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...
-#   create a change, push its commits and request review; run it from a git checkout, which is where the node and the repository come from, the revision is checkpointed on the way, and the branch name is the change identity, so re-running after an amend updates the same proposal
+# choir propose [reviewer]... [--key-file <path>] [--channel <name>] [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]...
+#   create a change, push its commits and request review, with no arguments at all; run it from a git checkout, which is where the node, the repository and the branch come from, while the key and the channel come from what `choir join` left in ~/.choir -- every one of them has a flag to override it; the revision is checkpointed on the way, and the branch name is the change identity, so re-running after an amend updates the same proposal; a leading `<key-file> <channel>` pair is still accepted, recognised by the first argument being a file that exists
 choir_propose() {
 	choir_run propose "$@"
 }

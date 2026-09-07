@@ -281,12 +281,13 @@ fn tool_checks() -> Vec<Check> {
 /// command would keep working.
 fn auth_check(path: Option<&str>) -> Check {
     let Some(path) = path else {
-        return Check::warn("auth file", "none given, and no default found")
-            .with_fix("choir --auth-file <path> …, or `choir join` to be issued one");
+        return Check::warn("auth file", "none given, and no default found").with_fix(
+            "choir join '<link>' to be issued one, or name yours: choir --auth-file <path> …",
+        );
     };
     let Ok(meta) = std::fs::metadata(path) else {
         return Check::fail("auth file", format!("{path} cannot be read"))
-            .with_fix("choir join <api> <invite-file> <key-file>");
+            .with_fix("choir join '<link>'");
     };
     #[cfg(unix)]
     {
@@ -322,8 +323,10 @@ fn auth_check(path: Option<&str>) -> Check {
 /// [`HttpClient`]: crate::mcp::HttpClient
 fn node_check(api: Option<&str>, auth: Option<&str>, curl: bool) -> Check {
     let Some(api) = api else {
-        return Check::warn("node", "no node configured")
-            .with_fix("write `node = <url>` to .choir/config, or pass the URL");
+        return Check::warn("node", "no node configured").with_fix(
+            "choir join '<link>' writes one to ~/.choir/config; or write `node = <url>` \
+             to .choir/config here, or pass the URL",
+        );
     };
     if !curl {
         return Check::fail("node", format!("{api}: cannot check without curl"));
@@ -396,6 +399,18 @@ fn daemon_check() -> Check {
         Err(_) => Check::warn("choir-node", "not beside `choir` or on PATH")
             .with_fix("only needed to run a node yourself: cargo build --release -p choir-node"),
     }
+}
+
+/// The line above the checks: what this machine is set up as.
+///
+/// Separate from [`report`] rather than folded into it because the role
+/// is read off paths and `report` is handed findings. Keeping the two
+/// apart is what lets the caller's own resolution — the `.choir/config`
+/// walk, the `--auth-file` flag — be the thing reported on, which is the
+/// same reason [`run`] takes its inputs rather than discovering them.
+#[must_use]
+pub fn heading(role: crate::join::Role, style: Style) -> String {
+    format!("\n  {}\n\n", style.bold(role.line()))
 }
 
 /// Renders the checks as the report the command prints.

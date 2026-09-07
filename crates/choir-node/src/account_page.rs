@@ -261,6 +261,15 @@ pub(crate) fn minted(
         h.push_str(&esc(&crate::join_page::approve_command(node, user, token)));
         h.push_str("</pre>");
     }
+    // A forward action as well as the way back. This was the one page in
+    // the walk whose only link went backwards, which leaves a reader who
+    // has just copied their token with nothing on the page to do next
+    // but use the browser's own controls.
+    crate::ui::next_action(
+        &mut h,
+        "Your token is kept now. <a href=\"/r/\">Open a repository</a> to read the reviews \
+         you were granted.",
+    );
     h.push_str("<p><span class=\"pill\"><a href=\"/account\">back to your account</a></span></p>");
     h.push_str("</section>");
     Page {

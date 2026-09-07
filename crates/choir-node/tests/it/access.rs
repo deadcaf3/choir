@@ -223,6 +223,96 @@ fn one_link_carries_somebody_from_stranger_to_account() {
     std::fs::remove_dir_all(&s.work).ok();
 }
 
+/// The same walk again, asking a different question of it: does every
+/// page say what to click next?
+///
+/// `one_link_carries_somebody_from_stranger_to_account` asserts the walk
+/// *works*. This asserts it can be *followed* by somebody who never
+/// opens a terminal — the reviewer persona, whose whole path is these
+/// pages. A page that succeeds and then offers nothing forward is a dead
+/// end for them even though every status code on the way was 200, and
+/// `routes.rs` cannot catch it: its crawl proves links go somewhere real
+/// and its dead-end test only covers the failure states.
+#[test]
+fn every_page_on_the_way_in_names_the_next_click() {
+    let s = served("forward");
+
+    // The front door, to a stranger with no credential. It must offer
+    // one of the two ways in rather than merely describing the product.
+    let (status, _, front) = get(&s.base, &[]);
+    assert_eq!(status, 200, "{front}");
+    assert!(
+        front.contains("href=\"/signin\"") || front.contains("Ask for access"),
+        "the front door offers no way in: {front}"
+    );
+
+    // The waiting room. Nothing to click here by design -- the answer
+    // comes from a person -- so what it owes the reader is what to do
+    // with the address they are standing on.
+    let link = s.ask("Ada", "wants to read the queue crate");
+    let (_, _, waiting) = get(&link, &[]);
+    assert!(
+        waiting.contains("Bookmark"),
+        "the waiting page says nothing to do: {waiting}"
+    );
+
+    // The operator's console, reached by clicking rather than by
+    // knowing the address, with a control that answers the request.
+    let (_, _, console) = get(&format!("{}/people", s.base), &["-u", "alice:a"]);
+    assert!(
+        console.contains("Let them in"),
+        "the console does not name the act: {console}"
+    );
+
+    let id = s.queue()[0]["request_id"]
+        .as_str()
+        .expect("an id")
+        .to_string();
+    let (status, answer) = crate::support::curl(&[
+        "-u",
+        "alice:a",
+        "-X",
+        "POST",
+        "-d",
+        &serde_json::json!({ "request_id": id, "grants": ["agents/demo.git write"] }).to_string(),
+        &format!("{}/api/accounts/request/grant", s.base),
+    ]);
+    assert_eq!(status, 200, "{answer}");
+
+    // The claim page, now an invite. Its next action is a button, and a
+    // reader with no terminal has to be able to see it.
+    let (_, _, claim) = get(&link, &[]);
+    assert!(
+        claim.contains("<button"),
+        "the invite page has no control on it: {claim}"
+    );
+
+    // And the page after redemption, which is the one that used to be
+    // the end of the line: it must point at something to read.
+    let form = format!(
+        "{}&user=ada",
+        link.split_once("/join?").expect("a join link").1
+    );
+    let (status, _, welcome) = get(&format!("{}/join", s.base), &["-X", "POST", "-d", &form]);
+    assert_eq!(status, 200, "{welcome}");
+    assert!(
+        welcome.contains("href=\"/r/\"") || welcome.contains("href=\"/account\""),
+        "the welcome page leads nowhere: {welcome}"
+    );
+
+    // The wall itself is not a dead end either: a person who arrives at
+    // a gated page with no session is shown the way past it, not a bare
+    // status line (D74).
+    let (status, _, walled) = get(&format!("{}/r/", s.base), &["-H", "Accept: text/html"]);
+    assert_eq!(status, 401, "{walled}");
+    assert!(
+        walled.contains("<form") && walled.contains("/signin"),
+        "the wall offers no way past it: {walled}"
+    );
+
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
 /// Declining says nothing back. A link that was declined and a link that
 /// never existed render the same page, so nobody can probe the queue by
 /// watching how their guesses are refused.

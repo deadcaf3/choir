@@ -856,35 +856,45 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     );
     h.push_str("</ol>");
 
-    // What it is like to use, in the three commands it actually takes.
-    // Deliberately the same three as the per-repository contribute page,
+    // What it is like to use, in the commands it actually takes.
+    // Deliberately the same steps as the per-repository contribute page,
     // in the same order, because a front door that describes a different
     // product from the one behind it is worse than a front door with no
-    // description. `NODE` and `REPO` stay placeholders: this page is
+    // description. The install is the one extra: a stranger reading this
+    // has no `choir` yet, and the contribute page's reader was sent
+    // there by an invite they were already acting on.
+    //
+    // `NODE`, `REPO` and `RELEASE` stay placeholders: this page is
     // static by construction and must not learn this node's own address.
     h.push_str("<h2>What using it looks like</h2>");
     h.push_str(
-        "<p>Three commands, and then the git you already know. There is no registration \
-         form and no second message to wait for.</p>",
+        "<p>Two commands to be set up, and then the git you already know. There is no \
+         registration form and no second message to wait for.</p>",
     );
     h.push_str("<ol class=\"steps\">");
     h.push_str(
-        "<li><h3><code>choir join</code></h3><p>Redeem the \
-         invite your operator sent you. It mints your key and stores your token.</p>\
-         <pre class=\"cmd\">choir join NODE ~/.choir/invite ~/.choir/agent.key</pre></li>",
+        "<li><h3>Install <code>choir</code></h3><p>One command, and nothing else has to \
+         be on the machine first.</p>\
+         <pre class=\"cmd\">curl -fsSL RELEASE/install.sh | sh</pre></li>",
     );
     h.push_str(
-        "<li><h3><code>choir git-credential</code></h3>\
-         <p>Point git at that token once, then clone normally. The token never enters the \
-         URL, so it cannot leak through <code>git remote -v</code>.</p>\
-         <pre class=\"cmd\">git config --global credential.helper \
-         '!choir git-credential ~/.choir/choir.auth'\ngit clone NODE/REPO.git</pre></li>",
+        "<li><h3><code>choir join</code></h3><p>Paste the whole invite link, quotes \
+         included. It mints your key, stores your token, and points git at that token \
+         for this node.</p>\
+         <pre class=\"cmd\">choir join 'NODE/join?i=…&amp;k=…'</pre></li>",
+    );
+    h.push_str(
+        "<li><h3><code>git clone</code></h3>\
+         <p>An ordinary clone. The token stays in the file <code>choir join</code> wrote \
+         and never enters the URL, so it cannot leak through <code>git remote -v</code>.</p>\
+         <pre class=\"cmd\">git clone NODE/REPO.git</pre></li>",
     );
     h.push_str(
         "<li><h3><code>choir propose</code></h3><p>Commit on \
-         a branch as you always would, then propose it. Run it again after an amend and it \
-         updates the same proposal rather than opening a second one.</p>\
-         <pre class=\"cmd\">choir propose ~/.choir/agent.key &lt;your-channel&gt;</pre></li>",
+         a branch as you always would, then propose it, from inside the checkout and with \
+         no arguments. Run it again after an amend and it updates the same proposal rather \
+         than opening a second one.</p>\
+         <pre class=\"cmd\">choir propose</pre></li>",
     );
     h.push_str("</ol>");
 

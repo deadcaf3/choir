@@ -344,12 +344,20 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "join",
-        args: "<api> <invite-file> <key-file> [--user <name>] [--channel <name>] [--ssh-key <path>] [--token-file <path>]",
-        summary: "redeem an operator's invite and mint your actor key in one step; \
+        args: "<link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]",
+        summary: "redeem the one link an operator sent you and set this machine up in one \
+                  step: an actor key at ~/.choir/agent.key, the issued token at \
+                  ~/.choir/auth (0600), a git credential helper scoped to that node so \
+                  `git clone` and `git push` need no token in the URL, and the node's URL \
+                  in ~/.choir/config so no later command has to be told it; \
                   --user names the account, which most invites leave for you to pick and \
-                  which the op log then keeps forever; writes the issued token to an auth \
-                  file at 0600, and on a node started with --invite-binds-keys the key is \
-                  registered by the redemption itself",
+                  which the op log then keeps forever -- the link form asks for it on the \
+                  terminal when the invite left it open, and refuses rather than guessing \
+                  when there is no terminal to ask; \
+                  the three-argument form is the agent's, takes the invite from a file, \
+                  answers with JSON and touches neither git nor your home directory; \
+                  on a node started with --invite-binds-keys the key is registered by the \
+                  redemption itself",
         agent_facing: true,
         group: "getting started",
     },
@@ -400,11 +408,15 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "propose",
-        args: "<key-file> <channel> [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]... [reviewer]...",
-        summary: "create a change, push its commits and request review; run it from a git \
-                  checkout, which is where the node and the repository come from, the \
-                  revision is checkpointed on the way, and the branch name is the change \
-                  identity, so re-running after an amend updates the same proposal",
+        args: "[reviewer]... [--key-file <path>] [--channel <name>] [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]...",
+        summary: "create a change, push its commits and request review, with no arguments \
+                  at all; run it from a git checkout, which is where the node, the \
+                  repository and the branch come from, while the key and the channel come \
+                  from what `choir join` left in ~/.choir -- every one of them has a flag \
+                  to override it; the revision is checkpointed on the way, and the branch \
+                  name is the change identity, so re-running after an amend updates the \
+                  same proposal; a leading `<key-file> <channel>` pair is still accepted, \
+                  recognised by the first argument being a file that exists",
         agent_facing: true,
         group: "changing code",
     },
@@ -1136,9 +1148,11 @@ pub fn usage_in(style: Style) -> String {
     out.push_str(&format!(
         "\n{}\n",
         style.dim(
-            "Most commands take the node's URL as their first argument. Put it in \n\
-             `.choir/config` as `node = <url>`, in this directory or any parent, and \n\
-             it is filled in when you leave it out."
+            "Most commands take the node's URL as their first argument, and fill it in \n\
+             when you leave it out. It is looked for as `node = <url>` in `.choir/config` \n\
+             in this directory, then in each directory above it, then in `~/.choir/config` \n\
+             -- so a checkout that names its own node wins, and the one `choir join` \n\
+             wrote answers everywhere else. An explicit URL always wins over both."
         )
     ));
     out.push_str(&format!(
@@ -1442,30 +1456,31 @@ pub fn contribute_html() -> String {
         (
             "1",
             "join",
-            "Redeem the invite your operator sent you. This mints your key and stores your token; \
-             there is no registration, and no second message to wait for.",
-            "choir join NODE ~/.choir/invite ~/.choir/agent.key",
+            "Paste the whole link your operator sent you, quotes included. This mints your key, \
+             stores your token, and points git at that token for this node -- so the clone \
+             below needs no credential in its URL. There is no registration, and no second \
+             message to wait for.",
+            "choir join 'NODE/join?i=…&amp;k=…'",
         ),
         (
             "2",
             "git-credential",
-            "Point git at your token once, then clone normally. The token stays in the file \
-             `choir join` wrote and never enters the URL, so it cannot leak through \
-             `git remote -v` or a pasted clone line.",
-            "git config --global credential.helper '!choir git-credential ~/.choir/choir.auth'\n\
-             git clone NODE/REPO.git",
+            "Clone normally. The token stays in the file `choir join` wrote and never enters \
+             the URL, so it cannot leak through `git remote -v` or a pasted clone line. This \
+             command is here for anybody who would rather wire that up by hand.",
+            "git clone NODE/REPO.git",
         ),
         (
             "3",
             "propose",
-            "Commit on a branch as you always would, then run this from inside the checkout. \
-             It creates the change, pushes it, publishes the revision and requests review. \
-             Your channel is the one `choir join` printed. Run it again after an amend and it \
-             updates the same proposal rather than opening a second one -- the branch name is \
-             what identifies the change.",
+            "Commit on a branch as you always would, then run this from inside the checkout, \
+             with no arguments. It creates the change, pushes it, publishes the revision and \
+             requests review. Run it again after an amend and it updates the same proposal \
+             rather than opening a second one -- the branch name is what identifies the \
+             change.",
             "git checkout -b fix-the-thing\n\
              git commit -am 'fix the thing'\n\
-             choir propose ~/.choir/agent.key <your-channel>",
+             choir propose",
         ),
     ] {
         let command = find(name);

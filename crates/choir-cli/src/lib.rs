@@ -45,6 +45,8 @@ pub mod docs;
 pub mod doctor;
 // Same reason as `docs`: intra-doc links in the module's own header.
 pub mod init;
+// Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod join;
 pub mod mcp;
 // Same reason as `docs`: the module's own header carries intra-doc
 // links that must resolve in its scope, not this one.
@@ -52,6 +54,9 @@ pub mod node;
 
 /// One-command proposal from a git checkout.
 pub mod propose;
+
+// Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod prompt;
 pub mod runner;
 
 // Same reason as `docs`: the module's own header carries intra-doc links.

@@ -55,10 +55,24 @@ fn crate_sources() -> Vec<(String, String)> {
 /// is never styled at all, so a pipeline reads identical bytes either
 /// way.
 ///
+/// `prompt.rs` is the second exemption, and it is the one that actually
+/// prompts. It exists because `choir join` has one question it may not
+/// answer for anybody: the account name, which most invites leave open
+/// and which the op log then keeps forever (D75).
+///
+/// What makes it admissible is not the question but the shape of
+/// `prompt::ask`. Its first line returns `None` when stdin is not a
+/// terminal, so the branch this rule exists to forbid — waiting for
+/// input that is not coming — is absent, and every caller is obliged to
+/// turn `None` into a refusal naming the flag that supplies the answer.
+/// `an_open_invite_with_no_terminal_names_the_flag_instead_of_guessing`
+/// in `first_run.rs` is that claim checked against the real binary; the
+/// exemption here is only the static half standing aside for it.
+///
 /// The exemption is by file rather than by pattern because a pattern
 /// exemption would let the next `is_terminal` in, wherever it appeared.
-/// A second file asking the question fails this test, and should: that
-/// is where a prompt would go.
+/// A third file asking the question fails this test, and should: that is
+/// where the next prompt would go, and it would have no `None` branch.
 #[test]
 fn no_source_reaches_for_a_terminal() {
     let banned = [
@@ -70,12 +84,25 @@ fn no_source_reaches_for_a_terminal() {
         "rpassword",
         "dialoguer",
     ];
-    // Colour, and nothing else. Named here so that widening it is an
-    // edit to this list rather than to the rule.
-    let terminal_probes_allowed_in = "style.rs";
+    // Colour, and the one module allowed to ask a question. Named here
+    // so that widening the set is an edit to this list rather than to
+    // the rule.
+    //
+    // Two entries, and each names the patterns it may use. `style.rs`
+    // asks whether it has a terminal and stops there; `prompt.rs` asks
+    // and then reads, which is why it is the only file that may say
+    // `read_line`. Widening either list, or adding a third row, is the
+    // edit a reviewer is meant to see.
+    let terminal_probes_allowed_in: &[(&str, &[&str])] = &[
+        ("style.rs", &["is_terminal", "IsTerminal"]),
+        ("prompt.rs", &["is_terminal", "IsTerminal", "read_line"]),
+    ];
     let mut findings = Vec::new();
     for (path, text) in crate_sources() {
-        let colour_module = path.ends_with(terminal_probes_allowed_in);
+        let allowed_here = terminal_probes_allowed_in
+            .iter()
+            .find(|(file, _)| path.ends_with(file))
+            .map_or(&[] as &[&str], |(_, patterns)| *patterns);
         for (number, line) in text.lines().enumerate() {
             // The rule is about code. This test names every pattern it
             // bans, and so does the module doc above it.
@@ -84,11 +111,10 @@ fn no_source_reaches_for_a_terminal() {
                 continue;
             }
             for needle in banned {
-                // Only the terminal probe is exempted, and only there.
-                // A prompt primitive in the colour module is still a
-                // finding -- that is the failure the exemption must not
-                // create a hole for.
-                let exempt = colour_module && matches!(needle, "is_terminal" | "IsTerminal");
+                // Exempted per file *and* per pattern. A `read_line` in
+                // the colour module is still a finding -- that is the
+                // failure the exemption must not create a hole for.
+                let exempt = allowed_here.contains(&needle);
                 if line.contains(needle) && !exempt {
                     findings.push(format!("{path}:{}: {needle}", number + 1));
                 }

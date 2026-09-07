@@ -13,10 +13,10 @@
 //! choir asks <api>
 //! choir grant <api> <request-id> <owner/repo> [read|write]
 //! choir decline <api> <request-id>
-//! choir join <api> <invite-file> <key-file> [--user <name>] [--channel <name>] [--ssh-key <path>] [--token-file <path>]
+//! choir join <link> | <api> <invite-file> <key-file> [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]
 //! choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>]
 //! choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>
-//! choir propose <key-file> <channel> [--api <url>] [--repo <owner/repo>] [--onto <branch>] [reviewer]...
+//! choir propose [reviewer]... [--key-file <path>] [--channel <name>] [--api <url>] [--repo <owner/repo>] [--onto <branch>]
 //! choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>
 //! choir submit <api> <key-file> <channel> '<op-json>'
 //! choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...
@@ -222,7 +222,15 @@ fn invoked_command() -> Option<String> {
 fn usage() -> ! {
     let style = choir_cli::style::Style::for_stderr();
     match invoked_command() {
-        // No command at all: this is the question the index answers.
+        // No command at all. On a machine that has been set up, the
+        // index is the question this answers. On one that has not, it is
+        // the wrong first screen: forty-eight commands, of which exactly
+        // one is any use to somebody holding an invite link.
+        None if choir_cli::join::Role::of(&state_dir(), discovered_auth_file().as_deref())
+            == choir_cli::join::Role::Nothing =>
+        {
+            eprint!("{}", choir_cli::join::orientation(style));
+        }
         None => eprint!("{}", choir_cli::surface::usage_in(style)),
         Some(name) => match choir_cli::surface::command_help_in(&name, style) {
             Some(help) => {
@@ -738,24 +746,109 @@ fn acl_render(api: &str, auth: AuthOptions<'_>, acl_file: &str) -> ! {
     finish(200, &doc.to_string());
 }
 
-/// `choir join <api> <invite-file> <key-file> [--channel <name>] [--ssh-key <path>] [--token-file <path>]`
+/// Where the credential that redeems an invite came from.
+///
+/// Two shapes because there are two readers. An agent is handed a file
+/// by whatever provisioned it; a person is handed a link in a chat
+/// window, and the link *is* the credential — writing it to a file first
+/// so this could read it back would be asking them to do by hand the one
+/// step this command exists to remove.
+enum Invite<'a> {
+    /// A file holding one `<id>:<secret>` line.
+    File(&'a str),
+    /// The two halves, lifted straight out of a join link.
+    Pair(String, String),
+}
+
+/// Creates `~/.choir` at 0700 if it is not there.
+///
+/// 0700 rather than the umask's answer because everything this directory
+/// is about to hold — an actor key, a bearer token — is a secret, and a
+/// directory somebody else can list is a directory whose filenames tell
+/// them what to come back for.
+fn ensure_state_dir() -> Result<(), String> {
+    let dir = state_dir();
+    if !dir.is_dir() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("chmod 700 {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// The `next` line out of a node's structured rejection.
+///
+/// Every rejection body carries `code`, `error` and `next` (see
+/// `ERRORS.md`), and `next` is the only one of the three that says what
+/// to do. Printing the body alone left it as the fourth field of a JSON
+/// object, which is where a reader who is already stuck stops reading.
+fn refusal_next(body: &str) -> Option<String> {
+    let doc: serde_json::Value = serde_json::from_str(body).ok()?;
+    doc.get("next")?.as_str().map(str::to_string)
+}
+
+/// The repair for a refused redemption, worked out from the node's
+/// message.
+///
+/// Reads the `error` string because this endpoint has no rejection code
+/// to branch on. Substring matching is the weaker test and is used
+/// knowingly: the fallback is a true sentence for every message that
+/// does not match, so a reworded node message costs a specific line and
+/// never produces a wrong one.
+fn redeem_next(body: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|doc| doc.get("error")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    if message.contains("no such invite") {
+        return "ask the operator for a new link; this one was never valid, or has been used"
+            .to_string();
+    }
+    if message.contains("expired") {
+        return "ask the operator for a new link; this one has expired".to_string();
+    }
+    if message.contains("--invite-binds-keys") {
+        return "send the operator the line `choir key <key-file> <channel>` prints, \
+                and ask them to register it"
+            .to_string();
+    }
+    if message.contains("already taken") || message.contains("username") {
+        return "choir join '<link>' --user <another-name>".to_string();
+    }
+    "send the operator that message; it describes their node, not your machine".to_string()
+}
+
+/// `choir join <link>`, or `choir join <api> <invite-file> <key-file>`
 ///
 /// Admission in one command: mint an actor key, redeem the operator's
-/// invite, and store the token where the rest of the CLI reads it.
+/// invite, store the token where the rest of the CLI reads it, and — for
+/// the link form — leave git and `~/.choir/config` set up so that the
+/// next thing the reader types is `git clone` and the thing after it is
+/// `choir propose`.
 ///
-/// The invite is read from a file rather than taken as an argument, for
-/// the reason every credential here is: an argv is readable by every
-/// process on the host through `ps`. The file's format is the node's
-/// own `user:token` auth-file spelling, so the invite an operator sent
-/// can be pasted straight into one.
+/// **The link is the whole input.** It carries the node and the invite,
+/// which is why the one thing a person was actually sent is now the one
+/// thing they have to paste. It reaches `curl` over stdin like every
+/// other credential here, never on an argv, where `ps` would show it.
+///
+/// The three-argument form stays because agents and provisioning
+/// scripts hold those paths. It answers with JSON, writes the token
+/// beside the key rather than into `~/.choir`, and touches neither git
+/// nor the home directory: a command that edits `~/.gitconfig` without
+/// being asked is one nobody can run under an automation account twice.
 ///
 /// What this does **not** do is decide admission. The operator issued
 /// the invite, and the invite carries the grants; this only spares them
 /// the second out-of-band step of pasting a key line into a file. A node
 /// started without `--invite-binds-keys` refuses the key and says so,
 /// and admission there still ends with an operator's edit.
-fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
+fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) -> ! {
     let (mut channel, mut ssh_key, mut token_file, mut chosen_user) = (None, None, None, None);
+    let mut key_flag = None;
     let mut index = 0;
     while index < rest.len() {
         let Some(value) = rest.get(index + 1).copied() else {
@@ -765,6 +858,10 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
             "--channel" if channel.is_none() => &mut channel,
             "--ssh-key" if ssh_key.is_none() => &mut ssh_key,
             "--token-file" if token_file.is_none() => &mut token_file,
+            // Says "yes, that path, I know what is there" -- the one way
+            // past the refusal below, and the reason the refusal can be
+            // flat rather than a prompt.
+            "--key-file" if key_flag.is_none() => &mut key_flag,
             // The name this account will hold forever (D75). Required by
             // an invite that left the seat open, which is the ordinary
             // kind: the node no longer picks on anybody's behalf.
@@ -774,14 +871,60 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
         *slot = Some(value);
         index += 2;
     }
-    if !std::path::Path::new(invite_file).is_file() {
-        eprintln!(
-            "choir join: {invite_file} does not exist.\n\
-             Write the invite the operator sent you into it, as one line: <id>:<secret>"
-        );
-        std::process::exit(2);
+    let from_link = key_file.is_none();
+    if from_link {
+        if let Err(error) = ensure_state_dir() {
+            eprintln!("choir join: {error}\nnext: choir join '<link>' --key-file <path>");
+            std::process::exit(1);
+        }
     }
-
+    // Three ways to name the key, most explicit first.
+    //
+    // The default path is refused when this machine has *already
+    // joined*, because a key is an identity the node has bound and
+    // overwriting one silently would strand every operation the old one
+    // signed. The test for "already joined" is the token beside it, not
+    // the key alone: `load_key` mints before the request, so any
+    // redemption that was refused -- a name this invite left open, a
+    // node that does not bind keys, a network that dropped -- leaves a
+    // key behind with no token. Refusing on the key alone made every one
+    // of those refusals permanent, which is the opposite of what this
+    // guard is for. A key with no token was never successfully redeemed,
+    // so redeeming with it is exactly right, and is what makes
+    // `load_key`'s idempotency reachable.
+    let default_key = state_dir().join("agent.key").display().to_string();
+    let key_file = match (key_flag, key_file) {
+        (Some(named), _) | (None, Some(named)) => named.to_string(),
+        (None, None) => {
+            let joined =
+                std::path::Path::new(&default_key).exists() && state_dir().join("auth").exists();
+            if joined {
+                eprintln!(
+                    "choir join: this machine has already joined a node: there is a key at \
+                     {default_key} and a token beside it.\n\
+                     A key is an identity the node has bound, so this will not replace one.\n\
+                     next: choir join '<link>' --key-file <another-path> --token-file <another-path>"
+                );
+                std::process::exit(1);
+            }
+            default_key
+        }
+    };
+    let key_file = key_file.as_str();
+    let invite_file = match invite {
+        Invite::File(path) => {
+            if !std::path::Path::new(path).is_file() {
+                eprintln!(
+                    "choir join: {path} does not exist.\n\
+                     Write the invite the operator sent you into it, as one line: <id>:<secret>\n\
+                     next: choir join '<link>'   (the link needs no file at all)"
+                );
+                std::process::exit(2);
+            }
+            Some(path)
+        }
+        Invite::Pair(..) => None,
+    };
     // Minted before the request, so the key exists whatever the node
     // answers. `load_key` is idempotent, which makes a retry after a
     // network failure redeem the key that already exists rather than a
@@ -806,34 +949,85 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
 
     let endpoint = choir_cli::surface::endpoint("POST", "/api/accounts/redeem")
         .expect("redemption is in the endpoint table");
-    let client =
-        match choir_cli::mcp::HttpClient::new(api, Some(std::path::Path::new(invite_file)), None) {
-            Ok(client) => client,
-            Err(error) => {
-                eprintln!("choir join: {error}");
-                std::process::exit(2);
-            }
-        };
-    let (status, response) = match client.request(endpoint, &body) {
+    let client = match &invite {
+        Invite::File(_) => {
+            choir_cli::mcp::HttpClient::new(api, invite_file.map(std::path::Path::new), None)
+        }
+        Invite::Pair(id, secret) => choir_cli::mcp::HttpClient::with_credential(api, id, secret),
+    };
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("choir join: {error}\nnext: choir join '<link>'");
+            std::process::exit(2);
+        }
+    };
+    let send = |body: &serde_json::Value| match client.request(endpoint, body) {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("choir join: {error}");
+            eprintln!(
+                "choir join: {error}\n\
+                 next: choir doctor   (it says which of curl, the network or the node is at fault)"
+            );
             std::process::exit(1);
         }
     };
+    let (mut status, mut response) = send(&body);
+    // An invite that left the seat open is the ordinary kind, and the
+    // node says so by refusing rather than by advertising it beforehand
+    // -- so the name is asked for here, after the refusal, and only ever
+    // once. The refusal happens before the invite is consumed, which is
+    // what makes retrying it safe.
+    if status == 400 && response.contains("this invite lets you pick your name") {
+        match choir_cli::prompt::ask("Pick the name this account keeps (letters, digits, - and _):")
+        {
+            Some(name) => {
+                body["user"] = serde_json::json!(name);
+                (status, response) = send(&body);
+            }
+            None => {
+                eprintln!(
+                    "choir join: this invite lets you pick your name, and nothing here can \
+                     ask for one.\n\
+                     next: choir join '<link>' --user <name>"
+                );
+                std::process::exit(2);
+            }
+        }
+    }
     if !(200..300).contains(&status) {
         println!("{response}");
+        // `/api/accounts/redeem` predates the structured-rejection table
+        // and answers with a bare `error`, so the repair is worked out
+        // here rather than read off the body. Four of them, because
+        // those are the four a contributor can actually reach: the rest
+        // are the operator's node being misconfigured, and the generic
+        // line is the true thing to say about those.
+        eprintln!(
+            "\nnext: {}",
+            refusal_next(&response).unwrap_or_else(|| redeem_next(&response))
+        );
         std::process::exit(1);
     }
     let account: serde_json::Value = match serde_json::from_str(&response) {
         Ok(account) => account,
         Err(error) => {
-            eprintln!("choir join: the node's answer did not parse: {error}");
+            // Both of these describe the operator's node rather than
+            // this machine, so the repair is theirs and the `next:` says
+            // whose it is. Retrying changes nothing.
+            eprintln!(
+                "choir join: the node's answer did not parse: {error}\n\
+                 next: send the operator that line; their node answered something \
+                 this version cannot read"
+            );
             std::process::exit(1);
         }
     };
     let (Some(user), Some(token)) = (account["user"].as_str(), account["token"].as_str()) else {
-        eprintln!("choir join: the node issued no token");
+        eprintln!(
+            "choir join: the node issued no token\n\
+             next: send the operator this; the invite was accepted and nothing was handed back"
+        );
         std::process::exit(1);
     };
 
@@ -841,25 +1035,52 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
     // this is the only chance to keep it. Written 0600 before anything
     // is printed: a token this process holds and never stored is one the
     // contributor has to ask for a second invite to replace.
-    let token_path = token_file.map_or_else(
-        || {
-            std::path::Path::new(key_file)
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("choir.auth")
-        },
-        std::path::PathBuf::from,
-    );
+    // The link form defaults to the path every other command already
+    // looks for, which is what makes "and nothing else" true: a
+    // credential written next to the key would need `--auth-file` typed
+    // on every command after it. The positional form keeps the name it
+    // has always written, because agents and scripts hold that path.
+    let token_path = match (token_file, from_link) {
+        (Some(named), _) => std::path::PathBuf::from(named),
+        (None, true) => state_dir().join("auth"),
+        (None, false) => std::path::Path::new(key_file)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("choir.auth"),
+    };
     if let Err(error) = choir_fs::write_atomic_private(&token_path, format!("{user}:{token}\n")) {
         eprintln!(
             "choir join: the node issued a token but it could not be stored at {}: {error}\n\
-             The invite is spent. Ask the operator for another.",
+             The invite is spent, so this token cannot be reissued.\n\
+             next: ask the operator for another link, then run \
+             `choir join '<link>' --token-file <a-writable-path>`",
             token_path.display()
         );
         std::process::exit(1);
     }
 
     let bound = account["actor_key_bound"] == serde_json::Value::Bool(true);
+    let channel = account["channel"].as_str().unwrap_or(user);
+    // Only the link form writes to git and to `~/.choir`. The positional
+    // form is what tests and provisioning scripts run, often as a user
+    // whose `~/.gitconfig` belongs to somebody else's automation, and a
+    // command that edits it without being asked is one nobody can run
+    // twice safely.
+    let (git_config, home_config) = match from_link {
+        false => (None, None),
+        true => (
+            configure_git_credential(api, &token_path.display().to_string()),
+            write_home_config(api, channel, key_file),
+        ),
+    };
+    let next = if bound {
+        "choir propose".to_string()
+    } else {
+        // Said as an instruction rather than a warning, because it is
+        // the step that is still outstanding: nothing this contributor
+        // does next will work until the operator registers the key.
+        format!("choir key {key_file} {channel}   — send the operator that line")
+    };
     let summary = serde_json::json!({
         "user": user,
         "channel": account["channel"],
@@ -867,31 +1088,168 @@ fn join(api: &str, invite_file: &str, key_file: &str, rest: &[&str]) -> ! {
         "auth_file": token_path.display().to_string(),
         "key_file": key_file,
         "actor_key_bound": bound,
-        "next": if bound {
-            "choir --auth-file <auth_file> propose <key_file> <channel>"
-        } else {
-            // Said as an instruction rather than a warning, because it
-            // is the step that is still outstanding: nothing this
-            // contributor does next will work until the operator
-            // registers the key.
-            "ask the operator to register your key: run `choir key <key_file> <channel>` and send them the line"
-        },
+        "git_config": git_config,
+        "config": home_config,
+        "next": next,
     });
-    note(
-        &format!("joined as {user}"),
-        &[
-            ("token", format!("{} (0600)", token_path.display())),
-            ("key", key_file.to_string()),
-            (
-                "next",
-                summary["next"].as_str().unwrap_or_default().to_string(),
+    if !from_link {
+        note(
+            &format!("joined as {user}"),
+            &[
+                ("token", format!("{} (0600)", token_path.display())),
+                ("key", key_file.to_string()),
+                ("next", next),
+            ],
+        );
+        finish(
+            200,
+            &serde_json::to_string_pretty(&summary).expect("summary is serializable"),
+        );
+    }
+
+    // The link form's reader is a person, so the answer is the report
+    // rather than the JSON. What was written is listed in full because
+    // every line of it is a file on their machine they did not choose,
+    // and the last line is one they can copy.
+    let style = choir_cli::style::Style::for_stdout();
+    println!("\n  {}\n", style.green(&format!("Joined {api} as {user}.")));
+    println!("  {}  {}", style.dim("channel "), channel);
+    println!(
+        "  {}  {} {}",
+        style.dim("key     "),
+        key_file,
+        style.dim("(0600)")
+    );
+    println!(
+        "  {}  {} {}",
+        style.dim("token   "),
+        token_path.display(),
+        style.dim("(0600)")
+    );
+    if let Some(path) = &home_config {
+        println!(
+            "  {}  {} {}",
+            style.dim("node    "),
+            path,
+            style.dim("(so no command has to be told the node again)")
+        );
+    }
+    match &git_config {
+        Some(path) => println!(
+            "  {}  {} {}",
+            style.dim("git     "),
+            path,
+            style.dim("(clone and push need no token in the URL)")
+        ),
+        None => println!(
+            "  {}  {}",
+            style.dim("git     "),
+            style.cyan(&format!(
+                "not configured; run: git config --global credential.{api}.helper \
+                 '!choir git-credential {}'",
+                token_path.display()
+            )),
+        ),
+    }
+    if bound {
+        println!(
+            "\n  {}\n  {}\n",
+            style.dim("Clone anything you were granted, commit on a branch, then:"),
+            style.cyan("choir propose")
+        );
+    } else {
+        println!(
+            "\n  {}\n  {}\n",
+            style.dim(
+                "This node does not register keys at redemption. Send the operator this line:"
             ),
-        ],
-    );
-    finish(
-        200,
-        &serde_json::to_string_pretty(&summary).expect("summary is serializable"),
-    );
+            style.cyan(&format!("choir key {key_file} {channel}")),
+        );
+    }
+    std::process::exit(0);
+}
+
+/// Points git at the token for one node, and returns the file it wrote.
+///
+/// Scoped to the node's origin with `credential.<origin>.helper` rather
+/// than set as the bare `credential.helper`, so this cannot answer for
+/// GitHub or for anybody else's server: a helper configured unscoped is
+/// asked about every host git ever talks to.
+///
+/// It goes in `~/.gitconfig` because that is the only config a clone
+/// that does not exist yet will read, and the whole point is that the
+/// next `git clone` works. `None` when git could not be run or refused,
+/// which is reported rather than fatal — the join itself succeeded, and
+/// the line to run by hand is printed instead.
+fn configure_git_credential(api: &str, auth_file: &str) -> Option<String> {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "choir".to_string());
+    let origin = api.trim_end_matches('/');
+    let out = std::process::Command::new("git")
+        .args([
+            "config",
+            "--global",
+            &format!("credential.{origin}.helper"),
+            &format!("!{exe} git-credential {auth_file}"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let out = std::process::Command::new("git")
+        .args([
+            "config",
+            "--global",
+            "--list",
+            "--show-origin",
+            "--name-only",
+        ])
+        .output()
+        .ok()?;
+    // `--show-origin` prints `file:<path>\t<name>`; the path is the same
+    // for every line, so the first will do. Asking git rather than
+    // spelling `~/.gitconfig` here is what keeps this honest on a
+    // machine using `$XDG_CONFIG_HOME/git/config`.
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.split('\t').next())
+        .and_then(|origin| origin.strip_prefix("file:"))
+        .map(str::to_string)
+}
+
+/// Records the node, channel and key in `~/.choir/config`.
+///
+/// The fallback the `.choir/config` walk reaches when no directory above
+/// the working one names a node — see [`configured`]. Existing keys are
+/// preserved rather than the file being rewritten, because `choir init`
+/// writes this same file when it is run from `$HOME`.
+///
+/// `None` when it could not be written, which is reported rather than
+/// fatal for the same reason [`configure_git_credential`]'s failure is.
+fn write_home_config(api: &str, channel: &str, key_file: &str) -> Option<String> {
+    let path = state_dir().join("config");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out = String::new();
+    let written = [
+        ("node", api.trim_end_matches('/')),
+        ("channel", channel),
+        ("key", key_file),
+    ];
+    for line in existing.lines() {
+        let key = line.split_once('=').map(|(k, _)| k.trim()).unwrap_or("");
+        if !written.iter().any(|(name, _)| *name == key) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for (name, value) in written {
+        out.push_str(&format!("{name} = {value}\n"));
+    }
+    choir_fs::write_atomic_private(&path, out).ok()?;
+    Some(path.display().to_string())
 }
 
 /// `choir git-credential <auth-file> [--auth-user <name>] <operation>`
@@ -995,6 +1353,25 @@ fn git_run(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
 /// same change instead of forking a second one.
 fn propose_abort(step: &str, detail: &str) -> ! {
     eprintln!("choir propose: {step}: {detail}");
+    // Every refusal in this command ends with a line the reader can act
+    // on. Some details carry their own -- the ones that know which flag
+    // is missing -- and the rest get the step-shaped one, which is the
+    // most specific true thing left to say. `choir doctor` is the
+    // fallback rather than a shrug: it is the command that tells apart
+    // "the node is down" from "git is not installed", and those are what
+    // the remaining steps fail on.
+    if !detail.contains("next:") {
+        let next = match step {
+            "checkout" => "run this from inside a git checkout",
+            "identity" => "choir join '<link>'",
+            "remote" | "base" => {
+                "git fetch, then re-run; or name it: choir propose --api <url> --repo <owner/repo>"
+            }
+            "push" => "check the push error above; the credential comes from ~/.choir/auth",
+            _ => "choir doctor",
+        };
+        eprintln!("next: {next}");
+    }
     std::process::exit(1);
 }
 
@@ -1005,12 +1382,36 @@ struct ProposeOptions<'a> {
     remote: &'a str,
     onto: Option<&'a str>,
     change: Option<&'a str>,
+    key_file: Option<&'a str>,
+    channel: Option<&'a str>,
     cone: Vec<String>,
     reviewers: Vec<String>,
 }
 
+/// Splits off the deprecated `<key-file> <channel>` prefix, if this
+/// invocation carries one.
+///
+/// The zero-argument form and the positional form cannot be told apart
+/// by counting, because a bare `choir propose alice bea` names two
+/// reviewers. They *can* be told apart by what the first argument is: a
+/// key file is a file that exists, and a reviewer is a channel name.
+/// Requiring the file to exist rather than merely to look like a path is
+/// deliberate — a typo'd key path then reads as a reviewer and is
+/// refused by the node by name, instead of being opened and minting a
+/// key nobody registered.
+fn positional_propose<'a>(rest: &'a [&'a str]) -> Option<(&'a str, &'a str, &'a [&'a str])> {
+    let [key_file, channel, tail @ ..] = rest else {
+        return None;
+    };
+    let positional = !key_file.starts_with("--")
+        && !channel.starts_with("--")
+        && std::path::Path::new(key_file).is_file();
+    positional.then_some((key_file, channel, tail))
+}
+
 fn parse_propose<'a>(rest: &[&'a str]) -> ProposeOptions<'a> {
     let (mut api, mut repo, mut onto, mut change) = (None, None, None, None);
+    let (mut key_file, mut channel) = (None, None);
     let mut remote = "origin";
     let (mut cone, mut reviewers) = (Vec::new(), Vec::new());
     let mut index = 0;
@@ -1031,6 +1432,11 @@ fn parse_propose<'a>(rest: &[&'a str]) -> ProposeOptions<'a> {
             "--onto" if onto.is_none() => onto = Some(value),
             "--change" if change.is_none() => change = Some(value),
             "--path" => cone.push(value.to_string()),
+            // The two the command used to take positionally. Both are
+            // inferred when absent; these override the inference for a
+            // machine holding more than one identity.
+            "--key-file" if key_file.is_none() => key_file = Some(value),
+            "--channel" if channel.is_none() => channel = Some(value),
             _ => usage(),
         }
         index += 2;
@@ -1047,12 +1453,14 @@ fn parse_propose<'a>(rest: &[&'a str]) -> ProposeOptions<'a> {
         remote,
         onto,
         change,
+        key_file,
+        channel,
         cone,
         reviewers,
     }
 }
 
-/// `choir propose <key-file> <channel> [flags] [reviewer]...`
+/// `choir propose [flags] [reviewer]...`
 ///
 /// The five-step path -- provision, commit, push, checkpoint, request
 /// review -- as one command, run from the contributor's own checkout.
@@ -1070,8 +1478,49 @@ fn parse_propose<'a>(rest: &[&'a str]) -> ProposeOptions<'a> {
 /// It is safe to re-run: the change, workspace and idempotency key are
 /// derived from the branch name, so a second run resumes the same
 /// proposal rather than opening a second one.
-fn propose(key_file: &str, channel: &str, rest: &[&str], auth: AuthOptions<'_>) -> ! {
-    let options = parse_propose(rest);
+fn propose(rest: &[&str], auth: AuthOptions<'_>) -> ! {
+    let positional = positional_propose(rest);
+    let options = parse_propose(positional.map_or(rest, |(_, _, tail)| tail));
+    // Most explicit first: the two positionals the command used to take,
+    // then their flags, then what `choir join` left behind. Nothing is
+    // guessed -- an identity that cannot be found is refused with the
+    // command that creates one, because signing as the wrong actor is
+    // worse than not signing.
+    let key_file = positional
+        .map(|(key_file, _, _)| key_file.to_string())
+        .or_else(|| options.key_file.map(str::to_string))
+        .or_else(|| configured("key"))
+        .unwrap_or_else(|| state_dir().join("agent.key").display().to_string());
+    if !std::path::Path::new(&key_file).is_file() {
+        propose_abort(
+            "identity",
+            &format!(
+                "no key at {key_file}\nnext: choir join '<link>'   \
+                 (or name one: choir propose --key-file <path>)"
+            ),
+        );
+    }
+    // The channel, in the same order. The auth file's user is the last
+    // resort rather than the first because an account's channel is not
+    // always its user name -- `--channel` at join time makes them
+    // differ, and `choir join` writes the answer down for exactly this.
+    let channel = positional
+        .map(|(_, channel, _)| channel.to_string())
+        .or_else(|| options.channel.map(str::to_string))
+        .or_else(|| configured("channel"))
+        .or_else(|| {
+            let path = discovered_auth_file()?;
+            choir_cli::mcp::credential_pair(std::path::Path::new(&path), auth.user)
+                .ok()
+                .map(|(user, _)| user)
+        })
+        .unwrap_or_else(|| {
+            propose_abort(
+                "identity",
+                "nothing here says which channel to sign as\nnext: choir propose --channel <name>",
+            )
+        });
+    let (key_file, channel) = (key_file.as_str(), channel.as_str());
     let cwd = std::env::current_dir().unwrap_or_else(|e| propose_abort("checkout", &e.to_string()));
     let top = match git_capture(&cwd, &["rev-parse", "--show-toplevel"]) {
         Ok(top) => std::path::PathBuf::from(top),
@@ -1378,6 +1827,15 @@ fn check_exit(subject: &ContentHash, body: &str) -> ! {
 /// Prints the response body and exits nonzero unless the status is 2xx.
 fn finish(status: u16, body: &str) -> ! {
     println!("{body}");
+    // The body stays exactly what the node said, on stdout, for whatever
+    // is parsing it. The repair is repeated on stderr because `next` is
+    // the fourth field of a JSON object and a reader who is already
+    // stuck does not read that far.
+    if !(200..300).contains(&status) {
+        if let Some(next) = refusal_next(body) {
+            eprintln!("\nnext: {next}");
+        }
+    }
     std::process::exit(if (200..300).contains(&status) { 0 } else { 1 });
 }
 
@@ -2318,29 +2776,58 @@ fn configured_node() -> Option<String> {
 /// same need: a checkout that names its node and a checkout that names
 /// the credential for it are the same question asked twice, and two
 /// parsers for one file is one of them drifting.
+/// The walk order, stated once so the surface can quote it: every
+/// `.choir/config` from the working directory up to the filesystem root,
+/// then `~/.choir/config`.
+///
+/// The home file is the fallback and not the first stop, so a checkout
+/// that names its own node still wins on a machine that has joined a
+/// different one. It exists because the walk alone cannot answer for a
+/// contributor who joins in one directory and clones into another:
+/// `~/src/foo` is not under `~` in any sense the walk can see once they
+/// have `cd`'d into it — it is, but only because `$HOME` happens to be a
+/// parent, which stops being true the moment they clone into `/srv` or
+/// onto another volume.
+///
+/// The alternative considered was writing the node into each clone at
+/// clone time through the credential helper. It was rejected because git
+/// gives a helper no hook that fires on `git clone` — the helper is
+/// asked for a credential, not told a repository was created — so the
+/// write would have to happen on the first *authenticated* fetch, which
+/// is after the contributor has already run a command that needed it.
 fn configured(want: &str) -> Option<String> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if let Ok(text) = std::fs::read_to_string(dir.join(".choir/config")) {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.starts_with('#') {
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once('=') {
-                    if key.trim() == want {
-                        let value = value.trim();
-                        if !value.is_empty() {
-                            return Some(value.to_string());
-                        }
-                    }
+    let mut dir = std::env::current_dir().ok();
+    while let Some(here) = dir {
+        if let Some(found) = configured_in(&here.join(".choir/config"), want) {
+            return Some(found);
+        }
+        let mut up = here;
+        if !up.pop() {
+            break;
+        }
+        dir = Some(up);
+    }
+    configured_in(&state_dir().join("config"), want)
+}
+
+/// One key out of one `.choir/config` file.
+fn configured_in(path: &std::path::Path, want: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == want {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
                 }
             }
         }
-        if !dir.pop() {
-            return None;
-        }
     }
+    None
 }
 
 /// Fills in the node URL for a command that takes one and was not given
@@ -2948,8 +3435,15 @@ fn main() {
             // check that reports "no auth file" must not report it about
             // a node whose credential this command would have used.
             let effective = api.as_deref().and_then(|api| auth.file_for(api));
-            let checks = choir_cli::doctor::run(api.as_deref(), effective.or(auth.file));
+            let credential = effective.or(auth.file);
+            let checks = choir_cli::doctor::run(api.as_deref(), credential);
             let style = choir_cli::style::Style::for_stdout();
+            // Above the checks, because the first question is "what is
+            // this machine" and every check below reads differently
+            // depending on the answer: a missing `choir-node` matters to
+            // an operator and is nothing to a contributor.
+            let role = choir_cli::join::Role::of(&state_dir(), credential);
+            print!("{}", choir_cli::doctor::heading(role, style));
             print!("{}", choir_cli::doctor::report(&checks, style));
             std::process::exit(choir_cli::doctor::exit_code(&checks));
         }
@@ -3077,9 +3571,24 @@ fn main() {
         // Deliberately not `<api>`-first like its neighbours: the git
         // remote already names the node, and repeating it is exactly the
         // friction this command exists to remove.
-        ["propose", key_file, channel, rest @ ..] => propose(key_file, channel, rest, auth),
+        ["propose", rest @ ..] => propose(rest, auth),
+        // The link form first, and tested on the *path* rather than on
+        // the argument count: `choir join <link> --user bea` has three
+        // arguments too, and read as the positional form it would name
+        // an invite file `--user`.
+        ["join", link, rest @ ..] if auth.is_empty() && choir_cli::join::Link::looks_like(link) => {
+            match choir_cli::join::Link::parse(link) {
+                Ok(choir_cli::join::Link { api, id, secret }) => {
+                    join(&api, Invite::Pair(id, secret), None, rest)
+                }
+                Err(why) => {
+                    eprintln!("choir join: {why}");
+                    std::process::exit(2);
+                }
+            }
+        }
         ["join", api, invite_file, key_file, rest @ ..] if auth.is_empty() => {
-            join(api, invite_file, key_file, rest)
+            join(api, Invite::File(invite_file), Some(key_file), rest)
         }
         // Argument order is git's, not ours: it appends the operation
         // to whatever the configured helper line already carried.

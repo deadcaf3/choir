@@ -16,7 +16,7 @@ repository you hold no grant on answers `404` on all four.
 
 Open the node's base URL (`/`) with a credential and it serves the repository index, and behind it one read-only page per repository: refs, the review queue with approval weights and verdicts, the latest ref-state attestation, workspaces, and sequencer health against the 100 ms gate. A browser prompts for a `--auth-file` user and token.
 
-**The one exception is the bare address itself (D57).** A `GET /` that presents *no* credential gets a static front page instead of a password box: what a choir node is, the three commands it takes to use one (`choir join`, `choir git-credential`, `choir propose`), and that the node is invite-only. A credential that is presented and *wrong* still gets the `401` and the `WWW-Authenticate` challenge.
+**The one exception is the bare address itself (D57).** A `GET /` that presents *no* credential gets a static front page instead of a password box: what a choir node is, the commands it takes to use one (install, `choir join <link>`, `git clone`, `choir propose`), and that the node is invite-only. A credential that is presented and *wrong* still gets the `401` and the `WWW-Authenticate` challenge.
 
 The page is server-rendered from the same `/api/view` payload the API serves, cached by view sequence, and revalidated with an `ETag`: a repeat visit on unchanged state returns `304` with no body. It is plain HTML, so it works offline.
 

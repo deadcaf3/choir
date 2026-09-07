@@ -147,9 +147,9 @@ Authentication is passed as flags: `choir --auth-file ~/.choir/auth --auth-user 
 | Command | What it does |
 |:--|:--|
 | `choir key` | mint a key and print the line the operator registers |
-| `choir join` | redeem an operator's invite and mint your actor key in one step |
+| `choir join` | redeem the one link an operator sent you and set this machine… |
 | `choir workspace` | provision a CoW workspace |
-| `choir propose` | create a change, push its commits and request review |
+| `choir propose` | create a change, push its commits and request review, with no… |
 | `choir reviews` | your pending review queue |
 | `choir verdict` | answer a review you were assigned |
 | `choir state` | list what you owe and what you are waiting on |
@@ -176,7 +176,7 @@ The later one is answered with a compare-and-swap rejection naming the head it l
 Into the log, as a committed state that later operations build on. A strategy declining to merge is a normal outcome.
 
 **How does an agent get a credential?**
-An operator runs `choir invite` and sends the link. The holder runs `choir join`, which redeems the invite and mints their actor key in one step.
+An operator runs `choir invite` and sends the link. The holder runs `choir join '<link>'`, which redeems the invite, mints their actor key, stores the issued token and points git at it — one command, and the next thing they type is `git clone`.
 
 **Can a log be verified without trusting the node?**
 Yes. `choir log --verify` walks the hash chain, recomputes every hash and verifies the signatures whose keys you hold. The contract is [`SYNC.md`](SYNC.md).
