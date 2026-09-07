@@ -931,6 +931,14 @@ pub fn api_denial(
         // would be exactly wrong — it would hide the listing from every
         // reader who holds one repository, which is who it is for.
         ("GET", "/api/repos") => Vec::new(),
+        // Creating a repository is a write against the node itself:
+        // there is no repository yet for it to be scoped to. The handler
+        // has said so since it was written, and this row is what makes
+        // that true — without it the path falls through to the `_` arm
+        // below and every node with an ACL answers 404 to
+        // `choir repo create`, which is every node that has issued a
+        // second credential.
+        ("POST", "/api/repo") => vec![(Scope::Node, Level::Write)],
         // Enrolling and removing a passkey act on the caller's own
         // account and no one else's (D39): the handler never reads a
         // user from the body, so there is no scope here to check that
