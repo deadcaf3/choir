@@ -3,13 +3,29 @@ name = "choir-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 authors.workspace = true
 # Two binaries live here (`choir-node` and the `choir-ssh` shim), so a bare
 # `cargo run -p choir-node` is ambiguous and every documented invocation
 # would need `--bin`. The daemon is what that spelling means.
 default-run = "choir-node"
 
+# Release-only, and off by default. `tiny_http`'s TLS backend links
+# `libssl` dynamically, so a binary built on one machine names that
+# machine's soname and refuses to start where it is absent — which is
+# every distribution that is not the runner's. A prebuilt is the only
+# build where that matters, so the vendored copy is a feature the
+# release turns on rather than a cost every `cargo build` pays.
+#
+# `openssl` is named here only to have a feature to forward; it is
+# already in the lock via `tiny_http`, so this adds no crate to the
+# workspace. The daemon does not call it directly and it is not
+# compiled in unless this feature is on.
+[features]
+vendored-tls = ["dep:openssl", "openssl/vendored"]
+
 [dependencies]
+openssl = { version = "0.10", optional = true }
 choir-fs = { path = "../choir-fs" }
 choir-hash = { path = "../choir-hash" }
 choir-identity = { path = "../choir-identity" }
@@ -26,6 +42,14 @@ serde_json = "1"
 # and SHA-256 is not BLAKE3.
 sha2 = "0.10"
 tiny_http = { version = "0.12", features = ["ssl-openssl"] }
+
+# Where `cargo binstall choir-node` looks for a prebuilt daemon rather
+# than compiling one. The same three fields as `choir-cli`, naming this
+# package's archives; `dist plan` prints the names both must match.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/choir-node-{ target }{ archive-suffix }"
+bin-dir = "choir-node-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"
 
 [lints]
 workspace = true

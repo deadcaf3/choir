@@ -4,6 +4,7 @@ default-run = "choir"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 authors.workspace = true
 
 [lib]
@@ -13,6 +14,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "choir"
 path = "src/main.rs"
+
+# Forwarded rather than its own: `choir` links `choir-node` for the rejection
+# table, and linking that crate is enough to inherit its `libssl`
+# soname. The client has no TLS of its own to vendor and still cannot
+# be a portable download without this.
+[features]
+vendored-tls = ["choir-node/vendored-tls"]
 
 [dependencies]
 choir-fs = { path = "../choir-fs" }
@@ -36,10 +44,17 @@ serde_json = "1"
 # The source build stays mandatory for the daemon on purpose. It is the
 # *contributor* who should not have to build a Rust workspace before
 # their first change, and `choir` is the only binary they need.
+#
+# Every field here mirrors something `dist` decides, and the three that
+# matter were all wrong while nothing had ever run: `dist` names an
+# archive after the *package*, not the binary, and its unix archive is
+# `.tar.xz`. They are written out rather than left to binstall's
+# defaults so that the disagreement is visible in one place if dist's
+# naming ever changes; `dist plan` prints the names it will use.
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/choir-{ target }{ archive-suffix }"
-bin-dir = "choir-{ target }/{ bin }{ binary-ext }"
-pkg-fmt = "tgz"
+pkg-url = "{ repo }/releases/download/v{ version }/choir-cli-{ target }{ archive-suffix }"
+bin-dir = "choir-cli-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"
 
 [dev-dependencies]
 

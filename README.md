@@ -15,7 +15,7 @@
 
 <br/>
 
-[**Quick start**](#quick-start) · [**Run a node**](#run-a-node) · [**Commands**](#commands) · [**FAQ**](#faq) · [**Documentation**](docs/README.md) · [**Decisions**](DECISIONS.md)
+[**Install**](#install) · [**Quick start**](#quick-start) · [**Run a node**](#run-a-node) · [**Commands**](#commands) · [**FAQ**](#faq) · [**Documentation**](docs/README.md) · [**Decisions**](DECISIONS.md)
 
 </div>
 
@@ -51,7 +51,9 @@ A change is a **signed operation** appended to an append-only log. One writer th
 
 ## Requirements
 
-Rust 1.97.1, pinned in `rust-toolchain.toml`, edition 2021. Install it with [rustup](https://rustup.rs/).
+**To build from source:** Rust 1.97.1, pinned in `rust-toolchain.toml`, edition 2021. Install it with [rustup](https://rustup.rs/). The [one-command install](#install) needs none of this — the release archives are prebuilt and link OpenSSL statically.
+
+**To run either way:** `git` and `curl`, which the binaries shell out to. `openssl` and `ssh-keygen` are needed for the commands that use them.
 
 | Tool | Purpose |
 |:--|:--|
@@ -71,7 +73,32 @@ Rust 1.97.1, pinned in `rust-toolchain.toml`, edition 2021. Install it with [rus
 
 ---
 
-## Build
+## Install
+
+One command, no toolchain, macOS and Linux, x86-64 and arm64:
+
+```bash
+curl -fsSL https://<release-host>/choir-cli-installer.sh | sh    # choir, choir-mcp
+curl -fsSL https://<release-host>/choir-node-installer.sh | sh   # choir-node, choir-ssh
+```
+
+Take the second one only if you are running a node yourself. Both put their binaries in `$CARGO_HOME/bin` (`~/.cargo/bin` by default) and print what they wrote where.
+
+`<release-host>` is a placeholder until the first release is cut; the release publishes `SHA256` sums beside every archive, and `sha256.sum` covers the set.
+
+With [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall), which fetches the same archives:
+
+```bash
+cargo binstall choir-cli choir-node
+```
+
+Nothing is published to a package registry. These are the release archives and their checksums, nothing else.
+
+---
+
+## Build from source
+
+The audited path, and the one an operator is still welcome to take: what you run is what you compiled, from a tree you can read. It is no longer the only way to get a binary.
 
 From a checkout of this repository:
 
@@ -79,6 +106,8 @@ From a checkout of this repository:
 cargo build --release -p choir-node -p choir-cli
 export PATH="$PWD/target/release:$PATH"
 ```
+
+Requires the toolchain and the headers in [Requirements](#requirements) above; the install above requires neither.
 
 `cargo build` and `cargo test` skip `choir-actor`, which carries a heavy Rivet dependency. Full release gate:
 

@@ -3,7 +3,14 @@ name = "choir-queue"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 authors.workspace = true
+
+# Not a release artifact. The three binaries here are the D18 executor
+# protocol's second party and its worked example — read against a
+# checkout of the protocol, not installed onto a PATH.
+[package.metadata.dist]
+dist = false
 
 [dependencies]
 choir-hash = { path = "../choir-hash" }

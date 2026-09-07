@@ -47,6 +47,13 @@ version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["asxeem"]
+# Where releases are downloaded from. `dist` refuses to generate a
+# GitHub workflow without it, and `cargo binstall` builds its `pkg-url`
+# out of it, so this one string decides where two independent installers
+# look. `<owner>` is a placeholder, the way every host and account name
+# in a tracked file here is: the operator substitutes it in the same
+# commit that first pushes to a remote, and nothing reads it until then.
+repository = "https://github.com/<owner>/choir"
 
 # Release packaging (`dist`, formerly `cargo-dist`). Read only by that
 # tool, never by a build: it generates the release workflow, the archives
@@ -54,28 +61,82 @@ authors = ["asxeem"]
 # downloads is described in the repository rather than in CI YAML nobody
 # reads.
 #
-# `choir` alone is published. The daemon is deliberately absent: an
-# operator running a node builds it from source, which is the audited
-# path, while a contributor needs one client binary and no toolchain.
-# `cargo-dist-version` is deliberately absent: it pins the exact
-# packaging tool a release was cut with, and a value written from memory
-# rather than from the installed tool is a pin that says something untrue
-# about how the artifact was built. `dist init` writes it, and refuses to
-# run until it has.
+# `choir` and `choir-node` are both published. This reverses the
+# original rule here, which was that only the client shipped and an
+# operator built the daemon from source "because that is the audited
+# path". The audience is what changed: that sentence describes an
+# operator who already has a Rust toolchain and a checkout, and the
+# person self-hosting a node now is somebody with a fresh VPS and
+# neither. Making them install rustup and openssl headers before they
+# can run a daemon is the same wall the client install just removed,
+# one step further in. The audited path is unchanged and still
+# documented; it stopped being the *only* path.
+#
+# What that costs, and what pays it: a prebuilt daemon must carry its
+# own build stamp (`CHOIR_GIT_HEAD`, which the workflow sets, since a
+# dist build has no HEAD of its own to read) and must not depend on the
+# runner's libssl (`features`, below). Both are release-time
+# arrangements; neither changes what a source build does.
+#
+# `choir-demo`, `choir-spike` and `choir-bridge` opt out in their own
+# manifests, each with the reason there.
+#
+# `dist init` writes the mechanical keys below and reformats this table
+# when it does, which is why every comment in it is load-bearing prose
+# that has to be put back by hand afterwards rather than a note on a
+# line dist owns.
 [workspace.metadata.dist]
-ci = ["github"]
+# The exact packaging tool this release was cut with. Written by `dist
+# init`, never by hand: a version typed from memory is a pin that says
+# something untrue about how the artifact was built.
+cargo-dist-version = "0.32.0"
+ci = "github"
 installers = ["shell"]
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-]
-# The gate is the gate. Release packaging runs after it rather than
-# beside it, so nothing is ever published that `./gate`
-# refused.
-publish-jobs = []
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 install-path = "CARGO_HOME"
+# The one build difference between a release artifact and a source
+# build: statically link OpenSSL, so a downloaded binary does not name
+# the runner's `libssl` soname. See `crates/choir-node/Cargo.toml`.
+features = ["vendored-tls"]
+# The gate is the gate. Release packaging runs after it rather than
+# beside it, so nothing is ever published that `./gate` refused: see
+# `plan-jobs` below for where that is enforced.
+#
+# Empty, and spelled out rather than left to the default: nothing here
+# is published to crates.io. A registry release is a name nobody can
+# take back, and this is a research prototype.
+publish-jobs = []
+# The quick gate, in front of everything. `plan-jobs` become a job the
+# build jobs `needs:`, so a refused gate stops the release before a
+# single artifact is built rather than after. The job it names is the
+# same reusable workflow `ci.yml` calls.
+plan-jobs = ["./gate-quick"]
+# Extra steps spliced into every build job, resolved relative to
+# `.github/workflows/`. One step, and it is the build stamp:
+# `.github/workflows/build-setup.yml`.
+github-build-setup = "build-setup.yml"
+
+# No self-updater. `choir` telling itself to fetch a new binary is a
+# second, unaudited install path, and the one command that installs it
+# is also the one command that upgrades it.
+install-updater = false
+
+# Native runners for the two Linux targets rather than dist's default,
+# which cross-compiles aarch64 on an x86 runner through
+# `cargo-zigbuild`. Two reasons, both about this workspace rather than
+# a preference: the release build statically links OpenSSL, and
+# vendored OpenSSL is a C build with its own configure step that a
+# cross toolchain is the least reliable place to run; and a native
+# runner is the only build whose `libc` is the one the artifact will
+# meet. `ubuntu-22.04-arm` is a GitHub-hosted runner, so this adds no
+# self-hosted machine for anybody to maintain.
+[workspace.metadata.dist.github-custom-runners]
+x86_64-unknown-linux-gnu = "ubuntu-22.04"
+# `host` is spelled out because dist knows the platform of the runner
+# images it shipped with and `ubuntu-22.04-arm` is not one of them; a
+# bare string here is rejected rather than guessed, which is the right
+# refusal and this is the answer to it.
+aarch64-unknown-linux-gnu = { runner = "ubuntu-22.04-arm", host = "aarch64-unknown-linux-gnu" }
 
 [workspace.dependencies]
 blake3 = "1"
@@ -119,6 +180,15 @@ debug = "line-tables-only"
 # blake3 and ed25519.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The profile release artifacts are built with. `dist init` writes this
+# with `lto = "thin"`; that line is deliberately removed, because
+# `[profile.release]` above chose "fat" from a measurement on this
+# workspace where fat won every metric including build time. A release
+# build is the one build where the measurement matters most, so it
+# inherits release and overrides nothing.
+[profile.dist]
+inherits = "release"
 
 [workspace.lints.rust]
 missing_docs = "warn"
