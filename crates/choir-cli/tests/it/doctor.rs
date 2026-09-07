@@ -32,9 +32,19 @@ fn workdir(tag: &str) -> PathBuf {
 /// parents for `.choir/config` the way every other command does, and a
 /// test standing in the repository would pick up whatever node the
 /// developer running it has configured.
+///
+/// `--state` is appended for the same reason, and it is the other half
+/// of the same hole. `doctor` also reports on the machine's *own* node
+/// when there is one, and it finds that node at `$HOME/.choir` — so
+/// these tests passed on a laptop with no node and failed on the
+/// developer's laptop that had one, which is the failure this helper
+/// exists to prevent. Pointing it at the scratch directory says "a
+/// machine with no node of its own", which is what every test in this
+/// file is about; the host-side rows are exercised in `host.rs`.
 fn doctor(dir: &std::path::Path, args: &[&str]) -> (i32, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_choir"))
         .args(args)
+        .args(["--state", &dir.to_string_lossy()])
         .current_dir(dir)
         .output()
         .expect("choir runs");

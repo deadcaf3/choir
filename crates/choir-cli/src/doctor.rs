@@ -368,6 +368,168 @@ pub fn run(api: Option<&str>, auth: Option<&str>) -> Vec<Check> {
     checks
 }
 
+/// The six facts that describe a machine *hosting* a node, as opposed
+/// to one talking to somebody else's.
+///
+/// Appended to [`run`] rather than folded into it, because they are only
+/// findings on a machine that has a node: reporting "linger is off" to a
+/// laptop that only ever clones would be six rows of noise on a report
+/// whose value is that every row means something.
+///
+/// The last of them is a request to this node's *public* name, made from
+/// the node itself. That is a hairpin — the packet may never leave the
+/// box — and it still answers the two questions that go wrong most
+/// often: whether the name resolves, and whether the certificate
+/// presented matches it. A firewall closed to the outside is the case it
+/// cannot see, and the firewall row is what covers that.
+#[must_use]
+pub fn host(state: &std::path::Path, auth: Option<&str>) -> Vec<Check> {
+    let layout = crate::serve::Layout::new(state, port_of_state(state));
+    let tls = layout.tls();
+    let mut checks = vec![Check::pass(
+        "bind",
+        match tls {
+            Some(_) => format!("{}:{} (reachable from outside)", layout.bind(), layout.port),
+            None => format!("127.0.0.1:{} (loopback only)", layout.port),
+        },
+    )];
+
+    checks.push(match &tls {
+        Some((cert, _)) => Check::pass("tls", format!("on, {}", cert.display())),
+        // A pass, not a warning. A loopback node without a certificate
+        // is correct rather than degraded — invariant 9 is what makes it
+        // so — and a report that cries "degraded" at every laptop is a
+        // report people stop reading.
+        // A pass, not a warning. A loopback node without a certificate
+        // is correct rather than degraded — invariant 9 is what makes it
+        // so — and a report that cries "degraded" at every laptop is a
+        // report people stop reading. The pointer goes in the detail
+        // rather than in a fix, because a fix on a passing row is a fix
+        // for a problem the row just said there isn't.
+        None => Check::pass(
+            "tls",
+            "off — not needed on loopback; `choir host --domain <name>` publishes it",
+        ),
+    });
+
+    checks.push(match &tls {
+        None => Check::pass("certificate", "none needed for a loopback node"),
+        Some((cert, _)) => match crate::tls::expiry(cert) {
+            Err(error) => Check::fail("certificate", error)
+                .with_fix("sudo choir node tls <domain> --user $(id -un)"),
+            Ok(when) => {
+                // `openssl -checkend` rather than parsing that date and
+                // doing the arithmetic here: the question is "is it
+                // still good", openssl answers it with an exit code, and
+                // a date parser written for one report is a date parser
+                // that is wrong in one time zone.
+                if !checkend(cert, 0) {
+                    Check::fail("certificate", format!("EXPIRED — was valid until {when}"))
+                        .with_fix("sudo certbot renew --force-renewal && choir node restart")
+                } else if !checkend(cert, 21 * 24 * 3600) {
+                    Check::warn("certificate", format!("expires within 21 days — {when}"))
+                        .with_fix("sudo certbot renew --dry-run   (checks the renewal path)")
+                } else {
+                    Check::pass("certificate", format!("valid until {when}"))
+                }
+            }
+        },
+    });
+
+    let user = crate::host::username();
+    checks.push(match crate::host::linger(&user) {
+        None => Check::pass("linger", "not a systemd --user machine"),
+        Some(true) => Check::pass("linger", format!("on for {user}")),
+        Some(false) => Check::fail(
+            "linger",
+            format!("off — the node dies when {user} logs out"),
+        )
+        .with_fix(format!("sudo loginctl enable-linger {user}")),
+    });
+
+    checks.push(unit_check());
+
+    checks.push(match layout.public() {
+        None => Check::pass("public url", "none; this node is not published"),
+        Some(url) => {
+            match crate::mcp::HttpClient::new(&url, auth.map(std::path::Path::new), None) {
+                Err(error) => Check::fail("public url", format!("{url}: {error}")),
+                Ok(client) => match client.get("/healthz") {
+                    Ok((200 | 401, _)) => Check::pass("public url", format!("{url} answers")),
+                    Ok((code, _)) => Check::warn("public url", format!("{url} answered {code}")),
+                    Err(error) => Check::fail("public url", format!("{url}: {error}")).with_fix(
+                        "check DNS points here, and that the port is open in the firewall",
+                    ),
+                },
+            }
+        }
+    });
+
+    checks
+}
+
+/// Whether a certificate is still valid `seconds` from now.
+fn checkend(cert: &std::path::Path, seconds: u64) -> bool {
+    std::process::Command::new("openssl")
+        .args(["x509", "-noout", "-checkend", &seconds.to_string(), "-in"])
+        .arg(cert)
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Whether the service manager has this node loaded and running.
+fn unit_check() -> Check {
+    let Some(supervisor) = crate::supervise::Supervisor::detect() else {
+        return Check::warn(
+            "unit",
+            format!("no service manager on {}", std::env::consts::OS),
+        )
+        .with_fix("run it in the foreground: choir node serve");
+    };
+    let (program, args) = match supervisor {
+        crate::supervise::Supervisor::Launchd => (
+            "launchctl",
+            vec![
+                "print".to_string(),
+                format!("gui/{}/{}", crate::tls::uid(), crate::supervise::LABEL),
+            ],
+        ),
+        crate::supervise::Supervisor::Systemd => (
+            "systemctl",
+            vec![
+                "--user".to_string(),
+                "is-active".to_string(),
+                "choir-node.service".to_string(),
+            ],
+        ),
+    };
+    match std::process::Command::new(program).args(&args).output() {
+        Ok(out) if out.status.success() => Check::pass("unit", "loaded and running"),
+        // A warning, not a failure. An unsupervised node is a real
+        // state and a supported one — `choir node serve` in a terminal,
+        // and `choir host --foreground` in a container, where the
+        // runtime is the supervisor and there is no unit to find. That
+        // the node is *answering* is the `node` row's question, and it
+        // is the one that fails when nothing does.
+        Ok(_) => Check::warn("unit", "not loaded — this node is not supervised")
+            .with_fix("choir node install, to survive a logout and a reboot"),
+        Err(error) => Check::warn("unit", format!("could not ask {program}: {error}")),
+    }
+}
+
+/// The port a state directory's node was installed on.
+///
+/// Read back out of the public URL when there is one, so a published
+/// node reports the port it actually serves rather than the default.
+fn port_of_state(state: &std::path::Path) -> u16 {
+    let layout = crate::serve::Layout::new(state, 8417);
+    layout
+        .public()
+        .as_deref()
+        .and_then(crate::serve::port_of)
+        .unwrap_or(8417)
+}
+
 /// Whether `choir node serve` has a daemon to exec.
 ///
 /// A warning rather than a failure: a machine that only ever talks to

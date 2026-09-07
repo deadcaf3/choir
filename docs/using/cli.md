@@ -55,6 +55,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
 
 - `choir init [<state-dir>] [--port <n>] [--force]`  
   set up a node on this machine from nothing: a repository root, a credential at 0600, an actor key the node will trust, and a .choir/config so the other commands stop asking which node you mean; refuses and names what exists rather than overwriting a token nothing can reissue
+- `choir host [--domain <name> | --public [--ip <addr>] | --public-name <name>] [--port <n>] [--repo <owner/name.git>] [--invite <name>] [--state <dir>] [--yes] [--dry-run] [--foreground] [-- <daemon flags>]`  
+  take this machine from nothing to a running node and print the URL people use; bare it binds loopback in seconds, --domain issues a Let's Encrypt certificate for a name you already own, and --public wears a magic-DNS name over this box's address so a VPS with no domain can still be reached over TLS — the node refuses a public bind without one. `--foreground` execs the daemon instead of installing a unit, for a container whose runtime is already the supervisor. Named `host` rather than `node host` for the reason `init` is not `node init`: `choir node …` is the family for a node that exists, and this is what you run when there is not one yet
 - `choir key <key-file> [name]`  
   mint a key and print the line the operator registers; pass your channel name to print the bound form
 - `choir git-credential <auth-file> [--auth-user <name>] get|store|erase`  
@@ -165,6 +167,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   run the node in this terminal, deriving its repository root, credential and trusted-key file from the layout `choir init` wrote, so starting one takes the same arguments as creating one — none; execs the daemon rather than wrapping it, so signals and the exit code reach the real process
 - `choir node install [--state <dir>] [--port <n>] [-- <daemon flags>]`  
   hand the node to this machine's service manager — a launchd agent on macOS, a systemd user unit on Linux — so it survives a logout, a crash and a reboot; the unit runs `choir node serve`, so a flag changing later never means re-rendering it
+- `choir node tls <domain> --user <account> [--port <n>] [--dry-run | --staging]`  
+  obtain a Let's Encrypt certificate for this node and wire up its renewal: certbot, a deploy hook that re-projects the pair and restarts the node because the daemon reads its certificate once at bind, and the two-line marker `node serve` reads. The only command here that expects root, and it has a name so it appears in sudo's log as itself; `--user` is required rather than inferred, because under sudo this process is root and the node deliberately is not
 - `choir node stop `  
   stop the supervised node for this boot, leaving the unit in place so it returns at next login; `node uninstall` is the one that ends it
 - `choir node restart `  
@@ -175,8 +179,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   the tail of the node's log, wherever this machine's service manager was told to write it; defaults to the last 30 lines
 - `choir node status [<api>]`  
   what the node is doing right now: health, the commit actually serving, the sequencer's position and its measured p99 against the 100 ms gate, and how much this credential can see; sections a narrower credential may not read say so rather than reading as an idle node
-- `choir doctor [<api>]`  
-  check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails
+- `choir doctor [<api>] [--state <dir>]`  
+  check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails. On a machine that is *hosting* a node it adds six rows — bind address, TLS, certificate expiry, linger, whether the unit is running, and whether the public URL answers
 - `choir backup verify <backup-dir>`  
   whether a backup can be restored from, which is a different claim from whether one was written; checks the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, and refuses a backup that carries a key or a credential — every check local, nothing asked of the node it is a copy of
 - `choir backup restore <backup-dir> <target-root>`  

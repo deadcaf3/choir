@@ -48,7 +48,22 @@ pub struct Layout {
     pub keys: PathBuf,
     /// Where the daemon's own log is appended when supervised.
     pub log: PathBuf,
-    /// The port to bind on loopback.
+    /// Two lines — certificate path, then key path — when this node
+    /// terminates TLS itself. Its *existence* is the switch, the same
+    /// marker discipline the review and scope gates already use: an
+    /// empty file and an absent one mean opposite things, and a separate
+    /// enable-flag beside the file it guards is a pair that can disagree.
+    pub tls_marker: PathBuf,
+    /// The D36 accounts file. Present means invites can be minted;
+    /// absent means `/api/accounts/invite` answers 503.
+    pub accounts: PathBuf,
+    /// The D29 per-repository grants. Its existence is the switch, and
+    /// the daemon refuses an accounts file without one — an issued grant
+    /// with no table to grade it against is a grant to everything.
+    pub acl: PathBuf,
+    /// The one URL people outside this machine use, when there is one.
+    pub public_url: PathBuf,
+    /// The port to bind.
     pub port: u16,
 }
 
@@ -62,7 +77,52 @@ impl Layout {
             auth: state.join("auth"),
             keys: state.join("keys"),
             log: state.join("node.log"),
+            tls_marker: state.join("tls.enabled"),
+            accounts: state.join("accounts.jsonl"),
+            acl: state.join("acl"),
+            public_url: state.join("public-url"),
             port,
+        }
+    }
+
+    /// The certificate and key this node terminates TLS with, if it does.
+    ///
+    /// Read at *start* time rather than baked into the supervision file,
+    /// which is what makes renewal a restart rather than a re-render: a
+    /// certbot deploy hook replaces the two files and restarts the unit,
+    /// and the unit still says `choir node serve`.
+    ///
+    /// Anything but two non-empty lines is `None`. A half-written marker
+    /// must not become a public bind with no certificate — that is
+    /// invariant 9 by another route.
+    #[must_use]
+    pub fn tls(&self) -> Option<(PathBuf, PathBuf)> {
+        let text = std::fs::read_to_string(&self.tls_marker).ok()?;
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let cert = PathBuf::from(lines.next()?);
+        let key = PathBuf::from(lines.next()?);
+        Some((cert, key))
+    }
+
+    /// The public URL, when one was written.
+    #[must_use]
+    pub fn public(&self) -> Option<String> {
+        let text = std::fs::read_to_string(&self.public_url).ok()?;
+        let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+        Some(line.to_string())
+    }
+
+    /// The address the daemon should bind.
+    ///
+    /// `0.0.0.0` exactly when there is a certificate to present, never
+    /// otherwise. The daemon refuses the unsafe combination on its own
+    /// (invariant 9); this side never asks for it, so the refusal is a
+    /// backstop rather than the mechanism.
+    #[must_use]
+    pub fn bind(&self) -> &'static str {
+        match self.tls() {
+            Some(_) => "0.0.0.0",
+            None => "127.0.0.1",
         }
     }
 
@@ -177,6 +237,51 @@ pub fn plan(
         "--keys-file".to_string(),
         layout.keys.display().to_string(),
     ];
+    // Both derived from a file's existence rather than from a flag, so
+    // that a certificate arriving later, or an accounts file being
+    // created later, changes what the node serves without the
+    // supervision file being re-rendered. That is the failure mode of
+    // the shell installers this replaces: a unit that lints clean and
+    // restarts cleanly while launching yesterday's arguments.
+    if let Some((cert, key)) = layout.tls() {
+        for path in [&cert, &key] {
+            if std::fs::File::open(path).is_err() {
+                return Err(format!(
+                    "{} names {}, which this user cannot read\n\n  \
+                     re-issue and re-project the pair: sudo choir node tls <domain> \
+                     --user $(id -un)",
+                    layout.tls_marker.display(),
+                    path.display()
+                ));
+            }
+        }
+        args.push("--bind".to_string());
+        args.push(layout.bind().to_string());
+        args.push("--tls-cert".to_string());
+        args.push(cert.display().to_string());
+        args.push("--tls-key".to_string());
+        args.push(key.display().to_string());
+    }
+    if layout.acl.exists() {
+        args.push("--acl-file".to_string());
+        args.push(layout.acl.display().to_string());
+    }
+    if layout.accounts.exists() {
+        // Refused here rather than left to the daemon, which exits on it
+        // at startup and is therefore discovered by a supervisor
+        // restarting every two seconds into the same failure.
+        if !layout.acl.exists() {
+            return Err(format!(
+                "{} turns on invite-only credentials, and there is no {} to grade the\n  \
+                 grants against — an issued grant with no table is a grant to every\n  \
+                 repository. Write one, or remove the accounts file.",
+                layout.accounts.display(),
+                layout.acl.display()
+            ));
+        }
+        args.push("--accounts-file".to_string());
+        args.push(layout.accounts.display().to_string());
+    }
     for repo in create {
         args.push("--create".to_string());
         args.push(repo.clone());
