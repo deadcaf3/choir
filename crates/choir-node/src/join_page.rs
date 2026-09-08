@@ -112,6 +112,16 @@ pub(crate) struct Offers {
     /// Whether the node offers passkeys, so redemption can be
     /// passwordless (D75).
     pub passkeys: bool,
+    /// Whether the node publishes any repository to readers with no
+    /// account (D78), which decides what the front door says about what
+    /// a stranger may read.
+    ///
+    /// Here rather than beside the page's own arguments because it is
+    /// the same kind of fact as the two above it: something this node
+    /// does or does not do, decided once by the router that can see the
+    /// table, and passed as one value so a page cannot answer it a
+    /// second way.
+    pub publishes: bool,
 }
 
 /// What the front door can offer somebody who arrives with nothing (D72).
@@ -139,6 +149,20 @@ pub(crate) struct Door<'a> {
     /// only thing on it a stranger can read in full (D76), so the front
     /// door is exactly where it belongs.
     pub docs: Option<&'a str>,
+    /// Whether this node publishes any repository to readers with no
+    /// account (D78).
+    ///
+    /// The paragraph below it used to say, unconditionally, that reading
+    /// anything here needs an account and there is nothing to browse.
+    /// On a node that publishes its own source that is not a stale
+    /// sentence, it is a false one, and it was the only thing the one
+    /// page a stranger reaches had to say about what they could do next.
+    ///
+    /// A count is deliberately not carried here. What is public is the
+    /// repository index's answer, filtered by the same table, and a
+    /// number rendered beside a link that disagrees with it is the kind
+    /// of drift this file already has one comment about.
+    pub publishes: bool,
 }
 
 /// Opens the document and the brand header.
@@ -336,7 +360,14 @@ fn offer(
     origin: Option<&str>,
     now: u64,
 ) -> Page {
-    let Offers { ssh, passkeys } = offers;
+    // `publishes` is deliberately unread here. This page is for somebody
+    // holding an invite, and what the node offers a *stranger* is the
+    // front door's sentence, not this one's.
+    let Offers {
+        ssh,
+        passkeys,
+        publishes: _,
+    } = offers;
     let mut h = shell("choir: you're invited", theme);
     // The card a chat client shows. Deliberately generic: it names no
     // repository, no issuer and no username, because the preview is
@@ -951,12 +982,26 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     // to an email. A private beta that does not say it is one reads as a
     // public service that is broken for you.
     h.push_str("<h2>Where this is</h2>");
-    h.push_str(
-        "<p>Private beta, by invite. Reading anything on this node needs an account, so \
-         there is nothing here to browse yet; the pages behind this one are the \
-         repositories themselves, their reviews, and the log every change is written \
-         into.</p>",
-    );
+    if door.publishes {
+        // Two sentences and a link, because a reader who can browse
+        // needs somewhere to click and a reader who cannot needs to know
+        // why. The wall did not move: it is still around everything that
+        // is not published, which is what the second half says without
+        // naming what is behind it.
+        h.push_str(
+            "<p>Private beta, by invite &mdash; but not private source. The code this node \
+             runs is <a href=\"/r/\">here to read and to clone</a>, with no account and \
+             nothing to sign. Everything else needs one: the reviews, the log every change \
+             is written into, and any repository whose operator has not published it.</p>",
+        );
+    } else {
+        h.push_str(
+            "<p>Private beta, by invite. Reading anything on this node needs an account, so \
+             there is nothing here to browse yet; the pages behind this one are the \
+             repositories themselves, their reviews, and the log every change is written \
+             into.</p>",
+        );
+    }
     // Everyone who is not already expected used to reach a dead end
     // here: the page named the two things to do with a credential and
     // said nothing at all to a person who has none, which is most people
@@ -1364,6 +1409,7 @@ mod tests {
             contact: None,
             asking: false,
             docs: None,
+            publishes: false,
         }
     }
 
@@ -1391,6 +1437,45 @@ mod tests {
     /// D72. The form is useless without the script that pays the cost,
     /// and the script is useless without the ids it looks for, so the
     /// page that offers one must carry both.
+    /// The paragraph about what a stranger may read follows the ACL,
+    /// and the link appears with it.
+    ///
+    /// Both directions, because the failure this replaced was a page
+    /// asserting a posture the deployment did not have: a node that
+    /// publishes nothing must keep saying so, or the fix is the same
+    /// defect pointing the other way.
+    #[test]
+    fn the_front_door_says_what_the_table_publishes_and_not_what_it_used_to() {
+        let closed = super::landing(None, &shut()).html;
+        assert!(
+            closed.contains("there is nothing here to browse yet"),
+            "a node publishing nothing stopped saying so"
+        );
+        assert!(
+            !closed.contains("href=\"/r/\""),
+            "a node publishing nothing linked into the wall"
+        );
+
+        let open = super::landing(
+            None,
+            &super::Door {
+                contact: None,
+                asking: false,
+                docs: None,
+                publishes: true,
+            },
+        )
+        .html;
+        assert!(
+            !open.contains("there is nothing here to browse yet"),
+            "a node serving its own source still told the reader it had nothing"
+        );
+        assert!(
+            open.contains("href=\"/r/\""),
+            "the reader was told they could browse and given nowhere to click"
+        );
+    }
+
     #[test]
     fn the_door_that_takes_requests_carries_the_form_and_the_script_that_runs_it() {
         let page = super::landing(
@@ -1399,6 +1484,7 @@ mod tests {
                 contact: None,
                 asking: true,
                 docs: None,
+                publishes: false,
             },
         );
         assert!(page.scripted, "the page declares no script");

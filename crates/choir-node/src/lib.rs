@@ -1649,6 +1649,13 @@ impl Node {
                             join_page::Offers {
                                 ssh: ssh_enabled,
                                 passkeys,
+                                // D78: whether this node has published
+                                // anything is the ACL's answer, so the
+                                // page cannot claim a posture the table
+                                // does not hold.
+                                publishes: acl
+                                    .as_ref()
+                                    .is_some_and(|t| t.holds_anything(acl::ANON)),
                             },
                             &sessions,
                             scheme,
@@ -3515,7 +3522,11 @@ fn respond_join(
     scheme: &'static str,
     root: &std::path::Path,
 ) -> std::io::Result<(u16, u64)> {
-    let join_page::Offers { ssh, passkeys } = offers;
+    let join_page::Offers {
+        ssh,
+        passkeys,
+        publishes,
+    } = offers;
     let _ = ssh;
     let contact = operator_contact(root);
     let contact = contact.as_deref();
@@ -3563,7 +3574,11 @@ fn respond_join(
                 store,
                 join_page::param(&url, "i").as_deref(),
                 join_page::param(&url, "k").as_deref(),
-                join_page::Offers { ssh, passkeys },
+                join_page::Offers {
+                    ssh,
+                    passkeys,
+                    publishes,
+                },
                 chrome,
                 origin.as_deref(),
                 join_page::now_unix_secs(),
@@ -3579,6 +3594,7 @@ fn respond_join(
                 // answer 503 (D72).
                 asking: store.is_some(),
                 docs: docs.as_deref(),
+                publishes,
             },
         )
     };

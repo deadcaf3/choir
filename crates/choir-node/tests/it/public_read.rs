@@ -26,6 +26,16 @@ struct Served {
     work: std::path::PathBuf,
 }
 
+/// The body of a `curl` with no credentials anywhere.
+fn anon_body(url: &str) -> String {
+    let out = std::process::Command::new("curl")
+        .args(["-s"])
+        .arg(url)
+        .output()
+        .expect("curl runs");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// The status of a `curl` with no credentials anywhere.
 fn anon(url: &str) -> u16 {
     let out = std::process::Command::new("curl")
@@ -212,4 +222,44 @@ fn a_table_that_does_not_publish_anything_still_meets_every_stranger_with_the_wa
         s.base
     ));
     assert_eq!(fetched, 401, "git opened without anybody publishing it");
+}
+
+/// The front door stops saying there is nothing to read, and says where.
+///
+/// The unit test holds both directions of the sentence; this one holds
+/// the wiring, which is the half that was actually missing after D78
+/// landed. The node published its own source and its one reachable page
+/// still told every stranger that reading anything needed an account --
+/// a page asserting a posture the deployment did not have, which is the
+/// defect this repository keeps writing gates against.
+#[test]
+fn the_front_door_offers_the_published_source_to_a_reader_with_no_account() {
+    let s = served("door", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+
+    let front = anon_body(&s.base);
+    assert!(
+        !front.contains("there is nothing here to browse yet"),
+        "the front door still claimed nothing was readable"
+    );
+    assert!(
+        front.contains("href=\"/r/\""),
+        "the front door offered no way into what it publishes"
+    );
+
+    // The link has to be a link: the index is itself a browse route, and
+    // it renders what this reader may see rather than refusing them.
+    assert_eq!(
+        anon(&format!("{}/r/", s.base)),
+        200,
+        "the front door linked somewhere a reader cannot reach"
+    );
+    let index = anon_body(&format!("{}/r/", s.base));
+    assert!(
+        index.contains("open/source"),
+        "the index did not list the published repository"
+    );
+    assert!(
+        !index.contains("closed/thing"),
+        "the index listed a repository nobody published"
+    );
 }
