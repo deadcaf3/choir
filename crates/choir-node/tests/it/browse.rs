@@ -2735,7 +2735,7 @@ fn contribute_page_prints_commands_a_newcomer_can_paste() {
     // The node substituted its own origin, so the first command is
     // copyable rather than illustrative.
     assert!(
-        body.contains(&format!("choir join {base} ")),
+        body.contains(&format!("choir join '{base}/join?")),
         "the join command does not name this node: {body}"
     );
     for placeholder in ["NODE", "REPO"] {
@@ -2765,9 +2765,15 @@ fn contribute_page_prints_commands_a_newcomer_can_paste() {
         steps.windows(2).all(|w| w[0] < w[1]),
         "steps are out of order"
     );
+    // `choir propose` now takes no arguments at all -- it infers the key
+    // and the channel from what `choir join` wrote -- so the shape that
+    // used to break silently here is gone. What is checked instead is
+    // that the example is the bare command and has not quietly regrown a
+    // positional the reader would have to fill in.
     assert!(
-        body.contains("choir propose ~/.choir/agent.key &lt;your-channel&gt;"),
-        "the propose example lost its channel argument: {body}"
+        body.contains("<pre class=\"cmd\">choir propose</pre>")
+            || body.contains("\nchoir propose</pre>"),
+        "the propose example is not the zero-argument form: {body}"
     );
 
     // The three things a GitHub-shaped reader will otherwise get wrong.

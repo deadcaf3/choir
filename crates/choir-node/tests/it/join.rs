@@ -138,11 +138,16 @@ fn a_stranger_at_the_bare_address_gets_a_page_rather_than_a_password_box() {
         "the landing page lists a repository: {body}"
     );
 
-    // The front door says what it takes to use the thing, in the same
-    // three commands as the per-repository contribute page. A door that
-    // describes a different product from the one behind it is worse than
-    // a door that describes nothing.
-    for command in ["choir join", "choir git-credential", "choir propose"] {
+    // The front door says what it takes to use the thing, as the
+    // commands a reader actually types. A door that describes a
+    // different product from the one behind it is worse than a door that
+    // describes nothing.
+    //
+    // `git clone` rather than `choir git-credential`: the credential
+    // helper is configured by `choir join` now, so naming it here would
+    // be teaching a step nobody has to take. The install is first
+    // because a stranger reading this has no `choir` yet.
+    for command in ["install.sh", "choir join", "git clone", "choir propose"] {
         assert!(
             body.contains(command),
             "the front door does not name `{command}`: {body}"
@@ -152,7 +157,7 @@ fn a_stranger_at_the_bare_address_gets_a_page_rather_than_a_password_box() {
     // static-by-construction property is what keeps the address of a
     // private node off a page anybody can fetch.
     assert!(
-        body.contains("choir join NODE"),
+        body.contains("choir join 'NODE"),
         "the example was specialised to this node: {body}"
     );
     assert!(
