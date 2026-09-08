@@ -52,10 +52,13 @@ authors = ["asxeem"]
 # Where releases are downloaded from. `dist` refuses to generate a
 # GitHub workflow without it, and `cargo binstall` builds its `pkg-url`
 # out of it, so this one string decides where two independent installers
-# look. `<owner>` is a placeholder, the way every host and account name
-# in a tracked file here is: the operator substitutes it in the same
-# commit that first pushes to a remote, and nothing reads it until then.
-repository = "https://github.com/<owner>/choir"
+# look. This carried `<owner>` as a placeholder, the way every host and
+# account name in a tracked file here does, until the commit that first
+# pushed to a remote filled it in. It is the one such name in the tree
+# that is meant to be real: it is where the public code lives, and the
+# installers read it. Every other host and account name stays a
+# placeholder.
+repository = "https://github.com/deadcaf3/choir"
 
 # Release packaging (`dist`, formerly `cargo-dist`). Read only by that
 # tool, never by a build: it generates the release workflow, the archives
