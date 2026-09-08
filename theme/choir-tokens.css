@@ -33,89 +33,115 @@
 
 :root{
   /* ---- type -------------------------------------------------------- */
-  --font-sans:"Helvetica Neue",Helvetica,"Segoe UI",system-ui,sans-serif;
+  /* System faces only, and `system-ui` first: the node ships no font
+     file, so the stack names what the reader's own machine already has.
+     A webfont here would be an asset the operator did not ask to host
+     and a request this surface makes to nobody. */
+  --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   --font-mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
 
-  --fs-100:0.6875rem;  /* 11.7px — micro labels, table eyebrows */
-  --fs-200:0.75rem;    /* 12.8px — kbd, pills, captions */
-  --fs-300:0.8125rem;  /* 13.8px — code, dense UI, sidebar */
-  --fs-400:0.9375rem;  /* 16.0px — UI default */
-  --fs-500:1rem;       /* 17.0px — body copy */
-  --fs-600:1.125rem;   /* 19.1px — lede */
-  --fs-700:1.375rem;   /* 23.4px — h3 */
-  --fs-800:1.75rem;    /* 29.8px — h2 */
-  --fs-900:2.375rem;   /* 40.4px — h1 */
-  --fs-1000:3.25rem;   /* 55.3px — landing display */
-  --fs-1100:4.25rem;   /* 72.3px — hero display, wide only */
+  /* A 16px root, so a rem is a round number and the space scale below
+     lands on a 4px grid without a decimal in sight. The previous 17px
+     root made every one of these a fraction of a pixel. */
+  --fs-100:0.6875rem;  /* 11px — micro labels, table eyebrows */
+  --fs-200:0.75rem;    /* 12px — captions, meta, counts */
+  --fs-300:0.8125rem;  /* 13px — code, oids, dense tables */
+  --fs-400:0.875rem;   /* 14px — UI default */
+  --fs-500:1rem;       /* 16px — body copy */
+  --fs-600:1.125rem;   /* 18px — lede */
+  --fs-700:1.3125rem;  /* 21px — h3 */
+  --fs-800:1.625rem;   /* 26px — h2 */
+  --fs-900:2.125rem;   /* 34px — h1 */
+  --fs-1000:2.75rem;   /* 44px — the front door's title */
+  --fs-1100:3.5rem;    /* 56px — reserved; nothing sets it today */
 
-  --lh-tight:1.06;
-  --lh-snug:1.24;
+  --lh-tight:1.14;
+  --lh-snug:1.3;
   --lh-normal:1.5;
-  --lh-copy:1.68;   /* roomy: docs body */
-  --lh-code:1.6;
+  --lh-copy:1.65;   /* prose: the front door and a README */
+  --lh-code:1.55;
 
   --fw-regular:400;
   --fw-medium:500;
-  --fw-bold:700;
+  --fw-bold:600;   /* 600, not 700: a system face at 700 shouts */
 
-  --tr-display:-0.024em;
-  --tr-heading:-0.014em;
-  --tr-body:-0.006em;
+  /* Tracking is nearly zero on purpose. `system-ui` is drawn for screen
+     text at these sizes and does not want the optical correction a
+     display face does; only the largest step and the small-caps
+     eyebrows get one. */
+  --tr-display:-0.021em;
+  --tr-heading:-0.011em;
+  --tr-body:0;
   --tr-mono:0;
-  --tr-caps:0.09em;   /* eyebrows, small-caps labels */
+  --tr-caps:0.075em;   /* eyebrows, small-caps labels */
 
-  /* ---- space (4px grid at 17px root) ------------------------------- */
+  /* ---- space (4px grid at a 16px root) ----------------------------- */
   --sp-0:0;
-  --sp-1:0.235rem;   /* 4  */
-  --sp-2:0.47rem;    /* 8  */
-  --sp-3:0.705rem;   /* 12 */
-  --sp-4:0.94rem;    /* 16 */
-  --sp-5:1.176rem;   /* 20 */
-  --sp-6:1.41rem;    /* 24 */
-  --sp-8:1.88rem;    /* 32 */
-  --sp-10:2.35rem;   /* 40 */
-  --sp-12:2.82rem;   /* 48 */
-  --sp-16:3.76rem;   /* 64 */
-  --sp-20:4.7rem;    /* 80 */
-  --sp-28:6.58rem;   /* 112 */
-  --sp-40:9.4rem;    /* 160 */
+  --sp-1:0.25rem;    /* 4  */
+  --sp-2:0.5rem;     /* 8  */
+  --sp-3:0.75rem;    /* 12 */
+  --sp-4:1rem;       /* 16 */
+  --sp-5:1.25rem;    /* 20 */
+  --sp-6:1.5rem;     /* 24 */
+  --sp-8:2rem;       /* 32 */
+  --sp-10:2.5rem;    /* 40 */
+  --sp-12:3rem;      /* 48 */
+  --sp-16:4rem;      /* 64 */
+  --sp-20:5rem;      /* 80 */
+  --sp-28:7rem;      /* 112 */
+  --sp-40:10rem;     /* 160 */
 
-  /* ---- radii ------------------------------------------------------- */
-  --r-xs:2px;
-  --r-sm:4px;
-  --r-md:7px;
-  --r-lg:11px;
-  --r-xl:16px;
+  /* ---- radii ------------------------------------------------------
+     Nothing on this surface is rounder than 4px, and only a count badge
+     is pill-shaped. A radius is a decoration, and this sheet spends its
+     hierarchy on type and whitespace instead. The names survive the
+     change so every call site keeps compiling; the values are what the
+     redesign is.
+     ------------------------------------------------------------------ */
+  --r-xs:1px;
+  --r-sm:2px;
+  --r-md:3px;
+  --r-lg:4px;
+  --r-xl:4px;
   --r-pill:999px;
 
   /* ---- borders ----------------------------------------------------- */
   --bw-hair:1px;
   --bw-1:1px;
+  --bw-0:0;
   --bw-2:2px;
-  --bw-rule:3px;      /* accent rule on section heads / callouts */
+  --bw-4:4px;         /* the outer radius of the focus ring */
+  --bw-rule:2px;      /* the accent tick, thinner than it was */
   --border:var(--bw-1) solid var(--line);
   --border-hair:var(--bw-hair) solid var(--hairline);
   --border-accent:var(--bw-1) solid var(--accent-line);
 
-  /* ---- motion ------------------------------------------------------ */
-  --dur-1:80ms;    /* state flips: hover, focus */
-  --dur-2:150ms;   /* small transforms, dropdowns */
-  --dur-3:240ms;   /* panels, dialogs */
-  --dur-4:420ms;   /* progress sweeps, page-scale */
+  /* ---- motion -----------------------------------------------------
+     There is almost nothing here to reduce, which is the intent: the
+     only transitions left are colour flips on hover and focus.
+     ------------------------------------------------------------------ */
+  --dur-1:60ms;    /* state flips: hover, focus */
+  --dur-2:120ms;
+  --dur-3:180ms;
+  --dur-4:240ms;
   --ease-out:cubic-bezier(.22,.61,.36,1);
   --ease-in-out:cubic-bezier(.45,.05,.55,.95);
   --ease-emphatic:cubic-bezier(.16,.84,.24,1);
   --ease-linear:linear;
 
   /* ---- layout ------------------------------------------------------ */
-  --measure:46rem;      /* docs prose column */
-  --search:21rem;       /* the one search box: a field, not a banner */
-  --article:48rem;      /* legacy alias, same intent */
-  --side:17.5rem;       /* docs sidebar */
+  --measure:36rem;      /* a book's measure: ~66 characters at 16px */
+  --search:20rem;       /* the one search box: a field, not a banner */
+  --article:40rem;      /* prose that carries code, slightly wider */
+  --side:17rem;         /* a narrow pane */
   --toc:14rem;
-  --topbar-h:3.35rem;
-  --page-max:80rem;
-  --tool-header-h:2.9rem; /* twin / flasher / graph chrome */
+  --topbar-h:3rem;
+  --page-max:72rem;
+  --tool-header-h:2.75rem;
+  /* One column of a three-up conflict. A floor rather than a width, so
+     the columns stack rather than overflow when the viewport cannot
+     give three of them this much. */
+  --col-min:15rem;
 
   /* ---- z ----------------------------------------------------------- */
   --z-base:0;
@@ -127,189 +153,207 @@
 }
 
 /* =========================================================================
-   DARK — the canonical theme. Ground is a cool near-black with a faint blue
-   cast; accent is "signal cyan", the colour of an impulse-radio trace.
+   LIGHT — the canonical palette, and the one the surface is designed in.
+
+   Warm neutral greys: the ground is an off-white with a little yellow in
+   it and the ink is a warm near-black, never `#000`. The previous sheet
+   was dark-canonical with a cool blue cast and a cyan accent that glowed;
+   it read as a dashboard. This one is meant to read as a page.
+
+   Every ratio below is measured against `--ground` unless it says
+   otherwise, and every body and secondary text token clears 4.5:1.
    ====================================================================== */
 :root,
-:root[data-theme="dark"],:root.coal:not([data-theme="light"]),:root.navy:not([data-theme="light"]),:root.ayu:not([data-theme="light"]){
-  color-scheme:dark;
-
-  --ground:#07090b;          /* page */
-  --surface:#0b0e12;         /* nav, sidebar, footer */
-  --card:#0f1319;            /* cards, code blocks */
-  --raise:#161b22;           /* hover / active fills, inputs */
-  --sunken:#040608;          /* terminal, wells */
-
-  --ink:#c8d1da;             /* body copy        — 12.9:1 on ground */
-  --strong:#f3f7fa;          /* headings         — 18.5:1 */
-  --muted:#8d99a5;           /* secondary        —  6.9:1 */
-  --faint:#7b8792;           /* tertiary, meta   —  5.4:1 (4.7:1 on --raise) */
-  --inverse:#05080a;         /* text on accent fills */
-
-  --line:rgba(200,216,232,.145);
-  --hairline:rgba(200,216,232,.075);
-  --line-strong:rgba(200,216,232,.30);
-
-  --accent:#2fd0e6;          /* fills, rules, active states */
-  --accent-ink:#63e0f0;      /* accent as text/links — 12.8:1 on ground */
-  --accent-hover:#8ceaf6;
-  --accent-tint:rgba(47,208,230,.11);
-  --accent-line:rgba(47,208,230,.42);
-  --accent-glow:0 0 0 1px rgba(47,208,230,.35),0 6px 26px -10px rgba(47,208,230,.5);
-
-  --ok:#41c98a;      --ok-tint:rgba(65,201,138,.12);   --ok-line:rgba(65,201,138,.4);
-  --warn:#e0b341;    --warn-tint:rgba(224,179,65,.12); --warn-line:rgba(224,179,65,.4);
-  --danger:#f2717a;  --danger-tint:rgba(242,113,122,.12); --danger-line:rgba(242,113,122,.4);
-  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
-
-  --focus:#7fe6f5;
-  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 4px var(--focus);
-  --selection:rgba(47,208,230,.28);
-
-  --shadow-1:0 1px 1px rgba(0,0,0,.6);
-  --shadow-2:0 1px 2px rgba(0,0,0,.6),0 10px 24px -14px rgba(0,0,0,.75);
-  --shadow-3:0 2px 4px rgba(0,0,0,.55),0 26px 60px -22px rgba(0,0,0,.85);
-  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.035);
-
-  /* syntax — one hue family plus three signals, so code reads as instrument
-     output rather than confetti. All ≥ 4.5:1 on --card. */
-  --syn-plain:#c8d1da;
-  --syn-comment:#7b8792;
-  --syn-keyword:#7fb8ff;
-  --syn-type:#63e0f0;
-  --syn-func:#a9d6ff;
-  --syn-string:#8fd6a8;
-  --syn-number:#e6c069;
-  --syn-const:#d5a8f0;
-  --syn-macro:#e59a76;
-  --syn-punct:#8d99a5;
-  --syn-added:rgba(65,201,138,.14);
-  --syn-removed:rgba(242,113,122,.14);
-  --syn-gutter:#7b8792;
-}
-
-/* =========================================================================
-   LIGHT — paper-white with the same cool cast; accent darkens to hold AA
-   against white (4.9:1 as text).
-   ====================================================================== */
-@media (prefers-color-scheme:light){
-  :root:not([data-theme="dark"]){
-    color-scheme:light;
-
-    --ground:#f6f8fa;
-    --surface:#ffffff;
-    --card:#ffffff;
-    --raise:#eef1f5;
-    --sunken:#e7ebf0;
-
-    --ink:#242a31;           /* 13.6:1 on ground */
-    --strong:#0d1116;        /* 17.8:1 */
-    --muted:#525c66;         /*  6.4:1 */
-    --faint:#646e78;         /*  4.9:1 (4.6:1 on --raise) */
-    --inverse:#ffffff;
-
-    --line:rgba(16,26,36,.14);
-    --hairline:rgba(16,26,36,.075);
-    --line-strong:rgba(16,26,36,.28);
-
-    --accent:#0f7c8f;
-    --accent-ink:#0b6675;    /*  6.2:1 on ground */
-    --accent-hover:#084f5c;
-    --accent-tint:rgba(15,124,143,.09);
-    --accent-line:rgba(15,124,143,.32);
-    --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
-
-    --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
-    --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
-    --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
-    --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
-
-    --focus:#0b6675;
-    --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
-    --selection:rgba(15,124,143,.2);
-
-    --shadow-1:0 1px 1px rgba(13,26,38,.06);
-    --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
-    --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
-    --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
-
-    --syn-plain:#242a31;
-    --syn-comment:#6d7883;
-    --syn-keyword:#1c4fbd;
-    --syn-type:#0b6675;
-    --syn-func:#2a4a86;
-    --syn-string:#1c6b41;
-    --syn-number:#8a5b06;
-    --syn-const:#6b3a9c;
-    --syn-macro:#9c4a1e;
-    --syn-punct:#525c66;
-    --syn-added:rgba(13,122,77,.1);
-    --syn-removed:rgba(189,47,58,.09);
-    --syn-gutter:#6d7883;
-  }
-}
-
-/* Manual override — duplicated rather than @extend'd because plain CSS has no
-   mixins and the attribute must beat the media query above. */
 :root[data-theme="light"],:root.light:not([data-theme="dark"]),:root.rust:not([data-theme="dark"]){
   color-scheme:light;
 
-  --ground:#f6f8fa;
-  --surface:#ffffff;
+  --ground:#faf9f7;          /* page */
+  --surface:#ffffff;         /* the one bordered region, when there is one */
   --card:#ffffff;
-  --raise:#eef1f5;
-  --sunken:#e7ebf0;
+  --raise:#f1efeb;           /* hover fills, inputs */
+  --sunken:#f4f2ee;          /* code wells, diffs */
 
-  --ink:#242a31;
-  --strong:#0d1116;
-  --muted:#525c66;
-  --faint:#646e78;
-  --inverse:#ffffff;
+  --ink:#22201d;             /* body copy      — 15.4:1 */
+  --strong:#111010;          /* headings       — 18.1:1 */
+  --muted:#5a554e;           /* secondary      —  7.0:1 */
+  --faint:#6e6960;           /* tertiary, meta —  5.2:1 (4.8:1 on --raise) */
+  --inverse:#ffffff;         /* text on an accent fill — 6.7:1 */
 
-  --line:rgba(16,26,36,.14);
-  --hairline:rgba(16,26,36,.075);
-  --line-strong:rgba(16,26,36,.28);
+  --line:rgba(34,32,29,.13);
+  --hairline:rgba(34,32,29,.07);
+  --line-strong:rgba(34,32,29,.26);
 
-  --accent:#0f7c8f;
-  --accent-ink:#0b6675;
-  --accent-hover:#084f5c;
-  --accent-tint:rgba(15,124,143,.09);
-  --accent-line:rgba(15,124,143,.32);
-  --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
+  --accent:#2b5f8f;          /* the one accent: a quiet slate blue */
+  --accent-ink:#1f4b73;      /* accent as text/links — 8.6:1 */
+  --accent-hover:#143451;
+  --accent-tint:rgba(43,95,143,.08);
+  --accent-line:rgba(43,95,143,.34);
 
-  --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
-  --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
-  --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
+  /* Status colours are desaturated and live on text and thin rules. The
+     `-tint` washes are backgrounds only; a foreground always takes the
+     solid token beside it. */
+  --ok:#1a6b47;      --ok-tint:rgba(26,107,71,.08);    --ok-line:rgba(26,107,71,.32);
+  --warn:#7a5410;    --warn-tint:rgba(122,84,16,.08);  --warn-line:rgba(122,84,16,.32);
+  --danger:#a8323a;  --danger-tint:rgba(168,50,58,.07);--danger-line:rgba(168,50,58,.32);
   --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
 
-  --focus:#0b6675;
-  --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
-  --selection:rgba(15,124,143,.2);
+  /* A plain ring, no blur and no colour bleed: two solid pixels offset
+     from the control. Written as a `box-shadow` pair because several
+     controls draw their own border and an `outline` on those sits
+     outside it at an inconsistent distance. */
+  --focus:#1f4b73;
+  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
+  --selection:rgba(43,95,143,.16);
 
-  --shadow-1:0 1px 1px rgba(13,26,38,.06);
-  --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
-  --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
-  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+  /* Depth is carried by whitespace and hairlines, so the first shadow is
+     nothing at all and the other two exist only for a control that
+     genuinely floats. Nothing on this surface does today. */
+  --shadow-1:none;
+  --shadow-2:0 1px 2px rgba(34,32,29,.07);
+  --shadow-3:0 1px 3px rgba(34,32,29,.09),0 8px 24px -16px rgba(34,32,29,.2);
+  --shadow-inset:none;
 
-  --syn-plain:#242a31;
-  --syn-comment:#6d7883;
-  --syn-keyword:#1c4fbd;
-  --syn-type:#0b6675;
-  --syn-func:#2a4a86;
-  --syn-string:#1c6b41;
-  --syn-number:#8a5b06;
-  --syn-const:#6b3a9c;
-  --syn-macro:#9c4a1e;
-  --syn-punct:#525c66;
-  --syn-added:rgba(13,122,77,.1);
-  --syn-removed:rgba(189,47,58,.09);
-  --syn-gutter:#6d7883;
+  /* Syntax: one hue family plus three signals, all ≥ 4.5:1 on
+     `--sunken`, which is the surface code is set on. */
+  --syn-plain:#22201d;
+  --syn-comment:#6e6960;
+  --syn-keyword:#1f4b73;
+  --syn-type:#3a5c8a;
+  --syn-func:#2f4f76;
+  --syn-string:#1a6b47;
+  --syn-number:#7a5410;
+  --syn-const:#6a4485;
+  --syn-macro:#8f4520;
+  --syn-punct:#5a554e;
+  --syn-added:rgba(26,107,71,.1);
+  --syn-removed:rgba(168,50,58,.09);
+  --syn-gutter:#726c63;
+}
+
+/* =========================================================================
+   DARK — a palette, not an inversion.
+
+   Warm charcoal rather than blue-black, and an ink that is a warm bone
+   rather than white. The accent lightens to hold its ratio; it does not
+   change hue, so the two themes are the same design at two exposures.
+   ====================================================================== */
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+
+    --ground:#141311;
+    --surface:#1a1917;
+    --card:#1a1917;
+    --raise:#232120;
+    --sunken:#100f0e;
+
+    --ink:#d6d1c8;           /* 12.2:1 */
+    --strong:#f5f2ec;        /* 16.6:1 */
+    --muted:#9a938a;         /*  6.1:1 */
+    --faint:#918a80;         /*  5.4:1 (4.7:1 on --raise) */
+    --inverse:#141311;
+
+    --line:rgba(214,209,200,.14);
+    --hairline:rgba(214,209,200,.07);
+    --line-strong:rgba(214,209,200,.28);
+
+    --accent:#6f9ecb;
+    --accent-ink:#8fb6dd;    /*  8.8:1 */
+    --accent-hover:#b3d0ec;
+    --accent-tint:rgba(143,182,221,.11);
+    --accent-line:rgba(143,182,221,.36);
+
+    --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
+    --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
+    --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
+    --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+    --focus:#8fb6dd;
+    --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
+    --selection:rgba(143,182,221,.24);
+
+    --shadow-1:none;
+    --shadow-2:0 1px 2px rgba(0,0,0,.5);
+    --shadow-3:0 1px 3px rgba(0,0,0,.5),0 8px 24px -16px rgba(0,0,0,.7);
+    --shadow-inset:none;
+
+    --syn-plain:#d6d1c8;
+    --syn-comment:#918a80;
+    --syn-keyword:#8fb6dd;
+    --syn-type:#a9c8e6;
+    --syn-func:#b9cfe8;
+    --syn-string:#8ecfa8;
+    --syn-number:#d9b571;
+    --syn-const:#c3a8e0;
+    --syn-macro:#e0a17e;
+    --syn-punct:#9a938a;
+    --syn-added:rgba(108,195,154,.12);
+    --syn-removed:rgba(232,138,144,.12);
+    --syn-gutter:#938c81;
+  }
+}
+
+/* Manual override — duplicated rather than `@extend`'d because plain CSS
+   has no mixins and the attribute must beat the media query above. The
+   generator that cuts this block for the book widens both theme
+   selectors by name, so neither may be reworded. */
+:root[data-theme="dark"],:root.coal:not([data-theme="light"]),:root.navy:not([data-theme="light"]),:root.ayu:not([data-theme="light"]){
+  color-scheme:dark;
+
+  --ground:#141311;
+  --surface:#1a1917;
+  --card:#1a1917;
+  --raise:#232120;
+  --sunken:#100f0e;
+
+  --ink:#d6d1c8;
+  --strong:#f5f2ec;
+  --muted:#9a938a;
+  --faint:#918a80;
+  --inverse:#141311;
+
+  --line:rgba(214,209,200,.14);
+  --hairline:rgba(214,209,200,.07);
+  --line-strong:rgba(214,209,200,.28);
+
+  --accent:#6f9ecb;
+  --accent-ink:#8fb6dd;
+  --accent-hover:#b3d0ec;
+  --accent-tint:rgba(143,182,221,.11);
+  --accent-line:rgba(143,182,221,.36);
+
+  --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
+  --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
+  --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
+  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+  --focus:#8fb6dd;
+  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
+  --selection:rgba(143,182,221,.24);
+
+  --shadow-1:none;
+  --shadow-2:0 1px 2px rgba(0,0,0,.5);
+  --shadow-3:0 1px 3px rgba(0,0,0,.5),0 8px 24px -16px rgba(0,0,0,.7);
+  --shadow-inset:none;
+
+  --syn-plain:#d6d1c8;
+  --syn-comment:#918a80;
+  --syn-keyword:#8fb6dd;
+  --syn-type:#a9c8e6;
+  --syn-func:#b9cfe8;
+  --syn-string:#8ecfa8;
+  --syn-number:#d9b571;
+  --syn-const:#c3a8e0;
+  --syn-macro:#e0a17e;
+  --syn-punct:#9a938a;
+  --syn-added:rgba(108,195,154,.12);
+  --syn-removed:rgba(232,138,144,.12);
+  --syn-gutter:#938c81;
 }
 
 /* --- legacy aliases -----------------------------------------------------
-   The v0.3.0 sheet and the documate-owned shell markup reference these
-   names. Keep them so generated HTML keeps rendering during migration;
-   author nothing new against them.
+   Names the book's hand-written sheet and older generated markup still
+   reference. Keep them; author nothing new against them.
    ----------------------------------------------------------------------- */
 :root{
   --sans:var(--font-sans);
