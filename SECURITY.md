@@ -7,7 +7,7 @@
 Use GitHub's private vulnerability reporting on this repository
 (*Security* → *Report a vulnerability*), which opens a private advisory
 visible only to the maintainers. If that is unavailable to you, write to
-`<security-contact>`.
+`deadcaf3@pm.me`.
 
 Include what you need to make the problem reproducible: the version or
 commit, the configuration flags the node was started with, and the
