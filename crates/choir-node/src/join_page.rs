@@ -871,6 +871,19 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
         "<p>Two commands to be set up, and then the git you already know. There is no \
          registration form and no second message to wait for.</p>",
     );
+    // Where `choir` comes from, before the three commands that assume
+    // it. A door that names a binary and never says how to obtain it
+    // sends its whole readership to a search engine, and this page's
+    // readership is exactly the people who do not have it yet.
+    //
+    // `RELEASE-HOST` is a placeholder for the same reason `NODE` and
+    // `REPO` are, and stands out for the same reason: this page is
+    // static by construction and must not learn any address, including
+    // the one it is served from.
+    h.push_str(
+        "<p class=\"muted\">You need <code>choir</code> first. One command, no toolchain:</p>\
+         <pre class=\"cmd\">curl -fsSL https://RELEASE-HOST/choir-cli-installer.sh | sh</pre>",
+    );
     h.push_str("<ol class=\"steps\">");
     h.push_str(
         "<li><h3>Install <code>choir</code></h3><p>One command, and nothing else has to \

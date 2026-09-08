@@ -3,7 +3,14 @@ name = "choir-demo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 authors.workspace = true
+
+# Not a release artifact. `choir-demo` is the narrated walkthrough, run
+# from a checkout with `cargo run -p choir-demo`; a prebuilt copy on
+# somebody's PATH is a binary with nothing to narrate.
+[package.metadata.dist]
+dist = false
 
 [dependencies]
 choir-hash = { path = "../choir-hash" }

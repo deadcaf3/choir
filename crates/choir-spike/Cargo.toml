@@ -3,7 +3,14 @@ name = "choir-spike"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 authors.workspace = true
+
+# Not a release artifact. The spike is the Phase-0 gate measurement, and
+# its numbers describe the tree and the machine it was built on; a
+# downloaded copy would invite somebody to read ours as theirs.
+[package.metadata.dist]
+dist = false
 
 [dependencies]
 choir-oplog = { path = "../choir-oplog" }

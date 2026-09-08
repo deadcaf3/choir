@@ -1,0 +1,107 @@
+name: Quick gate
+
+# `./gate quick`, as one reusable job with two callers: `ci.yml` on
+# every push and pull request, and `release.yml` before it builds a
+# single artifact. It lives here rather than inside `ci.yml` because
+# the dist table's comment claims nothing is published that `./gate`
+# refused, and a claim enforced by a second copy of these steps is a
+# claim that holds until the copies drift.
+#
+# What quick covers: the internal/-tracked guard, formatting, the book
+# (the only check on SUMMARY.md, because `create-missing` is off), and
+# the RustSec audit of Cargo.lock. What it deliberately does not:
+# compile or test. This suite's test execution alone runs for minutes.
+# `ci.yml` explains the trade; `nightly.yml` is its other half.
+#
+# It is the *quick* lane in front of a release rather than the full
+# one for the same reason CI runs quick: the full lane's measurement
+# stages assert release-profile ceilings on a quiet machine, and a
+# shared runner is neither. Project law is that the full lane ran
+# locally on the tree being tagged; this stops a release that quick
+# alone can already tell is wrong.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # The same pins the other workflows use. The toolchain is pinned
+  # because a check that passes on whatever rustc shipped today is not
+  # a check; cargo-audit is pinned because it decides what counts as a
+  # vulnerability; mdbook is pinned because it is the renderer whose
+  # refusal is the only check on `docs/SUMMARY.md`.
+  RUST_VERSION: 1.97.1
+  CARGO_AUDIT_VERSION: 0.22.2
+  MDBOOK_VERSION: 0.5.4
+  FORCE_COLOR: 1
+
+jobs:
+  quick:
+    name: quick gate
+    runs-on: ubuntu-24.04
+    # Warm, the whole job fits inside a minute. The allowance is for the
+    # rare cold run that rebuilds mdbook or cargo-audit from source
+    # after a version bump; anything else that overruns this deserves
+    # to be killed rather than waited on.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Restoring the toolchain is faster than downloading it, and it
+      # changes only when the pin does. rustup discovers a toolchain by
+      # its directory, so the install below is a no-op on a warm cache;
+      # `update-hashes` rides along so rustup knows it is current. If a
+      # restored toolchain were ever re-downloaded anyway, the cost is
+      # ~40 s, not a wrong answer.
+      - name: Cache the toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/${{ env.RUST_VERSION }}-x86_64-unknown-linux-gnu
+            ~/.rustup/update-hashes
+          key: rustup-${{ runner.os }}-${{ env.RUST_VERSION }}
+
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+          rustup override set "$RUST_VERSION"
+
+      # actions/cache rather than a third-party cache action on
+      # purpose: these steps run with the repository checked out and a
+      # token in the environment, and this is not the place to widen
+      # the set of people who can change what runs here.
+      - name: Cache mdbook
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/mdbook
+          key: mdbook-${{ runner.os }}-${{ env.MDBOOK_VERSION }}
+
+      - name: Cache cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      # The advisory database is a git clone that cargo-audit refreshes
+      # on every run; restoring the last run's copy turns that refresh
+      # into a delta fetch. The key carries the run id so every run
+      # saves a fresh entry, and `restore-keys` hands the next run the
+      # newest one.
+      - name: Cache the advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-db
+          key: advisory-db-${{ github.run_id }}
+          restore-keys: advisory-db-
+
+      - name: Install mdbook and cargo-audit
+        run: |
+          command -v mdbook >/dev/null \
+            || cargo install mdbook --version "$MDBOOK_VERSION" --locked
+          command -v cargo-audit >/dev/null \
+            || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+
+      - name: Quick gate
+        run: ./gate quick

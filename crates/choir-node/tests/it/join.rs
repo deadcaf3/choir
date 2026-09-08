@@ -153,6 +153,14 @@ fn a_stranger_at_the_bare_address_gets_a_page_rather_than_a_password_box() {
             "the front door does not name `{command}`: {body}"
         );
     }
+    // And it says where the binary those three commands name comes
+    // from. The page's whole readership is people who do not have it
+    // yet, so naming `choir` without naming an install is the one
+    // omission that sends every reader to a search engine.
+    assert!(
+        body.contains("choir-cli-installer.sh"),
+        "the front door names `choir` without saying how to get it: {body}"
+    );
     // Those commands are placeholders, not this node filled in. The
     // static-by-construction property is what keeps the address of a
     // private node off a page anybody can fetch.
