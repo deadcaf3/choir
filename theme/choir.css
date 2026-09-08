@@ -551,9 +551,15 @@ body,
   font-size: var(--fs-400);
 }
 
+/* `--focus-ring`, not `--accent-glow`. The redesign deleted the glow
+   token outright — there is no blurred halo anywhere on this surface any
+   more — so this declaration named a token nothing defines and a browser
+   dropped it in silence, leaving the book's search field the one control
+   here with no visible focus at all. The ring is the same two flat rings
+   the node's own controls draw. */
 #searchbar:focus {
-  border-color: var(--accent-line);
-  box-shadow: var(--accent-glow);
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
   outline: none;
 }
 
@@ -593,23 +599,33 @@ mark {
    visible from inside the book rather than a URL somebody has to be
    told about.
    ---------------------------------------------------------------------- */
+/* `--r-sm`, not `--r-pill`. The token block states the rule this was
+   the one survivor of: "nothing on this surface is rounder than 4px, and
+   only a count badge is pill-shaped". This is the book's single most
+   prominent control, so a pill here is the one place a reader meets the
+   shape the redesign retired — on the way out of the book and into
+   rustdoc, which is exactly where the two halves should look like one
+   product. */
 .content a.api-link {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
   background: var(--accent-tint);
   border: var(--bw-1) solid var(--accent-line);
-  border-radius: var(--r-pill);
+  border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-4);
   font-size: var(--fs-400);
   font-weight: var(--fw-medium);
   text-decoration: none;
 }
 
+/* The border darkening is the whole hover. The `--accent-glow` that used
+   to sit here named a token the redesign deleted, so it had already
+   stopped doing anything; removing it changes no pixel and stops the
+   sheet claiming an effect it does not have. */
 .content a.api-link:hover {
   background: var(--accent-tint);
   border-color: var(--accent);
-  box-shadow: var(--accent-glow);
 }
 
 /* -------------------------------------------------------------------------
