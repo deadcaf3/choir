@@ -1,0 +1,22 @@
+# Spliced by `dist` into every release build job, immediately before
+# `dist build`. Not a workflow of its own: it is a bare list of steps,
+# named by `github-build-setup` in the dist table.
+#
+# The build stamp. `crates/choir-node/build.rs` reads `CHOIR_GIT_HEAD`
+# first and falls back to `git rev-parse HEAD` in the crate directory,
+# and the fallback is what a release must not rely on: some of these
+# build jobs run inside a container that has no git, and a job that
+# quietly lost its git reports the stamp as the literal `unknown` --
+# a daemon that cannot say what it was built from, which is the exact
+# thing the stamp exists to prevent, shipped to everyone at once.
+#
+# `github.sha` rather than a shelled-out rev-parse for the same reason:
+# it is the commit the workflow was dispatched for, and it is there
+# whether or not the checkout kept any history.
+#
+# The env var is declared by the build script with
+# `rerun-if-env-changed`, so setting it is sound against a cached
+# script rather than a race with one.
+- name: Stamp the build with its commit
+  shell: bash
+  run: echo "CHOIR_GIT_HEAD=${{ github.sha }}" >> "$GITHUB_ENV"
