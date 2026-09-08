@@ -1993,6 +1993,10 @@ impl Node {
                             account: true,
                             console,
                             docs: docs.as_deref(),
+                            // Reaching this page at all means holding a
+                            // credential, so the bar takes the
+                            // signed-in shape without asking again.
+                            signed_in: Some(true),
                         },
                     );
                     let bytes = page.html.len() as u64;
@@ -2728,6 +2732,18 @@ fn respond_static_script(request: tiny_http::Request) -> std::io::Result<(u16, u
     served(request, response, 200, bytes)
 }
 
+/// Whether a request carried a credential this node could name.
+///
+/// `anon` is the name every unidentified request is logged and
+/// authorized under, and the empty string is what a page rendered
+/// outside a request has. Everything else is somebody. One function
+/// rather than the comparison at each call site, because the bar's two
+/// shapes and the comment box's gate are the same question and must not
+/// start disagreeing about the answer.
+fn identified(user: &str) -> bool {
+    !user.is_empty() && user != "anon"
+}
+
 /// The chrome facts for one request: the palette this reader chose and
 /// the address they are on.
 ///
@@ -2753,6 +2769,11 @@ fn reader_chrome(request: &tiny_http::Request) -> browse::Chrome<'static> {
         account: false,
         console: false,
         docs: None,
+        // For the same reason as the two above: half of these pages are
+        // rendered before the caller has been identified, so "is this
+        // reader signed in" has no answer here, and guessing would put
+        // a `sign in` link in front of somebody who already is.
+        signed_in: None,
     }
 }
 
@@ -2872,6 +2893,11 @@ fn is_browser_route(url: &str) -> bool {
         || path == "/index.html"
         || path == "/status"
         || path == "/theme"
+        // The reader's own review queue. It is not under `/r/` because
+        // it is not about one repository, so it has to be named here or
+        // an anonymous reader meets a bare `401` and a browser dialog
+        // instead of the page that signs them in (D74).
+        || path == "/reviews"
         || path == "/r"
         || path.starts_with("/r/")
 }
@@ -3448,6 +3474,9 @@ fn respond_join(
         // the front door wants next, and it is the one half of this site
         // that needs no credential at all (D76).
         docs: docs.as_deref(),
+        // These pages draw no bar, so this decides nothing; `None` is
+        // the honest value rather than the harmless one.
+        signed_in: None,
     };
     let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
     let url = request.url().to_string();
@@ -3889,6 +3918,7 @@ fn respond_people(
         // path for everybody else.
         console: true,
         docs: docs.as_deref(),
+        signed_in: Some(true),
     };
     let Some(store) = store else {
         let html = ui::refusal(
@@ -4199,6 +4229,7 @@ fn respond_account_token(
                 .is_none()
         }),
         docs: docs.as_deref(),
+        signed_in: Some(true),
     };
     let refuse = |request, title: &str, status: u16, reason: &'static str, next: &'static str| {
         let html = ui::refusal(
@@ -4789,6 +4820,7 @@ fn handle_ui(
                 .is_none()
         }),
         docs: docs.as_deref(),
+        signed_in: Some(identified(user)),
     };
     let tag = ui::etag(seq, generation, &reader, chrome.theme);
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
@@ -4934,6 +4966,13 @@ fn handle_browse(
                     .is_none()
             }),
             docs: docs.as_deref(),
+            signed_in: Some(identified(user)),
+            // The ACL answers "who owns this repository" for the one
+            // sentence the review page states about what would land a
+            // change. A node without one hands back an empty list,
+            // which is the right input: nobody owns anything, so the
+            // approval-weight rule is the one in force.
+            owners: &|repo: &str| acl.map_or_else(Vec::new, |table| table.owners(repo)),
         },
     );
     // Revalidation happens after the ACL check and before the body is

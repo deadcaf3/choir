@@ -91,6 +91,7 @@ const TABLE: &[Row] = &[
     ("/r/{}/{}/review/{}",    "/r/agents/one/review/nope",         401, 404, 404),
     ("/r/{}/{}/contribute",   "/r/agents/one/contribute",          401, 200, 200),
     // The node's own pages.
+    ("/reviews",              "/reviews",                          401, 200, 200),
     ("/status",               "/status",                           401, 200, 200),
     ("/theme",                "/theme?set=dark&to=/r/",            401, 303, 303),
     ("/p/{}",                 "/p/op",                             401, 200, 200),

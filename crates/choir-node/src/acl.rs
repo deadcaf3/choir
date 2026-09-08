@@ -391,6 +391,36 @@ impl Effective {
         })
     }
 
+    /// Every subject holding [`Level::Own`] over `repo`, sorted.
+    ///
+    /// [`Self::has_owner`] answers the question the *gate* asks — which
+    /// of the two landing rules applies — and deliberately answers it
+    /// without naming anybody, because the gate does not need a name.
+    /// A review page does: "an owner's assent lands this" is a rule, and
+    /// "`alice` or `bob` can land this" is an answer. Sorted so the
+    /// sentence a page renders is the same on two nodes holding the same
+    /// grants.
+    ///
+    /// This is a description of the ACL, never a decision about a
+    /// landing. The one function that admits a landing is
+    /// `Platform::authorization_for`, and nothing here may become a
+    /// second opinion beside it.
+    #[must_use]
+    pub fn owners(&self, repo: &str) -> Vec<String> {
+        let scope = Scope::Repo(normalize_repo(repo));
+        let mut names: Vec<String> = self
+            .grants
+            .iter()
+            .filter(|(_, held)| {
+                held.iter()
+                    .any(|(granted, at)| *at >= Level::Own && covers(granted, &scope))
+            })
+            .map(|(who, _)| who.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// A key identifying everything a filtered response depends on:
     /// the reader and the grants they hold, rendered canonically.
     ///

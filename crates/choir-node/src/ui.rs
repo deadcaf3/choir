@@ -1731,6 +1731,19 @@ mod tests {
     /// The token block must keep the load-bearing names and both
     /// themes, so a future edit that "tidies" it is caught rather than
     /// merged.
+    ///
+    /// The system-palette assertion is written as
+    /// `prefers-color-scheme`, without naming which of the two the
+    /// media query carries. It used to say `prefers-color-scheme:light`,
+    /// which was not a claim about theme completeness at all: it was a
+    /// claim about *which theme is canonical*. The sheet was
+    /// dark-canonical with light as the deviation; it is now
+    /// light-canonical with dark as the deviation, and both spellings
+    /// satisfy the property this test is for. What actually has to hold
+    /// is that a system preference is honoured **and** that both
+    /// `data-theme` overrides exist to beat it — a reader who has chosen
+    /// must win over the machine that guessed. That is what the three
+    /// assertions below say.
     #[test]
     fn the_token_block_is_present_and_theme_complete() {
         let sheet = include_str!("ui.css");
@@ -1738,17 +1751,180 @@ mod tests {
             assert!(sheet.contains(token), "the token block lost {token}");
         }
         assert!(
-            sheet.contains("prefers-color-scheme:light"),
-            "light theme lost"
+            sheet.contains("prefers-color-scheme"),
+            "the system palette is no longer honoured"
         );
         assert!(
             sheet.contains(r#":root[data-theme="light"]"#),
-            "manual theme override lost"
+            "manual light override lost"
+        );
+        assert!(
+            sheet.contains(r#":root[data-theme="dark"]"#),
+            "manual dark override lost"
         );
         assert!(
             sheet.contains("prefers-reduced-motion"),
             "reduced-motion handling lost"
         );
+    }
+
+    /// Every text colour clears 4.5:1 against every ground it is set
+    /// on, in both palettes.
+    ///
+    /// The redesign that introduced this palette reported its ratios in
+    /// a hand-written table computed by a script in a scratch directory,
+    /// which is a number nobody can check again and nothing can keep
+    /// true. Two of the values in that first table were **below** 4.5:1
+    /// — the diff gutter, in both themes — and they were caught by
+    /// running the script, not by anything in this suite. A palette is
+    /// exactly the kind of thing that gets nudged later for taste.
+    ///
+    /// The pairs below are the ones that actually occur: the component
+    /// block sets `--ink` on `--ground`, `--sunken` and `--raise`, and
+    /// so on. A pair that stops occurring is a pair to delete from this
+    /// list on purpose, not a reason to lower the threshold.
+    ///
+    /// Large text may legally sit at 3:1 and this asserts 4.5:1 for all
+    /// of it, which is stricter than required and cheaper than encoding
+    /// which token is set at which size.
+    #[test]
+    fn every_text_colour_clears_aa_against_every_ground_it_is_set_on() {
+        for (theme, palette) in [
+            ("light", palette(":root[data-theme=\"light\"]{")),
+            ("dark", palette(":root[data-theme=\"dark\"]{")),
+        ] {
+            let hex = |name: &str| -> String {
+                palette
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{theme} palette has no {name}"))
+                    .clone()
+            };
+            for ground in ["--ground", "--surface", "--raise", "--sunken"] {
+                for ink in [
+                    "--ink",
+                    "--strong",
+                    "--muted",
+                    "--faint",
+                    "--accent-ink",
+                    "--ok",
+                    "--warn",
+                    "--danger",
+                    "--syn-plain",
+                    "--syn-comment",
+                    "--syn-keyword",
+                    "--syn-type",
+                    "--syn-func",
+                    "--syn-string",
+                    "--syn-number",
+                    "--syn-const",
+                    "--syn-macro",
+                    "--syn-punct",
+                    "--syn-gutter",
+                ] {
+                    let ratio = contrast(&hex(ink), &hex(ground));
+                    assert!(
+                        ratio >= 4.5,
+                        "{theme}: {ink} on {ground} is {ratio:.2}:1, below the 4.5:1 floor"
+                    );
+                }
+            }
+            // The one pair that is the other way round: text on a solid
+            // accent fill, which is what the skip link and the page's one
+            // primary button are.
+            let ratio = contrast(&hex("--inverse"), &hex("--accent"));
+            assert!(
+                ratio >= 4.5,
+                "{theme}: --inverse on --accent is {ratio:.2}:1, below the 4.5:1 floor"
+            );
+        }
+    }
+
+    /// The dark palette is written twice and the two copies must agree.
+    ///
+    /// Plain CSS has no mixins, so the palette a reader gets from
+    /// `prefers-color-scheme` and the one they get from choosing `dark`
+    /// are two literal blocks. Nothing makes them the same, and a nudge
+    /// applied to one is a node whose appearance depends on whether the
+    /// reader ever pressed the switch — which reads as a rendering bug
+    /// and is nearly impossible to attribute.
+    #[test]
+    fn the_two_spellings_of_the_dark_palette_are_the_same_palette() {
+        let queried = palette(":root:not([data-theme=\"light\"]){");
+        let chosen = palette(":root[data-theme=\"dark\"]{");
+        assert!(
+            queried.len() > 20,
+            "the media-query dark block is not being read: {} tokens",
+            queried.len()
+        );
+        assert_eq!(
+            queried, chosen,
+            "the system-preference dark palette and the chosen one have drifted apart"
+        );
+    }
+
+    /// Every `--name:#hex` in the block that opens with `selector`.
+    ///
+    /// Deliberately hex-only: the wash tokens are `rgba()` and have no
+    /// single ratio to assert, and `no_translucent_token_is_used_as_a_foreground_colour`
+    /// already forbids painting text with one.
+    ///
+    /// Comments are stripped before anything is split, and that is not
+    /// tidiness. This block is written one declaration per line with the
+    /// ratio in a trailing comment, so splitting on `;` first hands the
+    /// *next* declaration a leading `/* … */` and `--ink` parses as a
+    /// name beginning with a slash. The first draft did exactly that and
+    /// read exactly one token out of a palette of forty — and it failed
+    /// loudly rather than quietly only because the lookup panics on a
+    /// missing name instead of skipping it.
+    fn palette(selector: &str) -> std::collections::BTreeMap<String, String> {
+        let sheet = include_str!("ui.css");
+        let at = sheet
+            .find(selector)
+            .unwrap_or_else(|| panic!("ui.css lost the `{selector}` block"));
+        let body = &sheet[at + selector.len()..];
+        let end = body.find('}').expect("a palette block closes");
+        let mut code = String::with_capacity(end);
+        let mut rest = &body[..end];
+        while let Some(open) = rest.find("/*") {
+            code.push_str(&rest[..open]);
+            let after = &rest[open + 2..];
+            match after.find("*/") {
+                Some(close) => rest = &after[close + 2..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        code.push_str(rest);
+        code.split(';')
+            .filter_map(|decl| {
+                let (name, value) = decl.split_once(':')?;
+                let (name, value) = (name.trim(), value.trim());
+                (name.starts_with("--") && value.starts_with('#'))
+                    .then(|| (name.to_string(), value.to_string()))
+            })
+            .collect()
+    }
+
+    /// The WCAG contrast ratio between two opaque `#rrggbb` colours.
+    fn contrast(a: &str, b: &str) -> f64 {
+        let luminance = |hex: &str| -> f64 {
+            let hex = hex.trim_start_matches('#');
+            let channel = |at: usize| {
+                let raw = u8::from_str_radix(&hex[at..at + 2], 16).expect("a hex pair") as f64;
+                let c = raw / 255.0;
+                if c <= 0.040_45 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
     }
 
     /// Every section must read the shape `/api/view` actually sends.

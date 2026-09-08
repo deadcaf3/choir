@@ -123,7 +123,11 @@ pub(crate) fn render(
          <input id=\"signin-secret\" name=\"secret\" type=\"password\" \
          autocomplete=\"current-password\" required></p>",
     );
-    h.push_str("<p><button type=\"submit\">Sign in</button></p>");
+    // The one decisive control on the page every person meets exactly
+    // once. `go` is opted into rather than taken by every submit button,
+    // because a console full of them would then be a page full of
+    // primary actions.
+    h.push_str("<p><button class=\"go\" type=\"submit\">Sign in</button></p>");
     h.push_str("</form>");
 
     if passkeys {

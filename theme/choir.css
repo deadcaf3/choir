@@ -101,8 +101,13 @@ html.ayu {
    intended size. It looks like a slightly small book rather than like a
    bug, which is why it is worth stating: an `html{}` rule here does not
    fix it, because `:root` is a pseudo-class and wins on specificity. */
+/* The same root the node's own pages use. Both sheets read the same
+   space and type scales out of `choir-tokens.css`, so a book at a
+   different root would set every one of those tokens to a different
+   number of pixels than the pages beside it — the two halves of one site
+   with two different notions of what a rem is. */
 :root {
-  font-size: 17px;
+  font-size: 16px;
   -webkit-text-size-adjust: 100%;
 }
 
@@ -159,10 +164,16 @@ body,
   margin-block: var(--sp-4) var(--sp-6);
 }
 
-/* An accent rule on the section head, which is what `--bw-rule` is for
-   in the source sheet. It is the one ornament in this stylesheet, and it
-   does a job: on a long operating page it is the thing the eye finds
-   when scrolling for the next section. */
+/* An accent rule on the section head. It is the one ornament in this
+   stylesheet, and it does a job: on a long operating page it is the
+   thing the eye finds when scrolling for the next section.
+
+   The node's own sheet dropped the equivalent tick from its `h2`, and
+   this one deliberately kept it, because the two headings are not the
+   same thing. There a section head is one of eight small eyebrows on a
+   page of lists, so a tick beside each spends the one accent eight
+   times; here it appears two or three times down a chapter a reader is
+   scrolling through, which is the case an accent is for. */
 .content h2 {
   font-size: var(--fs-800);
   margin-block: var(--sp-12) var(--sp-4);
