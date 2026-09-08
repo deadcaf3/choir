@@ -32,7 +32,11 @@ New here? [**Why choir exists**](docs/why.md) is the five-minute version.
 <br/>
 
 > [!IMPORTANT]
-> Research prototype on a private-beta release path. Keep beta ingress closed until the [private-beta runbook](docs/private-beta-runbook.md) go-live receipts are complete.
+> **The code is public; write access is not.** Read it, clone it, fork it, and open a pull request. Nobody but the maintainer can push here, and every change lands through review, so a fork and a PR is the way in rather than a limitation of it. [`CONTRIBUTING.md`](CONTRIBUTING.md) says what a change has to satisfy before it can land.
+>
+> **A hosted node is a separate thing, and it is invite-only.** Running the daemon yourself needs nothing from anybody: it is in this repository and [Run a node](#run-a-node) is the whole procedure. Accounts on somebody *else's* node are theirs to grant, and on the maintainer's node beta ingress stays closed until the [private-beta runbook](docs/private-beta-runbook.md) go-live receipts are complete.
+>
+> Research prototype. The register is `DECISIONS.md`, the invariants are one-way doors, and neither is decoration.
 
 A change is a **signed operation** appended to an append-only log. One writer thread per repository decides the order, and refs, reviews and workspaces are folds over that log. Two agents racing the same ref get a compare-and-swap, and a merge conflict is a value they can keep working on top of.
 
