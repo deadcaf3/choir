@@ -22,89 +22,115 @@
 
 :root{
   /* ---- type -------------------------------------------------------- */
-  --font-sans:"Helvetica Neue",Helvetica,"Segoe UI",system-ui,sans-serif;
+  /* System faces only, and `system-ui` first: the node ships no font
+     file, so the stack names what the reader's own machine already has.
+     A webfont here would be an asset the operator did not ask to host
+     and a request this surface makes to nobody. */
+  --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   --font-mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
 
-  --fs-100:0.6875rem;  /* 11.7px — micro labels, table eyebrows */
-  --fs-200:0.75rem;    /* 12.8px — kbd, pills, captions */
-  --fs-300:0.8125rem;  /* 13.8px — code, dense UI, sidebar */
-  --fs-400:0.9375rem;  /* 16.0px — UI default */
-  --fs-500:1rem;       /* 17.0px — body copy */
-  --fs-600:1.125rem;   /* 19.1px — lede */
-  --fs-700:1.375rem;   /* 23.4px — h3 */
-  --fs-800:1.75rem;    /* 29.8px — h2 */
-  --fs-900:2.375rem;   /* 40.4px — h1 */
-  --fs-1000:3.25rem;   /* 55.3px — landing display */
-  --fs-1100:4.25rem;   /* 72.3px — hero display, wide only */
+  /* A 16px root, so a rem is a round number and the space scale below
+     lands on a 4px grid without a decimal in sight. The previous 17px
+     root made every one of these a fraction of a pixel. */
+  --fs-100:0.6875rem;  /* 11px — micro labels, table eyebrows */
+  --fs-200:0.75rem;    /* 12px — captions, meta, counts */
+  --fs-300:0.8125rem;  /* 13px — code, oids, dense tables */
+  --fs-400:0.875rem;   /* 14px — UI default */
+  --fs-500:1rem;       /* 16px — body copy */
+  --fs-600:1.125rem;   /* 18px — lede */
+  --fs-700:1.3125rem;  /* 21px — h3 */
+  --fs-800:1.625rem;   /* 26px — h2 */
+  --fs-900:2.125rem;   /* 34px — h1 */
+  --fs-1000:2.75rem;   /* 44px — the front door's title */
+  --fs-1100:3.5rem;    /* 56px — reserved; nothing sets it today */
 
-  --lh-tight:1.06;
-  --lh-snug:1.24;
+  --lh-tight:1.14;
+  --lh-snug:1.3;
   --lh-normal:1.5;
-  --lh-copy:1.68;   /* roomy: docs body */
-  --lh-code:1.6;
+  --lh-copy:1.65;   /* prose: the front door and a README */
+  --lh-code:1.55;
 
   --fw-regular:400;
   --fw-medium:500;
-  --fw-bold:700;
+  --fw-bold:600;   /* 600, not 700: a system face at 700 shouts */
 
-  --tr-display:-0.024em;
-  --tr-heading:-0.014em;
-  --tr-body:-0.006em;
+  /* Tracking is nearly zero on purpose. `system-ui` is drawn for screen
+     text at these sizes and does not want the optical correction a
+     display face does; only the largest step and the small-caps
+     eyebrows get one. */
+  --tr-display:-0.021em;
+  --tr-heading:-0.011em;
+  --tr-body:0;
   --tr-mono:0;
-  --tr-caps:0.09em;   /* eyebrows, small-caps labels */
+  --tr-caps:0.075em;   /* eyebrows, small-caps labels */
 
-  /* ---- space (4px grid at 17px root) ------------------------------- */
+  /* ---- space (4px grid at a 16px root) ----------------------------- */
   --sp-0:0;
-  --sp-1:0.235rem;   /* 4  */
-  --sp-2:0.47rem;    /* 8  */
-  --sp-3:0.705rem;   /* 12 */
-  --sp-4:0.94rem;    /* 16 */
-  --sp-5:1.176rem;   /* 20 */
-  --sp-6:1.41rem;    /* 24 */
-  --sp-8:1.88rem;    /* 32 */
-  --sp-10:2.35rem;   /* 40 */
-  --sp-12:2.82rem;   /* 48 */
-  --sp-16:3.76rem;   /* 64 */
-  --sp-20:4.7rem;    /* 80 */
-  --sp-28:6.58rem;   /* 112 */
-  --sp-40:9.4rem;    /* 160 */
+  --sp-1:0.25rem;    /* 4  */
+  --sp-2:0.5rem;     /* 8  */
+  --sp-3:0.75rem;    /* 12 */
+  --sp-4:1rem;       /* 16 */
+  --sp-5:1.25rem;    /* 20 */
+  --sp-6:1.5rem;     /* 24 */
+  --sp-8:2rem;       /* 32 */
+  --sp-10:2.5rem;    /* 40 */
+  --sp-12:3rem;      /* 48 */
+  --sp-16:4rem;      /* 64 */
+  --sp-20:5rem;      /* 80 */
+  --sp-28:7rem;      /* 112 */
+  --sp-40:10rem;     /* 160 */
 
-  /* ---- radii ------------------------------------------------------- */
-  --r-xs:2px;
-  --r-sm:4px;
-  --r-md:7px;
-  --r-lg:11px;
-  --r-xl:16px;
+  /* ---- radii ------------------------------------------------------
+     Nothing on this surface is rounder than 4px, and only a count badge
+     is pill-shaped. A radius is a decoration, and this sheet spends its
+     hierarchy on type and whitespace instead. The names survive the
+     change so every call site keeps compiling; the values are what the
+     redesign is.
+     ------------------------------------------------------------------ */
+  --r-xs:1px;
+  --r-sm:2px;
+  --r-md:3px;
+  --r-lg:4px;
+  --r-xl:4px;
   --r-pill:999px;
 
   /* ---- borders ----------------------------------------------------- */
   --bw-hair:1px;
   --bw-1:1px;
+  --bw-0:0;
   --bw-2:2px;
-  --bw-rule:3px;      /* accent rule on section heads / callouts */
+  --bw-4:4px;         /* the outer radius of the focus ring */
+  --bw-rule:2px;      /* the accent tick, thinner than it was */
   --border:var(--bw-1) solid var(--line);
   --border-hair:var(--bw-hair) solid var(--hairline);
   --border-accent:var(--bw-1) solid var(--accent-line);
 
-  /* ---- motion ------------------------------------------------------ */
-  --dur-1:80ms;    /* state flips: hover, focus */
-  --dur-2:150ms;   /* small transforms, dropdowns */
-  --dur-3:240ms;   /* panels, dialogs */
-  --dur-4:420ms;   /* progress sweeps, page-scale */
+  /* ---- motion -----------------------------------------------------
+     There is almost nothing here to reduce, which is the intent: the
+     only transitions left are colour flips on hover and focus.
+     ------------------------------------------------------------------ */
+  --dur-1:60ms;    /* state flips: hover, focus */
+  --dur-2:120ms;
+  --dur-3:180ms;
+  --dur-4:240ms;
   --ease-out:cubic-bezier(.22,.61,.36,1);
   --ease-in-out:cubic-bezier(.45,.05,.55,.95);
   --ease-emphatic:cubic-bezier(.16,.84,.24,1);
   --ease-linear:linear;
 
   /* ---- layout ------------------------------------------------------ */
-  --measure:46rem;      /* docs prose column */
-  --search:21rem;       /* the one search box: a field, not a banner */
-  --article:48rem;      /* legacy alias, same intent */
-  --side:17.5rem;       /* docs sidebar */
+  --measure:36rem;      /* a book's measure: ~66 characters at 16px */
+  --search:20rem;       /* the one search box: a field, not a banner */
+  --article:40rem;      /* prose that carries code, slightly wider */
+  --side:17rem;         /* a narrow pane */
   --toc:14rem;
-  --topbar-h:3.35rem;
-  --page-max:80rem;
-  --tool-header-h:2.9rem; /* twin / flasher / graph chrome */
+  --topbar-h:3rem;
+  --page-max:72rem;
+  --tool-header-h:2.75rem;
+  /* One column of a three-up conflict. A floor rather than a width, so
+     the columns stack rather than overflow when the viewport cannot
+     give three of them this much. */
+  --col-min:15rem;
 
   /* ---- z ----------------------------------------------------------- */
   --z-base:0;
@@ -116,189 +142,207 @@
 }
 
 /* =========================================================================
-   DARK — the canonical theme. Ground is a cool near-black with a faint blue
-   cast; accent is "signal cyan", the colour of an impulse-radio trace.
+   LIGHT — the canonical palette, and the one the surface is designed in.
+
+   Warm neutral greys: the ground is an off-white with a little yellow in
+   it and the ink is a warm near-black, never `#000`. The previous sheet
+   was dark-canonical with a cool blue cast and a cyan accent that glowed;
+   it read as a dashboard. This one is meant to read as a page.
+
+   Every ratio below is measured against `--ground` unless it says
+   otherwise, and every body and secondary text token clears 4.5:1.
    ====================================================================== */
 :root,
-:root[data-theme="dark"]{
-  color-scheme:dark;
-
-  --ground:#07090b;          /* page */
-  --surface:#0b0e12;         /* nav, sidebar, footer */
-  --card:#0f1319;            /* cards, code blocks */
-  --raise:#161b22;           /* hover / active fills, inputs */
-  --sunken:#040608;          /* terminal, wells */
-
-  --ink:#c8d1da;             /* body copy        — 12.9:1 on ground */
-  --strong:#f3f7fa;          /* headings         — 18.5:1 */
-  --muted:#8d99a5;           /* secondary        —  6.9:1 */
-  --faint:#7b8792;           /* tertiary, meta   —  5.4:1 (4.7:1 on --raise) */
-  --inverse:#05080a;         /* text on accent fills */
-
-  --line:rgba(200,216,232,.145);
-  --hairline:rgba(200,216,232,.075);
-  --line-strong:rgba(200,216,232,.30);
-
-  --accent:#2fd0e6;          /* fills, rules, active states */
-  --accent-ink:#63e0f0;      /* accent as text/links — 12.8:1 on ground */
-  --accent-hover:#8ceaf6;
-  --accent-tint:rgba(47,208,230,.11);
-  --accent-line:rgba(47,208,230,.42);
-  --accent-glow:0 0 0 1px rgba(47,208,230,.35),0 6px 26px -10px rgba(47,208,230,.5);
-
-  --ok:#41c98a;      --ok-tint:rgba(65,201,138,.12);   --ok-line:rgba(65,201,138,.4);
-  --warn:#e0b341;    --warn-tint:rgba(224,179,65,.12); --warn-line:rgba(224,179,65,.4);
-  --danger:#f2717a;  --danger-tint:rgba(242,113,122,.12); --danger-line:rgba(242,113,122,.4);
-  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
-
-  --focus:#7fe6f5;
-  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 4px var(--focus);
-  --selection:rgba(47,208,230,.28);
-
-  --shadow-1:0 1px 1px rgba(0,0,0,.6);
-  --shadow-2:0 1px 2px rgba(0,0,0,.6),0 10px 24px -14px rgba(0,0,0,.75);
-  --shadow-3:0 2px 4px rgba(0,0,0,.55),0 26px 60px -22px rgba(0,0,0,.85);
-  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.035);
-
-  /* syntax — one hue family plus three signals, so code reads as instrument
-     output rather than confetti. All ≥ 4.5:1 on --card. */
-  --syn-plain:#c8d1da;
-  --syn-comment:#7b8792;
-  --syn-keyword:#7fb8ff;
-  --syn-type:#63e0f0;
-  --syn-func:#a9d6ff;
-  --syn-string:#8fd6a8;
-  --syn-number:#e6c069;
-  --syn-const:#d5a8f0;
-  --syn-macro:#e59a76;
-  --syn-punct:#8d99a5;
-  --syn-added:rgba(65,201,138,.14);
-  --syn-removed:rgba(242,113,122,.14);
-  --syn-gutter:#7b8792;
-}
-
-/* =========================================================================
-   LIGHT — paper-white with the same cool cast; accent darkens to hold AA
-   against white (4.9:1 as text).
-   ====================================================================== */
-@media (prefers-color-scheme:light){
-  :root:not([data-theme="dark"]){
-    color-scheme:light;
-
-    --ground:#f6f8fa;
-    --surface:#ffffff;
-    --card:#ffffff;
-    --raise:#eef1f5;
-    --sunken:#e7ebf0;
-
-    --ink:#242a31;           /* 13.6:1 on ground */
-    --strong:#0d1116;        /* 17.8:1 */
-    --muted:#525c66;         /*  6.4:1 */
-    --faint:#646e78;         /*  4.9:1 (4.6:1 on --raise) */
-    --inverse:#ffffff;
-
-    --line:rgba(16,26,36,.14);
-    --hairline:rgba(16,26,36,.075);
-    --line-strong:rgba(16,26,36,.28);
-
-    --accent:#0f7c8f;
-    --accent-ink:#0b6675;    /*  6.2:1 on ground */
-    --accent-hover:#084f5c;
-    --accent-tint:rgba(15,124,143,.09);
-    --accent-line:rgba(15,124,143,.32);
-    --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
-
-    --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
-    --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
-    --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
-    --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
-
-    --focus:#0b6675;
-    --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
-    --selection:rgba(15,124,143,.2);
-
-    --shadow-1:0 1px 1px rgba(13,26,38,.06);
-    --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
-    --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
-    --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
-
-    --syn-plain:#242a31;
-    --syn-comment:#6d7883;
-    --syn-keyword:#1c4fbd;
-    --syn-type:#0b6675;
-    --syn-func:#2a4a86;
-    --syn-string:#1c6b41;
-    --syn-number:#8a5b06;
-    --syn-const:#6b3a9c;
-    --syn-macro:#9c4a1e;
-    --syn-punct:#525c66;
-    --syn-added:rgba(13,122,77,.1);
-    --syn-removed:rgba(189,47,58,.09);
-    --syn-gutter:#6d7883;
-  }
-}
-
-/* Manual override — duplicated rather than @extend'd because plain CSS has no
-   mixins and the attribute must beat the media query above. */
 :root[data-theme="light"]{
   color-scheme:light;
 
-  --ground:#f6f8fa;
-  --surface:#ffffff;
+  --ground:#faf9f7;          /* page */
+  --surface:#ffffff;         /* the one bordered region, when there is one */
   --card:#ffffff;
-  --raise:#eef1f5;
-  --sunken:#e7ebf0;
+  --raise:#f1efeb;           /* hover fills, inputs */
+  --sunken:#f4f2ee;          /* code wells, diffs */
 
-  --ink:#242a31;
-  --strong:#0d1116;
-  --muted:#525c66;
-  --faint:#646e78;
-  --inverse:#ffffff;
+  --ink:#22201d;             /* body copy      — 15.4:1 */
+  --strong:#111010;          /* headings       — 18.1:1 */
+  --muted:#5a554e;           /* secondary      —  7.0:1 */
+  --faint:#6e6960;           /* tertiary, meta —  5.2:1 (4.8:1 on --raise) */
+  --inverse:#ffffff;         /* text on an accent fill — 6.7:1 */
 
-  --line:rgba(16,26,36,.14);
-  --hairline:rgba(16,26,36,.075);
-  --line-strong:rgba(16,26,36,.28);
+  --line:rgba(34,32,29,.13);
+  --hairline:rgba(34,32,29,.07);
+  --line-strong:rgba(34,32,29,.26);
 
-  --accent:#0f7c8f;
-  --accent-ink:#0b6675;
-  --accent-hover:#084f5c;
-  --accent-tint:rgba(15,124,143,.09);
-  --accent-line:rgba(15,124,143,.32);
-  --accent-glow:0 0 0 1px rgba(15,124,143,.28),0 6px 22px -12px rgba(15,124,143,.4);
+  --accent:#2b5f8f;          /* the one accent: a quiet slate blue */
+  --accent-ink:#1f4b73;      /* accent as text/links — 8.6:1 */
+  --accent-hover:#143451;
+  --accent-tint:rgba(43,95,143,.08);
+  --accent-line:rgba(43,95,143,.34);
 
-  --ok:#0d7a4d;      --ok-tint:rgba(13,122,77,.09);    --ok-line:rgba(13,122,77,.3);
-  --warn:#8a5b06;    --warn-tint:rgba(138,91,6,.09);   --warn-line:rgba(138,91,6,.3);
-  --danger:#bd2f3a;  --danger-tint:rgba(189,47,58,.08);--danger-line:rgba(189,47,58,.3);
+  /* Status colours are desaturated and live on text and thin rules. The
+     `-tint` washes are backgrounds only; a foreground always takes the
+     solid token beside it. */
+  --ok:#1a6b47;      --ok-tint:rgba(26,107,71,.08);    --ok-line:rgba(26,107,71,.32);
+  --warn:#7a5410;    --warn-tint:rgba(122,84,16,.08);  --warn-line:rgba(122,84,16,.32);
+  --danger:#a8323a;  --danger-tint:rgba(168,50,58,.07);--danger-line:rgba(168,50,58,.32);
   --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
 
-  --focus:#0b6675;
-  --focus-ring:0 0 0 var(--bw-2) var(--surface),0 0 0 4px var(--focus);
-  --selection:rgba(15,124,143,.2);
+  /* A plain ring, no blur and no colour bleed: two solid pixels offset
+     from the control. Written as a `box-shadow` pair because several
+     controls draw their own border and an `outline` on those sits
+     outside it at an inconsistent distance. */
+  --focus:#1f4b73;
+  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
+  --selection:rgba(43,95,143,.16);
 
-  --shadow-1:0 1px 1px rgba(13,26,38,.06);
-  --shadow-2:0 1px 2px rgba(13,26,38,.06),0 8px 22px -14px rgba(13,26,38,.24);
-  --shadow-3:0 2px 4px rgba(13,26,38,.07),0 22px 50px -22px rgba(13,26,38,.32);
-  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+  /* Depth is carried by whitespace and hairlines, so the first shadow is
+     nothing at all and the other two exist only for a control that
+     genuinely floats. Nothing on this surface does today. */
+  --shadow-1:none;
+  --shadow-2:0 1px 2px rgba(34,32,29,.07);
+  --shadow-3:0 1px 3px rgba(34,32,29,.09),0 8px 24px -16px rgba(34,32,29,.2);
+  --shadow-inset:none;
 
-  --syn-plain:#242a31;
-  --syn-comment:#6d7883;
-  --syn-keyword:#1c4fbd;
-  --syn-type:#0b6675;
-  --syn-func:#2a4a86;
-  --syn-string:#1c6b41;
-  --syn-number:#8a5b06;
-  --syn-const:#6b3a9c;
-  --syn-macro:#9c4a1e;
-  --syn-punct:#525c66;
-  --syn-added:rgba(13,122,77,.1);
-  --syn-removed:rgba(189,47,58,.09);
-  --syn-gutter:#6d7883;
+  /* Syntax: one hue family plus three signals, all ≥ 4.5:1 on
+     `--sunken`, which is the surface code is set on. */
+  --syn-plain:#22201d;
+  --syn-comment:#6e6960;
+  --syn-keyword:#1f4b73;
+  --syn-type:#3a5c8a;
+  --syn-func:#2f4f76;
+  --syn-string:#1a6b47;
+  --syn-number:#7a5410;
+  --syn-const:#6a4485;
+  --syn-macro:#8f4520;
+  --syn-punct:#5a554e;
+  --syn-added:rgba(26,107,71,.1);
+  --syn-removed:rgba(168,50,58,.09);
+  --syn-gutter:#726c63;
+}
+
+/* =========================================================================
+   DARK — a palette, not an inversion.
+
+   Warm charcoal rather than blue-black, and an ink that is a warm bone
+   rather than white. The accent lightens to hold its ratio; it does not
+   change hue, so the two themes are the same design at two exposures.
+   ====================================================================== */
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+
+    --ground:#141311;
+    --surface:#1a1917;
+    --card:#1a1917;
+    --raise:#232120;
+    --sunken:#100f0e;
+
+    --ink:#d6d1c8;           /* 12.2:1 */
+    --strong:#f5f2ec;        /* 16.6:1 */
+    --muted:#9a938a;         /*  6.1:1 */
+    --faint:#918a80;         /*  5.4:1 (4.7:1 on --raise) */
+    --inverse:#141311;
+
+    --line:rgba(214,209,200,.14);
+    --hairline:rgba(214,209,200,.07);
+    --line-strong:rgba(214,209,200,.28);
+
+    --accent:#6f9ecb;
+    --accent-ink:#8fb6dd;    /*  8.8:1 */
+    --accent-hover:#b3d0ec;
+    --accent-tint:rgba(143,182,221,.11);
+    --accent-line:rgba(143,182,221,.36);
+
+    --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
+    --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
+    --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
+    --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+    --focus:#8fb6dd;
+    --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
+    --selection:rgba(143,182,221,.24);
+
+    --shadow-1:none;
+    --shadow-2:0 1px 2px rgba(0,0,0,.5);
+    --shadow-3:0 1px 3px rgba(0,0,0,.5),0 8px 24px -16px rgba(0,0,0,.7);
+    --shadow-inset:none;
+
+    --syn-plain:#d6d1c8;
+    --syn-comment:#918a80;
+    --syn-keyword:#8fb6dd;
+    --syn-type:#a9c8e6;
+    --syn-func:#b9cfe8;
+    --syn-string:#8ecfa8;
+    --syn-number:#d9b571;
+    --syn-const:#c3a8e0;
+    --syn-macro:#e0a17e;
+    --syn-punct:#9a938a;
+    --syn-added:rgba(108,195,154,.12);
+    --syn-removed:rgba(232,138,144,.12);
+    --syn-gutter:#938c81;
+  }
+}
+
+/* Manual override — duplicated rather than `@extend`'d because plain CSS
+   has no mixins and the attribute must beat the media query above. The
+   generator that cuts this block for the book widens both theme
+   selectors by name, so neither may be reworded. */
+:root[data-theme="dark"]{
+  color-scheme:dark;
+
+  --ground:#141311;
+  --surface:#1a1917;
+  --card:#1a1917;
+  --raise:#232120;
+  --sunken:#100f0e;
+
+  --ink:#d6d1c8;
+  --strong:#f5f2ec;
+  --muted:#9a938a;
+  --faint:#918a80;
+  --inverse:#141311;
+
+  --line:rgba(214,209,200,.14);
+  --hairline:rgba(214,209,200,.07);
+  --line-strong:rgba(214,209,200,.28);
+
+  --accent:#6f9ecb;
+  --accent-ink:#8fb6dd;
+  --accent-hover:#b3d0ec;
+  --accent-tint:rgba(143,182,221,.11);
+  --accent-line:rgba(143,182,221,.36);
+
+  --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
+  --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
+  --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
+  --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
+
+  --focus:#8fb6dd;
+  --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
+  --selection:rgba(143,182,221,.24);
+
+  --shadow-1:none;
+  --shadow-2:0 1px 2px rgba(0,0,0,.5);
+  --shadow-3:0 1px 3px rgba(0,0,0,.5),0 8px 24px -16px rgba(0,0,0,.7);
+  --shadow-inset:none;
+
+  --syn-plain:#d6d1c8;
+  --syn-comment:#918a80;
+  --syn-keyword:#8fb6dd;
+  --syn-type:#a9c8e6;
+  --syn-func:#b9cfe8;
+  --syn-string:#8ecfa8;
+  --syn-number:#d9b571;
+  --syn-const:#c3a8e0;
+  --syn-macro:#e0a17e;
+  --syn-punct:#9a938a;
+  --syn-added:rgba(108,195,154,.12);
+  --syn-removed:rgba(232,138,144,.12);
+  --syn-gutter:#938c81;
 }
 
 /* --- legacy aliases -----------------------------------------------------
-   The v0.3.0 sheet and the documate-owned shell markup reference these
-   names. Keep them so generated HTML keeps rendering during migration;
-   author nothing new against them.
+   Names the book's hand-written sheet and older generated markup still
+   reference. Keep them; author nothing new against them.
    ----------------------------------------------------------------------- */
 :root{
   --sans:var(--font-sans);
@@ -312,7 +356,7 @@
 
 /* --- global reset (token-only) ------------------------------------------ */
 *,*::before,*::after{box-sizing:border-box}
-html{font-size:17px;-webkit-text-size-adjust:100%}
+html{font-size:16px;-webkit-text-size-adjust:100%}
 body{
   margin:0;
   background:var(--ground);
@@ -326,11 +370,14 @@ body{
   text-wrap:pretty;
 }
 ::selection{background:var(--selection);color:var(--strong)}
-code,kbd,pre,samp,.mono{font-family:var(--font-mono);letter-spacing:var(--tr-mono)}
+code,kbd,pre,samp,.mono{font-family:var(--font-mono);letter-spacing:var(--tr-mono);
+  font-variant-numeric:tabular-nums}
 a{color:var(--accent-ink);text-decoration-color:var(--accent-line);text-underline-offset:.18em}
 a:hover{color:var(--accent-hover);text-decoration-color:currentColor}
+/* A plain ring. `--focus-ring` is two flat rings — the ground, then the
+   focus colour — so it reads on any surface without a blur behind it. */
 :focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--r-sm)}
-hr{border:0;border-top:var(--border);margin:var(--sp-10) 0}
+hr{border:0;border-top:var(--border-hair);margin:var(--sp-10) 0}
 img,svg,canvas{max-width:100%}
 
 @media (prefers-reduced-motion:reduce){
@@ -340,6 +387,17 @@ img,svg,canvas{max-width:100%}
 
 /* =========================================================================
    CHOIR COMPONENTS — tokens only, no raw values below this line.
+
+   The register this block is written in: quiet, typographic, mostly
+   whitespace. Hierarchy comes from type size and vertical space, not
+   from boxes. A page has at most one bordered region, and usually none;
+   a section is separated from the next one by air and a hairline. The
+   accent appears on links, on the current selection, and nowhere else.
+
+   Two things on this surface nobody else renders, and they are the two
+   things the sheet spends its density on: a conflict as a committed
+   value, with base, left and right side by side, and a review with who
+   was drawn, who answered, and what authorizes the landing.
    ====================================================================== */
 
 body{background:var(--ground);color:var(--ink);margin:0 auto;
@@ -347,21 +405,13 @@ body{background:var(--ground);color:var(--ink);margin:0 auto;
 
 /* The pages that are one column of prose and one control rather than a
    tool's readout: the front door, signing in, asking, and redeeming an
-   invite. The width above is sized for the browse surface, where a file
-   table and a two-pane review earn every column they get. Those pages
-   are the reason it is wide, and they are not these.
-
-   On a wide display the tool width put a two-field form in the corner of
-   a card as wide as the screen and ran its sentences past any reasonable
-   line length, which is most of why this flow read as unfinished. The
-   measure is the token the docs prose already uses, because that is what
-   these pages are.
+   invite. They are set to the book measure. The width above is sized
+   for the browse surface, where a file table, a diff and a three-up
+   conflict earn every column they get.
 
    Which pages get it is decided by one thing: whether the page carries
-   the chrome bar. The account page reads as a task and does not take
-   this, because it draws that bar and a search box with five links
-   beside it does not fit the measure. A page wearing the tool's chrome
-   is on the tool surface whatever else is on it. */
+   the chrome bar. A page wearing the tool's chrome is on the tool
+   surface whatever else is on it. */
 body.task{max-width:var(--measure)}
 
 /* skip link */
@@ -371,254 +421,220 @@ body.task{max-width:var(--measure)}
   text-decoration:none;font-weight:var(--fw-medium)}
 .skip:focus{top:var(--sp-3);color:var(--inverse)}
 
-/* Density is the restyle's whole thesis: lists are the UI, so the chrome
-   around them shrinks. The h1 drops a step (fs-800 → fs-700) and the
-   header/section rhythm drops a step (sp-8 → sp-6) — a page is a tool's
-   readout, not a landing page, and nothing here earns display type. */
-/* The page title sits on the ground, above the panels, and needs no rule
-   under it: the first panel's own edge is that line, and drawing both
-   put two horizontals within a few pixels of each other. */
-header.top{padding-bottom:var(--sp-0);margin-bottom:var(--sp-6)}
+/* ------------------------------------------------------------------
+   THE PAGE HEAD
+   A title and, under it, the facts about what you are looking at as a
+   line of plain text. The facts used to be bordered chips; a row of
+   outlined lozenges is six boxes doing the work of one sentence.
+   ------------------------------------------------------------------ */
+header.top{padding-bottom:var(--sp-0);margin-bottom:var(--sp-8)}
 h1{font-size:var(--fs-800);line-height:var(--lh-tight);letter-spacing:var(--tr-heading);
-  color:var(--strong);margin:0;font-weight:var(--fw-bold);overflow-wrap:break-word}
+  color:var(--strong);margin:var(--sp-0);font-weight:var(--fw-bold);
+  overflow-wrap:break-word}
+/* A section head is an eyebrow: small, spaced capitals, quiet. No rule
+   under it and no accent tick beside it — the whitespace above it is
+   what separates one section from the last, and a tick on every heading
+   spends the one accent thirty times a page. */
 h2{font-size:var(--fs-100);text-transform:uppercase;letter-spacing:var(--tr-caps);
-  color:var(--faint);margin:var(--sp-10) 0 var(--sp-3);font-weight:var(--fw-medium);
-  border-left:var(--bw-rule) solid var(--accent);padding-left:var(--sp-3)}
+  color:var(--faint);margin:var(--sp-10) var(--sp-0) var(--sp-3);
+  font-weight:var(--fw-medium)}
+h3{font-size:var(--fs-500);color:var(--strong);letter-spacing:var(--tr-heading);
+  font-weight:var(--fw-medium);margin:var(--sp-6) var(--sp-0) var(--sp-2)}
 .count{text-transform:none;letter-spacing:var(--tr-body);font-weight:var(--fw-regular);
-  color:var(--faint)}
+  color:var(--faint);font-variant-numeric:tabular-nums}
 
-.sub{margin-top:var(--sp-3);display:flex;flex-wrap:wrap;gap:var(--sp-2)}
-.pill{background:var(--card);border:var(--border);border-radius:var(--r-pill);
-  padding:var(--sp-1) var(--sp-3);font-size:var(--fs-200);color:var(--muted);
-  font-family:var(--font-mono)}
-.pill.on{color:var(--accent-ink);border-color:var(--accent-line);
-  background:var(--accent-tint)}
-/* Two kinds of pill share one class because they share one shape: a
-   fact the page is stating, and a place the reader can go. Only the
-   second is a link, so the link is what tells them apart — no second
-   class to remember at thirty call sites. The hover rule is written
-   with `:has()` on purpose: where it is not understood the pill simply
-   does not light up, which is the state it was in before. */
+/* The subtitle line: facts and destinations, set as text and divided by
+   a hairline rather than boxed. */
+.sub{margin-top:var(--sp-3);display:flex;flex-wrap:wrap;
+  align-items:baseline;gap:var(--sp-1) var(--sp-4);
+  font-size:var(--fs-300);color:var(--muted)}
+.pill{font-family:var(--font-mono);color:var(--muted);
+  display:inline-flex;align-items:baseline;gap:var(--sp-2)}
+/* The one that is a state rather than a fact keeps the accent, because
+   "this is the thing you are looking at" is what the accent is for. */
+.pill.on{color:var(--accent-ink)}
 .pill a{color:var(--accent-ink);text-decoration:none}
-.pill:has(a){border-color:var(--line-strong)}
-.pill:has(a):hover{border-color:var(--accent-line);background:var(--accent-tint)}
-/* The clone URL is the one pill on the surface that exists to be taken
-   rather than read, so it is set into the page like a field and selects
-   whole on a single click. */
+.pill a:hover{text-decoration:underline}
+/* The clone URL is the one string on the surface that exists to be
+   taken rather than read, so it is set into the page like a field and
+   selects whole on a single click. */
 .pill.clone{background:var(--sunken);color:var(--ink);
+  padding:var(--sp-0) var(--sp-2);border-radius:var(--r-sm);
   -webkit-user-select:all;user-select:all}
 
 /* ------------------------------------------------------------------
-   PANELS
-   Every page here is a readout, and a readout's parts are instruments:
-   each says one thing and is bounded so the eye can tell where it stops.
-   Before this the sections were bare — hairline tables floating on the
-   ground with an eyebrow above them — and on a page holding two rows
-   that reads as an unfinished page rather than a quiet one. The card
-   surface, its border and the one-pixel shadow already existed in the
-   token block; the component block simply never asked for them.
-
-   `main>section` catches every ordinary page. The repository root is
-   the exception: its parts are `.pane` inside `div.panes`, so they are
-   named here too rather than restyled separately.
+   SECTIONS
+   Not cards. A section is a stretch of page with room around it; where
+   two of them need telling apart, a hairline does it. The bordered,
+   tinted, shadowed panel this replaced was the single biggest reason
+   the surface read as a dashboard: eight outlined rectangles on a page
+   whose content was mostly two-column text.
    ------------------------------------------------------------------ */
-main>section,.pane{background:var(--card);border:var(--border);
-  border-radius:var(--r-lg);box-shadow:var(--shadow-1),var(--shadow-inset);
-  padding:var(--sp-5) var(--sp-6);margin-bottom:var(--sp-5)}
-section{margin-bottom:var(--sp-6)}
-/* A section head inside a panel is a band across it, not a floating
-   label: negative side margins carry the hairline to both edges, and
-   the accent tick lands exactly on the card's own border, which is why
-   the padding is a full gutter rather than the `--sp-3` the bare
-   eyebrow uses. */
-main>section>h2,.pane>h2{display:flex;align-items:baseline;gap:var(--sp-2);
-  margin:var(--sp-8) calc(-1 * var(--sp-6)) var(--sp-4);
-  padding:var(--sp-0) var(--sp-6) var(--sp-3);
-  border-bottom:var(--border-hair)}
-main>section>h2:first-child,.pane>h2:first-child{margin-top:var(--sp-0)}
-/* The count, and anything else the head carries, sits at the far end. */
-main>section>h2 .count,main>section>h2 .mono,
-.pane>h2 .count~*,.pane>h2 .mono{margin-left:auto;text-transform:none;
-  letter-spacing:var(--tr-mono)}
-/* A panel whose whole content is "there is nothing here" gets room to
-   say so; otherwise the sentence hugs the top edge and the card reads
-   as clipped rather than empty. */
+main>section,.pane{margin-bottom:var(--sp-10)}
+section{margin-bottom:var(--sp-8)}
+/* A panel whose whole content is "there is nothing here" still gets its
+   sentence set as a sentence. */
 main>section>p.lede:first-child,main>section>p.empty:first-child{
-  margin-top:var(--sp-3);margin-bottom:var(--sp-5)}
-/* `lh-snug` and sp-1 vertical padding: a table is scanned, not read, and
-   the tighter grid is what lets a screenful answer the reader's question
-   without a scroll. Prose outside tables keeps `lh-copy` from the reset. */
+  margin-top:var(--sp-2)}
+
+/* Tables are the dense part of this surface and stay dense: `lh-snug`,
+   tight vertical padding, hairlines rather than rules. A table is
+   scanned, not read; prose outside one keeps `lh-copy` from the reset. */
 table{width:100%;border-collapse:collapse;font-size:var(--fs-300);
   line-height:var(--lh-snug)}
 td,th{text-align:left;padding:var(--sp-2) var(--sp-3);
   border-bottom:var(--border-hair);vertical-align:top;overflow-wrap:break-word}
-/* The first cell of a row carries the row's identity, so it starts at
-   the panel's text edge rather than one gutter in from it. */
+/* The first cell carries the row's identity, so it starts at the page's
+   own text edge rather than one gutter in from it. */
 tr>td:first-child,tr>th:first-child{padding-left:var(--sp-0)}
 tr>td:last-child,tr>th:last-child{padding-right:var(--sp-0)}
 thead th{font-size:var(--fs-100);text-transform:uppercase;
   letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium);
   border-bottom:var(--border)}
-/* The last row's rule would sit a few pixels above the panel's own
-   border and read as a mistake. */
-tbody tr:last-child>td{border-bottom:0}
+tbody tr:last-child>td{border-bottom:var(--bw-0) solid transparent}
 tbody tr:hover{background:var(--raise)}
-tr.group th{background:var(--surface);color:var(--muted);
-  font-family:var(--font-mono);font-size:var(--fs-200);text-transform:none;
-  letter-spacing:var(--tr-mono)}
-tr.open{background:var(--accent-tint)}
-tr.open td{border-left:var(--bw-2) solid var(--accent)}
+tr.group th{color:var(--muted);font-family:var(--font-mono);
+  font-size:var(--fs-200);text-transform:none;letter-spacing:var(--tr-mono)}
+/* The current selection: the one place besides a link that spends the
+   accent. A tint and a rule on the leading edge, never a fill. */
+tr.open td{background:var(--accent-tint)}
+/* The rule marking the row is drawn on its first cell only. As an inset
+   shadow on every `td` it repeated at each column boundary, which reads
+   as a grid rather than as a marker. */
+tr.open td:first-child{box-shadow:inset var(--bw-2) var(--sp-0) var(--sp-0) var(--accent)}
 
-/* `anywhere` rather than `break-word`, and the difference is the whole
-   point: only `anywhere` lowers a cell's min-content width, so only
-   `anywhere` lets a table holding a 64-character digest or a long ref
-   name shrink to a phone instead of pushing the page sideways. Prose
-   cells keep `break-word` above, which wraps at spaces and never chops a
-   word that had somewhere to go. */
 /* A two-column table is a list of facts, not a grid: the label column
    takes the width of its longest label and no more, so the value sits
-   beside what names it instead of across a hand's width of nothing.
-   `width:1%` with `nowrap` is the shrink-to-content idiom used for the
-   same reason in `table.hits`. */
-table.kv td:first-child{width:1%;white-space:nowrap;color:var(--muted);
-  padding-right:var(--sp-8)}
-/* The front door's list of repositories. Everywhere else a table is
-   dense because it is scanned; this one holds the reason the reader
-   came, often three or four rows of it, so the name is set at reading
-   size and the row is given the height to match. */
+   beside what names it instead of across a hand's width of nothing. */
+table.kv td:first-child{width:1%;white-space:nowrap;color:var(--faint);
+  padding-right:var(--sp-8);font-size:var(--fs-200);text-transform:uppercase;
+  letter-spacing:var(--tr-caps)}
+/* The list of repositories. Everywhere else a table is dense because it
+   is scanned; this one holds the reason the reader came, so the name is
+   set at reading size and the row is given the height to match. */
 table.repos td{padding-top:var(--sp-3);padding-bottom:var(--sp-3)}
 table.repos td:first-child a{font-size:var(--fs-500);
-  font-weight:var(--fw-medium)}
+  font-weight:var(--fw-medium);text-decoration:none;color:var(--strong)}
+table.repos td:first-child a:hover{color:var(--accent-ink);
+  text-decoration:underline}
+/* `anywhere` rather than `break-word`, and the difference is the whole
+   point: only `anywhere` lowers a cell's min-content width, so only
+   `anywhere` lets a table holding a sixty-four-character digest shrink
+   to a phone instead of pushing the page sideways. */
 .mono,.id{font-family:var(--font-mono);font-size:var(--fs-300);
   overflow-wrap:anywhere}
 .num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
 .muted{color:var(--faint)}
+
+/* ------------------------------------------------------------------
+   STATE
+   A word and a dot in the same desaturated signal colour. No fill and
+   no outline: a status is a fact about a row, and a filled lozenge
+   makes it look like a button somebody could press.
+   ------------------------------------------------------------------ */
 b.tag{display:inline-flex;align-items:center;gap:var(--sp-2);
-  font-size:var(--fs-100);font-weight:var(--fw-medium);
-  text-transform:uppercase;letter-spacing:var(--tr-caps);
-  border-radius:var(--r-sm);padding:var(--sp-0) var(--sp-2);
-  border:var(--bw-1) solid transparent}
-/* The state, said twice: a word and a dot in the same colour, so a
-   reader scanning a column of them lands on the shape before reading
-   any of it. Drawn out of a border rather than a box because this
-   sheet may not author a length, and a zero-content box with a
-   `--bw-rule` border and a pill radius is a dot of exactly that
-   radius. */
+  font-size:var(--fs-200);font-weight:var(--fw-medium);
+  letter-spacing:var(--tr-body);white-space:nowrap}
+/* The dot, drawn out of a border because this sheet may not author a
+   length: a zero-content box with a rule-width border and a pill radius
+   is a dot of exactly that radius. */
 b.tag::before{content:"";display:inline-block;border-radius:var(--r-pill);
   border:var(--bw-rule) solid currentColor}
-b.ok{color:var(--ok);background:var(--ok-tint);border-color:var(--ok-line)}
-b.warn{color:var(--warn);background:var(--warn-tint);border-color:var(--warn-line)}
-b.pending{color:var(--accent-ink);background:var(--accent-tint);
-  border-color:var(--accent-line)}
-b.danger{color:var(--danger);background:var(--danger-tint);
-  border-color:var(--danger-line)}
+b.ok{color:var(--ok)}
+b.warn{color:var(--warn)}
+b.pending{color:var(--muted)}
+b.danger{color:var(--danger)}
 .v{padding:var(--sp-0) 0;font-size:var(--fs-200)}
-.empty,.note{color:var(--faint);font-size:var(--fs-200);margin:var(--sp-2) 0}
-.note{border-left:var(--border-accent);padding-left:var(--sp-3)}
+.empty{color:var(--faint);font-size:var(--fs-400);margin:var(--sp-3) var(--sp-0)}
+/* A note is one sentence of consequence, marked by a thin rule at its
+   leading edge and nothing else. */
+.note{color:var(--muted);font-size:var(--fs-400);line-height:var(--lh-normal);
+  margin:var(--sp-4) var(--sp-0);padding-left:var(--sp-4);
+  border-left:var(--border-accent);max-width:var(--article)}
 
-/* `.lede` and the admonitions, sharing the token block's scale with the
-   rest of this sheet, and used for exactly what
-   they are named for: the sentence explaining a refusal is a lede, and
-   the one next action is a note-level admonition. Inventing choir-local
-   equivalents was the first draft of this block and it was the wrong
-   instinct — a second vocabulary for the same two things is how a design
-   system stops being one.
-
-   One deliberate divergence, recorded rather than hidden: the source's
-   `.callout > .ico` carries `padding-top:.15em`, an optical nudge. This
-   sheet's rule ("no colour, size, radius, shadow or duration is authored
-   below") is stricter than components.css's own, which permits em nudges
-   and breakpoint literals. The declaration is dropped rather than
-   smuggled in under a marker that says it is not there. */
 .lede{font-size:var(--fs-600);line-height:var(--lh-normal);color:var(--muted);
   max-width:var(--measure)}
+
+/* The admonitions. One thin rule at the leading edge, a label in small
+   capitals, and no fill — the tinted, bordered, radiused box these were
+   is exactly the shape this redesign is removing everywhere else. */
 .callout{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--sp-3);
-  margin:0 0 var(--sp-6);padding:var(--sp-4) var(--sp-5);
-  border:var(--border);border-left:var(--bw-rule) solid var(--line-strong);
-  border-radius:var(--r-sm) var(--r-md) var(--r-md) var(--r-sm);
-  background:var(--card);font-size:var(--fs-400);line-height:var(--lh-normal)}
-.callout > .ico{font-family:var(--font-mono);font-size:var(--fs-200);
+  margin:var(--sp-0) var(--sp-0) var(--sp-6);padding-left:var(--sp-4);
+  border-left:var(--bw-rule) solid var(--line-strong);
+  font-size:var(--fs-400);line-height:var(--lh-normal);max-width:var(--article)}
+.callout > .ico{font-family:var(--font-mono);font-size:var(--fs-100);
   color:var(--faint);text-transform:uppercase;letter-spacing:var(--tr-caps)}
-.callout p{margin:0 0 var(--sp-2);max-width:none}
-.callout p:last-child{margin:0}
+.callout p{margin:var(--sp-0) var(--sp-0) var(--sp-2);max-width:none}
+.callout p:last-child{margin:var(--sp-0)}
 .callout strong{color:var(--strong)}
-.callout-note{border-left-color:var(--accent);background:var(--accent-tint)}
+.callout-note{border-left-color:var(--accent)}
 .callout-note > .ico{color:var(--accent-ink)}
-.callout-ok{border-left-color:var(--ok);background:var(--ok-tint)}
+.callout-ok{border-left-color:var(--ok)}
 .callout-ok > .ico{color:var(--ok)}
-.callout-warn{border-left-color:var(--warn);background:var(--warn-tint)}
+.callout-warn{border-left-color:var(--warn)}
 .callout-warn > .ico{color:var(--warn)}
-.callout-danger{border-left-color:var(--danger);background:var(--danger-tint)}
+.callout-danger{border-left-color:var(--danger)}
 .callout-danger > .ico{color:var(--danger)}
-/* Choir's own: a command inside a callout or a lede reads as one. */
-.callout code,.lede code{background:var(--sunken);border-radius:var(--r-xs);
-  padding:var(--sp-0) var(--sp-1);font-size:var(--fs-300);color:var(--syn-string)}
-footer{margin-top:var(--sp-12);padding-top:var(--sp-4);border-top:var(--border);
-  color:var(--faint);font-size:var(--fs-200)}
+/* A command inside a callout or a lede reads as one. */
+.callout code,.lede code,.note code{background:var(--sunken);
+  border-radius:var(--r-xs);padding:var(--sp-0) var(--sp-1);
+  font-size:var(--fs-300);color:var(--ink)}
+
+footer{margin-top:var(--sp-16);padding-top:var(--sp-4);
+  border-top:var(--border-hair);color:var(--faint);font-size:var(--fs-200)}
 details{margin-top:var(--sp-3)}
 summary{cursor:pointer;color:var(--muted);font-size:var(--fs-200);
   padding:var(--sp-2) 0}
 summary:hover{color:var(--accent-ink)}
 
-/* Repository browsing (D30). Code and diffs reuse the token block's
-   own syntax tokens rather than inventing a second palette for them. */
-/* A deep path is the ordinary case, not the exceptional one, so the
-   breadcrumb wraps rather than widening the page: `anywhere` because a
-   single segment can be longer than a phone is wide and has no space in
-   it to break at. */
-nav.crumbs{margin-top:var(--sp-3);font-size:var(--fs-200);color:var(--muted);
+/* ------------------------------------------------------------------
+   CODE, TREES AND DIFFS — the dense half of the surface.
+   ------------------------------------------------------------------ */
+/* A deep path is the ordinary case, so the breadcrumb wraps rather than
+   widening the page: `anywhere` because a single segment can be longer
+   than a phone is wide and has no space in it to break at. */
+nav.crumbs{margin-top:var(--sp-3);font-size:var(--fs-300);color:var(--muted);
   font-family:var(--font-mono);overflow-wrap:anywhere;line-height:var(--lh-normal)}
-pre.code{background:var(--sunken);border:var(--border);border-radius:var(--r-md);
-  padding:var(--sp-3);overflow-x:auto;font-family:var(--font-mono);
-  font-size:var(--fs-200);line-height:var(--lh-code);color:var(--syn-plain)}
-/* `min-width`, not `width`: a fixed box is exactly wide enough for four
-   digits, and the five-digit line numbers of any real file overflowed it
-   into the first characters of their own source line. */
+pre.code{background:var(--sunken);border-radius:var(--r-md);
+  padding:var(--sp-4);overflow-x:auto;font-family:var(--font-mono);
+  font-size:var(--fs-300);line-height:var(--lh-code);color:var(--syn-plain);
+  margin:var(--sp-4) var(--sp-0)}
+/* The blob view's line numbers: a column of tabular figures, right
+   aligned so the digits line up under each other. `min-width`, not
+   `width` — a fixed box is exactly wide enough for four digits, and the
+   five-digit line numbers of any real file overflowed it into the first
+   characters of their own source line. */
 pre.code .ln{display:inline-block;min-width:var(--sp-10);
-  padding-right:var(--sp-2);color:var(--syn-gutter);
+  padding-right:var(--sp-4);color:var(--syn-gutter);text-align:right;
+  font-variant-numeric:tabular-nums;
   -webkit-user-select:none;user-select:none}
-/* `--syn-added` and `--syn-removed` are ~14%-alpha washes, i.e. background
-   tokens. Setting them as `color` rendered added and removed lines at 14%
-   opacity on the darkest surface in the sheet — the two lines a reader
-   opens a diff for were the two least legible on the page. The wash is
-   the background it was always meant to be, and the foreground is the
-   signal token that carries a stated contrast ratio. */
+/* `--syn-added` and `--syn-removed` are washes, i.e. background tokens;
+   the foreground is the signal token that carries a stated ratio. */
 pre.diff .add{color:var(--ok);background:var(--syn-added)}
 pre.diff .del{color:var(--danger);background:var(--syn-removed)}
-pre.diff .hunk{color:var(--accent-ink)}
-/* A `diff --git` header is the seam a reader scrolls for; `--strong`
-   is what lets the eye catch it inside two thousand lines of --syn-plain. */
+pre.diff .hunk{color:var(--faint)}
+/* A `diff --git` header is the seam a reader scrolls for. */
 pre.diff .file{color:var(--strong);font-weight:var(--fw-medium)}
-/* The truncation line sits on `--sunken`, the darkest surface, where
-   `--faint` (the page-wide `.muted` colour) measures 4.3:1 in light
-   mode. One step up holds AA on this surface in both themes. */
 pre.diff .muted{color:var(--muted)}
 /* Word-level emphasis inside a changed line pair. The line wash says
-   "this line moved"; the mark says *which words*. Text goes to
-   `--strong` because the line's own signal colour (--ok/--danger) sits
-   too close in hue to the `-line` wash behind the mark to survive it. */
+   "this line moved"; the mark says which words. */
 pre.diff mark{color:var(--strong);border-radius:var(--r-xs);
-  padding:var(--sp-0)}
+  padding:var(--sp-0);background:var(--raise)}
 pre.diff .add mark{background:var(--ok-line)}
 pre.diff .del mark{background:var(--danger-line)}
-/* The diffstat row above every diff: one line per file, counts in the
-   signal colours. `.plus`/`.minus` are foregrounds, so they take the
-   solid tokens, never the washes. */
 .plus{color:var(--ok)}
 .minus{color:var(--danger)}
-/* A `<details>` living inside a table row: the summary is the row's
-   own text, so it sheds the block spacing the page-level disclosure
-   above carries. */
 td details{margin:var(--sp-0)}
 td summary{padding:var(--sp-0);display:inline-block}
+
 /* The bar above a repository's file list: which revision is shown, and
-   how much is under it. `flex-wrap` rather than a grid because the
-   counts are the part that should drop to a second line on a narrow
-   screen, and a grid would drop the picker with them. */
+   how much is under it. */
 .repobar{display:flex;align-items:baseline;flex-wrap:wrap;
-  gap:var(--sp-3);margin:var(--sp-4) var(--sp-0) var(--sp-3)}
+  gap:var(--sp-3) var(--sp-5);margin:var(--sp-6) var(--sp-0) var(--sp-4);
+  padding-bottom:var(--sp-3);border-bottom:var(--border-hair)}
 .repobar .counts{display:flex;flex-wrap:wrap;gap:var(--sp-4);
-  font-size:var(--fs-300);color:var(--faint)}
+  font-size:var(--fs-300);color:var(--faint);
+  font-variant-numeric:tabular-nums}
 /* The revision picker. A `<details>`, because this surface runs no
    script and a `<select>` without script is a control that changes
    nothing when a reader uses it. The open panel is positioned static,
@@ -626,298 +642,233 @@ td summary{padding:var(--sp-0);display:inline-block}
    is a trap on a page with no handlers. */
 .picker{margin:var(--sp-0)}
 .picker>summary{display:inline-block;cursor:pointer;
-  padding:var(--sp-1) var(--sp-3);border:var(--border);
-  border-radius:var(--r-sm);background:var(--raise);
+  padding:var(--sp-1) var(--sp-2);border:var(--border);
+  border-radius:var(--r-sm);background:var(--ground);
   font-family:var(--font-mono);font-size:var(--fs-300);color:var(--strong)}
-.picker>summary:hover{border-color:var(--line-strong)}
+.picker>summary:hover{border-color:var(--line-strong);color:var(--accent-ink)}
 .picker h3{font-size:var(--fs-100);letter-spacing:var(--tr-caps);
-  text-transform:uppercase;color:var(--faint);
-  margin:var(--sp-3) var(--sp-0) var(--sp-1)}
+  text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
+  margin:var(--sp-4) var(--sp-0) var(--sp-1)}
 .picker ul{list-style:none;padding:var(--sp-0);margin:var(--sp-0);
   display:flex;flex-wrap:wrap;gap:var(--sp-1) var(--sp-3)}
 .picker li a{font-family:var(--font-mono);font-size:var(--fs-300)}
-/* The file listing's two new columns. The subject is the flexible one:
-   it truncates, and everything else keeps its natural width so the
-   rhythm of the rows survives a very long commit message. */
+/* The file listing. The subject is the flexible column: it truncates,
+   and everything else keeps its natural width so the rhythm of the rows
+   survives a very long commit message. */
 table.listing{table-layout:auto;width:100%}
-/* The name column takes the width its longest name needs. Without this
-   the subject cell's `width:100%` squeezes it to the narrowest column
-   that can hold the text *broken*, and since a repository full of
-   `choir-actor`, `choir-bridge`, `choir-sequencer` breaks at the hyphen,
-   every entry in the directory rendered across two lines. */
 table.listing td:first-child{white-space:nowrap}
 table.listing td.subject{max-width:0;width:100%;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-300)}
-table.listing td.when{white-space:nowrap;font-size:var(--fs-300)}
-/* `3.2 KiB` is one token to a reader and two words to a line-breaker.
-   Without this the size column wraps mid-value and every row it happens
-   on becomes two rows tall. */
+  text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-300);
+  color:var(--muted)}
+table.listing td.when{white-space:nowrap;font-size:var(--fs-300);
+  color:var(--faint)}
+/* A size is one token to a reader and two words to a line-breaker. */
 table.listing td.num{white-space:nowrap}
-/* The README. It is the one block on this surface holding prose the
-   node did not author, so it is set as a document: one reading measure,
-   headings that step down from the page's own, and nothing drawn around
-   it.
 
-   It used to sit in a bordered, tinted, padded card — inside a pane,
-   inside the page. Three nested containers, and the innermost one was
-   carrying no information: its background differs from the page beneath
-   it by almost nothing, so the border was the only thing it added, and
-   what that border added was a line. Measured in a browser, the card
-   plus the rules under two headings plus a hairline under every table
-   row is what made this column read as heavy. The prose is the content;
-   the frame around it was not. */
+/* The README: the one block on this surface holding prose the node did
+   not author, so it is set as a document — one reading measure,
+   headings that step down from the page's own, nothing drawn around
+   it. */
 section.readme{margin-top:var(--sp-0)}
-/* The eyebrow keeps the accent rule, because that is how every pane on
-   this page names itself and this one should not be the exception. */
-section.readme>h2{font-size:var(--fs-300);letter-spacing:var(--tr-caps);
+section.readme>h2{font-size:var(--fs-100);letter-spacing:var(--tr-caps);
   text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
   margin:var(--sp-0) var(--sp-0) var(--sp-5)}
 /* One document title is enough. The page already says `owner/name`
    overhead, so the README's own `h1` steps down to sit under it rather
    than restate it louder. */
-section.readme h1{font-size:var(--fs-700)}
-/* Headings *inside* the prose are not pane headers, and they were
-   inheriting the accent bar from the global `h2` — so "Prerequisites"
-   came with the same blue rule as "Reviews", two levels of hierarchy
-   wearing one badge. Clearing `border-bottom` alone left the bar. */
+section.readme h1{font-size:var(--fs-700);margin-top:var(--sp-0)}
+/* Headings inside the prose are not section heads, and were inheriting
+   the eyebrow treatment from the global `h2`. */
 section.readme h2:not(:first-child){font-size:var(--fs-600);
   text-transform:none;letter-spacing:var(--tr-heading);color:var(--strong);
-  font-weight:var(--fw-bold);border-bottom:0;border-left:0;
-  padding-left:var(--sp-0);margin-top:var(--sp-8)}
+  font-weight:var(--fw-bold);margin-top:var(--sp-8)}
 section.readme h3{font-size:var(--fs-500)}
 section.readme p,section.readme li{max-width:var(--measure);
   line-height:var(--lh-copy)}
 section.readme pre{background:var(--sunken);padding:var(--sp-4);
-  border-radius:var(--r-sm);overflow-x:auto;max-width:var(--measure)}
-/* Tables share the prose measure instead of running the full column.
-   At full width they were wider than every paragraph around them, so
-   the right edge of the document jumped in and out down the page. And
-   they are read here, not scanned like the node's own tables, so they
-   get the roomier row. */
-section.readme table{display:block;overflow-x:auto;max-width:var(--measure)}
+  border-radius:var(--r-md);overflow-x:auto;max-width:var(--article)}
+/* Tables share the prose measure instead of running the full column. At
+   full width they were wider than every paragraph around them, so the
+   right edge of the document jumped in and out down the page. */
+section.readme table{display:block;overflow-x:auto;max-width:var(--article)}
 section.readme td,section.readme th{padding:var(--sp-2) var(--sp-3)}
+
 /* ------------------------------------------------------------------
-   THE CONTRIBUTE PAGE
-   Three numbered steps and the commands that make them up. The markup
-   carried these class names from the day the page shipped and nothing
-   in this sheet answered them, so the one page written for somebody who
-   has never used this node rendered as a bare `<ol>` — the least
-   finished surface on the node, in front of the newest reader.
+   THE STEPS
+   Numbered instructions and the commands that make them up: the
+   contribute page, and the front door's two lists. Set as a numbered
+   list of prose, not as a stack of cards.
    ------------------------------------------------------------------ */
-ol.steps{list-style:none;padding:var(--sp-0);margin:var(--sp-5) var(--sp-0);
-  display:grid;gap:var(--sp-4)}
+ol.steps{list-style:none;padding:var(--sp-0);margin:var(--sp-6) var(--sp-0);
+  display:grid;gap:var(--sp-8)}
 /* `min-width` because the step is a grid item and its automatic minimum
    size is its min-content width, which the command inside it sets: a
    `pre` never wraps, so its min-content is the whole line. Without this
-   the longest command widens the track past the card and the step hangs
-   off its right edge.
-
-   The `overflow-x:auto` on the command block below does not prevent it,
-   which is the part worth writing down: that rule zeroes the automatic
-   minimum size of the box it is on, and the box it is on is not the grid
-   item. The step is. Once the step may shrink, the command scrolls
-   inside it, which is what that rule was for. */
-ol.steps>li{background:var(--surface);border:var(--border);
-  border-radius:var(--r-md);padding:var(--sp-4) var(--sp-5);min-width:0}
-ol.steps h3{display:flex;align-items:center;gap:var(--sp-3);
-  font-size:var(--fs-500);color:var(--strong);letter-spacing:var(--tr-heading);
+   the longest command widens the track past the page. */
+ol.steps>li{min-width:0;padding-left:var(--sp-8);position:relative}
+ol.steps h3{font-size:var(--fs-500);color:var(--strong);
+  letter-spacing:var(--tr-heading);font-weight:var(--fw-medium);
   margin:var(--sp-0) var(--sp-0) var(--sp-2)}
 ol.steps h3 code{font-family:var(--font-mono);font-size:var(--fs-400);
-  color:var(--accent-ink)}
+  color:var(--strong)}
 ol.steps p{margin:var(--sp-0) var(--sp-0) var(--sp-3);color:var(--muted);
   font-size:var(--fs-400);line-height:var(--lh-normal);max-width:var(--measure)}
-/* The usage line under each command is a reference, not prose: it is
-   read once, by somebody who needs a flag the example does not show,
-   so it is set smaller than the command it annotates rather than
-   larger, which is what it inherited from the paragraph rule above. */
+/* The usage line under a command is a reference, not prose: read once,
+   by somebody who needs a flag the example does not show. */
 ol.steps p.mono{font-size:var(--fs-200);color:var(--faint);
   max-width:none;line-height:var(--lh-normal)}
 ol.steps p:last-child{margin-bottom:var(--sp-0)}
-/* The step number. Round, quiet, and the same shape as the state dots,
-   because both answer "where am I in a sequence". */
-.step{display:inline-grid;place-items:center;flex:none;
-  padding:var(--sp-0) var(--sp-2);border-radius:var(--r-pill);
-  border:var(--border-accent);background:var(--accent-tint);
-  color:var(--accent-ink);font-family:var(--font-mono);
-  font-size:var(--fs-200);font-weight:var(--fw-medium)}
-/* A command written to be copied. Same well as `pre.code`, tighter,
-   and never wrapped: a broken command line is a broken command. */
-pre.cmd{background:var(--sunken);border:var(--border);border-radius:var(--r-md);
+/* The step number: a figure in the margin, the way a numbered list in a
+   book sets one. It was a tinted, outlined, pill-shaped badge. */
+.step{position:absolute;left:var(--sp-0);top:var(--sp-0);
+  font-family:var(--font-mono);font-size:var(--fs-300);
+  font-variant-numeric:tabular-nums;color:var(--faint);
+  font-weight:var(--fw-regular)}
+/* A command written to be copied: one well, never wrapped, because a
+   broken command line is a broken command. */
+pre.cmd{background:var(--sunken);border-radius:var(--r-md);
   padding:var(--sp-3) var(--sp-4);margin:var(--sp-0) var(--sp-0) var(--sp-3);
   overflow-x:auto;font-family:var(--font-mono);font-size:var(--fs-300);
-  line-height:var(--lh-code);color:var(--syn-string)}
+  line-height:var(--lh-code);color:var(--ink)}
 
-/* The diffstat table above a patch. One row per file, and the counts
-   are the point, so the name column gives the rest of the row away. */
+/* The diffstat table above a patch. */
 table.stat{margin:var(--sp-3) var(--sp-0)}
 table.stat td:first-child{width:1%;white-space:nowrap}
 table.stat td.num{white-space:nowrap}
 
-/* Scope tabs. Links rather than a control, styled as a row of them, with
-   the current one flat and unclickable so its state reads without
-   colour alone carrying it. */
-nav.tabs{display:flex;flex-wrap:wrap;gap:var(--sp-2);
-  margin:var(--sp-5) var(--sp-0) var(--sp-5);
-  border-bottom:var(--border-hair);padding-bottom:var(--sp-2)}
-.tab{font-size:var(--fs-300);padding:var(--sp-2) var(--sp-3);
-  border-radius:var(--r-sm);text-decoration:none;color:var(--muted)}
-a.tab:hover{color:var(--accent-ink);background:var(--accent-tint)}
-b.tab.here{color:var(--strong);background:var(--raise);
-  border:var(--border);font-weight:var(--fw-medium)}
+/* Scope tabs. Links rather than a control, with the current one flat
+   and unclickable so its state reads without colour alone carrying it.
+   The current tab is marked by a rule under it, which is the one place
+   a tab strip earns a line. */
+nav.tabs{display:flex;flex-wrap:wrap;gap:var(--sp-5);
+  margin:var(--sp-6) var(--sp-0);
+  border-bottom:var(--border-hair)}
+.tab{font-size:var(--fs-300);padding:var(--sp-2) var(--sp-0);
+  text-decoration:none;color:var(--muted);
+  border-bottom:var(--bw-2) solid transparent}
+a.tab:hover{color:var(--accent-ink)}
+b.tab.here{color:var(--strong);font-weight:var(--fw-medium);
+  border-bottom-color:var(--accent)}
 /* The matched span inside a result. The browser default is a yellow
    wash that ignores both themes, so it is repainted from the palette. */
-mark{background:var(--accent-tint);color:var(--accent-ink);
-  border-radius:var(--r-sm);padding:0 var(--sp-1)}
+mark{background:var(--accent-tint);color:var(--strong);
+  border-radius:var(--r-xs);padding:0 var(--sp-1)}
 /* A content hit is a location and a line. The location column takes only
    the width it needs; the code takes the rest and is clipped, not
    scrolled — `overflow-x:auto` here gave every row its own scrollbar and
-   parked long lines at their right-hand end, which is how a hit whose
-   match is at column 4 rendered as a row of unrelated code. */
+   parked long lines at their right-hand end. */
 table.hits{width:100%}
-/* `width:1%` with `nowrap` is the shrink-to-content idiom: the column
-   asks for almost nothing and `nowrap` makes the browser give it exactly
-   what the path needs. The code cell then takes the rest, and `max-width:0`
-   is what lets `text-overflow` see a box to overflow. */
 table.hits td:first-child{white-space:nowrap;font-size:var(--fs-200);
   vertical-align:baseline;width:1%}
 table.hits td:last-child{width:99%;max-width:0;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 table.hits code{font-size:var(--fs-300)}
-/* Why a commit is in a search result when its subject does not say so:
-   the matching line from the message body, under the subject and quieter
-   than it. It inherits the subject cell's single-line ellipsis, which is
-   what keeps a long body line from widening the table. */
-.subject .why{display:block;color:var(--muted);font-size:var(--fs-200);
+.subject .why{display:block;color:var(--faint);font-size:var(--fs-200);
   margin-top:var(--sp-1)}
 
 /* ------------------------------------------------------------------
-   THE FIXED BAR
-   One box, same place, every page. `sticky` rather than `fixed` so it
-   participates in layout and needs no compensating offset on `body`;
-   full-bleed via negative margins that cancel the body padding, so the
-   rule under it runs edge to edge the way a chrome element should.
+   THE NAV
+   One line of text links on the page's own ground, with a hairline
+   under it. It used to be a filled, bordered, sticky bar with a brand
+   diamond and a segmented palette switch: chrome that announced itself
+   above every page whose content was a list.
+
+   Still `sticky`, because "the same box in the same place" is a claim
+   about the viewport; full-bleed via negative margins that cancel the
+   body padding, so the rule under it runs edge to edge.
    ------------------------------------------------------------------ */
 .chrome{position:sticky;top:var(--sp-0);z-index:var(--z-header);
-  background:var(--surface);border-bottom:var(--border);
-  margin:calc(-1 * var(--sp-10)) calc(-1 * var(--sp-6)) var(--sp-8);
+  background:var(--ground);border-bottom:var(--border-hair);
+  margin:calc(-1 * var(--sp-10)) calc(-1 * var(--sp-6)) var(--sp-10);
   padding:var(--sp-3) var(--sp-6)}
-/* The inner rail shares the page's own max width so the box lines up
-   with the content under it rather than floating over its own grid. */
 /* Wraps rather than breaking at a width. There is no media query here
    on purpose: this sheet authors no raw lengths, and a breakpoint is a
-   raw length by definition. The flex basis below does the same work —
-   the box asks for a reading measure, and wraps to its own line on any
-   viewport that cannot give it one. */
-.chrome-in{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-4);
-  max-width:var(--page-max);margin:var(--sp-0) auto}
-.brand{display:inline-flex;align-items:center;gap:var(--sp-2);
-  font-weight:var(--fw-bold);letter-spacing:var(--tr-heading);
+   raw length by definition. The flex basis does the same work. */
+.chrome-in{display:flex;flex-wrap:wrap;align-items:baseline;
+  gap:var(--sp-3) var(--sp-5);max-width:var(--page-max);margin:var(--sp-0) auto}
+.brand{font-weight:var(--fw-medium);letter-spacing:var(--tr-heading);
   color:var(--strong);text-decoration:none;white-space:nowrap;
   font-size:var(--fs-400)}
-/* A mark, drawn rather than fetched: `default-src 'none'` means an
-   image would be blocked and a font file would be a file to ship. A
-   rotated zero-content box with an accent border is a diamond, and it
-   costs one rule. */
-.brand::before{content:"";display:inline-block;border-radius:var(--r-xs);
-  border:var(--bw-rule) solid var(--accent);transform:rotate(45deg)}
 .brand:hover{color:var(--accent-ink)}
-.brand:hover::before{border-color:var(--accent-hover)}
 
-/* The box. The scope sits inside the field's own border so the two read
-   as one control: what will be searched, then where you type it. */
-form.omni{display:flex;align-items:stretch;flex:1 1 var(--search);
-  min-width:0;background:var(--raise);border:var(--border);
-  border-radius:var(--r-md);overflow:hidden;
-  transition:border-color var(--dur-1),box-shadow var(--dur-1)}
-form.omni:focus-within{border-color:var(--accent-line);
-  box-shadow:var(--accent-glow)}
-form.omni .scope{display:flex;align-items:center;white-space:nowrap;
-  font-size:var(--fs-200);color:var(--muted);background:var(--card);
-  border-right:var(--border);padding:var(--sp-2) var(--sp-3)}
+/* The search box: a field, not a banner. One hairline under the input
+   and nothing else, so it sits on the nav line as a piece of text you
+   can type into rather than as a widget. */
+form.omni{display:flex;align-items:baseline;flex:1 1 var(--search);
+  min-width:0;gap:var(--sp-2);
+  border-bottom:var(--border);
+  transition:border-color var(--dur-1)}
+form.omni:focus-within{border-bottom-color:var(--accent)}
+form.omni .scope{white-space:nowrap;font-size:var(--fs-200);
+  color:var(--faint);font-family:var(--font-mono)}
 form.omni input[type="search"]{flex:1 1 var(--search);min-width:0;
   font:inherit;font-size:var(--fs-300);color:var(--ink);
-  background:transparent;border:0;padding:var(--sp-2) var(--sp-3);
+  background:transparent;border:0;padding:var(--sp-1) var(--sp-0);
   appearance:none}
 form.omni input[type="search"]::placeholder{color:var(--faint)}
-/* The focus ring belongs to the whole control, drawn by `:focus-within`
-   above — a second ring on the bare field would double it. */
-form.omni input[type="search"]:focus{outline:0}
-form.omni input[type="search"]::-webkit-search-cancel-button{
-  appearance:none}
+/* The whole control shows focus through its own rule, drawn by
+   `:focus-within` above; a second ring on the bare field would double
+   it. */
+form.omni input[type="search"]:focus{outline:0;box-shadow:none}
+form.omni input[type="search"]::-webkit-search-cancel-button{appearance:none}
 
-/* Wraps for the same reason the rail above it does, and it did not have
-   to until it carried more than two links. With `account`, `people` and
-   `docs` on it (D76) this row measures about 480 CSS pixels rendered,
-   so it no longer fits a phone — and a flex row that cannot wrap is the
-   one item its wrapping parent cannot rescue, because the parent can
-   only move it to a line of its own, not break it. Each link keeps
-   `white-space:nowrap` so a break lands between them rather than inside
-   one. */
-.chrome-nav{display:flex;flex-wrap:wrap;align-items:center;
+/* Each link keeps `nowrap` so a break lands between them rather than
+   inside one. */
+.chrome-nav{display:flex;flex-wrap:wrap;align-items:baseline;
   gap:var(--sp-2) var(--sp-4);font-size:var(--fs-300)}
 .chrome-nav>*{white-space:nowrap}
 .chrome-nav a{color:var(--muted);text-decoration:none}
 .chrome-nav a:hover{color:var(--accent-ink)}
+/* The one link in the bar that is an action rather than a destination. */
+.chrome-nav a.go{color:var(--accent-ink)}
 
 /* The palette control. Three states rather than a toggle, because the
    default is "follow the system" and a two-state switch cannot say so:
    a reader who has never chosen would be shown a lie about what they
    chose. The current one is a `<b>`, not a link, so it reads as the
-   state it is without colour being the only thing that says so — the
-   same markup, and the same reason, as the search scope tabs. */
-.themes{display:inline-flex;align-items:stretch;
-  border:var(--border);border-radius:var(--r-pill);overflow:hidden;
-  background:var(--card);font-size:var(--fs-200);
-  font-family:var(--font-mono)}
-.theme{padding:var(--sp-1) var(--sp-3);color:var(--muted);
-  text-decoration:none;transition:background var(--dur-1)}
-a.theme:hover{color:var(--accent-ink);background:var(--accent-tint)}
-b.theme.here{color:var(--accent-ink);background:var(--accent-tint);
-  font-weight:var(--fw-medium)}
-/* The hit count beside a tab label. Tabular figures so the three counts
-   sit on a common baseline grid and the row does not shift as they
-   change width. */
+   state it is without colour being the only thing that says so. Three
+   words, hairline-divided; it was a pill-shaped segmented control. */
+.themes{display:inline-flex;align-items:baseline;font-size:var(--fs-200);
+  font-family:var(--font-mono);color:var(--faint)}
+.theme{padding:var(--sp-0) var(--sp-2);color:var(--faint);
+  text-decoration:none;border-left:var(--border-hair)}
+.theme:first-child{border-left:var(--bw-0) solid transparent;
+  padding-left:var(--sp-0)}
+a.theme:hover{color:var(--accent-ink)}
+b.theme.here{color:var(--strong);font-weight:var(--fw-medium)}
 .tab .count{font-variant-numeric:tabular-nums;font-size:var(--fs-200);
   color:var(--faint)}
-b.tab.here .count{color:var(--accent-ink)}
+b.tab.here .count{color:var(--muted)}
 
 /* Three panes at the repository root: what work is in flight, what
-   files exist, what the README says. Flex rather than grid, and wrapping
-   rather than a breakpoint — the component block may not author raw
-   values, and a media query is a raw length by definition. A basis plus
-   `flex-wrap` reaches the same place: the panes sit side by side while
-   they fit and stack when they do not, at whatever width that turns out
-   to be rather than one we guessed. */
-/* `stretch`, not `flex-start`: three cards of three different heights
-   in one row read as three unrelated things, and the shortest one
-   reads as clipped. Equal height is what makes them a row of panels.
-   The basis is `--side` rather than `--toc` because a review's change
-   id is the widest thing either narrow pane holds, and at a sidebar's
-   width it survives to its fingerprint instead of ending at `demo…`. */
-.panes{display:flex;flex-wrap:wrap;align-items:stretch;gap:var(--sp-5)}
+   files exist, what the README says. Flex rather than grid, and
+   wrapping rather than a breakpoint — the component block may not
+   author raw values, and a media query is a raw length by definition.
+   A basis plus `flex-wrap` reaches the same place. */
+.panes{display:flex;flex-wrap:wrap;align-items:flex-start;
+  gap:var(--sp-10) var(--sp-12)}
 .pane{min-width:0;display:flex;flex-direction:column}
 .pane-reviews{flex:4 1 var(--side)}
 .pane-files{flex:4 1 var(--side)}
 .pane-content{flex:7 1 var(--measure)}
 .pane-content>.readme{margin-top:var(--sp-0)}
+.pane>h2:first-child{margin-top:var(--sp-0)}
 
 /* The in-flight list. One row per review: state, what it is, how far
    through its verdicts it is. */
 table.flight{width:100%;border-collapse:collapse}
 table.flight td{padding:var(--sp-2) var(--sp-0);
-  border-bottom:var(--border);vertical-align:top}
-/* `max-width:0` on a cell in a full-width table is what makes the column
-   shrink to the space the pane has, rather than to the width of its
-   longest unbreakable word — the same pattern `.pane-files` uses. A
-   change id is one such word, and without this it pushed the table past
-   the pane and drew the row across the file listing beside it. */
+  border-bottom:var(--border-hair);vertical-align:top}
+/* `max-width:0` on a cell in a full-width table is what makes the
+   column shrink to the space the pane has, rather than to the width of
+   its longest unbreakable word. A change id is one such word. */
 table.flight td:first-child{white-space:nowrap;max-width:var(--sp-0);width:100%;
   overflow:hidden;text-overflow:ellipsis;padding-right:var(--sp-3)}
 table.flight td:last-child{white-space:nowrap;text-align:right;width:1%;
   font-size:var(--fs-200)}
 table.flight .why{display:block;font-size:var(--fs-200);margin-top:var(--sp-1)}
 /* `.mono` sets `overflow-wrap:anywhere`, which is right for a hash in a
-   wide table and wrong here: it shattered `refs/heads/main` over three
+   wide table and wrong here: it shattered a full ref name over three
    lines in a pane this narrow. One line, clipped. */
 table.flight .why.mono{white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;margin-top:var(--sp-0)}
@@ -930,101 +881,221 @@ table.flight td:first-child a{overflow-wrap:normal}
 .pane-files .why{display:block;font-size:var(--fs-200);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 
-/* A file view is a panel whose whole content is the file, so the file
-   sheds its own frame and the panel becomes it: a bordered well inside
-   a bordered card is two frames drawn around one thing, and the inner
-   one carries no information the outer one has not already given.
-   `:only-child` is the guard — a blob page that also carries a note
-   about size or binary content keeps both, because there the well is
-   distinguishing the file from the sentence about it. */
-main>section>pre.code:only-child{border:0;border-radius:var(--sp-0);
-  margin:calc(-1 * var(--sp-5)) calc(-1 * var(--sp-6));
-  padding:var(--sp-5) var(--sp-6)}
+/* ------------------------------------------------------------------
+   THE REVIEW PAGE — the product.
 
-/* The comment box on a review page. A `rows` attribute sizes its height
-   and nothing sizes its width, so the browser's default `cols` left a
-   two-word field on a page where every other block runs to the measure —
-   the one control on this surface that looked unfinished. Capped at the
-   measure rather than filling the page, because a comment is prose and
-   prose has a reading width.
+   Above the fold: what is proposed, who was drawn and who answered,
+   what authorizes the landing, and the controls if the reader is one of
+   the people being asked. Then the diff. Then the thread.
+   ------------------------------------------------------------------ */
+/* The proposal, as a sentence rather than a table of four labelled
+   cells. A reviewer arriving cold needs to read "this branch, onto that
+   ref, at this commit" in one line, and a two-column table makes them
+   assemble it out of four. */
+p.proposal{font-size:var(--fs-600);line-height:var(--lh-normal);
+  color:var(--ink);max-width:var(--article);margin:var(--sp-0) var(--sp-0) var(--sp-4)}
+p.proposal .mono{font-size:var(--fs-500);color:var(--strong)}
+/* What authorizes the landing, in one plain sentence. It is the only
+   thing on this page set against a tint, because it is the answer to
+   the question the page exists to answer and the reader should find it
+   without looking. */
+p.authority{background:var(--accent-tint);
+  border-left:var(--bw-rule) solid var(--accent);
+  padding:var(--sp-3) var(--sp-4);margin:var(--sp-5) var(--sp-0);
+  font-size:var(--fs-400);line-height:var(--lh-normal);
+  color:var(--ink);max-width:var(--article)}
+p.authority b{color:var(--strong);font-weight:var(--fw-medium)}
+/* Who was drawn, and what they said. Dense, and the verdict column is
+   the one the eye goes to, so it is first after the name. */
+table.who td:first-child{width:1%;white-space:nowrap}
+table.who td.said{width:1%;white-space:nowrap;padding-right:var(--sp-6)}
+table.who td.remark{color:var(--muted)}
 
-   Written as the bare element rather than an id selector, because the
-   raw-value rule reads a hash anywhere below the marker as a hex
-   colour — comment lines included, since it only strips a comment that
-   opens on the same line. The comment box is the only textarea this
-   node serves, so the bare element is the same set either way. */
-textarea{display:block;width:100%;max-width:var(--measure);
+/* The verdict controls. Two buttons that mean opposite things, and a
+   sentence saying what pressing one spends. */
+.verdicts{display:flex;flex-wrap:wrap;gap:var(--sp-3);
+  margin:var(--sp-4) var(--sp-0)}
+
+/* The thread, under the diff rather than beside it: a comment is about
+   the change as a whole, and a column of them next to a patch competes
+   with the patch for the same eye. */
+ol.thread{list-style:none;padding:var(--sp-0);margin:var(--sp-4) var(--sp-0);
+  display:grid;gap:var(--sp-6);max-width:var(--article)}
+ol.thread>li{padding-left:var(--sp-4);border-left:var(--border-hair)}
+ol.thread .who{display:flex;flex-wrap:wrap;align-items:baseline;
+  gap:var(--sp-3);font-size:var(--fs-200);color:var(--faint);
+  margin-bottom:var(--sp-2)}
+ol.thread .who .name{color:var(--strong);font-weight:var(--fw-medium);
+  font-size:var(--fs-300)}
+ol.thread .body{margin:var(--sp-0);white-space:pre-wrap;
+  font-size:var(--fs-400);line-height:var(--lh-normal);color:var(--ink)}
+
+/* ------------------------------------------------------------------
+   THE CONFLICT VIEW
+   Base, left and right, side by side, with the same conflict line on
+   the same row across all three. This is the one thing on this surface
+   nobody else renders: a merge conflict is a committed value here, not
+   an error somebody has to clear before the history is allowed to
+   exist, so it gets a reading surface rather than a marker soup.
+
+   Three columns on a wide screen and stacked on a narrow one, without a
+   media query: `auto-fit` collapses the track count when the viewport
+   cannot give each column its floor.
+   ------------------------------------------------------------------ */
+.conflict{margin:var(--sp-6) var(--sp-0);overflow-x:auto}
+.conflict-head{display:flex;flex-wrap:wrap;align-items:baseline;
+  gap:var(--sp-3);margin-bottom:var(--sp-3);font-size:var(--fs-200);
+  color:var(--faint);font-family:var(--font-mono)}
+.conflict-head .mark{color:var(--warn);display:inline-flex;
+  align-items:center;gap:var(--sp-2)}
+/* The glyph carries its own `width`/`height` attributes, in `em`, so it
+   rides the text beside it. Sized there rather than here because this
+   sheet may not author a length below the marker and `1em` is one — the
+   same rule that keeps the breakpoints out. */
+.conflict-head .mark svg{fill:currentColor}
+/* The three columns. `minmax(<floor>,1fr)` with `auto-fit` is what
+   gives the stacking behaviour a breakpoint would, decided by the
+   content's own floor rather than by a number we guessed. */
+.sides{display:grid;gap:var(--bw-1);
+  grid-template-columns:repeat(auto-fit,minmax(var(--col-min),1fr));
+  background:var(--line);border-top:var(--border);border-bottom:var(--border)}
+.side{background:var(--ground);min-width:0;padding:var(--sp-0)}
+.side>h4{margin:var(--sp-0);padding:var(--sp-2) var(--sp-3);
+  font-size:var(--fs-100);text-transform:uppercase;
+  letter-spacing:var(--tr-caps);font-weight:var(--fw-medium);
+  color:var(--faint);border-bottom:var(--border-hair)}
+.side-left>h4{color:var(--ok)}
+.side-right>h4{color:var(--danger)}
+/* Alignment across the three columns is the whole point, so every row
+   is one line tall in every column: a side with fewer lines than its
+   neighbours is padded with empty rows rather than allowed to end
+   early, and no line wraps. Overflow scrolls the whole block, which is
+   what keeps row N in one column beside row N in the next. */
+.side pre{margin:var(--sp-0);padding:var(--sp-2) var(--sp-3);
+  font-family:var(--font-mono);font-size:var(--fs-300);
+  line-height:var(--lh-code);color:var(--syn-plain);
+  white-space:pre;overflow-x:auto;scrollbar-width:none}
+/* Every row is exactly one line tall, including the empty ones. A block
+   with no inline content in it has no line box and therefore no height,
+   so a blank row would be shorter than a filled one and the columns
+   would drift apart by one line for every blank — which is the one
+   defect this view cannot have. The zero-width space is inline content
+   that occupies no width: it forces the line box without printing
+   anything. A `min-height` token was the first attempt and was wrong,
+   because it is a length and the line height is a ratio, so the two
+   agreed at one font size and nowhere else. */
+.side pre .row{display:block}
+.side pre .row::after{content:"\200B"}
+.side-left pre .row.has{background:var(--syn-added)}
+.side-right pre .row.has{background:var(--syn-removed)}
+.side-base pre .row.has{background:var(--raise)}
+/* A row that exists on one side and not on another. Left blank rather
+   than filled with a placeholder character: the absence is the fact,
+   and a row of dashes reads as content. */
+.side pre .row.gap{background:var(--hairline)}
+
+/* ------------------------------------------------------------------
+   FORMS AND CONTROLS
+   One column, label above field, one primary action. Every field is a
+   rule under text rather than a filled well with a border: the fields
+   were the loudest boxes on the quietest pages.
+   ------------------------------------------------------------------ */
+form p{margin:var(--sp-0) var(--sp-0) var(--sp-5);max-width:var(--measure)}
+label{display:inline-block;font-size:var(--fs-300);color:var(--muted);
+  margin-bottom:var(--sp-1)}
+textarea{display:block;width:100%;max-width:var(--article);
   font:inherit;font-size:var(--fs-400);color:var(--ink);
-  background:var(--raise);border:var(--border);border-radius:var(--r-md);
+  background:var(--ground);border:var(--border);border-radius:var(--r-sm);
   padding:var(--sp-2) var(--sp-3);resize:vertical}
 textarea::placeholder{color:var(--faint)}
-/* The text fields, which had nothing at all. A textarea was drawn and a
-   button was drawn, and the control between them was left to the
-   browser: a grey well about nine characters wide with a system border,
-   sitting on a card this sheet had drawn. It was the first thing on the
-   sign-in page a reader saw and the only thing on it this node had not
-   authored, which is why the page every person meets exactly once looked
-   like the least finished one here.
-
-   Capped at the search token for the reason that token already carries:
-   a field, not a banner. A username is short, and a control as wide as
-   the card claims otherwise. A cap rather than a width so the field
-   still shrinks on a narrow screen. The search box itself is excluded
-   because it is a flex child of its own control and sized there. */
+/* The search box is excluded because it is a flex child of its own
+   control and sized there. A cap rather than a width, so the field
+   still shrinks on a narrow screen. */
 input:not([type="search"]){width:100%;max-width:var(--search);
   font:inherit;font-size:var(--fs-400);color:var(--ink);
-  background:var(--raise);border:var(--border);border-radius:var(--r-md);
-  padding:var(--sp-2) var(--sp-3)}
+  background:transparent;border:0;border-bottom:var(--border);
+  border-radius:var(--sp-0);padding:var(--sp-2) var(--sp-0)}
 input:not([type="search"])::placeholder{color:var(--faint)}
-input:not([type="search"]):focus-visible{border-color:var(--accent-line);
-  box-shadow:var(--accent-glow);outline:0}
-/* The dropdown, for the same reason and in the same pass. The comment on
-   the button rule below claims those were the last controls here the
-   system drew; the two dropdowns on the console are what made that
-   false. Sized by its own content rather than by a token, because what
-   it holds is a repository name and the operator picking one wants to
-   read it. */
+input:not([type="search"]):focus-visible{border-bottom-color:var(--accent);
+  box-shadow:var(--focus-ring)}
 select{font:inherit;font-size:var(--fs-300);color:var(--ink);
-  background:var(--raise);border:var(--border);border-radius:var(--r-md);
+  background:var(--ground);border:var(--border);border-radius:var(--r-sm);
   padding:var(--sp-1) var(--sp-2)}
-select:focus-visible{border-color:var(--accent-line);
-  box-shadow:var(--accent-glow);outline:0}
-textarea:focus-visible{border-color:var(--accent-line);
-  box-shadow:var(--accent-glow);outline:0}
+select:focus-visible{box-shadow:var(--focus-ring);outline:0}
+textarea:focus-visible{border-color:var(--accent);box-shadow:var(--focus-ring);
+  outline:0}
 
-/* The three buttons this node serves — post a comment, cast a verdict,
-   add a passkey — were the last system-drawn controls on a surface that
-   draws everything else itself. One element rule rather than three
-   class rules, because they are one thing: the control that spends a
-   signature. */
+/* One button shape. A quiet outline for the ordinary case and one solid
+   accent fill for the page that has exactly one thing to press. */
 button{font:inherit;font-size:var(--fs-300);color:var(--ink);
-  background:var(--card);border:var(--border);border-radius:var(--r-md);
-  padding:var(--sp-2) var(--sp-3);cursor:pointer;
-  transition:border-color var(--dur-1),box-shadow var(--dur-1)}
-button:hover{background:var(--raise);border-color:var(--accent-line)}
-button:focus-visible{border-color:var(--accent-line);
-  box-shadow:var(--accent-glow);outline:0}
-button:disabled{color:var(--faint);cursor:default}
+  background:var(--ground);border:var(--bw-1) solid var(--line-strong);
+  border-radius:var(--r-sm);padding:var(--sp-2) var(--sp-4);cursor:pointer;
+  transition:border-color var(--dur-1),color var(--dur-1)}
+button:hover{border-color:var(--accent);color:var(--accent-ink)}
+button:focus-visible{box-shadow:var(--focus-ring);outline:0}
+button:disabled{color:var(--faint);border-color:var(--line);cursor:default}
+button:disabled:hover{color:var(--faint);border-color:var(--line)}
 /* The one decisive control on a page that has exactly one: accepting an
-   invite. Every other button here sits among siblings, so a quiet card
-   button is right for them; this one is the only thing on its page a
-   reader is meant to press, and a control that looks optional on a page
-   with no alternative reads as though something is missing. Solid accent
-   text, never a wash, so it stays legible in both palettes. */
-button.go{color:var(--accent-ink);background:var(--accent-tint);
-  border-color:var(--accent-line);font-weight:var(--fw-medium)}
-button.go:hover{border-color:var(--accent);background:var(--accent-tint)}
+   invite, signing in, asking for access. A solid fill, because a
+   control that looks optional on a page with no alternative reads as
+   though something is missing.
 
-/* The verdict pair. They are the only two controls on this surface that
-   mean opposite things, and a reader about to spend a signature should
-   be able to tell which one is under the cursor without reading it. The
-   text colours are the solid signal tokens, never the washes behind
-   them. */
+   Opted into by class rather than taken by every `type="submit"`, which
+   was the first draft and was wrong in one place that matters: the
+   people console's rows carry `Let them in` and `Decline` side by side,
+   and painting both of them as the page's one decisive action says
+   something false about a screen whose whole job is to hold a choice
+   open. A page with one thing to press names it. */
+button.go{color:var(--inverse);background:var(--accent);
+  border-color:var(--accent);font-weight:var(--fw-medium)}
+button.go:hover{background:var(--accent-hover);
+  border-color:var(--accent-hover);color:var(--inverse)}
+/* A form inside a table cell is a row's controls, not a page's, so it
+   sheds the block spacing a standalone form carries. */
+td form p{margin:var(--sp-0) var(--sp-0) var(--sp-2)}
+td form:last-child p{margin-bottom:var(--sp-0)}
+/* The verdict pair. The only two controls on this surface that mean
+   opposite things, and a reader about to spend a signature should be
+   able to tell which one is under the cursor without reading it. The
+   text colours are the solid signal tokens, never the washes. */
 button.verdict{font-weight:var(--fw-medium)}
-button.verdict.ok{color:var(--ok);border-color:var(--ok-line);
-  background:var(--ok-tint)}
-button.verdict.danger{color:var(--danger);border-color:var(--danger-line);
-  background:var(--danger-tint)}
-button.verdict.ok:hover{border-color:var(--ok);background:var(--ok-tint)}
-button.verdict.danger:hover{border-color:var(--danger);
-  background:var(--danger-tint)}
+button.verdict.ok{color:var(--ok);border-color:var(--ok-line)}
+button.verdict.danger{color:var(--danger);border-color:var(--danger-line)}
+button.verdict.ok:hover{border-color:var(--ok);color:var(--ok)}
+button.verdict.danger:hover{border-color:var(--danger);color:var(--danger)}
+
+/* ------------------------------------------------------------------
+   THE FRONT DOOR
+   Set like a page of a book: a title, a lede at the measure, three
+   short sections, the commands in one monospace block, and the form
+   last. No hero and no cards, so almost everything here is a size and a
+   margin rather than a box.
+   ------------------------------------------------------------------ */
+body.task header.top{margin-bottom:var(--sp-10)}
+body.task h1{font-size:var(--fs-900);letter-spacing:var(--tr-display)}
+/* The front door alone takes the display step, because it is the one
+   page whose job is to be read from the top by somebody who has not
+   decided to care yet. */
+body.door h1{font-size:var(--fs-1000)}
+body.door .lede{font-size:var(--fs-600);color:var(--ink);
+  line-height:var(--lh-copy);margin:var(--sp-6) var(--sp-0) var(--sp-10)}
+body.task main p{max-width:var(--measure);line-height:var(--lh-copy)}
+body.task h2{margin-top:var(--sp-12)}
+/* The three claims. Not a list of cards and not a numbered list: three
+   short sections of a page, each with a heading. */
+ul.claims{list-style:none;padding:var(--sp-0);margin:var(--sp-6) var(--sp-0);
+  display:grid;gap:var(--sp-6)}
+ul.claims h3{margin:var(--sp-0) var(--sp-0) var(--sp-1);
+  font-size:var(--fs-500);color:var(--strong)}
+ul.claims p{margin:var(--sp-0);color:var(--muted);
+  font-size:var(--fs-400);line-height:var(--lh-normal)}
+/* Every command on the front door in one block, in order, the way a
+   book sets a listing. Three separate wells with prose between them
+   made three commands look like three procedures. */
+pre.session{background:var(--sunken);border-radius:var(--r-md);
+  padding:var(--sp-5);margin:var(--sp-6) var(--sp-0);overflow-x:auto;
+  font-family:var(--font-mono);font-size:var(--fs-300);
+  line-height:var(--lh-code);color:var(--ink)}
+pre.session .said{color:var(--faint)}
+pre.session .cmd{color:var(--strong)}
+.next-doc{margin-top:var(--sp-6)}

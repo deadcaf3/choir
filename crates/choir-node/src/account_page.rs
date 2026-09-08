@@ -167,10 +167,17 @@ pub(crate) fn render(
                 key pair, which it will only do with scripting enabled. With it off, POST a \
                 credential you already hold to <code>/api/accounts/passkey</code>.</p></noscript>",
     );
+    // Field first and then the button, with the label above the field.
+    // It was the other way round — a button, then the box naming the
+    // thing the button had already made — which reads as an afterthought
+    // and, with no label on it at all, as a search box.
     h.push_str("<div id=\"enrol\" hidden data-user=\"");
     h.push_str(&esc(user));
-    h.push_str("\"><button id=\"enrol-go\">Add a passkey</button> ");
-    h.push_str("<input id=\"enrol-label\" maxlength=\"64\" placeholder=\"this laptop\">");
+    h.push_str(
+        "\"><p><label for=\"enrol-label\">What to call this device</label><br>\
+         <input id=\"enrol-label\" maxlength=\"64\" placeholder=\"this laptop\"></p>",
+    );
+    h.push_str("<p><button class=\"go\" id=\"enrol-go\">Add a passkey</button></p>");
     h.push_str("<p id=\"enrol-said\" class=\"note\" hidden></p></div>");
     h.push_str(crate::ui::CEREMONY_SCRIPT);
     h.push_str("</section>");
