@@ -5544,6 +5544,46 @@ impl Platform {
             .collect()
     }
 
+    /// Every live review that `channel` was drawn for and has not
+    /// answered, paired with the repository its target ref names.
+    ///
+    /// The reviewer's own queue, which the view has always held and no
+    /// page has ever shown. Three filters and no others:
+    ///
+    /// - **drawn**: `channel` is on the review's reviewer list. Being
+    ///   able to read a repository is not being asked about it.
+    /// - **unanswered**: no verdict of theirs stands. A review they have
+    ///   already answered is not owed, whatever anybody else has said.
+    /// - **live**: not archived. An archived review has dropped its
+    ///   verdicts, so an answer to it would land nowhere.
+    ///
+    /// A review with no target ref is omitted for the same reason
+    /// [`Self::reviews_for_repo`] omits one: it belongs to no repository,
+    /// and this page's rows are grouped by one. It cannot become
+    /// invisible that way — nothing can be drawn on a ref that is not
+    /// named.
+    ///
+    /// **This does no authorization.** The caller filters by what the
+    /// reader may read, because the ACL lives there and a second copy of
+    /// that decision here is a second copy that can disagree.
+    pub fn reviews_awaiting(&self, channel: &str) -> Vec<(String, String, serde_json::Value)> {
+        let view = self.view.lock().expect("view lock");
+        view.reviews
+            .iter()
+            .filter(|(_, r)| !matches!(r.status, choir_view::ReviewStatus::Archived { .. }))
+            .filter(|(_, r)| r.reviewers.iter().any(|who| who == channel))
+            .filter(|(_, r)| !r.verdicts.contains_key(channel))
+            .filter_map(|(id, r)| {
+                let repo = r
+                    .target_ref
+                    .as_deref()
+                    .and_then(|target| target.split_once(':'))
+                    .map(|(named, _)| crate::acl::normalize_repo(named))?;
+                Some((id.clone(), repo, review_json(r)))
+            })
+            .collect()
+    }
+
     /// Handles one `/api/...` request, returning `(status, json_body)`.
     pub fn handle_api(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         match (method, path) {

@@ -212,6 +212,13 @@ pub(crate) enum Page {
     Contribute { repo: String },
     /// Every review proposing to land on this repository.
     Reviews { repo: String },
+    /// Every review this reader was drawn for and has not answered,
+    /// across every repository they may read.
+    ///
+    /// The one page on this surface that is about the *reader* rather
+    /// than about a repository, which is why it takes no `repo` and is
+    /// filtered per reader the way [`Page::Index`] is.
+    Owed,
     /// One review: what it proposes, who was asked, what they said, and
     /// the diff between the proposal and where it would land.
     Review { repo: String, id: String },
@@ -230,7 +237,7 @@ impl Page {
     /// filtered per reader instead of gated.
     pub(crate) fn repo(&self) -> Option<&str> {
         match self {
-            Page::Index { .. } => None,
+            Page::Index { .. } | Page::Owed => None,
             Page::Tree { repo, .. }
             | Page::Blob { repo, .. }
             | Page::Commits { repo, .. }
@@ -265,6 +272,13 @@ pub(crate) fn route(url: &str) -> Option<Page> {
         return Some(Page::Index {
             q: param(url, "q").unwrap_or_default(),
         });
+    }
+    // The reader's own queue. Above the `/r/` prefix check because it is
+    // not about one repository, and matched exactly so that `/reviewers`
+    // or `/reviews/anything` falls through rather than rendering this
+    // page under an address that promises something else.
+    if path == "/reviews" {
+        return Some(Page::Owed);
     }
     let rest = path.strip_prefix("/r")?;
     let rest = rest.strip_prefix('/').unwrap_or(rest);
@@ -716,6 +730,10 @@ pub(crate) struct Rendered {
 /// is still clonable by whoever could clone it before.
 pub(crate) fn scope(page: Page, site: &str) -> Option<Page> {
     match page.repo() {
+        // The reader's own queue survives narrowing. It is about a
+        // person rather than a repository, so a node that presents one
+        // repository has not made it redundant — it has made it short.
+        None if matches!(page, Page::Owed) => Some(page),
         None => Some(Page::Tree {
             repo: site.to_string(),
             rev: "HEAD".into(),
@@ -759,6 +777,18 @@ pub(crate) struct Viewer<'a> {
     /// Where this node's book is, if its operator has said. See
     /// [`Chrome::docs`].
     pub(crate) docs: Option<&'a str>,
+    /// Whether this request carries a credential. See
+    /// [`Chrome::signed_in`].
+    pub(crate) signed_in: Option<bool>,
+    /// Who holds `own` over a repository, for the sentence the review
+    /// page states about what would authorize a landing.
+    ///
+    /// A closure rather than the [`crate::acl::Acl`] itself, so this
+    /// module keeps knowing nothing about how authorization is spelled:
+    /// it asks a question and renders the answer. A node with no ACL
+    /// hands back an empty list, which is the right input — nobody owns
+    /// anything, so the approval-weight rule is the one in force.
+    pub(crate) owners: &'a dyn Fn(&str) -> Vec<String>,
 }
 
 pub(crate) fn render(
@@ -779,6 +809,8 @@ pub(crate) fn render(
         account,
         console,
         docs,
+        signed_in,
+        owners,
     } = viewer;
     let chrome = Chrome {
         site,
@@ -787,6 +819,7 @@ pub(crate) fn render(
         account,
         console,
         docs,
+        signed_in,
     };
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
@@ -819,13 +852,17 @@ pub(crate) fn render(
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, chrome, origin),
         Page::Contribute { repo } => contribute(root, repo, chrome, origin, self_service),
         Page::Reviews { repo } => reviews(repo, platform, chrome),
+        Page::Owed => owed(readable, platform, user, chrome),
         Page::Review { repo, id } => review(
             &bare(root, repo),
             repo,
             id,
             platform,
-            user,
-            browser_writes,
+            Reader {
+                user,
+                browser_writes,
+                owners,
+            },
             chrome,
         ),
     }
@@ -2234,15 +2271,20 @@ fn blob(
             }
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
-                h.push_str("<pre class=\"code\">");
-                for (n, line) in text.lines().enumerate() {
-                    h.push_str("<span class=\"ln\">");
-                    h.push_str(&(n + 1).to_string());
-                    h.push_str("</span>");
-                    h.push_str(&esc(line));
-                    h.push('\n');
+                let regions = split_conflicts(&text);
+                if regions.iter().any(|r| matches!(r, Region::Conflict { .. })) {
+                    conflicted_file(&mut h, &regions);
+                } else {
+                    h.push_str("<pre class=\"code\">");
+                    for (n, line) in text.lines().enumerate() {
+                        h.push_str("<span class=\"ln\">");
+                        h.push_str(&(n + 1).to_string());
+                        h.push_str("</span>");
+                        h.push_str(&esc(line));
+                        h.push('\n');
+                    }
+                    h.push_str("</pre>");
                 }
-                h.push_str("</pre>");
             }
         }
     }
@@ -2253,6 +2295,274 @@ fn blob(
         html: close(h),
     }
 }
+
+/// One stretch of a file that is either ordinary text or a committed
+/// conflict.
+///
+/// A conflict is a value here, not an error (invariant 6): a merge that
+/// nothing could resolve is committed with all three sides kept, and
+/// later work builds on top of it. That is the state
+/// [`choir_view::TreeEntry::Conflict`] names in the log's own substrate,
+/// and it is the state git's conflict markers name in a repository this
+/// node serves — the same fact in the two places this node stores facts.
+/// The browse surface reads git, so this reads the markers.
+#[derive(Debug, PartialEq, Eq)]
+enum Region<'a> {
+    /// Ordinary lines, with the one-based number of the first of them.
+    Plain { first: usize, lines: Vec<&'a str> },
+    /// A committed conflict, all three sides kept.
+    Conflict {
+        /// The one-based line the `<<<<<<<` marker sits on.
+        first: usize,
+        /// What the marker named as the left side, usually a ref.
+        left_label: &'a str,
+        /// What the closing marker named as the right side.
+        right_label: &'a str,
+        /// The base, present only in a `diff3`-style conflict. `None` is
+        /// not "no base": it is "this file was written by a merge driver
+        /// that did not record one", and the column says so rather than
+        /// rendering empty as though the base were blank.
+        base: Option<Vec<&'a str>>,
+        left: Vec<&'a str>,
+        right: Vec<&'a str>,
+    },
+}
+
+/// Splits a file into plain stretches and committed conflicts.
+///
+/// Deliberately forgiving. A conflict that never closes, or one whose
+/// markers arrive out of order, is *text*: a file that happens to
+/// contain the string `<<<<<<<` in a code fence must render as itself,
+/// and a half-parsed conflict view over ordinary prose would be worse
+/// than no conflict view at all. So the scan only commits to a region
+/// once it has seen the whole `<<<<<<< … ======= … >>>>>>>` shape, and
+/// otherwise emits the lines it consumed as plain text.
+///
+/// The seven-character marker length is git's, and the space after it is
+/// required: `<<<<<<<<` (eight) is not a marker, and neither is a line of
+/// nothing but angle brackets.
+fn split_conflicts(text: &str) -> Vec<Region<'_>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<Region<'_>> = Vec::new();
+    let mut plain: Vec<&str> = Vec::new();
+    let mut plain_first = 1usize;
+    let mut i = 0usize;
+    while i < lines.len() {
+        let Some(left_label) = marker(lines[i], "<<<<<<<") else {
+            if plain.is_empty() {
+                plain_first = i + 1;
+            }
+            plain.push(lines[i]);
+            i += 1;
+            continue;
+        };
+        // Walk forward for the rest of the shape. `base_at` is the
+        // `|||||||` line if this driver wrote one.
+        let mut base_at: Option<usize> = None;
+        let mut split_at: Option<usize> = None;
+        let mut end_at: Option<usize> = None;
+        let mut right_label = "";
+        for (at, line) in lines.iter().enumerate().skip(i + 1) {
+            // A second opening marker before this one closed means the
+            // first was never a conflict. Stop and let it be text.
+            if marker(line, "<<<<<<<").is_some() {
+                break;
+            }
+            if base_at.is_none() && split_at.is_none() && marker(line, "|||||||").is_some() {
+                base_at = Some(at);
+            } else if split_at.is_none() && line.trim_end() == "=======" {
+                split_at = Some(at);
+            } else if let Some(label) = marker(line, ">>>>>>>") {
+                if split_at.is_some() {
+                    right_label = label;
+                    end_at = Some(at);
+                }
+                break;
+            }
+        }
+        let (Some(split), Some(end)) = (split_at, end_at) else {
+            if plain.is_empty() {
+                plain_first = i + 1;
+            }
+            plain.push(lines[i]);
+            i += 1;
+            continue;
+        };
+        if !plain.is_empty() {
+            out.push(Region::Plain {
+                first: plain_first,
+                lines: std::mem::take(&mut plain),
+            });
+        }
+        let left_end = base_at.unwrap_or(split);
+        out.push(Region::Conflict {
+            first: i + 1,
+            left_label,
+            right_label,
+            base: base_at.map(|at| lines[at + 1..split].to_vec()),
+            left: lines[i + 1..left_end].to_vec(),
+            right: lines[split + 1..end].to_vec(),
+        });
+        i = end + 1;
+    }
+    if !plain.is_empty() {
+        out.push(Region::Plain {
+            first: plain_first,
+            lines: plain,
+        });
+    }
+    out
+}
+
+/// The label on a conflict marker line, or `None` when this is not one.
+///
+/// A bare marker with no label is still a marker — git writes one for
+/// `=======` and can write one for the others — so an exact match
+/// returns the empty label rather than `None`.
+fn marker<'a>(line: &'a str, mark: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(mark)?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    Some(rest.strip_prefix(' ')?.trim_end())
+}
+
+/// A file with at least one committed conflict in it.
+///
+/// **This is the view nobody else renders.** Every other forge treats a
+/// conflict as a thing that must not be committed, so the only way any
+/// of them will show you one is as marker soup in a text file — three
+/// versions of the same lines interleaved, in one column, with the
+/// reader doing the alignment in their head. Here a conflict is a
+/// committed value, so it gets a reading surface: base, left and right
+/// as three columns, the same conflict line on the same row across all
+/// three, and the ordinary text of the file above and below it.
+fn conflicted_file(h: &mut String, regions: &[Region<'_>]) {
+    let count = regions
+        .iter()
+        .filter(|r| matches!(r, Region::Conflict { .. }))
+        .count();
+    h.push_str("<p class=\"note\">");
+    h.push_str(&esc(&plural(
+        count,
+        "unresolved conflict",
+        "unresolved conflicts",
+    )));
+    h.push_str(
+        " in this file. This is a committed state, not a failure: work can be built on top \
+         of it, and resolving it is a later commit that links back to this one.</p>",
+    );
+    for region in regions {
+        match region {
+            Region::Plain { first, lines } => {
+                if lines.iter().all(|line| line.trim().is_empty()) {
+                    continue;
+                }
+                h.push_str("<pre class=\"code\">");
+                for (n, line) in lines.iter().enumerate() {
+                    h.push_str("<span class=\"ln\">");
+                    h.push_str(&(first + n).to_string());
+                    h.push_str("</span>");
+                    h.push_str(&esc(line));
+                    h.push('\n');
+                }
+                h.push_str("</pre>");
+            }
+            Region::Conflict {
+                first,
+                left_label,
+                right_label,
+                base,
+                left,
+                right,
+            } => {
+                h.push_str("<div class=\"conflict\"><div class=\"conflict-head\">");
+                h.push_str("<span class=\"mark\">");
+                h.push_str(CONFLICT_GLYPH);
+                h.push_str(" conflict</span><span>line ");
+                h.push_str(&first.to_string());
+                h.push_str("</span></div>");
+                h.push_str("<div class=\"sides\">");
+                // Read once and handed to all three, because it is the
+                // property that makes the view readable rather than a
+                // per-column detail: every side is padded to the longest
+                // one, so row N here is beside row N there.
+                let rows = rows_of(base, left, right);
+                // Base first, because it is what both sides changed and
+                // is the only column that answers "what was there
+                // before". A conflict view that omits it shows a reader
+                // two alternatives and no way to judge between them.
+                match base {
+                    Some(lines) => side(h, "side-base", "base", lines, rows),
+                    None => {
+                        h.push_str("<div class=\"side side-base\"><h4>base</h4>");
+                        h.push_str("<pre><span class=\"row\">not recorded</span></pre></div>");
+                    }
+                }
+                side(h, "side-left", left_label, left, rows);
+                side(h, "side-right", right_label, right, rows);
+                h.push_str("</div></div>");
+            }
+        }
+    }
+}
+
+/// How many rows every column of one conflict is padded to.
+///
+/// Alignment across the three columns is the whole point of the view, so
+/// row N in one column must be beside row N in the next. The columns are
+/// different lengths — that is what a conflict *is* — so the short ones
+/// are padded with blank rows rather than allowed to end early and let
+/// the next column's content slide up beside the wrong line.
+fn rows_of(base: &Option<Vec<&str>>, left: &[&str], right: &[&str]) -> usize {
+    base.as_ref()
+        .map_or(0, Vec::len)
+        .max(left.len())
+        .max(right.len())
+}
+
+/// One column of a conflict: a label and exactly `rows` lines.
+fn side(h: &mut String, class: &str, label: &str, lines: &[&str], rows: usize) {
+    h.push_str("<div class=\"side ");
+    h.push_str(class);
+    h.push_str("\"><h4>");
+    // An unlabelled side is still a side. Git labels the two outer
+    // markers with refs, but a hand-written conflict or an unusual merge
+    // driver may not, and a heading reading as blank is worse than one
+    // naming which side it is.
+    h.push_str(&esc(if label.is_empty() { "unnamed" } else { label }));
+    h.push_str("</h4><pre>");
+    for n in 0..rows {
+        match lines.get(n) {
+            Some(line) if !line.is_empty() => {
+                h.push_str("<span class=\"row has\">");
+                h.push_str(&esc(line));
+            }
+            // An empty line the side genuinely has, and a row the side
+            // does not reach, are different facts and are drawn
+            // differently: the first is content, the second is absence.
+            Some(_) => h.push_str("<span class=\"row has\">"),
+            None => h.push_str("<span class=\"row gap\">"),
+        }
+        h.push_str("</span>");
+    }
+    h.push_str("</pre></div>");
+}
+
+/// The one drawn glyph on this surface: a conflict marker.
+///
+/// Inline SVG, authored here, sized in `em` so it rides the text it sits
+/// beside. It is drawn rather than fetched for the reason nothing else
+/// here is fetched — the node's `default-src 'none'` blocks an image and
+/// a font file would be a file to ship — and it is the only one, because
+/// a set of icons is a vocabulary a reader has to learn and this surface
+/// would rather spend the same space on a word.
+///
+/// Two paths diverging from one: the shape of the thing it marks.
+const CONFLICT_GLYPH: &str = "<svg viewBox=\"0 0 16 16\" width=\"1em\" height=\"1em\" \
+     aria-hidden=\"true\" focusable=\"false\">\
+     <path d=\"M7 1h2v5H7z\"/>\
+     <path d=\"M8 5.5 3.5 10v5h2v-4.2L8 8.3l2.5 2.5V15h2v-5z\"/></svg>";
 
 /// Recent history.
 fn commits(
@@ -2983,6 +3293,119 @@ fn reviews(
     }
 }
 
+/// The three facts about the *reader* that the review page needs.
+///
+/// Grouped for the reason [`Viewer`] and [`Chrome`] are: they arrive
+/// together, they are all about who is asking rather than about the
+/// review, and passing them one at a time is how a signature grows until
+/// nobody can read a call site. `owners` was the eighth argument, which
+/// is where clippy stops accepting the habit and it is right to.
+#[derive(Clone, Copy)]
+struct Reader<'a> {
+    /// The authenticated reader, whose seat on the review decides
+    /// whether the verdict controls render.
+    user: &'a str,
+    /// Whether the browser may offer mutation controls at all.
+    browser_writes: bool,
+    /// Who holds `own` over a repository. See [`Viewer::owners`].
+    owners: &'a dyn Fn(&str) -> Vec<String>,
+}
+
+/// Every review this reader was drawn for and has not answered.
+///
+/// The reviewer's own queue. It existed in the view from the day reviews
+/// did and on no page: the only way to find a review you had been asked
+/// about was to already know which repository it was against, which is
+/// exactly the thing a person coming back after a day away does not
+/// know. It is the second link in the bar for that reason.
+///
+/// Filtered twice. [`crate::platform::Platform::reviews_awaiting`] does
+/// the "drawn, unanswered, live" half, and `readable` does the
+/// authorization half here, where the ACL already lives — a reader is
+/// never shown a review against a repository they may not read, even one
+/// they were somehow drawn for.
+fn owed(
+    readable: &dyn Fn(&str) -> bool,
+    platform: Option<&crate::platform::Platform>,
+    user: &str,
+    chrome: Chrome<'_>,
+) -> Rendered {
+    let mut h = shell("choir: reviews you owe", Bar::index(chrome));
+    h.push_str("<header class=\"top\"><h1>Reviews you owe</h1>");
+    let Some(platform) = platform else {
+        h.push_str("</header><main id=\"main\"><section>");
+        h.push_str(
+            "<p class=\"lede\">This node serves git, but its platform API is switched off, \
+             so it holds no reviews to owe you.</p>",
+        );
+        h.push_str("</section>");
+        return Rendered {
+            status: 200,
+            etag: None,
+            html: close(h),
+        };
+    };
+    let rows: Vec<(String, String, serde_json::Value)> = platform
+        .reviews_awaiting(user)
+        .into_iter()
+        .filter(|(_, repo, _)| readable(repo))
+        .collect();
+    h.push_str("<div class=\"sub\"><span class=\"pill\">");
+    h.push_str(&plural(rows.len(), "review", "reviews"));
+    h.push_str(" waiting on you</span></div>");
+    h.push_str("</header><main id=\"main\"><section>");
+    if rows.is_empty() {
+        // Not the same sentence as "there are no reviews". A person with
+        // an empty queue has answered everything they were asked, and
+        // the page should say that rather than look broken.
+        h.push_str(
+            "<p class=\"lede\">Nothing is waiting on you. A review appears here when you \
+             are drawn for it and leaves the moment you answer.</p>",
+        );
+    } else {
+        h.push_str("<table><thead><tr><th>review</th><th>repository</th><th>onto</th>");
+        h.push_str("<th>state</th><th>answered</th></tr></thead><tbody>");
+        for (id, repo, review) in &rows {
+            h.push_str("<tr><td><a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/review/");
+            h.push_str(&esc(id));
+            h.push_str("\" title=\"");
+            h.push_str(&esc(id));
+            h.push_str("\">");
+            h.push_str(&esc(&short_change_id(id)));
+            h.push_str("</a></td><td><a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("\">");
+            h.push_str(&esc(repo));
+            h.push_str("</a></td><td class=\"mono muted\">");
+            h.push_str(&esc(ref_name(review)));
+            h.push_str("</td><td>");
+            state_tag(&mut h, review);
+            h.push_str("</td><td class=\"num\">");
+            // How far along the rest of the review is, so a reader can
+            // tell "waiting only on me" from "nobody has looked".
+            let assigned = review["reviewers"].as_array().cloned().unwrap_or_default();
+            let answered = assigned
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|who| review["verdicts"][who]["verdict"].as_str().is_some())
+                .count();
+            h.push_str(&answered.to_string());
+            h.push_str(" of ");
+            h.push_str(&assigned.len().to_string());
+            h.push_str("</td></tr>");
+        }
+        h.push_str("</tbody></table>");
+    }
+    h.push_str("</section>");
+    Rendered {
+        status: 200,
+        etag: None,
+        html: close(h),
+    }
+}
+
 /// One review: the proposal, the people, and the diff between what is
 /// proposed and where it would land.
 ///
@@ -2996,10 +3419,14 @@ fn review(
     repo: &str,
     id: &str,
     platform: Option<&crate::platform::Platform>,
-    user: &str,
-    browser_writes: bool,
+    reader: Reader<'_>,
     chrome: Chrome<'_>,
 ) -> Rendered {
+    let Reader {
+        user,
+        browser_writes,
+        owners,
+    } = reader;
     let Some(platform) = platform else {
         return unavailable(repo, chrome);
     };
@@ -3035,23 +3462,44 @@ fn review(
     h.push_str("/reviews\">all reviews</a></span>");
     h.push_str("</div></header><main id=\"main\">");
 
-    // The relationship: what lands where, which is the thing reviews
-    // have always carried and never shown in one place.
-    h.push_str("<section><h2>Proposal</h2><table class=\"kv\"><tbody>");
-    // The id whole, because it is what a reviewer pastes into `choir
-    // verdict` and what `view.changes` is keyed by. Shortening it here
-    // would be an identity change wearing a display change's clothes.
-    h.push_str("<tr><td>change</td><td class=\"mono\">");
-    h.push_str(&esc(id));
-    h.push_str("</td></tr>");
-    h.push_str("<tr><td>commit</td><td class=\"mono\"><a href=\"/r/");
+    // ---------------------------------------------------------------
+    // ABOVE THE FOLD. Four things, in the order a reviewer needs them:
+    // what is proposed, who was asked, what would authorize the landing,
+    // and — if this reader is one of the people being asked — the two
+    // buttons. The diff follows, and the discussion follows that.
+    //
+    // The order these used to be in was proposal, reviewers,
+    // *discussion*, diff, controls. So a reviewer arriving to answer had
+    // to scroll past everybody else's comments to reach the change, and
+    // past the change to reach the buttons: the two things the page
+    // exists for were its last two sections.
+    // ---------------------------------------------------------------
+
+    // The relationship, as a sentence. It was four labelled cells in a
+    // two-column table, which made a reader assemble "this commit, onto
+    // that ref" out of parts instead of reading it.
+    h.push_str("<section><h2>Proposal</h2>");
+    h.push_str("<p class=\"proposal\">Land <a class=\"mono\" href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("/commit/");
     h.push_str(&esc(&commit_oid));
     h.push_str("\">");
     h.push_str(&esc(&short_oid(&commit_oid)));
-    h.push_str("</a></td></tr><tr><td>onto</td><td class=\"mono\">");
-    h.push_str(&esc(ref_name(&state)));
+    h.push_str("</a>");
+    let onto_ref = ref_name(&state);
+    if onto_ref.is_empty() {
+        h.push_str(" — this review names no destination ref.");
+    } else {
+        h.push_str(" onto <span class=\"mono\">");
+        h.push_str(&esc(onto_ref));
+        h.push_str("</span>.");
+    }
+    h.push_str("</p>");
+    // The id whole, because it is what a reviewer pastes into `choir
+    // verdict` and what `view.changes` is keyed by. Shortening it here
+    // would be an identity change wearing a display change's clothes.
+    h.push_str("<table class=\"kv\"><tbody><tr><td>change</td><td class=\"mono\">");
+    h.push_str(&esc(id));
     h.push_str("</td></tr>");
     if state["re_review_required"].as_bool().unwrap_or(false) {
         h.push_str("<tr><td>re-review</td><td><b class=\"tag warn\">required</b></td></tr>");
@@ -3078,8 +3526,8 @@ fn review(
              that is the only way a reviewer list is ever set.",
         );
     } else {
-        h.push_str("<table><thead><tr><th>reviewer</th><th>verdict</th><th>note</th>");
-        h.push_str("</tr></thead><tbody>");
+        h.push_str("<table class=\"who\"><thead><tr><th>reviewer</th><th>verdict</th>");
+        h.push_str("<th>note</th></tr></thead><tbody>");
         for who in reviewers.iter().filter_map(serde_json::Value::as_str) {
             let verdict = &state["verdicts"][who];
             let slashed = state["slashes"]
@@ -3094,7 +3542,7 @@ fn review(
             h.push_str(&esc(&url_path(who)));
             h.push_str("\">");
             h.push_str(&esc(&crate::ui::person(who, &roster)));
-            h.push_str("</a></td><td>");
+            h.push_str("</a></td><td class=\"said\">");
             match verdict["verdict"].as_str() {
                 Some("Approve") => h.push_str("<b class=\"tag ok\">approve</b>"),
                 Some("RequestChanges") => h.push_str("<b class=\"tag danger\">changes</b>"),
@@ -3106,50 +3554,32 @@ fn review(
                 h.push_str(&esc(reason));
                 h.push_str("</span>");
             }
-            h.push_str("</td><td>");
+            h.push_str("</td><td class=\"remark\">");
             h.push_str(&esc(verdict["note"].as_str().unwrap_or("")));
             h.push_str("</td></tr>");
         }
         h.push_str("</tbody></table>");
     }
+    authority(&mut h, repo, &state, owners, &roster);
     h.push_str("</section>");
 
-    // The discussion (D38). Rendered, never accepted: a comment is a
-    // signed operation, so the only way one reaches the log is the
-    // submit endpoint. This surface stays read-only, exactly as D34
-    // built it.
-    h.push_str("<section><h2>Discussion</h2>");
-    let comments = state["comments"].as_array().cloned().unwrap_or_default();
-    let archived = state["archived"].as_bool().unwrap_or(false);
-    if comments.is_empty() {
-        if archived {
-            // Saying "no comments" here would be a claim the node cannot
-            // support: archiving drops the thread with the verdicts, so
-            // an emptied review and a review nobody discussed look
-            // identical from the view. Report the one that is known.
-            h.push_str("<p class=\"empty\">This review was archived; its discussion was ");
-            h.push_str("dropped with its verdicts. The log still holds every comment.</p>");
-        } else {
-            h.push_str("<p class=\"empty\">Nothing said yet.</p>");
-        }
+    // The two buttons, above the diff rather than after it. A reviewer
+    // who has read the change scrolls back up to answer, which is one
+    // scroll rather than two and is also where they were when they
+    // decided. `write_sections` returns them and the comment box as
+    // separate fragments precisely so the two can sit in different
+    // places on the page.
+    let (verdict_html, comment_html) = if browser_writes {
+        write_sections(id, &state, user)
     } else {
-        h.push_str("<table><thead><tr><th>op</th><th>author</th><th>comment</th>");
-        h.push_str("</tr></thead><tbody>");
-        for comment in &comments {
-            h.push_str("<tr><td class=\"num mono muted\">");
-            h.push_str(&esc(&comment["at"].to_string()));
-            h.push_str("</td><td class=\"mono\">");
-            h.push_str(&esc(&crate::ui::person(
-                comment["author"].as_str().unwrap_or(""),
-                &roster,
-            )));
-            h.push_str("</td><td>");
-            h.push_str(&esc(comment["body"].as_str().unwrap_or("")));
-            h.push_str("</td></tr>");
-        }
-        h.push_str("</tbody></table>");
-    }
-    h.push_str("</section>");
+        (
+            String::new(),
+            "<p class=\"note\">This beta keeps browser access read-only. Use the signed CLI \
+             for verdicts and comments.</p>"
+                .to_string(),
+        )
+    };
+    h.push_str(&verdict_html);
 
     // The diff, against wherever the target ref points right now.
     h.push_str("<section><h2>Changes</h2>");
@@ -3186,10 +3616,59 @@ fn review(
     }
     h.push_str("</section>");
 
-    if browser_writes {
-        write_sections(&mut h, id, &state, user);
+    // The discussion (D38), under the diff. A comment here is about the
+    // change as a whole, so it belongs after the thing it is about; a
+    // column of comments beside a patch competes with the patch for the
+    // same eye, and loses, which is the worst of both.
+    //
+    // Rendered, never accepted: a comment is a signed operation, so the
+    // only way one reaches the log is the submit endpoint. This surface
+    // stays read-only, exactly as D34 built it.
+    h.push_str("<section><h2>Discussion</h2>");
+    let comments = state["comments"].as_array().cloned().unwrap_or_default();
+    let archived = state["archived"].as_bool().unwrap_or(false);
+    if comments.is_empty() {
+        if archived {
+            // Saying "no comments" here would be a claim the node cannot
+            // support: archiving drops the thread with the verdicts, so
+            // an emptied review and a review nobody discussed look
+            // identical from the view. Report the one that is known.
+            h.push_str("<p class=\"empty\">This review was archived; its discussion was ");
+            h.push_str("dropped with its verdicts. The log still holds every comment.</p>");
+        } else {
+            h.push_str("<p class=\"empty\">Nothing said yet.</p>");
+        }
     } else {
-        h.push_str("<section><h2>Writes</h2><p class=\"note\">This beta keeps browser access read-only. Use the signed CLI for verdicts and comments.</p></section>");
+        // A thread, not a table. Each comment is a paragraph somebody
+        // wrote, and a three-column grid set it as a database row: the
+        // author in a monospace cell, the body wrapped to whatever width
+        // was left, and the sequence number given a column of its own at
+        // the front, where the eye lands first.
+        h.push_str("<ol class=\"thread\">");
+        for comment in &comments {
+            h.push_str("<li><div class=\"who\"><span class=\"name\">");
+            h.push_str(&esc(&crate::ui::person(
+                comment["author"].as_str().unwrap_or(""),
+                &roster,
+            )));
+            // The op position stays on the page — it is what orders the
+            // thread and what a reader cites — but as the quiet half of
+            // a byline rather than as the first column of a table.
+            h.push_str("</span><span class=\"mono\">op ");
+            h.push_str(&esc(&comment["at"].to_string()));
+            h.push_str("</span></div><p class=\"body\">");
+            h.push_str(&esc(comment["body"].as_str().unwrap_or("")));
+            h.push_str("</p></li>");
+        }
+        h.push_str("</ol>");
+    }
+    h.push_str(&comment_html);
+    h.push_str("</section>");
+    // One script element, if either write affordance rendered. It is
+    // emitted here rather than inside either fragment so that a page
+    // carrying both does not load it twice.
+    if wants_ceremony(&verdict_html, &comment_html) {
+        h.push_str(crate::ui::CEREMONY_SCRIPT);
     }
     Rendered {
         status: 200,
@@ -3198,21 +3677,119 @@ fn review(
     }
 }
 
-/// Both write affordances, and the one `<script>` element that serves
-/// them — emitted only if one of them rendered.
+/// Both write affordances, as two fragments the caller places
+/// separately: the verdict controls belong above the diff and the
+/// comment box belongs at the end of the thread, which is under it.
 ///
-/// A reader with no verdict to cast and no right to comment gets the
-/// page they always got, script in neither sense: no element and no
+/// A reader with no verdict to cast and no right to comment gets two
+/// empty strings, and `review` then emits no script element and makes no
 /// request. That is the read surface's guarantee, and it is a function
 /// rather than four lines inside `review` so a test can hold it without
 /// standing up a platform.
-fn write_sections(h: &mut String, id: &str, state: &serde_json::Value, user: &str) {
-    let before = h.len();
-    verdict_buttons(h, id, state, user);
-    comment_box(h, id, state, user);
-    if h.len() > before {
-        h.push_str(crate::ui::CEREMONY_SCRIPT);
+///
+/// It stopped emitting the script itself when the two halves stopped
+/// being adjacent: the one element has to be written once, by whoever
+/// knows both fragments landed, and that is now the caller.
+fn write_sections(id: &str, state: &serde_json::Value, user: &str) -> (String, String) {
+    let mut verdict = String::new();
+    let mut comment = String::new();
+    verdict_buttons(&mut verdict, id, state, user);
+    comment_box(&mut comment, id, state, user);
+    (verdict, comment)
+}
+
+/// Whether a review page needs the one `<script>` element at all.
+///
+/// The read surface's guarantee is that a reader with no verdict to cast
+/// and no right to comment gets a page that fetches nothing: no element
+/// and no request. That used to be `h.len() > before` inside
+/// [`write_sections`], which stopped working the moment the two
+/// fragments went to different places on the page.
+///
+/// The comment half is matched on its element id rather than on being
+/// non-empty, because the read-only fallback is also a non-empty string
+/// — a sentence naming the CLI — and a sentence needs no script.
+fn wants_ceremony(verdict: &str, comment: &str) -> bool {
+    !verdict.is_empty() || comment.contains("id=\"comment\"")
+}
+
+/// What would authorize this landing, in one plain sentence (D42, D43).
+///
+/// Two rules, and which one applies is a property of the *repository*
+/// rather than of the actor: somebody owns it and an owner's assent is
+/// necessary and sufficient, or nobody does and approval weight decides.
+/// A reviewer looking at a page of verdicts cannot tell which of those
+/// they are participating in, and the difference is whether their
+/// approval can ever be what lands the change.
+///
+/// **This describes the rule; it does not decide anything.** The one
+/// function that admits a landing is `Platform::authorization_for`, and
+/// it runs at submit time against the ACL as of that moment. The
+/// sentence here is written in those terms deliberately — "an owner's
+/// assent lands this", not "this is authorized" — so that a page which
+/// is a few seconds stale about a grant is still saying something true.
+fn authority(
+    h: &mut String,
+    repo: &str,
+    state: &serde_json::Value,
+    owners: &dyn Fn(&str) -> Vec<String>,
+    roster: &crate::ui::Roster,
+) {
+    let owners = owners(repo);
+    h.push_str("<p class=\"authority\">");
+    if owners.is_empty() {
+        // The pre-D42 rule, still in force wherever nobody has been
+        // granted `own`. The required weight is not rendered from a
+        // constant here because the page has no honest access to the
+        // node's own threshold; the weight standing is what the view
+        // holds, and the sentence says what it is rather than judging it.
+        h.push_str(
+            "Nobody holds <b>own</b> on this repository, so approval weight is what \
+             lands it: this review stands at <b>",
+        );
+        h.push_str(&esc(&state["approval_weight"].to_string()));
+        h.push_str("</b>, from approvals by distinct operators.");
+    } else {
+        // Which of the owners has already said yes, if any. A reader
+        // whose own approval cannot land the change should be able to
+        // see who is actually being waited on.
+        let assented: Vec<String> = owners
+            .iter()
+            .filter(|owner| {
+                state["verdicts"][owner.as_str()]["verdict"].as_str() == Some("Approve")
+            })
+            .map(|owner| crate::ui::person(owner, roster))
+            .collect();
+        h.push_str(
+            "This repository has an owner, so an owner's assent is what lands it and no \
+             amount of other approval substitutes. ",
+        );
+        // Each name is escaped and *then* joined with markup. Escaping
+        // the joined string instead would render the separator as
+        // literal angle brackets, which is the bug this comment exists
+        // to stop somebody re-introducing while tidying.
+        let names = |list: &[String]| {
+            list.iter()
+                .map(|one| format!("<b>{}</b>", esc(one)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if assented.is_empty() {
+            // "Waiting on ana." and "Waiting on ana, bo." — one form that
+            // is grammatical at every count. The first draft wrote "None
+            // of ana has approved yet", which is correct English only
+            // when there are at least two of them and reads as a bug
+            // when there is one, which is the ordinary case.
+            h.push_str("Waiting on ");
+            h.push_str(&names(&owners));
+            h.push('.');
+        } else {
+            h.push_str("Approved by ");
+            h.push_str(&names(&assented));
+            h.push('.');
+        }
     }
+    h.push_str("</p>");
 }
 
 /// The passkey write affordance (D39), and the one place this repository
@@ -3267,6 +3844,7 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
         "\"><p class=\"note\">Signed by your passkey on this device. Nothing is sent \
                 until you approve the prompt.</p>",
     );
+    h.push_str("<div class=\"verdicts\">");
     for (verdict, label, class) in [
         ("Approve", "Approve", "ok"),
         ("RequestChanges", "Request changes", "danger"),
@@ -3282,8 +3860,9 @@ fn verdict_buttons(h: &mut String, id: &str, state: &serde_json::Value, user: &s
         h.push_str(&esc(&prepared.challenge));
         h.push_str("\">");
         h.push_str(label);
-        h.push_str("</button> ");
+        h.push_str("</button>");
     }
+    h.push_str("</div>");
     h.push_str("<p id=\"verdict-said\" class=\"note\" hidden></p></div>");
     h.push_str("</section>");
 }
@@ -3306,7 +3885,10 @@ fn comment_box(h: &mut String, id: &str, state: &serde_json::Value, user: &str) 
     if user.is_empty() || user == "anon" || state["archived"].as_bool().unwrap_or(false) {
         return;
     }
-    h.push_str("<section><h2>Say something</h2>");
+    // No `<section>` of its own: this lands at the end of the thread,
+    // inside the Discussion section, because "say something" is the last
+    // turn of the conversation above it rather than a separate topic.
+    h.push_str("<h3>Say something</h3>");
     h.push_str(
         "<noscript><p class=\"note\">Commenting signs an operation with your passkey, \
                 which needs scripting. With it off, use <code>choir comment</code>.</p></noscript>",
@@ -3321,7 +3903,6 @@ fn comment_box(h: &mut String, id: &str, state: &serde_json::Value, user: &str) 
     );
     h.push_str("<p><button id=\"comment-go\">Sign and post</button></p>");
     h.push_str("<p id=\"comment-said\" class=\"note\" hidden></p></div>");
-    h.push_str("</section>");
 }
 
 /// The git object id inside a view hash, or `None` when the hash is not
@@ -3436,7 +4017,7 @@ pub(crate) fn decode_channel(rest: &str) -> Option<String> {
 /// questions with different fixes, and shared with the malformed-name
 /// case on purpose: a reader is never told which of the two they hit.
 pub(crate) fn no_such_actor(chrome: Chrome<'_>) -> Rendered {
-    let chrome = Chrome { here: "", ..chrome };
+    let chrome = chrome.refusal();
     Rendered {
         status: 404,
         etag: None,
@@ -3642,15 +4223,13 @@ pub(crate) fn profile_page(
 }
 
 pub(crate) fn no_such_repository(chrome: Chrome<'_>) -> Rendered {
-    // The reader's address is dropped here, and dropping it is the
-    // property rather than a tidy-up. This page is rendered both for a
+    // Every reader-specific fact is dropped here, and dropping it is the
+    // property rather than a tidy-up: this page is rendered both for a
     // repository that does not exist and for one the reader may not
     // read, and the two must be byte-identical or a reader learns which
-    // names exist by diffing them. The palette links carry a `to=` with
-    // the address on it, so a page that kept the address would differ
-    // between the two paths — which is exactly how the integration test
-    // caught this the first time it was written the other way.
-    let chrome = Chrome { here: "", ..chrome };
+    // names exist by diffing them. See `Chrome::refusal` for what
+    // survives and why.
+    let chrome = chrome.refusal();
     Rendered {
         status: 404,
         etag: None,
@@ -3836,6 +4415,62 @@ pub(crate) struct Chrome<'a> {
     /// link. The address is untracked operator state for the reason
     /// every host address here is.
     pub(crate) docs: Option<&'a str>,
+    /// Whether this request carries a credential.
+    ///
+    /// The bar has two shapes and this is the only thing that decides
+    /// between them: signed out it offers the way in, signed in it
+    /// offers the three destinations a person actually uses. Before this
+    /// the bar was the same either way, so a node with no ACL — where a
+    /// reader without a credential is served every page — showed a
+    /// stranger `account` and `people` and no way to become somebody.
+    ///
+    /// It is about the *request*, not about the node: `account` and
+    /// `console` above answer "does this page exist here" and "does this
+    /// reader hold the grant it needs", which are different questions
+    /// and stay separate fields.
+    ///
+    /// `None` means the question has no answer on this page, and the bar
+    /// then offers neither shape. That is the refusals' state: half of
+    /// them are rendered for a caller who has not been identified yet,
+    /// and a bar that guessed would put a `sign in` link in front of
+    /// somebody already signed in, on the page where they have just been
+    /// told something went wrong.
+    pub(crate) signed_in: Option<bool>,
+}
+
+impl<'a> Chrome<'a> {
+    /// The same chrome with every reader-specific fact dropped.
+    ///
+    /// A refusal page is rendered both for a repository that does not
+    /// exist and for one the reader may not read, and the two must be
+    /// **byte-identical** or a reader learns which names exist by
+    /// diffing them. That makes every field here that varies with the
+    /// reader a leak: their address, whether they hold `@node write`,
+    /// whether they are signed in at all.
+    ///
+    /// It is a constructor rather than a field list at each refusal
+    /// because the property is structural. `here` was blanked by hand at
+    /// both call sites and the next field to arrive — `signed_in` — was
+    /// not, so a signed-in reader's refusal grew a `reviews` link an
+    /// anonymous one's did not have, and the integration test that
+    /// exists for exactly this caught it. Adding a field to [`Chrome`]
+    /// now means deciding here whether it survives a refusal.
+    ///
+    /// `theme` and `docs` do survive: the palette is the reader's own
+    /// choice and would flip at the worst possible moment if it were
+    /// dropped, and the book's address is node-wide and identical for
+    /// everybody.
+    fn refusal(self) -> Chrome<'a> {
+        Chrome {
+            site: None,
+            theme: self.theme,
+            here: "",
+            account: false,
+            console: false,
+            docs: self.docs,
+            signed_in: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3865,6 +4500,9 @@ pub(crate) struct Bar<'a> {
     pub(crate) console: bool,
     /// Where the book is, if anywhere. See [`Chrome::docs`].
     pub(crate) docs: Option<&'a str>,
+    /// Whether this request carries a credential. See
+    /// [`Chrome::signed_in`].
+    pub(crate) signed_in: Option<bool>,
 }
 
 impl<'a> Bar<'a> {
@@ -3879,6 +4517,7 @@ impl<'a> Bar<'a> {
             account: chrome.account,
             console: chrome.console,
             docs: chrome.docs,
+            signed_in: chrome.signed_in,
         }
     }
 
@@ -3893,6 +4532,7 @@ impl<'a> Bar<'a> {
             account: chrome.account,
             console: chrome.console,
             docs: chrome.docs,
+            signed_in: chrome.signed_in,
         }
     }
 
@@ -3907,6 +4547,7 @@ impl<'a> Bar<'a> {
             account: chrome.account,
             console: chrome.console,
             docs: chrome.docs,
+            signed_in: chrome.signed_in,
         }
     }
 
@@ -3921,6 +4562,7 @@ impl<'a> Bar<'a> {
             account: chrome.account,
             console: chrome.console,
             docs: chrome.docs,
+            signed_in: chrome.signed_in,
         }
     }
 }
@@ -3935,7 +4577,9 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
     h.push_str("<div class=\"chrome\"><div class=\"chrome-in\">");
 
     // Home. On a single-repository node that is the repository itself,
-    // because there is no list to go back to.
+    // because there is no list to go back to. A word, not a mark: the
+    // rotated square this used to draw beside it was decoration, and
+    // decoration is what this surface is spending less of.
     h.push_str("<a class=\"brand\" href=\"");
     h.push_str(if bar.site { "/" } else { "/r/" });
     h.push_str("\">");
@@ -3986,12 +4630,26 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
     // had just signed in could reach every page about the *node* and no
     // page about *themselves*: the account that mints the token git
     // speaks was reachable only by typing `/account`.
+    //
+    // Two shapes, decided by `signed_in`. Signed out the bar offers the
+    // one thing a stranger can do here; signed in it offers where the
+    // work is: the repositories, the reviews this reader owes an answer
+    // to, and their own account. `reviews` is the link this surface was
+    // missing — a reviewer's own queue existed in the view and on no
+    // page, so the only way to find a review you had been drawn for was
+    // to already know which repository it was against.
     h.push_str("<nav class=\"chrome-nav\">");
+    if bar.signed_in == Some(false) {
+        h.push_str("<a class=\"go\" href=\"/signin\">sign in</a>");
+    }
     if bar.scope.is_some() && !bar.site {
         h.push_str("<a href=\"/r/\">repositories</a>");
     }
+    if bar.signed_in == Some(true) {
+        h.push_str("<a href=\"/reviews\">reviews</a>");
+    }
     h.push_str("<a href=\"/status\">node</a>");
-    if bar.account {
+    if bar.account && bar.signed_in == Some(true) {
         h.push_str("<a href=\"/account\">account</a>");
     }
     if bar.console {
@@ -4262,6 +4920,239 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------
+    // The conflict view.
+    // ---------------------------------------------------------------
+
+    /// A file with no markers in it is one plain region, whatever else
+    /// it holds.
+    ///
+    /// The negative case first, because it is the one that costs a
+    /// reader something when it is wrong: every file on the surface goes
+    /// through this scan, and a parser that saw conflicts in ordinary
+    /// text would replace the file listing with a three-column view of
+    /// nothing on some fraction of the repository.
+    #[test]
+    fn ordinary_text_is_never_read_as_a_conflict() {
+        for text in [
+            "fn main() {}\n",
+            // The markers, but not as markers: too long, too short, and
+            // with no space after them.
+            "<<<<<<<<ours\n=======\n>>>>>>>>theirs\n",
+            "<<<<<<ours\n=======\n>>>>>>theirs\n",
+            "<<<<<<<ours\n=======\n>>>>>>>theirs\n",
+            // Opened and never closed, which is a file that happens to
+            // contain the string.
+            "<<<<<<< a\nsome text\n",
+            // Closed without ever splitting.
+            "<<<<<<< a\nsome text\n>>>>>>> b\n",
+        ] {
+            let regions = split_conflicts(text);
+            assert!(
+                regions.iter().all(|r| matches!(r, Region::Plain { .. })),
+                "read a conflict out of ordinary text: {text:?} -> {regions:?}"
+            );
+        }
+    }
+
+    /// The two-sided shape git writes by default: left, a split, right.
+    ///
+    /// `base` is `None` and that is a fact rather than an omission — the
+    /// merge driver recorded no base — which is why the column says so
+    /// on the page instead of rendering empty.
+    #[test]
+    fn a_two_sided_conflict_keeps_both_sides_and_says_it_has_no_base() {
+        let regions = split_conflicts(
+            "before\n<<<<<<< HEAD\nours one\nours two\n=======\ntheirs\n>>>>>>> topic\nafter\n",
+        );
+        assert_eq!(regions.len(), 3, "{regions:?}");
+        assert_eq!(
+            regions[0],
+            Region::Plain {
+                first: 1,
+                lines: vec!["before"]
+            }
+        );
+        assert_eq!(
+            regions[1],
+            Region::Conflict {
+                first: 2,
+                left_label: "HEAD",
+                right_label: "topic",
+                base: None,
+                left: vec!["ours one", "ours two"],
+                right: vec!["theirs"],
+            }
+        );
+        // The plain region after a conflict resumes at the right line
+        // number, which is what keeps the gutter honest across a file
+        // with several of them.
+        assert_eq!(
+            regions[2],
+            Region::Plain {
+                first: 8,
+                lines: vec!["after"]
+            }
+        );
+    }
+
+    /// The `diff3` shape, which is the one worth having: with a base,
+    /// the view answers "what was there before" and not merely "here are
+    /// two alternatives".
+    #[test]
+    fn a_diff3_conflict_keeps_the_base_as_its_own_side() {
+        let regions =
+            split_conflicts("<<<<<<< ours\nA\n||||||| base\nB\n=======\nC\n>>>>>>> theirs\n");
+        assert_eq!(
+            regions,
+            vec![Region::Conflict {
+                first: 1,
+                left_label: "ours",
+                right_label: "theirs",
+                base: Some(vec!["B"]),
+                left: vec!["A"],
+                right: vec!["C"],
+            }]
+        );
+    }
+
+    /// Every column of one conflict has the same number of rows.
+    ///
+    /// This is the whole property of the view: three columns side by
+    /// side are only readable if the same conflict line is on the same
+    /// row across all three, and the sides are different lengths by
+    /// definition. A short column that ended early would slide the next
+    /// column's content up beside the wrong line, which is worse than no
+    /// alignment at all because it looks like an answer.
+    #[test]
+    fn every_side_of_a_conflict_is_padded_to_the_same_row_count() {
+        let regions = split_conflicts(
+            "<<<<<<< ours\nA\nB\nC\n||||||| base\nX\n=======\nY\nZ\n>>>>>>> theirs\n",
+        );
+        let mut h = String::new();
+        conflicted_file(&mut h, &regions);
+        let columns: Vec<&str> = h.split("<div class=\"side ").skip(1).collect();
+        assert_eq!(columns.len(), 3, "three columns: {h}");
+        let rows: Vec<usize> = columns
+            .iter()
+            .map(|column| column.matches("class=\"row").count())
+            .collect();
+        assert_eq!(rows, vec![3, 3, 3], "rows out of step: {h}");
+        // And the padding is marked as absence rather than as an empty
+        // line the side actually has.
+        assert_eq!(h.matches("row gap").count(), 3, "{h}");
+    }
+
+    /// Text around a conflict is still the file, with its own line
+    /// numbers, and the conflict names the line it starts on.
+    #[test]
+    fn a_conflicted_file_still_renders_the_text_around_the_conflict() {
+        let regions = split_conflicts("one\ntwo\n<<<<<<< a\nL\n=======\nR\n>>>>>>> b\nlast\n");
+        let mut h = String::new();
+        conflicted_file(&mut h, &regions);
+        assert!(h.contains("<span class=\"ln\">1</span>one"), "{h}");
+        assert!(h.contains("<span class=\"ln\">8</span>last"), "{h}");
+        assert!(h.contains("line 3"), "the conflict names where it is: {h}");
+        assert!(h.contains("1 unresolved conflict"), "{h}");
+        // The page says what a conflict *is* here, because a reader
+        // arriving from any other forge has only ever seen one as a
+        // thing that had to be cleared before anything could proceed.
+        assert!(h.contains("committed state"), "{h}");
+    }
+
+    /// Everything in a conflict is escaped, on every side.
+    ///
+    /// The three columns are three separate write paths and a miss in
+    /// any one of them is a hole; the labels come off a marker line,
+    /// which is file content, so they are attacker-controlled too.
+    #[test]
+    fn every_side_and_label_of_a_conflict_is_escaped() {
+        let regions = split_conflicts(
+            "<<<<<<< <img src=x>\n<script>a</script>\n||||||| b\n<b>base</b>\n\
+             =======\n<script>c</script>\n>>>>>>> <svg onload=y>\n",
+        );
+        let mut h = String::new();
+        conflicted_file(&mut h, &regions);
+        assert!(!h.contains("<script>"), "unescaped markup: {h}");
+        assert!(!h.contains("<img src=x>"), "unescaped label: {h}");
+        assert!(!h.contains("<svg onload=y>"), "unescaped label: {h}");
+        assert!(h.contains("&lt;script&gt;a&lt;/script&gt;"), "{h}");
+    }
+
+    // ---------------------------------------------------------------
+    // What authorizes a landing.
+    // ---------------------------------------------------------------
+
+    /// The two landing rules read as two different sentences, and each
+    /// says which one is in force (D42).
+    ///
+    /// A reviewer cannot otherwise tell whether their approval can ever
+    /// be the thing that lands the change, which is the difference
+    /// between being asked and being consulted.
+    #[test]
+    fn the_authority_sentence_names_the_rule_in_force() {
+        let roster = crate::ui::Roster::new();
+        let state = serde_json::json!({
+            "approval_weight": 1,
+            "verdicts": {"alice": {"verdict": "Approve"}},
+        });
+
+        let mut unowned = String::new();
+        authority(&mut unowned, "o/r", &state, &|_| Vec::new(), &roster);
+        assert!(unowned.contains("approval weight"), "{unowned}");
+        assert!(
+            unowned.contains("<b>1</b>"),
+            "the weight standing: {unowned}"
+        );
+        assert!(!unowned.contains("owner"), "{unowned}");
+
+        let mut owned = String::new();
+        authority(
+            &mut owned,
+            "o/r",
+            &state,
+            &|_| vec!["alice".into(), "bob".into()],
+            &roster,
+        );
+        assert!(owned.contains("an owner's assent"), "{owned}");
+        assert!(
+            owned.contains("Approved by <b>alice</b>") && !owned.contains("<b>bob</b>"),
+            "only the owner who actually approved: {owned}"
+        );
+
+        // And an owned repository nobody has assented to names who is
+        // being waited on, rather than reading as merely "not yet".
+        let mut waiting = String::new();
+        authority(
+            &mut waiting,
+            "o/r",
+            &serde_json::json!({"approval_weight": 9, "verdicts": {}}),
+            &|_| vec!["alice".into()],
+            &roster,
+        );
+        assert!(waiting.contains("Waiting on <b>alice</b>"), "{waiting}");
+        // The weight is not offered as an alternative on a repository
+        // where it is not one, however high it has climbed.
+        assert!(!waiting.contains('9'), "{waiting}");
+    }
+
+    /// An owner's name is escaped, because it comes out of a file the
+    /// operator edits and lands inside markup this function assembles by
+    /// hand.
+    #[test]
+    fn an_owner_name_cannot_inject_markup() {
+        let mut h = String::new();
+        authority(
+            &mut h,
+            "o/r",
+            &serde_json::json!({"approval_weight": 0, "verdicts": {}}),
+            &|_| vec!["<script>x</script>".into()],
+            &crate::ui::Roster::new(),
+        );
+        assert!(!h.contains("<script>"), "{h}");
+        assert!(h.contains("&lt;script&gt;"), "{h}");
+    }
 
     /// git's failures are shown to a reader, and several of them quote
     /// the `--git-dir` they were handed. That path is the node's install
@@ -4727,29 +5618,50 @@ mod tests {
     /// the page is a read page again. Every authenticated reader gets a
     /// comment box on a live review, so a served page cannot show this:
     /// archiving is admission policy the daemon spends its own key on,
-    /// and no curl-driven test can reach it. Hence here, on the four
+    /// and no curl-driven test can reach it. Hence here, on the few
     /// lines that decide.
+    ///
+    /// It reads two functions rather than one now, because the redesign
+    /// put the verdict controls above the diff and the comment box at
+    /// the end of the thread below it: `write_sections` returns the two
+    /// fragments and `wants_ceremony` is the decision that used to be
+    /// "did either of them write anything". The property asserted is
+    /// unchanged — nothing to do, nothing fetched — and it is asserted
+    /// on the same two inputs.
     #[test]
     fn a_review_nobody_can_act_on_asks_for_no_script() {
         let settled = serde_json::json!({
             "reviewers": ["carol"], "verdicts": {}, "archived": true,
         });
-        let mut h = String::new();
-        super::write_sections(&mut h, "review-1", &settled, "carol");
-        assert!(h.is_empty(), "an archived review fetched the ceremony: {h}");
+        let (verdict, comment) = super::write_sections("review-1", &settled, "carol");
+        assert!(
+            verdict.is_empty() && comment.is_empty(),
+            "an archived review drew a control: {verdict}{comment}"
+        );
+        assert!(
+            !super::wants_ceremony(&verdict, &comment),
+            "an archived review fetched the ceremony"
+        );
 
-        // And the live case still does, exactly once, however many
-        // sections rendered.
+        // And the live case still does, once, however many fragments
+        // rendered — the element is written by the caller, exactly once,
+        // whichever of the two produced it.
         let live = serde_json::json!({
             "reviewers": ["carol"], "verdicts": {}, "archived": false,
         });
-        let mut h = String::new();
-        super::write_sections(&mut h, "review-1", &live, "carol");
-        assert_eq!(h.matches("<script").count(), 1, "{h}");
+        let (verdict, comment) = super::write_sections("review-1", &live, "carol");
+        assert!(super::wants_ceremony(&verdict, &comment));
         assert!(
-            h.contains("Your verdict") && h.contains("comment-go"),
-            "{h}"
+            verdict.contains("Your verdict") && comment.contains("comment-go"),
+            "{verdict}{comment}"
         );
+        // The read-only fallback is a sentence, and a sentence needs no
+        // script: this is the case the old `is_empty` check would have
+        // got wrong once the fragment stopped being empty.
+        assert!(!super::wants_ceremony(
+            "",
+            "<p class=\"note\">Use the signed CLI.</p>"
+        ));
     }
 
     /// Discussion is wider than judgement, and narrower than the page.
