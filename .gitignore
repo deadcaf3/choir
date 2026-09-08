@@ -36,3 +36,11 @@ __pycache__/
 # Claude Code worktree whitelist: names private paths (internal/) and is
 # per-machine tooling config, like CLAUDE.md above.
 .worktreeinclude
+
+# A node's own state, when one is run from inside a checkout. `choir
+# init` and `choir host` default to `~/.choir`, but both take a path and
+# the `node = <url>` lookup walks up from the working directory, so a
+# `.choir/` here is a normal thing to end up with. It holds a credential
+# and the daemon's key when it holds anything, and nothing in this
+# repository is ever meant to be tracked from it.
+/.choir/

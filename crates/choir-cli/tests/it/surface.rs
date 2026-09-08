@@ -475,6 +475,9 @@ fn local_only_files_stay_ignored() {
         "internal/plan.md",
         "internal/PHASE0.md",
         ".codex/config.toml",
+        // A node run from inside a checkout writes here, and what it
+        // writes is a credential and the daemon's key.
+        ".choir/config",
     ] {
         let ignored = std::process::Command::new("git")
             .args(["check-ignore", "--no-index", local])
