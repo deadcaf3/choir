@@ -383,6 +383,142 @@ fn the_cache_key_follows_the_files_that_produced_it() {
     std::fs::remove_dir_all(scratch).ok();
 }
 
+/// Recursive directory copy. Hand-rolled rather than a dev-dep, per the
+/// house convention, and small because the only tree it copies is one
+/// crate with no build artifacts in it.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("destination directory");
+    for entry in std::fs::read_dir(from).expect("source directory is readable") {
+        let entry = entry.expect("directory entry");
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if src.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).expect("copy a file into the worktree");
+        }
+    }
+}
+
+/// The mirror of the test above, and the one it did not cover (D77).
+///
+/// That test asserts a key is not too *wide*: a leaf edit must leave an
+/// unrelated crate cached. This one asserts a key is not too *narrow*,
+/// which is the failure that actually shipped. `choir-guards` reads
+/// every crate as text and depends on none of them, so neither the
+/// dependency closure nor the string-literal path rule can see its
+/// inputs; the same scan lived in `choir-view` reading `choir-node`,
+/// and editing `browse.rs` changed neither the key nor the selection.
+/// A cached green then stood over a tree that broke D40.
+///
+/// Both halves are asserted, because either alone leaves the hole
+/// open: the verdict must be invalidated, *and* the touched lane must
+/// select the crate. The probe edits a crate `choir-guards` declares
+/// and does not depend on, which is exactly the pair of properties
+/// that made the original invisible.
+#[test]
+fn a_guard_crates_key_follows_the_sources_it_scans() {
+    let scratch = scratch_dir();
+    let tree = scratch.join("worktree");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(args)
+            .output()
+            .expect("git")
+    };
+    let added = git(&[
+        "worktree",
+        "add",
+        "--detach",
+        tree.to_str().expect("worktree path"),
+        "HEAD",
+    ]);
+    assert!(
+        added.status.success(),
+        "could not make a worktree to mutate: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    std::fs::copy(gate(), tree.join("gate")).expect("the gate under test, not HEAD's");
+    // The declaring crate and the membership that admits it, from the
+    // checkout rather than HEAD, for the same reason the gate is: this
+    // test is about the pair as it is on disk, and a worktree of HEAD
+    // carries neither until the change is committed. Copying them is
+    // what keeps the test from passing vacuously on a tree that has no
+    // guard crate in it at all.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    std::fs::copy(root.join("Cargo.toml"), tree.join("Cargo.toml")).expect("workspace manifest");
+    copy_tree(
+        &root.join("crates/choir-guards"),
+        &tree.join("crates/choir-guards"),
+    );
+
+    let run_tree = |lane: Option<&str>| {
+        let mut command = std::process::Command::new("sh");
+        if let Some(lane) = lane {
+            command.arg(tree.join("gate")).arg(lane);
+        } else {
+            command.arg(tree.join("gate"));
+        }
+        command
+            .env("CHOIR_GATE_TEST_MODE", "1")
+            .env("CHOIR_GATE_TEST_CACHE", "1")
+            .env("TMPDIR", &scratch)
+            .output()
+            .expect("run the worktree's gate")
+    };
+    // The gate names its log directory after the tree it ran in, so
+    // find it rather than recomputing the hash it uses.
+    let log_dir = || {
+        std::fs::read_dir(&scratch)
+            .expect("scratch is readable")
+            .filter_map(|e| Some(e.ok()?.path()))
+            .find(|p| p.join("keys").is_dir())
+            .expect("the gate made a log directory")
+    };
+    let read = |relative: &str| {
+        std::fs::read_to_string(log_dir().join(relative))
+            .unwrap_or_else(|e| panic!("gate wrote no {relative}: {e}"))
+    };
+
+    assert!(run_tree(None).status.success(), "populate the cache");
+    let before = read("keys/key-choir-guards");
+
+    // A source in a crate `choir-guards` scans and does not depend on.
+    let probe = tree.join("crates/choir-node/src/browse.rs");
+    let mut body = std::fs::read_to_string(&probe).expect("read the scanned source");
+    body.push_str("\n// guard key probe\n");
+    std::fs::write(&probe, body).expect("change the scanned source");
+
+    assert!(run_tree(None).status.success(), "rerun after the edit");
+    assert_ne!(
+        before,
+        read("keys/key-choir-guards"),
+        "editing a source choir-guards scans left its key unchanged, so \
+         a cached green survives a tree the scan has not read"
+    );
+
+    // And the edit-loop lane has to select it, which no path under
+    // crates/choir-guards/ changed to say.
+    run_tree(Some("touched"));
+    let selected = read("touched.pkgs");
+    assert!(
+        selected.contains("-p choir-guards"),
+        "the touched lane did not select the guard crate after editing \
+         a source it scans; it chose: {selected}"
+    );
+
+    git(&[
+        "worktree",
+        "remove",
+        "--force",
+        tree.to_str().expect("worktree path"),
+    ]);
+    std::fs::remove_dir_all(scratch).ok();
+}
+
 /// The cache is opt-in twice over: off in test mode unless asked for,
 /// and off entirely under `CHOIR_GATE_NO_CACHE`. The second is the
 /// escape hatch a person reaches for when they suspect it, so it has to

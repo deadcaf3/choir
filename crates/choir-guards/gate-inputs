@@ -1,0 +1,5 @@
+# What this crate's tests read, for `gate` (D77). Paths are
+# relative to the workspace root, one per line. The scanners here
+# read every crate as text, so the declaration is the directory
+# and not a list that could drift out of step with them.
+crates/

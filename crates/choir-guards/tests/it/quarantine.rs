@@ -14,12 +14,22 @@
 //! conflicted commit lives in choir's content-addressed store, and the
 //! git-facing crates (`choir-node`, `choir-cli`) move only git oids.
 //! That is enforced by nothing except those crates never naming the
-//! type — so the tripwire is that they never name the type.
+//! type in code — so the tripwire is that they never name it in code.
+//!
+//! **Prose is not code, and the difference is load-bearing** (D77). The
+//! scan runs over [`strip_comments`], so a doc comment may name
+//! `TreeEntry` and link to it. It has to be able to: `browse.rs`
+//! renders a committed conflict, and the comment explaining *why* that
+//! is git's markers rather than choir's own type is the comment most
+//! worth linking. Reading a rustdoc link as an opened one-way door
+//! failed `main` for a comment that was documenting the quarantine.
+//! What the tripwire watches is a `use`, a field, a match arm.
 //!
 //! A failure here is not a bug to route around: it means a one-way
 //! door is being opened. Update D40 in `DECISIONS.md` deliberately or
 //! remove the new edge.
 
+use choir_guards::{mentions, strip_comments};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,8 +57,8 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn view_never_depends_on_merge() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let manifest = fs::read_to_string(manifest).expect("own manifest is readable");
+    let manifest = crate_root("choir-view").join("Cargo.toml");
+    let manifest = fs::read_to_string(manifest).expect("choir-view manifest is readable");
     assert!(
         !manifest.contains("choir-merge"),
         "choir-view must not depend on choir-merge: the fold would gain \
@@ -67,14 +77,51 @@ fn git_facing_crates_never_name_tree_entries() {
         assert!(!files.is_empty(), "{krate}/src has sources");
         for file in files {
             let text = fs::read_to_string(&file).expect("source file is readable");
+            let named = text
+                .lines()
+                .enumerate()
+                .find(|(_, line)| mentions(strip_comments(line), "TreeEntry"));
             assert!(
-                !text.contains("TreeEntry"),
-                "{} names TreeEntry: conflicted commits must stay in \
-                 choir's own object model, quarantined from git \
+                named.is_none(),
+                "{}:{} names TreeEntry in code: conflicted commits must \
+                 stay in choir's own object model, quarantined from git \
                  transport (D40). If this is deliberate, update the \
-                 register row first.",
-                file.display()
+                 register row first. (A doc comment naming the type is \
+                 not this finding; the scan strips comments.)",
+                file.display(),
+                named.expect("a hit, since the assert fired").0 + 1
             );
         }
     }
+}
+
+/// The scanner, driven in both directions on synthetic sources.
+///
+/// A source scanner is the classic vacuous test: one bad assumption
+/// about formatting and it matches nothing while passing. This pins
+/// exactly the distinction the tripwire now rests on — that prose
+/// naming the type is not a use of it — so that loosening the detector
+/// cannot quietly become loosening the invariant.
+#[test]
+fn the_scanner_reads_code_and_not_prose() {
+    let hit = |source: &str| {
+        source
+            .lines()
+            .any(|line| mentions(strip_comments(line), "TreeEntry"))
+    };
+
+    // Prose, including a working intra-doc link. Not a finding.
+    assert!(!hit(
+        "/// That is the state [`choir_view::TreeEntry::Conflict`] names."
+    ));
+    assert!(!hit("//! A vanilla client never observes a TreeEntry."));
+    assert!(!hit("let x = 1; // TreeEntry lives in the store"));
+    // A longer name that merely contains it. Not a finding.
+    assert!(!hit("struct TreeEntryId(u64);"));
+
+    // Code. Every one of these is a finding.
+    assert!(hit("use choir_view::TreeEntry;"));
+    assert!(hit("    entries: Vec<TreeEntry>,"));
+    assert!(hit("        TreeEntry::Conflict { .. } => todo!(),"));
+    assert!(hit("let e: TreeEntry = read(); // safe, honest"));
 }

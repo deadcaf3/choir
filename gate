@@ -240,9 +240,33 @@ ISOLATED="hooks_isolation"
 # thing an edit loop most wants tested.
 PKGS=
 touched_pkgs() {
-  { git diff --name-only HEAD 2>/dev/null
-    git ls-files --others --exclude-standard 2>/dev/null
-  } | sed -n 's|^crates/\([^/]*\)/.*|-p \1|p' | sort -u | tr '\n' ' '
+  _changed=$( { git diff --name-only HEAD 2>/dev/null
+                git ls-files --others --exclude-standard 2>/dev/null
+              } | sort -u )
+  # The crate a changed file lives in, and -- separately -- any crate
+  # that declared that file as an input it reads. Without the second
+  # half this lane is blind to every scanner: `choir-guards` reads
+  # `choir-node`, so editing `browse.rs` has to select it, and no path
+  # under `crates/choir-guards/` changed to say so.
+  #
+  # This is not "and everything that depends on the changed crate".
+  # The touched lane deliberately does not test dependents; a
+  # declaration is narrower and explicit, and the crates that carry one
+  # are the crates whose subject *is* the tree.
+  { printf '%s\n' "$_changed" | sed -n 's|^crates/\([^/]*\)/.*|\1|p'
+    for _gi in crates/*/gate-inputs; do
+      [ -f "$_gi" ] || continue
+      _owner=$(basename "$(dirname "$_gi")")
+      while read -r _decl; do
+        case $_decl in '' | \#*) continue ;; esac
+        case $_decl in */) _pfx=$_decl ;; *) _pfx="$_decl/" ;; esac
+        if printf '%s\n' "$_changed" | grep -q "^$_pfx"; then
+          printf '%s\n' "$_owner"
+          break
+        fi
+      done <"$_gi"
+    done
+  } | sort -u | sed 's|^|-p |' | tr '\n' ' '
 }
 
 # Anything outside `crates/` this tree changed, as top-level names.
@@ -435,6 +459,42 @@ compute_keys() {
             git ls-files -s "$_rd" | grep -v '\.rs$'
           fi
         done
+      # Declared inputs (D77): `crates/<c>/gate-inputs`, one per line,
+      # relative to the root. This is the one place `.rs` files from
+      # another crate enter a key, and it is opt-in for exactly that
+      # reason -- the exclusion above exists to stop a leaf edit
+      # invalidating a crate that does not depend on it, and a crate
+      # that declares a path is saying it is not such a crate.
+      #
+      # What it is for: a scanner whose subject is other people's
+      # source. `choir-guards` reads every crate as text and depends on
+      # none of them, so neither the closure (cargo sees no edge) nor
+      # the literal-path rule above (the paths are computed, and would
+      # be excluded anyway) can see its inputs. D40's tripwire sat in
+      # `choir-view` under exactly that blindness and a stale green
+      # stood over a tree that broke it.
+      #
+      # Kept honest by being coarse: a declaration names a directory,
+      # so it cannot drift the way a file list does.
+      if [ -f "crates/$_c/gate-inputs" ]; then
+        while read -r _decl; do
+          case $_decl in '' | \#*) continue ;; esac
+          printf 'decl %s\n' "$_decl"
+          git ls-files -s -- "$_decl"
+          # The index is not the tree. Same reason as the block above:
+          # a key that reads only `ls-files` hits stale for an unstaged
+          # edit, which is every edit in the loop this is meant to
+          # catch.
+          git status --porcelain --untracked-files=all -- "$_decl" |
+            while read -r _st _path; do
+              if [ -f "$_path" ]; then
+                printf 'wt %s %s\n' "$_path" "$(git hash-object "$_path")"
+              else
+                printf 'gone %s\n' "$_path"
+              fi
+            done
+        done <"crates/$_c/gate-inputs"
+      fi
     } | git hash-object --stdin >"$KEYS/self-$_c"
   done
   _g=$(cat "$KEYS/global")
@@ -659,6 +719,11 @@ if [ "$LANE" = touched ]; then
 # running the suite on every edit and running it when you remember to.
 PKGS=$(touched_pkgs)
 ROOT_CHANGED=$(touched_root)
+# The selection, on disk. Nothing in the printed report names the crates
+# this lane chose -- the stage line carries a test count -- and the
+# choice is exactly what `a_guard_crates_key_follows_the_sources_it_scans`
+# has to read back, in a mode that runs no cargo to count.
+printf '%s\n' "$PKGS" >"$LOG/touched.pkgs"
 # A touched crate whose key already holds green test and clippy markers
 # was verified against this exact tree by an earlier run; re-running it
 # would prove nothing the marker does not already say.

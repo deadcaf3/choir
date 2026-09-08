@@ -1,0 +1,19 @@
+[package]
+name = "choir-guards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Deliberately empty, in both tables (D77). A guard reads other crates as
+# *text*; it must never reach them as types, because a dependency edge
+# here would be an edge the guards themselves exist to forbid -- D40's
+# whole subject is which crate may name which. It is also what keeps
+# this crate a leaf nobody depends on, which is the property that lets
+# `gate-inputs` name the whole workspace without the cost landing on
+# anything else. See `gate-inputs` beside this file.
+[dependencies]
+
+[lints]
+workspace = true

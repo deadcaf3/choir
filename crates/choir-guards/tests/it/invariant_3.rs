@@ -38,6 +38,12 @@
 //! workspace is invisible, and an item with a hand-written `Serialize`
 //! impl instead of a derive is not scanned. Aliases defined *inside* the
 //! workspace are resolved, because `choir-node` has one.
+//!
+//! `strip_comments` and `mentions` are this crate's, shared with
+//! `quarantine`: both scanners rest on the same reading of what is code
+//! and what is prose, so they are one definition and not two.
+
+use choir_guards::{mentions, strip_comments};
 
 /// A `serde`-serializable item found in the source: its name and its body
 /// text with comments already removed.
@@ -45,33 +51,6 @@
 struct Item {
     name: String,
     body: String,
-}
-
-/// Everything after `//` on a line, gone. Deliberately crude: the risk is
-/// a `//` inside a string literal truncating a line early, which the
-/// workspace does not currently contain and which would only ever hide a
-/// hit on that same line.
-fn strip_comments(line: &str) -> &str {
-    match line.find("//") {
-        Some(i) => &line[..i],
-        None => line,
-    }
-}
-
-/// Whether `text` names `ident` as a whole word rather than as a
-/// substring, so `Commit` does not match `CommitId`.
-fn mentions(text: &str, ident: &str) -> bool {
-    let mut rest = text;
-    while let Some(i) = rest.find(ident) {
-        let before = rest[..i].chars().next_back();
-        let after = rest[i + ident.len()..].chars().next();
-        let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if boundary(before) && boundary(after) {
-            return true;
-        }
-        rest = &rest[i + ident.len()..];
-    }
-    false
 }
 
 /// Extracts every item deriving `Serialize` from one file's source, with
