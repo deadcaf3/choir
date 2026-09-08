@@ -1,8 +1,5 @@
 # Rate limits, quotas and fairness
 
-Three ceilings on three different things, plus one that is not a ceiling at
-all:
-
 | Bound | Flag | Bounds |
 |:--|:--|:--|
 | Requests per minute | `--rate-limit-api`, `--rate-limit-git` (D33) | how often one user may ask |
@@ -10,12 +7,9 @@ all:
 | Workspaces held at once | `--quota-workspaces` (D37) | how much disk one user may hold |
 | Ops awaiting a decision | none, deliberately | how far one actor may get ahead of the writer |
 
-Each of the flagged ones requires `--auth-file`, because each keys on the
-authenticated username, and each carries the same three exemptions.
+The flagged ones require `--auth-file` and share three exemptions.
 
 ## Request log and rate limiting (D33)
-
-Authentication says who you are and the ACL says what you may reach. Neither leaves a record of what you did, and neither bounds how much of it you do. These two flags are the rest of the floor a second credential needs, and like `--acl-file` both require `--auth-file`, since both key on the authenticated username.
 
 ```bash
 cargo run -p choir-node -- /tmp/choir-repos 8417 \
@@ -26,35 +20,36 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --rate-limit-git 120
 ```
 
-**The request log** is one JSON object per served request, the same shape as the op log and the lag log:
+**The request log** is one JSON object per served request:
 
 ```json
 {"format_version":1,"at_unix_ms":1755100000000,"user":"alice","method":"GET","path":"/api/view","us":812,"status":200,"bytes":4310}
 ```
 
-Every served request produces a line, including refusals: a `401` is recorded as `anon` (never the attempted username, which is attacker-chosen), a `429` is recorded against the user it was charged to, and a response that failed midway is recorded with `"status":0` and the write error's kind.
+Refusals are recorded too: a `401` as `anon` (never the attempted
+username), a `429` against the charged user, a failed response with
+`"status":0`. The path is truncated at `?`; headers and bodies never reach
+the file.
 
-The record is exactly those fields. The path is truncated at `?` before capture, so `GET /api/log?from=0&token=…` is recorded as `/api/log`, and headers, bodies and query strings never reach the file. The file is meant to be handed to whoever is handling an incident.
+Rotation: past `--request-log-max-bytes` (32 MiB default) the file becomes
+`<path>.1` and a fresh one starts. Two generations kept. Writes are
+unbuffered and unsynced.
 
-Rotation is size-bounded and single-generation. Past `--request-log-max-bytes` (32 MiB by default) the file is renamed to `<path>.1`, replacing any earlier `.1`, and a fresh one is started. Disk is bounded at about twice that number, and exactly two generations are kept, so copy the file out on your own schedule for deeper history. Writes are unbuffered and unsynced: one `write_all` per request, no `fsync`.
+**Rate limiting** is a token bucket per user per class, in memory,
+requests per minute with one minute's burst. Over-limit answers `429` with
+`Retry-After` in seconds. The browser pages count against the API bucket.
 
-**Rate limiting** is a token bucket per user per class, in memory. Each ceiling is requests per minute; capacity is one minute's worth, so an agent may burst a minute's allowance at once and then proceeds at the sustained rate, which is the shape agent traffic actually has. An over-limit request is answered `429` with `Retry-After` in whole seconds, JSON on an API path and plain text on a git path (git shows the operator the body and nothing else).
-
-The two classes carry separate flags because their costs differ: a clone is one request streaming an entire pack, and a `POST /api/submit-batch` is one request carrying many operations. Set both, or set one and leave the other unlimited. The browser page and the D30 browsing pages count against the API bucket, so give that number a real value.
-
-Three things are exempt:
+Exempt:
 
 | Exempt | Why |
 |:--|:--|
-| The loopback hook callback | A push of N refs makes N `/api/git-update` calls. Throttling the fourth fails the push halfway and drives the retraction path for refs git will never create. It carries a node-minted secret over loopback. |
-| Any holder of an `@node` grant | That grant is already total authority over the node. Throttling the one actor who can repair it, during the incident the limiter is reporting, is worse than the flood. |
-| Every request on a node with no `--auth-file` | There is no per-user identity to meter. The daemon refuses the flags outright in that configuration. |
+| The loopback hook callback | A push of N refs makes N `/api/git-update` calls; throttling one fails the push halfway. |
+| Any holder of an `@node` grant | Already total authority; throttling the one actor who can repair the node is worse than the flood. |
+| Every request on a node with no `--auth-file` | No per-user identity; the daemon refuses the flags. |
 
-On a node with `--auth-file` but no `--acl-file` nobody is exempt except the hook callback, because there is no `@node` grant to hold. An operator who wants an exemption grants themselves one, which is the same two lines the ACL section already recommends.
+With `--auth-file` but no `--acl-file`, only the hook callback is exempt.
 
 ## Per-user quotas (D37)
-
-A rate does not imply a size. One push a minute is still an unbounded pack, and one workspace a minute is still unbounded disk. Two more ceilings, on the same subject as the D33 flags and so with the same `--auth-file` requirement and the same three exemptions:
 
 ```bash
 cargo run -p choir-node -- /tmp/choir-repos 8417 \
@@ -64,33 +59,32 @@ cargo run -p choir-node -- /tmp/choir-repos 8417 \
   --quota-workspaces 20
 ```
 
-**`--quota-push-bytes`** bounds the body of one git request. Over it, the node answers `413` with both numbers (what you sent and what is allowed), because a refusal that says only "too large" leaves the pusher guessing how much to split by.
+**`--quota-push-bytes`** bounds one git request body. Over it: `413` with
+both numbers. Checked before `git http-backend` spawns, so a refused push
+runs no hook. The body is drained so the client reads the `413`.
 
-The ceiling is checked before `git http-backend` is spawned, which is what runs the `pre-receive` hook. A refused push therefore runs no hook, submits no op and never enters the retraction path.
+**`--quota-workspaces`** bounds workspaces per user: `403` with
+`quota_exceeded`. The count is folded out of the op log at startup.
 
-An over-limit body is drained to a sink before the refusal is written, so the client reads a `413` rather than a broken connection. Those bytes cross the network, but they never reach memory beyond the ceiling, `git`, or the log.
-
-**`--quota-workspaces`** bounds how many workspaces one user holds at once, answered `403` with the `quota_exceeded` code and the action that frees room. The count is folded out of the op log during the replay the node already performs at startup, keyed on the attribution channel every workspace-creating operation carries, so a restart rebuilds it from the same log that rebuilds the view.
-
-Two boundaries:
-
-- The ceiling is checked on `POST /api/workspace`, not on `POST /api/submit`. A credential that signs a `SetWorkspaceHead` itself still creates a view entry. Enforcing on the submission path would mean enforcing inside the sequencer's admission check, which cannot see an `@node` grant and would throttle the one actor who can repair the node.
-- The count is read outside the provisioning lock, so two simultaneous creations by a user at their ceiling can both pass. The overshoot is bounded by that user's own concurrency.
+- Checked on `POST /api/workspace`, not `POST /api/submit`.
+- Read outside the provisioning lock, so two simultaneous creations at the
+  ceiling can both pass.
 
 ## Fairness at the sequencer's door
 
-One actor submitting a thousand operations must not put another actor's single operation behind all thousand of them. So in front of the single writer, each actor holds a bounded number of ops awaiting a decision (512, twice the writer's 256-op batch), and the writer serves what it drained round-robin across actors rather than in arrival order.
+Each actor holds at most 512 ops awaiting a decision (twice the writer's
+256-op batch), served round-robin. The total order is untouched: the writer
+stamps `seq` alone.
 
-The total order is untouched. Round-robin decides who is asked next; the writer stamps `seq` one at a time, alone, and appends in the order it decided.
+Over the bound, a submission is rejected naming the count and the limit;
+retry when one of your own ops completes.
 
-Over the bound, a submission is **answered rather than parked**: a rejection naming the count and the limit, so a flooding client retries when one of its own ops completes.
-
-Two limits:
-
-- **The actor key is a claim.** It is the key id the submission carries, and the signature is verified later on the writer thread. It bounds an honest flooder. Invented identities are the rate limiter's problem (D33), and claiming someone else's key id is a bounded denial of service against that one actor.
-- **The wait is unmeasured.** `decision_latency` is stamped when the writer picks an op up, so time spent in front of the writer is invisible to the node's own instruments.
+- **The actor key is a claim**, verified later on the writer thread. It
+  bounds an honest flooder.
+- **The wait is unmeasured.** `decision_latency` starts when the writer
+  picks an op up.
 
 > [!IMPORTANT]
 > Nothing here may become load-bearing for authorization.
 
-The bound is a backstop above a working agent's concurrency and has no flag.
+The bound has no flag.

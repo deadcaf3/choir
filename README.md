@@ -16,21 +16,16 @@
 
 <br/>
 
-Ten agents editing one repository will collide. choir gives every change a
-place in one order: a signed operation on an append-only log, decided by a
-single writer thread, so a race is answered with a compare-and-swap instead
-of a lost write, and a merge conflict is a value that later work can build
-on rather than an error that stops it.
-
-Your git client does not change. `git clone`, `git fetch` and `git push`
-all work, because the sequencer runs inside an ordinary `pre-receive` hook.
+Every change is a signed operation on an append-only log, ordered by one
+writer thread. A race gets a compare-and-swap rejection, not a lost write.
+A merge conflict is a committed value. Plain `git clone`, `fetch` and
+`push` work: the sequencer is a `pre-receive` hook.
 
 ---
 
 ## Quick start
 
-No toolchain needed, only `git`. Two installers and the command that uses
-them, which prints the URL when it is done:
+Needs only `git`. The last command prints the node URL:
 
 ```bash
 curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
@@ -38,12 +33,10 @@ curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node
 choir host
 ```
 
-`choir host` takes a machine from nothing to a running node: it mints the
-repository root, a credential at mode `0600`, a key the node trusts and a
-config file, then hands the daemon to launchd or systemd and prints the
-address. Open it in a browser and you get a front page and a sign-in.
+`choir host` mints the repository root, a `0600` credential, a trusted key
+and a config file, then installs the daemon under launchd or systemd.
 
-Want to see the ideas move before installing anything?
+Narrated demo, no install:
 
 ```bash
 git clone https://github.com/deadcaf3/choir
@@ -51,58 +44,43 @@ cd choir
 cargo run -p choir-demo
 ```
 
-That gives three agents keys and races their signed operations through the
-sequencer, so one gets rejected, one takes a first-class conflict and carries
-on, and a real `git` client pushes through the daemon at the end. It is
-narrated, and it is the fastest way to understand the model.
-
 ---
 
 ## Install
 
-**One command, no toolchain.** macOS and Linux, x86-64 and arm64. The
-archives are prebuilt and every one carries a `SHA256` beside it, with a
-`sha256.sum` over the set:
+**Prebuilt**, macOS and Linux, x86-64 and arm64, with a `SHA256` per
+archive and a `sha256.sum` over the set:
 
 ```bash
 curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
 ```
 
-That gives you `choir` and `choir-mcp`. Add the node's own binaries only if
-you are running a node rather than talking to someone else's:
+That is `choir` and `choir-mcp`. Node binaries, only if you run one:
 
 ```bash
 curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
 ```
 
-Both land in `$CARGO_HOME/bin` (`~/.cargo/bin` by default) and print what
-they wrote where. [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall)
-fetches the same archives with `cargo binstall choir-cli choir-node`.
+Both land in `$CARGO_HOME/bin` (`~/.cargo/bin` by default).
+[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
+`cargo binstall choir-cli choir-node`.
 
-**From source**, if you would rather compile what you run. Needs only a Rust
-toolchain from [rustup](https://rustup.rs/):
+**From source**, with [rustup](https://rustup.rs/):
 
 ```bash
 cargo install --git https://github.com/deadcaf3/choir choir-cli choir-node
 ```
 
-Neither package pulls in `choir-actor`, the one crate that needs this
-workspace's `LIBSQLITE3_FLAGS`, so this builds with no checkout and none of
-the repository's cargo configuration.
+Nothing is on a package registry.
 
-Nothing is published to a package registry. These are the release archives
-and their checksums, nothing else.
-
-**What the binaries shell out to.** `git` and `curl` always; `openssl` and
-`ssh-keygen` for the commands that use them; `mergiraf` only if you want
-structured merges. On macOS, workspaces use APFS `clonefile`; on Linux, a
-btrfs volume gives the same snapshot-backed behaviour.
+**Subprocesses.** `git` and `curl` always; `openssl` and `ssh-keygen`
+where used; `mergiraf` for structured merges. Workspaces use APFS
+`clonefile` on macOS, btrfs snapshots on Linux.
 ---
 
 ## Run a node
 
-The daemon serves git smart-HTTP and the platform API on one port, 8417 by
-default.
+One port, 8417 by default, serves git smart-HTTP and the platform API.
 
 ```bash
 choir host                      # nothing to running node, supervised, prints the URL
@@ -111,49 +89,41 @@ choir repo url me/thing.git     # the clone URL and the git config to go with it
 choir node status               # health, the commit serving, sequencer position
 ```
 
-`choir host --domain example.com` issues a Let's Encrypt certificate for a
-name you already own. `choir host --foreground` execs the daemon instead of
-installing a service unit, which is what a container wants. Binding anything
-other than loopback requires TLS, and the node refuses to start without it.
+`choir host --domain example.com` issues a Let's Encrypt certificate.
+`choir host --foreground` execs the daemon instead of installing a service
+unit. A non-loopback bind requires TLS.
 
-To invite somebody, `choir invite` prints one link. They run
-`choir join '<link>'`, which redeems it, mints their key, stores their token
-and points git at it. The next thing they type is `git clone`.
+`choir invite` prints one link; `choir join '<link>'` mints the key, stores
+the token and points git at it.
 
 > [!IMPORTANT]
-> Pass `--acl-file` before you issue a second credential. Until you do, every
-> credential reaches every repository.
-> [Authorization](docs/operating/authorization.md) is the short read that
-> prevents this.
+> Pass `--acl-file` before issuing a second credential; until then every
+> credential reaches every repository. See
+> [Authorization](docs/operating/authorization.md).
 
-Backups are two halves. `./choirctl pull-backup` copies the log, the node
-fingerprint, the policy files and one git bundle per repository somewhere
-that cannot be lost with the original. `choir backup verify <dir>` then says
-whether that copy can be restored *from*. Neither half carries a secret.
+`./choirctl pull-backup` copies the log, node fingerprint, policy files
+and one git bundle per repository. `choir backup verify <dir>` checks it
+restores. Neither carries a secret.
 
-Every flag and every policy file: [**Running a node**](docs/operating/running-a-node.md).
+Every flag and policy file: [**Running a node**](docs/operating/running-a-node.md).
 
 ---
 
 ## How it works
 
-A change is a **signed operation** appended to a hash-chained log. One writer
-thread per repository decides the order. Refs, reviews and workspaces are all
-folds over that log.
+A change is a **signed operation** on a hash-chained log. One writer thread
+per repository decides the order. Refs, reviews and workspaces are folds
+over that log.
 
 - **Two agents push the same ref.** The later one gets a compare-and-swap
-  rejection naming the head it lost to. Integrate and retry.
-- **A merge cannot be resolved.** The conflict is committed as a value, and
-  later operations build on top of it. Nothing silently picks a side.
-- **A reader wants proof.** `choir log --verify` walks the chain, recomputes
-  every hash and checks the signatures whose keys you hold, so a served page
-  is checkable against the one you already have.
-- **Three things do not come along.** Git LFS has no server here, submodules
-  are ordinary gitlinks and are not sequenced, and a force-push over a
-  rejection is refused rather than obeyed.
+  rejection naming the winning head. Integrate and retry.
+- **A merge cannot be resolved.** The conflict is committed as a value.
+- **Proof.** `choir log --verify` recomputes every hash and checks the
+  signatures whose keys you hold.
+- **Not included.** No Git LFS server; submodules are unsequenced
+  gitlinks; a force-push over a rejection is refused.
 
-[Architecture](docs/architecture.md) has the layer map and the path one
-operation takes end to end.
+Layer map: [Architecture](docs/architecture.md).
 
 ---
 
@@ -178,27 +148,26 @@ Authentication is passed as flags: `choir --auth-file ~/.choir/auth --auth-user 
 Full surface, every command and every endpoint: [`docs/using/cli.md`](docs/using/cli.md).
 <!-- /generated -->
 
-Exit codes: **0** accepted, **1** rejected with its JSON error body printed,
-**2** usage. `choir doctor` answers why a command failed.
+Exit codes: **0** accepted, **1** rejected with its JSON error body,
+**2** usage. `choir doctor` explains a failure.
 
 ---
 
 ## Documentation
 
-Full index: [**`docs/README.md`**](docs/README.md). The same pages build into
-a book with the API reference inside it.
+Full index: [**`docs/README.md`**](docs/README.md).
 
 | You want | Read |
 |:--|:--|
-| The five-minute version of why | [Why choir exists](docs/why.md) |
+| Why | [Why choir exists](docs/why.md) |
 | How the pieces fit | [Architecture](docs/architecture.md) |
-| To run a node properly | [Running a node](docs/operating/running-a-node.md) |
+| To run a node | [Running a node](docs/operating/running-a-node.md) |
 | To get a change reviewed and landed | [The contribution workflow](docs/using/workflow.md) |
 | Every command and endpoint | [The CLI and HTTP API](docs/using/cli.md) |
 | To wire up a coding agent | [`templates/`](templates/README.md) · [`AGENTS.md`](AGENTS.md) |
 | Something is broken | [Troubleshooting](docs/reference/troubleshooting.md) · [`ERRORS.md`](ERRORS.md) |
 
-To build the book yourself, from a checkout:
+Build the book:
 
 ```bash
 cargo install mdbook --locked
@@ -208,8 +177,6 @@ choir docs --open
 ---
 
 ## Building and testing
-
-From a checkout, if you want to compile rather than install:
 
 ```bash
 cargo build --release -p choir-node -p choir-cli
@@ -222,50 +189,42 @@ Full release gate:
 ./gate
 ```
 
-It fails closed on format, tests, clippy, rustdoc, the measurement spike,
-freshness and the history scan. Three narrower lanes serve the edit loop:
-`./gate touched` for the crates this tree changed, `./gate quick` for a
-sub-minute check that compiles nothing, and `./gate fast` to skip the
-timing-gated stages. Work is presented as green under the full lane.
+Fails closed. Edit-loop lanes: `./gate touched` (changed crates),
+`./gate quick` (compiles nothing), `./gate fast` (skips timing-gated
+stages).
 
 > [!CAUTION]
-> Keep `.cargo/config.toml`. Every workspace build needs the
-> `LIBSQLITE3_FLAGS` it sets, and the failure it prevents does not name
-> itself.
+> Keep `.cargo/config.toml`. Every build needs its `LIBSQLITE3_FLAGS`, and
+> the failure it prevents does not name itself.
 
 ---
 
 ## Status and scope
 
 > [!IMPORTANT]
-> **Research prototype.** `DECISIONS.md` is the register behind every design
-> choice, and the invariants in [`CONTRIBUTING.md`](CONTRIBUTING.md) are
-> one-way doors rather than style preferences.
+> **Research prototype.** `DECISIONS.md` is the register behind every
+> design choice; the invariants in [`CONTRIBUTING.md`](CONTRIBUTING.md)
+> are one-way doors.
 >
-> **The code is public; write access is not.** Read it, clone it, fork it and
-> open a pull request. Nobody but the maintainer can push here and every
-> change lands through review, so a fork and a PR is the way in rather than a
-> limitation of it.
+> **The code is public; write access is not.** Fork and open a pull
+> request.
 >
-> **A hosted node is a separate thing, and it is invite-only.** Running the
-> daemon yourself needs nothing from anybody. Accounts on somebody *else's*
-> node are theirs to grant.
+> **A hosted node is separate and invite-only.** Running your own needs
+> nothing from anybody.
 
-Keys, tokens and PEM files live under `~/.choir/` at mode `0600`, and the
-daemon key at `<repo-root>/.choir/node.key`. Never commit them.
+Keys, tokens and PEM files: `~/.choir/` at mode `0600`, the daemon key at
+`<repo-root>/.choir/node.key`. Never commit them.
 
 ---
 
 ## Contributing
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the gate lanes, the invariants
-that are one-way doors, and the conventions that look like omissions and are
-not. Security reports go to [`SECURITY.md`](SECURITY.md), never to a public
-issue.
+[`CONTRIBUTING.md`](CONTRIBUTING.md): gate lanes, invariants, house
+conventions. Security reports: [`SECURITY.md`](SECURITY.md), never a
+public issue.
 
 ## License
 
 MIT ([`LICENSE-MIT`](LICENSE-MIT)) or Apache-2.0
-([`LICENSE-APACHE`](LICENSE-APACHE)), at your option. Mergiraf, an optional
-subprocess, is GPLv3 and is executed rather than linked. Third-party
-attributions are in [`NOTICE`](NOTICE).
+([`LICENSE-APACHE`](LICENSE-APACHE)). Mergiraf, an optional subprocess, is
+GPLv3 and executed rather than linked. Attributions: [`NOTICE`](NOTICE).

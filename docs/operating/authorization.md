@@ -1,6 +1,6 @@
 # Authorization
 
-Five separate questions, kept apart:
+Five separate questions:
 
 | Question | Answered by |
 |:--|:--|
@@ -11,12 +11,11 @@ Five separate questions, kept apart:
 | Whose key signed it, and when? | key bindings and revocations (D44) |
 
 > [!IMPORTANT]
-> Without `--acl-file`, every credential reaches every repository. The auth
-> file establishes identity; the ACL establishes reach.
+> Without `--acl-file`, every credential reaches every repository.
 
 ## Per-repository authorization (D29)
 
-`--acl-file` gates each repository per user. Three whitespace-separated columns, an optional fourth, `#` comments, and the same append-a-line discipline as the keys file:
+Three whitespace-separated columns, an optional fourth, `#` comments:
 
 ```text
 # <user>   <repo|*|@node>   <level>    [until=<unix seconds>]
@@ -29,83 +28,90 @@ erin       owner/demo       propose
 frank      owner/demo       write      until=1788000000
 ```
 
-Each level adds to the one above it:
+Each level adds to the one above:
 
 | Level | Adds |
 |:--|:--|
 | `read` | cloning and fetching |
 | `propose` | opening a review |
 | `write` | pushing any other ref, workspace provisioning, submitting ops that touch that repository |
-| `own` | authorizing a landing on a protected ref (D42, below) |
+| `own` | authorizing a landing on a protected ref (D42) |
 
-`own` is the only repository-scoped administrative action.
+**`propose` admits one thing (D60): a push to
+`refs/for/<branch>/<user>/<topic>`, which opens a review (D53).** Every
+other ref is refused. The pusher's own name is a required segment. The
+grant is checked at the smart-HTTP boundary and again when the
+`pre-receive` hook reports the refs.
 
-**`propose` is how a repository takes a contribution from somebody it does not trust with its branches (D60).** It admits one thing, a push to `refs/for/<branch>/<user>/<topic>`, which opens a review (D53); every other ref is refused with a message naming that spelling. The pusher's own name is a required segment, and it keeps concurrent `propose` holders from overwriting each other's proposals. A `write` holder is exempt, having every ref already. The grant is checked twice: the smart-HTTP boundary sees no refname, so the push is admitted there and the refs are judged when the `pre-receive` hook reports them, with nothing applied in between. Both transports get it.
-
-The operator's own credential usually wants two lines:
+The operator's credential usually wants:
 
 ```text
 myself     *      write
 myself     @node  write
 ```
 
-`*` covers every repository and never covers `@node`. `@node` is the node itself: `auditor` reads `/api/log` and `/api/ref-agreement`, which are gated rather than filtered. `@node write` is needed for ops that name no repository, such as key bindings.
-
-Vouching (D65) is the one node-wide op that needs only `@node auditor`: it names no repository and reports what its signer thinks. To put somebody in the web of trust, grant `@node auditor`, which is read-only.
+`*` never covers `@node`. `@node auditor` reads `/api/log` and
+`/api/ref-agreement`; `@node write` is needed for ops naming no repository,
+such as key bindings. Vouching (D65) needs only `@node auditor`.
 
 ## A grant that ends (D66)
 
-The fourth column is a deadline in unix seconds: it lends a privilege instead of handing over an account. `frank` above may push until that second. The table is dated on every request, so nothing sweeps and no restart is needed.
+The fourth column is a deadline in unix seconds. The table is dated on every
+request; no restart.
 
-A deadline **lapses downward**. Pair a permanent `read` with a `write` that ends, and when the write ends they are a reader:
+A deadline **lapses downward**. Pair a permanent `read` with a `write` that
+ends:
 
 ```text
 frank      owner/demo       read
 frank      owner/demo       write      until=1788000000
 ```
 
-That is the shape worth using. A single expiring grant leaves the holder with a repository that answers `404`, which reads to them like it was deleted.
+A single expiring grant leaves the holder with a `404`.
 
-Three things not to be surprised by:
+- A deadline in the past parses and never matches; startup says
+  `acl enabled (7 grants, 1 expired)`.
+- `until=` is absolute: `date -v+90d +%s` on macOS, `date -d '+90 days' +%s`
+  on GNU.
+- The node's clock decides.
 
-- **A deadline already in the past parses.** The line never matches, and the startup and reload lines say `acl enabled (7 grants, 1 expired)`, so it is visible rather than silent.
-- **The deadline is absolute, not a duration.** `until=` is a moment: `date -v+90d +%s` on macOS, `date -d '+90 days' +%s` on GNU.
-- **It is the node's clock that decides**, exactly as it already does for invite expiry.
+`own` may carry a deadline; when it lapses the landing gate returns to the
+approval-weight rule (D42).
 
-`own` may carry a deadline too, and when it lapses the repository has no owner: the landing gate returns to the approval-weight rule (D42).
+Fail closed: anything not granted is refused. An unreadable repository
+answers `404`, never `403`. The flag requires `--auth-file`. A malformed file
+refuses to start; a malformed *edit* keeps the previous table and complains.
 
-This is the mechanism D24's T1 tripwire response names, "time-locks + bonds only". A grant lives in this file and in the self-service store rather than in the op log, which is D29's design and the single element replay cannot rederive.
-
-Fail closed: with the flag set, anything not granted is refused. A repository you cannot read answers `404` rather than `403`, so a denial never confirms that it exists. The flag requires `--auth-file`. A malformed file refuses to start; a malformed *edit* keeps the previous table and complains, so a typo cannot silently revoke access.
-
-`/api/view`, `/api/reviews` and the browser page are narrowed to the repositories a credential may read, so a grant on one repository does not disclose that the others exist. Node-wide sections of the view (the ref-state attestation, key bindings, the vouch graph, and the concentration, growth, newcomer and lag telemetry) need `@node auditor`; the log head and build stamp reach everyone, since a writer needs them to submit. A review you were assigned to reaches you on any repository.
+`/api/view`, `/api/reviews` and the browser page are narrowed to readable
+repositories. Node-wide sections (ref-state attestation, key bindings, vouch
+graph, telemetry) need `@node auditor`; the log head and build stamp reach
+everyone. A review you were assigned to reaches you on any repository.
 
 ## Repository ownership (D42)
 
-With `--protected-refs` and `--require-review`, a protected ref normally needs approval weight 2 from two distinct operators, and nobody is exempt. `own` changes which question the gate asks for that repository:
+With `--protected-refs` and `--require-review`, a protected ref needs
+approval weight 2 from two distinct operators. `own` changes the question:
 
 ```text
 myself     owner/demo       own
 ```
 
-**On a protected ref of an owned repository, one owner's assent is necessary and sufficient.** Assent takes either form:
+**On a protected ref of an owned repository, one owner's assent is necessary
+and sufficient**: the owner lands it, or the owner approved a review naming
+that exact `(ref, commit)`.
 
-- the owner performs the landing themselves, or
-- the owner approved a review naming that exact `(ref, commit)`.
+- **An owner's key is equivalent to the repositories they own.**
+- **An owner submitting directly must have their key bound** in
+  `--keys-file` (`<channel> <64-hex>`). Approving a review does not need
+  this.
+- **`own` is granted in the file you write**; self-service cannot issue it.
 
-So an owner can land alone, with no review in existence. A non-owner reaches an owned ref only with an owner's approval.
-
-Three things worth knowing before granting it:
-
-- **An owner's key is equivalent to the repositories they own.** Under the weight rule a stolen key buys one unit and still needs a second, conflict-graph-separated operator. Here it buys the repository. Make the trade deliberately.
-- **An owner submitting directly must have their key bound** in `--keys-file` (`<channel> <64-hex>`): an unbound key is unconstrained in what channel it claims, so the gate refuses to read ownership off one. Approving a review does not need this; landing under your own key does.
-- **`own` is granted in the file you write.** Self-service (D36) contributes to the merged table the HTTP layer enforces, but the landing gate reads the operator's file directly, so ownership cannot be self-issued.
-
-A repository nobody owns keeps the weight rule. The file is re-read per landing, so a grant takes effect with no restart; an unreadable or malformed file refuses the landing rather than concluding there are no owners.
+The file is re-read per landing. An unreadable or malformed file refuses the
+landing.
 
 ## Landing a review with the reason it was allowed (D43)
 
-A `SetRef` on a protected ref records that a merge happened. The gate runs at admission against the ACL and the protected-ref list, and the log carries neither. `Submit` is the same ref move with the gate's own answer attached.
+`Submit` is a ref move with the gate's answer attached:
 
 ```json
 {"Submit": {"review": "r1", "name": "demo.git:refs/heads/main",
@@ -115,52 +121,61 @@ A `SetRef` on a protected ref records that a merge happened. The gate runs at ad
                               "approvers": [{...}]}}}
 ```
 
-The basis is one of three, matching the three ways a landing is allowed: `OwnerLanded`, `OwnerApproved`, or `ApprovalWeight {required, met}`. Under D42 a landing can be authorized with **zero** approvals.
+Basis is `OwnerLanded`, `OwnerApproved`, or `ApprovalWeight {required, met}`.
 
-**The authorization is never a client's to assert.** Build a `Submit` and post it; if it does not match, the rejection's `expected` field is the gate's own record as JSON. Sign that verbatim and post again:
+**The authorization is never a client's to assert.** Post a `Submit`; on
+mismatch the rejection's `expected` field is the gate's record. Sign that
+verbatim and post again:
 
 ```bash
 curl -u "$USER" -X POST https://<HOST>/api/submit -d "$FIRST_ATTEMPT" \
   | jq -r .expected          # the authorization the gate produced
 ```
 
-Two refusals to expect:
+- **`this landing cannot name its approvers`**: an approving channel has no
+  key binding (or two). Bind the reviewer's key and merge again.
+- **`is not gated on this node`**: unprotected ref, or no `--require-review`.
+  Use `SetRef`.
 
-- **`this landing cannot name its approvers`.** Approvers are recorded as actor ids, read from the log's own `BindKey` records, so an approving channel with no binding (or two) refuses the landing rather than recording it with a gap. Bind the reviewer's key and merge again.
-- **`is not gated on this node`.** A `Submit` on an unprotected ref, or on a node not running `--require-review`, is refused. Move the ref with `SetRef`.
-
-Archiving a review discards its verdicts, leaving the entry bytes as the only surviving answer to who approved a landing. Replay still verifies each, at its own position in the log.
+Archiving a review discards its verdicts; the entry bytes remain the answer
+to who approved a landing.
 
 ## Rotating a key without breaking anything (D44)
 
-A reviewer's approval is recorded against the key that was **live when the verdict was cast**. The ordinary lifecycle keeps telling the truth:
+An approval is credited against the key live when the verdict was cast.
 
 ```bash
 choir revoke <api> <node-key-file> <old-pubkey-hex> "laptop lost"
 choir bind   <api> <node-key-file> <operator> <new-pubkey-hex> [channel]
 ```
 
-Both take the **public key hex** that `choir key` prints and the trusted-keys file already carries; the actor id is derived for you. Both are node-signed, so they need the node's key file.
+Both take the public key hex `choir key` prints and are node-signed.
 
-Approvals the old key already cast still land, and still name the old key. Crediting reads the bindings live at the verdict, so adding a key leaves open approvals unambiguous.
-
-Two consequences worth knowing:
-
-- **An approval cast by an already-revoked key cannot be credited**, and the landing is refused. That reviewer needs a fresh key and a fresh verdict.
-- **`choir log --verify` checks signatures as of their own position.** An entry signed before its key's revocation verifies forever; one signed at or after it is a failure, not merely unverified. The client fetches revocation positions from `/api/view`, so verification needs API access as well as a keys file.
+- **An approval cast by an already-revoked key cannot be credited**; the
+  reviewer needs a fresh key and verdict.
+- **`choir log --verify` checks signatures as of their own position.** It
+  fetches revocation positions from `/api/view`, so it needs API access.
 
 > [!WARNING]
-> **Keep revoked keys in the trusted-keys file.** The log stores a key id, never the public key, so deleting the line makes every entry that key ever signed permanently unverifiable. Deletion causes that decay, and nothing in the code can stop it.
+> **Keep revoked keys in the trusted-keys file.** The log stores a key id,
+> never the public key, so deleting the line makes every entry that key
+> signed permanently unverifiable.
 
-That warning is about ed25519 keys only. A passkey-signed entry carries its own credential key (D45), so it survives a restore that keeps the log and loses everything else, which is what `scripts/flip/pull_backup.sh` does. `choir log --verify` counts those entries on their own line, as *intact but unanchored*: the bytes are proven, and the binding of credential to account lives in the accounts store rather than in the log.
+That applies to ed25519 keys only. A passkey-signed entry carries its own
+credential key (D45); `choir log --verify` counts those as *intact but
+unanchored*.
 
-Review retention is opt-in. `--review-retention N` archives completed reviews when more than `N` remain live. Incomplete reviews never lapse unless `--review-lapse-after-secs` is also set; that flag is invalid without a retention count.
+Review retention is opt-in: `--review-retention N` archives completed
+reviews when more than `N` remain live. `--review-lapse-after-secs` is
+invalid without it.
 
 ## Issuing a credential without editing a file (D36)
 
-`--accounts-file <path>` turns on invite-only self-service. The auth file and the ACL file stay yours, and issued credentials are added to what they say rather than written into them.
+`--accounts-file <path>` turns on invite-only self-service; issued
+credentials are added to what the auth and ACL files say.
 
-Passkeys are a second switch, `--passkeys`. With `--accounts-file` alone, `POST /api/accounts/passkey` and the `/account` enrolment page both answer 503 and say which switch is missing.
+Passkeys are `--passkeys`. Without it, `POST /api/accounts/passkey` and
+`/account` answer 503.
 
 ```bash
 choir-node ./repos 8417 --auth-file ~/.choir/auth --acl-file ~/.choir/acl \
@@ -171,87 +186,83 @@ choir-node ./repos 8417 --auth-file ~/.choir/auth --acl-file ~/.choir/acl \
 
 ### The console (D72)
 
-`/people` is those three operations as a page, for a credential holding `@node write`: the queue of people asking for access, a button to let one in, and a form that mints an invite link. It renders plain forms.
+`/people`, for `@node write`: the queue of people asking for access, a
+button to let one in, and a form that mints an invite link.
 
-A stranger who reaches the node's front page can ask for access there. They keep the link the page gives them, and granting the request turns that same link into their invite. Each request costs a proof of work in the asker's browser, and the queue is capped at 64 unanswered requests; the endpoint that fills it needs no credential.
+A stranger can ask for access on the front page and keeps the link it
+gives them; granting turns that link into their invite. Each request costs
+a proof of work; the queue caps at 64.
 
-A `POST` whose `Origin` names another site is refused, on the console and on the JSON endpoints below.
+A `POST` whose `Origin` names another site is refused.
 
 ### The same three by hand
 
-Mint an invite, as a credential holding `@node write`:
+Mint an invite, as `@node write`:
 
 ```bash
 curl -u "$OPERATOR" -X POST https://<HOST>/api/accounts/invite \
   -d '{"user":"bob","grants":["owner/demo read","owner/notes write"]}'
 ```
 
-That invite names nobody (D75). `display_name` records what to call them; the **username is theirs to pick** when they redeem. Send `{"user":"buildbot"}` when the name has to be exact, which is what a bot or a script wants.
+The invite names nobody (D75); the username is theirs to pick. Send
+`{"user":"buildbot"}` when the name must be exact.
 
-The response carries `invite`, an `id:secret` pair, once. Hand it over out of band. The invite *is* the credential: it is presented as basic auth and reaches this one endpoint.
+The response carries `invite`, an `id:secret` pair, once. It is presented as
+basic auth to one endpoint:
 
 ```bash
 curl -u "<INVITE>" -X POST https://<HOST>/api/accounts/redeem \
   -d "{\"ssh_key\":\"$(cat ~/.ssh/id_ed25519.pub)\"}"
 ```
 
-That answers, once, with the token to clone with and registers the key for SSH. Invites expire (a day by default, `expires_in_secs` to choose) and are single use.
+That answers with the clone token and registers the key for SSH. Invites
+are single use and expire in a day (`expires_in_secs`).
 
-**The browser route enrols a passkey in place of a password.** Opening the link in a browser gives a page that asks for a username and runs the passkey ceremony; the account is created with the passkey enrolled, and the redemption opens a browser session. Git and the CLI speak basic auth, so a token is minted on request from the account page (`POST /account/token`), one per account, replacing any it had. A browser without WebAuthn gets the password route.
+**In a browser the link enrols a passkey** and opens a session. A token for
+git is minted from `/account` (`POST /account/token`), one per account.
 
-`GET /api/accounts` lists who holds what: accounts, live invites and the pending request queue. `POST /api/accounts/request/grant` with `{"request_id":"ask-...","grants":[...]}` answers one of those requests, `POST /api/accounts/request/decline` drops it, and `POST /api/accounts/revoke` with `{"user":"bob"}` deletes an account: the token stops authenticating on the next request, the grants leave the table, and the key leaves the generated `authorized_keys`. Revocation is deletion rather than a record: the log is append-only, so none of this lives in it.
+`GET /api/accounts` lists accounts, live invites and pending requests.
+`POST /api/accounts/request/grant` with `{"request_id":"ask-...","grants":[...]}`
+answers one; `POST /api/accounts/request/decline` drops one;
+`POST /api/accounts/revoke` with `{"user":"bob"}` deletes an account, its
+grants and its `authorized_keys` line. Revocation is deletion.
 
 > [!CAUTION]
-> **`@node` can never be issued by self-service.** Node-wide authority, the
-> auditor role and the rate-limit exemption that comes with it, stays in the
-> ACL file you write by hand. The flag requires both `--auth-file` and
-> `--acl-file`.
+> **`@node` can never be issued by self-service.** The flag requires both
+> `--auth-file` and `--acl-file`.
 
-Two rules worth knowing before you rely on it:
-
-- **An issued grant may carry a deadline too**, in the same spelling: `{"grants":["owner/demo write until=1788000000"]}`. The join page says so in words the holder can act on ("push to owner/demo, until in about 90 days"). The invite is single-use and short-lived; the grants it hands over last as long as their own fourth column says, or forever without one.
-- **The generated `authorized_keys` is generated.** Point `sshd` at it once (`AuthorizedKeysFile /path/to/repos/.choir/authorized_keys` in `sshd_config`, alongside the account setup in [Git over SSH](transports.md#git-over-ssh-d31)) and never edit it: it is rewritten on every account change, and a hand-added line disappears with the next one.
+- **An issued grant may carry a deadline**: `{"grants":["owner/demo write until=1788000000"]}`.
+- **The generated `authorized_keys` is generated.** Point `sshd` at it
+  (`AuthorizedKeysFile /path/to/repos/.choir/authorized_keys`, see
+  [Git over SSH](transports.md#git-over-ssh-d31)) and never edit it.
 
 ## Publishing a repository to everybody (D78)
 
-Every browse route is behind the auth gate: a reader with no account meets
-the sign-in page, not a repository. That is right for a private beta and
-wrong for source that is already public elsewhere, so one line in the ACL
-opens one repository:
+One line in the ACL opens one repository to readers with no account:
 
 ```text
 @anon    owner/project.git    read
 ```
 
-`@anon` is the reader who presented no credential. Naming it beside a
-repository is what publishes that repository: an unauthenticated browse or
-fetch of it is evaluated under that principal instead of refused, and every
-check after the gate is the one that was already there. There is no second
-authorization rule and no flag; the table answers "may this caller read
-this" the same way for a stranger as for an account holder.
+`@anon` is the reader who presented no credential. An unauthenticated browse
+or fetch is evaluated under that principal; every check after the gate is
+unchanged. No flag.
 
 **It cannot be authenticated as.** Account names are ASCII letters, digits,
-`-`, `_` and `.`, so the leading `@` is unspellable in the one place a name
-gets chosen. A user called `anon`, with no `@`, is an ordinary account and
-is not this principal.
+`-`, `_` and `.`, so `@` is unspellable. A user called `anon` is an ordinary
+account.
 
-**Three grants it will not take**, each refused when the file parses rather
-than when a request arrives, so the failure is a node that will not start:
+**Three grants it will not take**, refused at parse time:
 
 | Written | Refused because |
 |:--|:--|
-| `@anon @node auditor` | that scope is the op log and the audit surface |
-| `@anon * read` | name each public repository, so adding a private one later is not a publication nobody typed |
-| `@anon o/r write` | a write path for a caller carrying no credential |
+| `@anon @node auditor` | the op log and the audit surface |
+| `@anon * read` | name each public repository explicitly |
+| `@anon o/r write` | a write path with no credential |
 
-**What opens, and what does not.** The browse surface for that repository
-and the read half of git smart-HTTP, so `git clone` works with no
-credentials. Not `/api/view` or `/api/log`, which are `GET` requests that
-serve the op log; not `/reviews`, which is the reader's own queue and means
-nothing for a principal that is every stranger at once; and not
-`git-receive-pack`, which needs `propose` and above, which `@anon` cannot
-hold. A repository nobody published answers exactly as one that does not
-exist, so the wall never confirms which private repositories are here.
+**What opens:** the browse surface for that repository and the read half of
+git smart-HTTP, so `git clone` works with no credentials. **What does not:**
+`/api/view`, `/api/log`, `/reviews`, and `git-receive-pack`. An unpublished
+repository answers exactly as one that does not exist.
 
-Pair it with `--site-repo owner/project` to make that repository the front
-page, which is what a node serving a single open-source project wants.
+Pair with `--site-repo owner/project` to make that repository the front page.

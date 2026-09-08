@@ -1,31 +1,24 @@
 # choir documentation
 
-Getting started lives in the [top-level README](../README.md). Everything
-else is here, indexed by what you are trying to do.
+Getting started is in the [top-level README](../README.md). Everything else
+is here, indexed by task.
 
-Every page here is also compiled into the API documentation: each one is
-pulled into the crate that implements it with `#![doc = include_str!]`, so
-`cargo doc` renders this prose beside the types it describes. That is not a
-convenience — it is what keeps these pages honest. The release gate runs
-`cargo doc` with `-D warnings`, so a Rust example in any of these files that
-stops compiling fails the build.
+Each page is also pulled into the crate that implements it with
+`#![doc = include_str!]`, and the release gate runs `cargo doc -D warnings`,
+so a Rust example here that stops compiling fails the build.
 
 <a class="api-link" href="api/index.html">API documentation →</a>
 <!--node-link-->
 
-Build both halves together with `choir docs`, which renders the book and
-puts rustdoc inside it at `/api/`. From a checkout without the CLI
-installed: `cargo run -p choir-cli -- docs --open`.
-
-The comment above is a marker, not stray markup: `choir docs` replaces it
-with a link to the node when the publishing workflow supplies that address
-(D76).
+`choir docs` builds the book with rustdoc inside it at `/api/`. From a
+checkout: `cargo run -p choir-cli -- docs --open`. The comment above is a
+marker `choir docs` replaces with a link to the node (D76).
 
 ## Start here
 
 | You want | Read |
 |:--|:--|
-| To know what this is and whether you want it | [Why choir exists](why.md) |
+| What this is | [Why choir exists](why.md) |
 | How the pieces fit | [Architecture](architecture.md) |
 | To run a node | [Running a node](operating/running-a-node.md) |
 | To use a node | [The CLI and HTTP API](using/cli.md) |
@@ -36,55 +29,53 @@ with a link to the node when the publishing workflow supplies that address
 
 | Page | Covers |
 |:--|:--|
-| [Running a node](operating/running-a-node.md) | Starting the daemon, every policy file, the supervised macOS install |
-| [Authorization](operating/authorization.md) | ACLs (D29), repository ownership (D42), landing basis (D43), key rotation (D44), credential self-service (D36) |
-| [Rate limits, quotas and fairness](operating/limits.md) | Request log and rate limits (D33), per-user quotas (D37), the sequencer's in-flight window |
-| [Webhooks](operating/webhooks.md) | Outbound ref-landed deliveries (D32) |
-| [Observability and repair](operating/observability.md) | The decision journal, `choir repair`, what each derived record is for |
-| [Transports and the browser surface](operating/transports.md) | Git over HTTPS and SSH (D31), the read-only page (D28), repository browsing (D30) |
+| [Running a node](operating/running-a-node.md) | Flags, policy files, supervised install |
+| [Authorization](operating/authorization.md) | ACLs (D29), ownership (D42), landing basis (D43), key rotation (D44), self-service (D36), publishing (D78) |
+| [Rate limits, quotas and fairness](operating/limits.md) | Request log, rate limits (D33), quotas (D37), in-flight window |
+| [Webhooks](operating/webhooks.md) | Ref-landed deliveries (D32) |
+| [Observability and repair](operating/observability.md) | Decision journal, `choir repair`, derived records |
+| [Transports and the browser surface](operating/transports.md) | Git over HTTPS and SSH (D31), read-only page (D28), browsing (D30) |
 
-Two runbooks sit beside these, for the two operations that are procedures
-rather than configuration:
+Runbooks:
 
-- [Private single-node beta runbook](private-beta-runbook.md) — the network
-  hold, the TLS proxy, backups, staging promotion, go-live receipts.
-- [Restoring a node from a backup](runbook-restore.md) — the ordering rule,
-  and the secrets a backup deliberately never holds.
-- [Canonical-node flip runbook](../scripts/flip/RUNBOOK.md) — supervised
-  install and turning on the protected-ref gates.
+- [Private single-node beta runbook](private-beta-runbook.md): network
+  hold, TLS proxy, backups, staging promotion, go-live receipts.
+- [Restoring a node from a backup](runbook-restore.md): ordering rule, and
+  the secrets a backup never holds.
+- [Canonical-node flip runbook](../scripts/flip/RUNBOOK.md): supervised
+  install, protected-ref gates.
 
 ## Using a node
 
 | Page | Covers |
 |:--|:--|
 | [The CLI and HTTP API](using/cli.md) | Every command and endpoint, generated from one table |
-| [The contribution workflow](using/workflow.md) | Workspace to landed ref, and the review rules that bite in practice |
-| [Agent templates](../templates/README.md) | Drop-in harness snippets for Claude Code, Codex and Cursor |
-| [`AGENTS.md`](../AGENTS.md) | The same surface written for an agent that has never seen choir |
+| [The contribution workflow](using/workflow.md) | Workspace to landed ref, review rules |
+| [Agent templates](../templates/README.md) | Snippets for Claude Code, Codex and Cursor |
+| [`AGENTS.md`](../AGENTS.md) | The surface, written for an agent |
 
 ## Reference
 
 | Page | Covers |
 |:--|:--|
 | [Troubleshooting](reference/troubleshooting.md) | Symptoms, causes, fixes |
-| [`ERRORS.md`](../ERRORS.md) | Every rejection code and its repair hint — generated from the node's own table |
-| [`SYNC.md`](../SYNC.md) | Catching up on a log, and replaying a page's hash chain and signatures so what the node served is checkable |
-| [`DECISIONS.md`](../DECISIONS.md) | What each `D<n>` in the code means, and which are one-way doors |
-| [Bridge permissions](../crates/choir-bridge/PERMISSIONS.md) | The minimum GitHub App grants, and what must not be granted |
+| [`ERRORS.md`](../ERRORS.md) | Every rejection code and repair hint, generated |
+| [`SYNC.md`](../SYNC.md) | Catching up on a log and verifying a served page |
+| [`DECISIONS.md`](../DECISIONS.md) | What each `D<n>` means, and which are one-way doors |
+| [Bridge permissions](../crates/choir-bridge/PERMISSIONS.md) | Minimum GitHub App grants |
 
 ## Which of these is generated
 
-Editing a generated file by hand is wasted work: the release gate compares
-it against its source and fails when they differ. Regenerate with
-`cargo run -p choir-cli --example gen-surface`.
+The gate fails when a generated file differs from its source. Regenerate
+with `cargo run -p choir-cli --example gen-surface`.
 
 | Generated | Source |
 |:--|:--|
 | The surface block in [using/cli.md](using/cli.md) | `crates/choir-cli/src/surface.rs` |
-| `theme/choir-tokens.css`, the book's palette | `crates/choir-node/src/ui.css` |
+| `theme/choir-tokens.css` | `crates/choir-node/src/ui.css` |
 | The cheat-sheet block in [the README](../README.md) | `crates/choir-cli/src/surface.rs` |
 | [`AGENTS.md`](../AGENTS.md), `/llms.txt`, `/api/schema` | `crates/choir-cli/src/surface.rs` |
 | [`ERRORS.md`](../ERRORS.md) | `crates/choir-node/src/reject.rs` |
 | The command lists in [`templates/`](../templates/README.md) | `crates/choir-cli/src/surface.rs` |
 
-Everything else on this page is written by hand and is fair game to edit.
+Everything else on this page is hand-written.

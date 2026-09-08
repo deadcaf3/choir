@@ -1,8 +1,8 @@
 # The `choir` CLI and the node's HTTP API
 
-The complete surface, rendered from one table so that the CLI's `--help`,
-`AGENTS.md`, `/llms.txt`, `/api/schema` and this page cannot disagree with
-each other. A staleness test fails the release gate when they do.
+The complete surface, rendered from one table shared with the CLI's
+`--help`, `AGENTS.md`, `/llms.txt` and `/api/schema`. A staleness test fails
+the gate when they differ.
 
 ## Authentication and exit codes
 
@@ -197,10 +197,10 @@ Live surface on a running node: `GET /llms.txt`. Sync verification: `SYNC.md` / 
 
 ## MCP adapter
 
-For MCP clients, run the synchronous stdio adapter. It maps generated tools onto the same HTTP endpoints and owns no second implementation or session state.
+A synchronous stdio adapter mapping generated tools onto the same HTTP endpoints; no second implementation, no session state.
 
 ```bash
 choir-mcp http://127.0.0.1:8417 --auth-file ~/.choir/auth --auth-user choir
 ```
 
-It serves the measured legacy handshakes and the stateless 2026-07-28 request path. Tool order and schemas come from `crates/choir-cli/src/surface.rs`.
+Serves the legacy handshakes and the stateless 2026-07-28 request path. Tool order and schemas come from `crates/choir-cli/src/surface.rs`.

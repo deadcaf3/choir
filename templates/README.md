@@ -1,22 +1,18 @@
 # choir agent templates
 
-These drop-in snippets teach an agent harness how to collaborate through a
-choir node. Install one in a project and each session gets the same Git,
-review, signing, and conflict-handling conventions.
+Snippets that teach an agent harness a choir node's conventions.
 
 ## Install
 
-All harnesses share one environment file:
+One environment file for all harnesses:
 
-1. Source [`choir.env.sh`](choir.env.sh) from your shell profile or harness
-   environment, and set at least `CHOIR_API`.
-2. For Git basic auth, set `CHOIR_USER` and a token-only
-   `CHOIR_TOKEN_FILE`. For the `choir` CLI or MCP adapter, pass
-   `--auth-file <path> --auth-user <name>` explicitly; the file uses the
-   node's `user:token`-per-line format.
-3. Set `CHOIR_KEY_FILE` for signed platform operations and `CHOIR_SSH_KEY`
-   for signed pushes. Keep all credential and key files under `~/.choir/`
-   at mode 0600, never in a repository.
+1. Source [`choir.env.sh`](choir.env.sh); set at least `CHOIR_API`.
+2. Git basic auth: `CHOIR_USER` and a token-only `CHOIR_TOKEN_FILE`. The
+   `choir` CLI and MCP adapter take `--auth-file <path> --auth-user <name>`
+   explicitly; the file is `user:token` per line.
+3. `CHOIR_KEY_FILE` for signed platform operations, `CHOIR_SSH_KEY` for
+   signed pushes. Keep them under `~/.choir/` at mode 0600, never in a
+   repository.
 
 Then per harness:
 
@@ -29,24 +25,20 @@ Then per harness:
 ## Symphony workspace backend
 
 [`symphony/choir-workspace-backend.sh`](symphony/choir-workspace-backend.sh)
-implements a versioned external backend contract for exact-base create/reuse,
-strict revision checkpoint, and recoverable archive. See the
-[`Symphony integration guide`](symphony/README.md) for the pinned upstream
-contract and the required workspace-manager seam.
+implements a versioned external backend contract: exact-base create/reuse,
+strict revision checkpoint, recoverable archive. Pinned contract and
+workspace-manager seam: [`Symphony integration guide`](symphony/README.md).
 
-Do not wire it through Symphony's current workspace hooks. The reference
-implementation ignores `before_remove` failures and then deletes the directory,
-which cannot preserve Choir's recoverable archive guarantee.
+Do not wire it through Symphony's current workspace hooks: they ignore
+`before_remove` failures and delete the directory.
 
 ## Claude Code isolated workspaces
 
-Claude Code can replace its Git worktree implementation with Choir by using
-[`claude-code/choir-worktree.sh`](claude-code/choir-worktree.sh) for both
-`WorktreeCreate` and `WorktreeRemove`. The adapter requires `bash`, `jq`, the
-`choir` CLI, and a Choir node whose workspace paths are accessible on the
-Claude host.
+[`claude-code/choir-worktree.sh`](claude-code/choir-worktree.sh) replaces
+Claude Code's Git worktrees for `WorktreeCreate` and `WorktreeRemove`.
+Requires `bash`, `jq` and the `choir` CLI.
 
-Install the script outside the repository so every checkout can use it:
+Install outside the repository:
 
 ```bash
 install -d "$HOME/.choir/hooks"
@@ -54,8 +46,8 @@ install -m 0755 templates/claude-code/choir-worktree.sh \
   "$HOME/.choir/hooks/choir-worktree.sh"
 ```
 
-Create a mode-0600 config such as `$HOME/.choir/claude-worktree.json`. It
-contains identities and paths, never credential values:
+Create a mode-0600 config such as `$HOME/.choir/claude-worktree.json`,
+identities and paths only:
 
 ```json
 {
@@ -71,56 +63,48 @@ contains identities and paths, never credential values:
 
 Copy the hook entries from
 [`claude-code/settings.worktree.example.json`](claude-code/settings.worktree.example.json)
-into `.claude/settings.local.json`, then replace both paths with the installed
-script and config paths. Merge the `hooks` entries with existing settings;
-do not overwrite the file. `WorktreeCreate` and `WorktreeRemove` do not use
-matchers.
+into `.claude/settings.local.json`, replacing both paths. Merge with
+existing `hooks`; do not overwrite. Neither hook takes a matcher.
 
-Creation binds the caller checkout's exact `HEAD`, a deterministic
-Claude-session workspace name, one owner, and one stable change. Exact hook
-retries reuse the same workspace. Removal validates non-secret metadata under
-the clone's `.git/` directory and calls owner-signed recoverable archive. It
-does not commit, push, or checkpoint automatically.
+Creation binds the checkout's exact `HEAD` to one owner and one change;
+retries reuse the workspace. Removal validates non-secret metadata under
+the clone's `.git/`, then archives (owner-signed, recoverable). Nothing
+commits, pushes or checkpoints.
 
-Operational limits:
+Limits:
 
-- The selected `HEAD` must already exist in the Choir bare repository.
-- The node and Claude Code must share the filesystem path returned by Choir.
+- The selected `HEAD` must exist in the Choir bare repository.
+- The node and Claude Code must share the path Choir returns.
 - A custom create hook replaces Claude's default Git behavior, including
-  `.worktreeinclude` processing.
-- Claude cannot be stopped by a failing `WorktreeRemove` hook. Check its debug
-  log and retry the adapter manually when archive did not complete.
+  `.worktreeinclude`.
+- A failing `WorktreeRemove` hook does not stop Claude. Check its debug
+  log and rerun the adapter by hand.
 
-The input/output behavior follows the current
+Input/output follows the
 [Claude Code hooks reference](https://code.claude.com/docs/en/hooks#worktreecreate).
 
 ## Optional MCP adapter
 
-Register `choir-mcp` as a stdio server if the harness supports MCP:
+Register `choir-mcp` as a stdio server:
 
 ```text
 choir-mcp <api> [--auth-file <path>] [--auth-user <name>]
 ```
 
-For an authenticated node, use the node URL as `<api>` and name the credential
-file with `--auth-file`; use `--auth-user` when it has multiple entries. The
-adapter exposes seven public platform operations. It does not expose discovery
-documents or the internal Git hook as tools.
+`--auth-user` picks an entry when the file has several. Seven platform
+operations; no discovery documents or Git hook.
 
 ## What the templates teach an agent
 
-- The remote-URL shape and auth for git over the choir daemon.
-- That pushes are sequenced (CAS): a rejection means integrate and
-  retry, never force-push.
-- Signed pushes (`gpg.format=ssh`) for per-key attribution when the
-  agent has a key.
-- The platform API: `/api/view` (current state), `/api/log` (ordered
-  signed history), and `/api/submit-batch` (ordered signed operations).
-- First-class conflicts: a conflicted merge is a valid committed state
-  to build on, not an error to block on.
+- Remote-URL shape and auth for git over the daemon.
+- Pushes are sequenced (CAS): on rejection, integrate and retry, never
+  force-push.
+- Signed pushes (`gpg.format=ssh`) for per-key attribution.
+- `/api/view` (state), `/api/log` (signed history), `/api/submit-batch`
+  (signed operations).
+- A conflicted merge is a valid committed state.
 
-The generated command lists in these snippets come from
-`crates/choir-cli/src/surface.rs`; refresh them with
-`cargo run -p choir-cli --example gen-surface`. For protocol details, use
-the [sync contract](../SYNC.md), [rejection-code catalog](../ERRORS.md), and
+Command lists come from `crates/choir-cli/src/surface.rs`; refresh with
+`cargo run -p choir-cli --example gen-surface`. Protocol:
+[sync contract](../SYNC.md), [rejection-code catalog](../ERRORS.md),
 main [README](../README.md).

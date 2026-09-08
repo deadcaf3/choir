@@ -5,93 +5,67 @@
 **Do not open a public issue for a security report.**
 
 Use GitHub's private vulnerability reporting on this repository
-(*Security* → *Report a vulnerability*), which opens a private advisory
-visible only to the maintainers. If that is unavailable to you, write to
-`deadcaf3@pm.me`.
+(*Security* → *Report a vulnerability*), or write to `deadcaf3@pm.me`.
 
-Include what you need to make the problem reproducible: the version or
-commit, the configuration flags the node was started with, and the
-smallest sequence of requests that shows it. A proof of concept is
-welcome and never required.
+Include the version or commit, the node's startup flags, and the smallest
+reproducing request sequence.
 
-This project has one maintainer and no service level agreement. You will
-get an acknowledgement, a verdict on whether it is in scope, and a fix or
-a written reason there will not be one. Nothing here is a promise about
-how fast.
+One maintainer, no service level agreement: an acknowledgement, a scope
+verdict, and a fix or a written reason there will not be one.
 
 ## Supported versions
 
-Pre-1.0, and there are no released versions. **Only `main` is
-supported.** A fix lands on `main` and nothing is backported, because
-there is nothing to backport to.
+Pre-1.0, no released versions. **Only `main` is supported.** Nothing is
+backported.
 
 ## What the design assumes
 
-Read these before deciding whether something is a bug. Several of them
-look like vulnerabilities and are not.
-
-- **The operation log is readable by anyone holding a read grant on the
-  repository.** It carries every ref update, review, verdict and key
-  binding, with author signatures. It is designed to be replayed and
-  checked by anyone holding that grant, against the copy they already
-  have. Treat anything you submit as durable and visible to that
-  audience.
+- **The operation log is readable by anyone with a read grant.** It
+  carries every ref update, review, verdict and key binding, signed. What
+  you submit is durable and visible.
 - **A compare-and-swap rejection is a normal outcome**, not a denial of
-  service. Two writers racing one ref means one of them is told which
-  head it lost to.
-- **A merge conflict is a committed value**, not a failure state. A
-  strategy that declines to merge and records a conflict is behaving
-  correctly.
-- **The node refuses to bind a non-loopback address without TLS.** This
-  is enforced in code rather than documented as advice. A configuration
-  that appears to bypass it is a report worth making.
-- **Secrets live outside the repository**, under `~/.choir/` at mode
-  `0600` and the daemon key at `<root>/.choir/node.key`. A backup carries
-  the log, the node fingerprint, the policy files and one git bundle per
-  repository, and carries **no** key, token, or PEM.
+  service.
+- **A merge conflict is a committed value**, not a failure state.
+- **The node refuses to bind a non-loopback address without TLS.**
+  Enforced in code; a bypass is worth reporting.
+- **Secrets live outside the repository**: `~/.choir/` at mode `0600`,
+  the daemon key at `<root>/.choir/node.key`. A backup carries the log,
+  node fingerprint, policy files and one git bundle per repository, and
+  **no** key, token or PEM.
 
 ## In scope
-
-Reports in these areas are the ones worth your time and mine:
 
 - Forging or replaying a signed operation, or getting one accepted whose
   hash chain does not verify.
 - Landing on a protected ref without the authorization the policy
   requires, by any transport.
-- Reading a repository, review or log entry without a grant that permits
-  it, including through the browser surface or an error message.
-- Any path that puts a key, token or PEM somewhere it should not be: a
-  backup, an export, a log line, a rendered page, a subprocess argument.
-- Escaping the sandbox a CI executor runs a candidate merge in, or
-  reaching the host filesystem from inside one.
-- Authorization checks that leak their answer through timing. Token
-  comparison does not exit early on length or content, on purpose; a place
-  that does is a bug.
+- Reading a repository, review or log entry without a grant, via any
+  surface including error messages.
+- A key, token or PEM reaching a backup, export, log line, rendered page
+  or subprocess argument.
+- Escaping the sandbox a CI executor runs a candidate merge in.
+- Authorization checks that leak through timing. Token comparison does
+  not exit early, on purpose.
 
 ## Out of scope
 
-- **Mergiraf's licence or behaviour.** It is an optional external program
-  executed as a subprocess, never linked, and the platform works without
-  it. Report Mergiraf issues upstream.
-- **Defaults you chose yourself.** Rate limits, body limits, batch limits
-  and quotas are flags. A node started without them is configured that
-  way, not vulnerable.
+- **Mergiraf's licence or behaviour.** Optional, subprocess only, never
+  linked. Report upstream.
+- **Defaults you chose yourself.** Rate, body and batch limits and quotas
+  are flags.
 - **Denial of service by volume** against a node you control or were
-  invited to. Report resource exhaustion that a single well-formed
-  request can cause; a flood is not a finding.
+  invited to. Exhaustion from one well-formed request is in scope; a
+  flood is not.
 - Missing hardening headers on a page that serves no credential, absent a
-  concrete attack that uses their absence.
-- Reports produced only by an automated scanner, with no demonstrated
-  impact on this codebase.
+  concrete attack.
+- Scanner output with no demonstrated impact.
 
 ## Verifying a release yourself
 
-What a node serves is replayable and checkable. `choir log --verify`
-walks the hash chain, recomputes every hash, and verifies the signatures
-for the keys you hold. It is not a transparency log: there are no
-inclusion proofs, so a node serving two divergent histories is caught by
-two readers comparing, not by either alone. [`SYNC.md`](SYNC.md) is the
-contract it implements, and every node serves that document at
+`choir log --verify` walks the hash chain, recomputes every hash and
+verifies signatures for the keys you hold. Not a transparency log: no
+inclusion proofs, so divergent histories are caught by two readers
+comparing. [`SYNC.md`](SYNC.md) is the contract, served at
 `GET /sync.md`.
 
 Release artifacts carry a `SHA256SUMS` file and a CycloneDX SBOM per

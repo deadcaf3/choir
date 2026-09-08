@@ -1,24 +1,20 @@
 # Architecture
 
-choir is an agent-first code collaboration platform. Many agents work on one
-repository at once, a single-writer sequencer puts every change in one total
-order, and merge conflicts are first-class values rather than errors.
-
-This page maps the layers, the crate that implements each, and what travels
-between them. Every crate's `//!` header assumes it.
+Many agents work on one repository; a single-writer sequencer puts every
+change in one total order; merge conflicts are values, not errors. This page
+maps the layers and the crate for each.
 
 ## The model
 
 A change is a **signed operation** appended to an **append-only log**. One
 writer thread per repository decides the order, stamps a sequence number and
-appends. Every other structure, the set of refs, the review queue and who
-holds which workspace, is a **fold over that log**, recomputed rather than
-stored. Undo is therefore a pure function of position, and two agents racing
-the same ref get a compare-and-swap.
+appends. Refs, the review queue and workspace ownership are **folds over that
+log**, recomputed rather than stored. Undo is a function of position; two
+agents racing one ref get a compare-and-swap.
 
 ## Layers
 
-The layer numbers are the ones code comments and `DECISIONS.md` use.
+Layer numbers match code comments and `DECISIONS.md`.
 
 | Layer | Concern | Crate | Decision |
 |:--|:--|:--|:--|
@@ -31,27 +27,21 @@ The layer numbers are the ones code comments and `DECISIONS.md` use.
 | L8 | Identity: one ed25519 key per actor, signatures over log entries | `choir-identity` | D9 (**one-way**) |
 | L10 | Transport: centralized now, peer-to-peer later | `choir-node` | D14 (gated) |
 
-Three crates sit beside the stack rather than inside it:
+Beside the stack:
 
 | Crate | What it is |
 |:--|:--|
-| `choir-sequencer` | The single writer itself (D2), plus the decision journal, the fairness queue and the lag meter |
-| `choir-actor` | A *second* implementation of the same actor-runtime seam, on Rivet (D3). It exists to prove the seam is a seam: both implementations pass one conformance suite |
-| `choir-merge` | The merge-strategy pipeline (D4/D19), cheapest strategy first, Mergiraf as an optional subprocess |
+| `choir-sequencer` | The single writer (D2), decision journal, fairness queue, lag meter |
+| `choir-actor` | A second implementation of the actor-runtime seam, on Rivet (D3); both pass one conformance suite |
+| `choir-merge` | The merge-strategy pipeline (D4/D19), cheapest first, Mergiraf as an optional subprocess |
 
-Four are tools rather than layers: `choir-cli` (the `choir` binary, and the
-surface table every generated document is rendered from), `choir-bridge`
-(the forge follower, D21), `choir-demo` (a narrated walkthrough of the whole
-stack) and `choir-spike` (the Phase-0 gate binary). One is neither:
-`choir-fs`, the durable-file primitives — atomic writes and a working-
-directory lock — that the binaries share.
-
-Each crate's own header links the crates it depends on, and the gate checks
-those links.
+Tools: `choir-cli` (the `choir` binary and the surface table every generated
+document renders from), `choir-bridge` (forge follower, D21), `choir-demo`
+(narrated walkthrough), `choir-spike` (Phase-0 gate binary). `choir-fs`
+holds the atomic-write and lock primitives the binaries share. `choir-guards`
+holds source-scanning tripwires (D77).
 
 ## What one operation does
-
-An agent submitting a change walks the whole stack.
 
 ```text
   agent
@@ -79,58 +69,44 @@ An agent submitting a change walks the whole stack.
   ref landed → webhook        --hooks-file            D32
 ```
 
-Two properties of that shape are load-bearing:
-
-- **The order is decided in exactly one place.** Round-robin fairness
-  decides who is *asked* next. The writer stamps `seq` one at a time, alone,
-  and appends in the order it decided.
-- **Every check before the writer is advisory about identity.** The actor
-  key the fairness queue buckets on is a *claim*, and the signature is
-  verified on the writer thread. It bounds an honest flooder.
+- **The order is decided in one place.** Fairness decides who is asked
+  next; the writer stamps `seq` alone and appends in that order.
+- **Checks before the writer are advisory.** The actor key the fairness
+  queue buckets on is a claim; the signature is verified on the writer
+  thread.
 
 > [!IMPORTANT]
 > Nothing in front of the writer may become load-bearing for authorization.
 
 ## A conflict is a value
 
-`choir-view`'s `TreeEntry` has a `Conflict` variant, and a commit containing
-one is a **valid commit**: it hashes, it is signed, it is appended, and an
-agent can keep working on top of it.
-
-The merge queue therefore never blocks. A change that conflicts is evicted
-from the speculative train as a first-class conflict and the queue keeps
-moving. `choir-merge` is a *pipeline* of strategies for the same reason:
-trivial merge, then line merge, then Mergiraf as an optional subprocess,
-each free to decline as a normal outcome.
+`TreeEntry::Conflict` in `choir-view` is a **valid commit**: hashed, signed,
+appended, and buildable on. The merge queue never blocks; a conflicting
+change is evicted from the speculative train as a conflict and the queue
+keeps moving. `choir-merge` is a pipeline (trivial, line, Mergiraf) where
+each strategy may decline.
 
 ## Replay purity
 
-The view is a fold, so replaying the log from position zero must produce
-exactly the state the node is serving. That is promoted to a contract (D40),
-and three things follow from it:
+Replaying the log from zero must produce exactly the served state (D40).
+So:
 
-1. **Derived data is never a durability barrier.** The request log, the
-   decision journal and the lag log are one-way records nothing replays.
-2. **Some projections are folded out of the log rather than persisted.** The
-   per-user workspace tally that `--quota-workspaces` enforces is one: a
-   restart rebuilds it from the same log that rebuilds everything else.
-3. **Accounts and credentials sit outside the log (D36).** The log is
-   append-only, and revoking a credential has to be deletion.
+1. **Derived data is never a durability barrier.** Request log, decision
+   journal and lag log are one-way records.
+2. **Some projections are folded, not persisted.** The per-user workspace
+   tally behind `--quota-workspaces` is rebuilt from the log on restart.
+3. **Accounts and credentials sit outside the log (D36).** Revocation is
+   deletion.
 
 ## What the format versions are for
 
-`FORMAT_VERSION` appears in `choir-store`, `choir-oplog` and `choir-view`,
-and the one-way rows of `DECISIONS.md` are mostly about those three numbers.
-Three rules govern them:
+`FORMAT_VERSION` appears in `choir-store`, `choir-oplog` and `choir-view`.
 
-- Hashes are **self-describing**: a codec byte names the hash function, so a
-  hash migration adds a codec rather than rewriting every stored identifier.
-- A field that will be needed later is present from day one.
-  `OpEntry::witnesses` has existed since the first entry, empty, making the
-  D16 swap to a witnessed log a value change.
-- Adding an operation variant is **one-way for readers**. The first accepted
-  entry of that shape permanently ends replay compatibility with earlier
-  binaries.
+- Hashes are **self-describing**: a codec byte names the function, so a
+  migration adds a codec.
+- Fields needed later exist from day one: `OpEntry::witnesses` has always
+  been present and empty (D16, D67).
+- Adding an operation variant is **one-way for readers**.
 
 ## Where to go next
 
@@ -139,4 +115,4 @@ Three rules govern them:
 | To run one | `docs/operating/running-a-node.md` |
 | To use one | `docs/using/cli.md` |
 | Why a decision went the way it did | `DECISIONS.md` |
-| To catch up on a log and check the page you were served | `SYNC.md` |
+| To catch up on a log and check a served page | `SYNC.md` |
