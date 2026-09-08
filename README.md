@@ -29,11 +29,12 @@ all work, because the sequencer runs inside an ordinary `pre-receive` hook.
 
 ## Quick start
 
-You need [Rust](https://rustup.rs/) and `git`. Two commands, and the second
-one prints the URL:
+No toolchain needed, only `git`. Two installers and the command that uses
+them, which prints the URL when it is done:
 
 ```bash
-cargo install --git https://github.com/deadcaf3/choir choir-cli choir-node
+curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
+curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
 choir host
 ```
 
@@ -59,28 +60,43 @@ narrated, and it is the fastest way to understand the model.
 
 ## Install
 
-**From source, today.** This is the working install until the first tagged
-release, and it needs only a Rust toolchain:
+**One command, no toolchain.** macOS and Linux, x86-64 and arm64. The
+archives are prebuilt and every one carries a `SHA256` beside it, with a
+`sha256.sum` over the set:
+
+```bash
+curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
+```
+
+That gives you `choir` and `choir-mcp`. Add the node's own binaries only if
+you are running a node rather than talking to someone else's:
+
+```bash
+curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
+```
+
+Both land in `$CARGO_HOME/bin` (`~/.cargo/bin` by default) and print what
+they wrote where. [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall)
+fetches the same archives with `cargo binstall choir-cli choir-node`.
+
+**From source**, if you would rather compile what you run. Needs only a Rust
+toolchain from [rustup](https://rustup.rs/):
 
 ```bash
 cargo install --git https://github.com/deadcaf3/choir choir-cli choir-node
 ```
 
-`choir-cli` gives you `choir` and `choir-mcp`. `choir-node` gives you
-`choir-node` and `choir-ssh`, and you only need it if you are running a node
-rather than talking to someone else's. Both land in `~/.cargo/bin`.
+Neither package pulls in `choir-actor`, the one crate that needs this
+workspace's `LIBSQLITE3_FLAGS`, so this builds with no checkout and none of
+the repository's cargo configuration.
 
-**From a release archive.** Once a version is tagged, prebuilt archives for
-macOS and Linux on x86-64 and arm64 are published with `SHA256` sums beside
-them, installable with one `curl` and no toolchain, or with
-[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall). Nothing is
-published to a package registry.
+Nothing is published to a package registry. These are the release archives
+and their checksums, nothing else.
 
 **What the binaries shell out to.** `git` and `curl` always; `openssl` and
 `ssh-keygen` for the commands that use them; `mergiraf` only if you want
 structured merges. On macOS, workspaces use APFS `clonefile`; on Linux, a
 btrfs volume gives the same snapshot-backed behaviour.
-
 ---
 
 ## Run a node
