@@ -145,9 +145,9 @@ fn a_stranger_at_the_bare_address_gets_a_page_rather_than_a_password_box() {
     //
     // `git clone` rather than `choir git-credential`: the credential
     // helper is configured by `choir join` now, so naming it here would
-    // be teaching a step nobody has to take. The install is first
-    // because a stranger reading this has no `choir` yet.
-    for command in ["install.sh", "choir join", "git clone", "choir propose"] {
+    // be teaching a step nobody has to take. The install is asserted
+    // separately below, because it is not one of the steps.
+    for command in ["choir join", "git clone", "choir propose"] {
         assert!(
             body.contains(command),
             "the front door does not name `{command}`: {body}"

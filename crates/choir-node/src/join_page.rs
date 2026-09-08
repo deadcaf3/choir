@@ -860,15 +860,20 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     // Deliberately the same steps as the per-repository contribute page,
     // in the same order, because a front door that describes a different
     // product from the one behind it is worse than a front door with no
-    // description. The install is the one extra: a stranger reading this
-    // has no `choir` yet, and the contribute page's reader was sent
-    // there by an invite they were already acting on.
+    // description.
     //
-    // `NODE`, `REPO` and `RELEASE` stay placeholders: this page is
-    // static by construction and must not learn this node's own address.
+    // The install is not one of the steps. It is the paragraph below,
+    // which is where somebody who has no `choir` at all needs it -- and
+    // keeping it out of the numbered list is what lets the list stay the
+    // answer to "what is it like to use this", which is the question a
+    // reader who already has the binary is asking.
+    //
+    // `NODE` and `REPO` stay placeholders, like `RELEASE-HOST` below:
+    // this page is static by construction and must not learn this node's
+    // own address.
     h.push_str("<h2>What using it looks like</h2>");
     h.push_str(
-        "<p>Two commands to be set up, and then the git you already know. There is no \
+        "<p>One command to be set up, and then the git you already know. There is no \
          registration form and no second message to wait for.</p>",
     );
     // Where `choir` comes from, before the three commands that assume
@@ -885,11 +890,6 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
          <pre class=\"cmd\">curl -fsSL https://RELEASE-HOST/choir-cli-installer.sh | sh</pre>",
     );
     h.push_str("<ol class=\"steps\">");
-    h.push_str(
-        "<li><h3>Install <code>choir</code></h3><p>One command, and nothing else has to \
-         be on the machine first.</p>\
-         <pre class=\"cmd\">curl -fsSL RELEASE/install.sh | sh</pre></li>",
-    );
     h.push_str(
         "<li><h3><code>choir join</code></h3><p>Paste the whole invite link, quotes \
          included. It mints your key, stores your token, and points git at that token \
