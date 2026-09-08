@@ -25,25 +25,25 @@ The signed-operation API is the primary agent path: it carries actor identity an
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/submit` | Submit one signed operation (hex payload, hex signature) |
-| `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads (throughput figures live in the build log, not here, so they cannot go stale) |
-| `GET /api/view?limit=N&offset=M` | The materialized view plus the latest ref-state attestation, durable key bindings, T2 new-actor review outcomes, T3 concentration, T4 newcomer harm, complete-view growth, the commit this daemon was built from, and the sequencer's measured decision latency against the 100 ms gate. On a node running an ACL you are served your own slice: the repositories your credential may read, plus reviews you were assigned to; the node-wide sections need a node-wide grant. A repository missing from the response is one you were not granted, not one that is gone. Every map-shaped section is bounded: `limit` rows each (200 by default, 1000 at most), `offset` rows skipped in key order, `<section>_omitted` counting what this page left out, and `paging.next` naming the request that fetches the rest or being null when there is none |
-| `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; it requests operator adjudication and never changes privilege |
-| `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`: entries evicted from the in-memory window are served from the persisted log (`source` says which), and a node that cannot reach that far back answers 409 rather than a page with a hole in it. Each entry carries its hash, parent and author signature so pages can be chained, replayed and checked against the chain a second reader holds; SYNC.md is that procedure |
+| `POST /api/submit-batch` | Same, in array order; the primary path for agent workloads |
+| `GET /api/view?limit=N&offset=M` | The materialized view plus the latest ref-state attestation, key bindings, T2 review outcomes, T3 concentration, T4 newcomer harm, view growth, the build commit, and the sequencer's p99 against the 100 ms gate. Under an ACL you get your own slice; node-wide sections need a node-wide grant, and a missing repository is one you were not granted. Map-shaped sections are bounded: `limit` rows (200 default, 1000 max), `offset`, `<section>_omitted`, and `paging.next` |
+| `POST /api/appeal` | Record an appeal for a rejected newcomer attempt; requests operator adjudication and never changes privilege |
+| `GET /api/log?from=N` | Ordered log entries, the catch-up and sync primitive. Absolute `from`; evicted entries are served from the persisted log (`source` says which), and a node that cannot reach back answers 409. Each entry carries hash, parent and author signature; SYNC.md is the verification procedure |
 | `POST /api/workspace` | Provision a CoW workspace; optional exact base/change binding makes retries idempotent |
 | `POST /api/workspace/archive` | Recoverably archive a change-bound workspace and remove it from the active view |
 | `GET /api/reviews?reviewer=X` | One actor's pending review queue |
-| `GET /api/schema` | This surface, machine-readable and versioned, plus what this particular node will accept — the description an agent generates a client from (D17) |
-| `GET /api/search?q=X&in=code&repo=owner/name&rev=R&limit=N` | Search repository contents, file names or commit messages. Node-wide by default: every repository your credential may read, each at its own HEAD, which is why `rev` is accepted only alongside a single `repo`. A repository you were not granted is absent from the results and, asked for by name, is answered exactly as one that does not exist. Unindexed -- one `git grep` per repository -- so `limit` bounds what comes back while `matches` still counts everything found, and `truncated` says which happened. The same search the browser pages run, so the two cannot disagree about what a match is |
-| `GET /api/profile?channel=X` | One actor's standing, counted out of the view you may already see: the keys bound to them and how many ops ago, changes they own, reviews they were assigned and the verdicts they gave, approvals slashed, checks they reported. It is a reading of `/api/view` and never a wider one -- two callers with different grants get different numbers about the same actor, which is the point. `vouches` names the operator whose graph it is (a vouch is between operators, so `ops/agent` reads `ops`), who vouches for them and whether each edge points both ways. D24 wants key age, vouches, scoped grants and bonds against approval inflation; two of the four are reported here as inputs, because a score would be a weighting of one against the other that nobody has measured. Scoped grants exist since D66 and are absent from this reading on purpose: a time-locked grant lives in the node's authorization files rather than in the log, so nothing counted out of the view can see one |
+| `GET /api/schema` | This surface, machine-readable and versioned, plus what this node will accept; the description an agent generates a client from (D17) |
+| `GET /api/search?q=X&in=code&repo=owner/name&rev=R&limit=N` | Search repository contents, file names or commit messages across every repository you may read, each at HEAD; `rev` needs a single `repo`. Ungranted repositories are absent, or answered as nonexistent by name. Unindexed (`git grep`): `limit` bounds the results, `matches` counts everything, `truncated` says which |
+| `GET /api/profile?channel=X` | One actor's standing out of the view you may see: bound keys and their age, changes owned, reviews assigned and verdicts given, approvals slashed, checks reported, and `vouches` with direction. Two callers with different grants get different numbers. No score; time-locked grants (D66) live outside the log and are not counted |
 | `GET /llms.txt` | This surface, as text, for an agent that has never seen choir |
-| `GET /sync.md` | The sync contract, in full: cursor semantics and how to verify a page's hash chain and author signatures so a page is replayable and checkable |
-| `GET /api/repos` | Which repositories this credential can see, from the filesystem rather than the view — a repository is not an entity in the view, and `portable::repos` already answers which ones exist by walking the root. Narrowed rather than refused, like the other aggregate reads: `narrowed` says whether an ACL was applied, so "you can see none" is distinguishable from "there are none". |
-| `POST /api/repo` | Create a repository on a running node, with the `pre-receive` hook that puts its pushes in the sequencer's order; needs a node-wide write grant, because there is no repository yet to be scoped to. Nothing is appended to the log: a repository is not a value in the view, and which ones exist is answered by the filesystem, as the export already does |
+| `GET /sync.md` | The sync contract: cursor semantics and how to verify a page's hash chain and author signatures |
+| `GET /api/repos` | Which repositories this credential can see, read from the filesystem; `narrowed` says whether an ACL was applied |
+| `POST /api/repo` | Create a repository on a running node with the `pre-receive` hook that sequences its pushes; needs a node-wide write grant; appends nothing to the log |
 | `GET /api/ref-agreement` | Where the op log and the bare repos disagree about a ref, read-only |
-| `POST /api/accounts/invite` | Mint a single-use, expiring invite for a new account and the grants it will hold; needs a node-wide write grant, and can never issue one. A grant may carry its own deadline, `owner/repo write until=<unix seconds>` (D66); the invite's expiry bounds redemption, never what redemption hands over |
-| `POST /api/accounts/redeem` | Redeem an invite — presented as the credential — for a token, once, and register an ssh key with it |
-| `POST /api/accounts/request/grant` | Answer somebody who asked for access (D72): turns their pending request into an invite under the id and secret they already hold, so the link they were given starts working with nothing sent |
-| `POST /api/accounts/request/decline` | Drop a pending access request. Their link then says only that it is not valid, the same as a link that never existed |
+| `POST /api/accounts/invite` | Mint a single-use, expiring invite and the grants it will hold; needs a node-wide write grant and can never issue one; a grant may carry `until=<unix seconds>` (D66) |
+| `POST /api/accounts/redeem` | Redeem an invite, presented as the credential, for a token, once, and register an ssh key |
+| `POST /api/accounts/request/grant` | Answer an access request (D72): turns it into an invite under the id and secret the asker already holds |
+| `POST /api/accounts/request/decline` | Drop a pending access request; their link then reads as never valid |
 | `POST /api/accounts/revoke` | Delete an account: its token stops authenticating on the next request, and its grants and keys go with it |
 | `GET /api/accounts` | Who holds an account, what they were granted, and which invites are outstanding; never a secret or its hash |
 | `POST /api/git-update` | Internal: the pre-receive hook callback |
@@ -54,38 +54,38 @@ The signed-operation API is the primary agent path: it carries actor identity an
 **getting started**
 
 - `choir host [--domain <name> | --public [--ip <addr>] | --public-name <name>] [--port <n>] [--repo <owner/name.git>] [--invite <name>] [--state <dir>] [--yes] [--dry-run] [--foreground] [-- <daemon flags>]`  
-  take this machine from nothing to a running node and print the URL people use; bare it binds loopback in seconds, --domain issues a Let's Encrypt certificate for a name you already own, and --public wears a magic-DNS name over this box's address so a VPS with no domain can still be reached over TLS — the node refuses a public bind without one. `--foreground` execs the daemon instead of installing a unit, for a container whose runtime is already the supervisor. Named `host` rather than `node host` for the reason `init` is not `node init`: `choir node …` is the family for a node that exists, and this is what you run when there is not one yet
+  take this machine from nothing to a running node and print its URL; bare binds loopback, --domain issues a Let's Encrypt certificate for a name you own, --public uses a magic-DNS name over this box's address, --foreground execs the daemon instead of installing a unit
 - `choir init [<state-dir>] [--port <n>] [--force]`  
-  set up a node on this machine from nothing: a repository root, a credential at 0600, an actor key the node will trust, and a .choir/config so the other commands stop asking which node you mean; refuses and names what exists rather than overwriting a token nothing can reissue
+  set up a node's layout on this machine: repository root, credential at 0600, an actor key the node trusts, and .choir/config; refuses to overwrite what exists
 - `choir key <key-file> [name]`  
   mint a key and print the line the operator registers; pass your channel name to print the bound form
 - `choir git-credential <auth-file> [--auth-user <name>] get|store|erase`  
-  git credential helper: hands git your token on stdin so it never lives in a remote URL; configure once with `git config credential.helper '''!choir git-credential <auth-file>'''`
+  git credential helper: hands git your token on stdin so it never lives in a remote URL; configure with `git config credential.helper '!choir git-credential <auth-file>'`
 - `choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]`  
-  redeem the one link an operator sent you and set this machine up in one step: an actor key at ~/.choir/agent.key, the issued token at ~/.choir/auth (0600), a git credential helper scoped to that node so `git clone` and `git push` need no token in the URL, and the node's URL in ~/.choir/config so no later command has to be told it; --user names the account, which most invites leave for you to pick and which the op log then keeps forever -- the link form asks for it on the terminal when the invite left it open, and refuses rather than guessing when there is no terminal to ask; the three-argument form is the agent's, takes the invite from a file, answers with JSON and touches neither git nor your home directory; on a node started with --invite-binds-keys the key is registered by the redemption itself
+  redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, and the node URL in ~/.choir/config; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory
 - `choir docs [--open]`  
-  build this repository's documentation: the book from `docs/`, and the API documentation inside it at `book/api/` so the prose can link to a type; needs a checkout and `mdbook`, and refuses with the command that installs it
+  build the book from `docs/` with the API documentation inside it at `book/api/`; needs a checkout and `mdbook`, and names the install command if it is missing
 - `choir skill install [--into <dir>]`  
-  install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
+  install the choir agent skill (default .claude/skills), rendered from this binary's own surface table; re-run after upgrading
 
 **changing code**
 
 - `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...`  
-  provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
+  provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree
 - `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>`  
-  publish an immutable change revision after committing and pushing its Git object
+  publish an immutable change revision after committing and pushing its git object
 - `choir propose [reviewer]... [--key-file <path>] [--channel <name>] [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]...`  
-  create a change, push its commits and request review, with no arguments at all; run it from a git checkout, which is where the node, the repository and the branch come from, while the key and the channel come from what `choir join` left in ~/.choir -- every one of them has a flag to override it; the revision is checkpointed on the way, and the branch name is the change identity, so re-running after an amend updates the same proposal; a leading `<key-file> <channel>` pair is still accepted, recognised by the first argument being a file that exists
+  create a change, push its commits and request review, with no arguments; run from a git checkout, with the key and channel from ~/.choir, every value overridable by flag; re-running after an amend updates the same proposal; a leading `<key-file> <channel>` pair is still accepted
 - `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>`  
   owner-sign and recoverably archive a bound workspace; exact retries are idempotent
 - `choir submit <api> <key-file> <channel> '<op-json>'`  
   sign and submit one raw operation
 - `choir batch <api> <key-file> <channel> <ops-file>`  
-  sign and submit many operations as one batch — the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op in order
+  sign and submit many operations as one batch, the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op
 - `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'`  
   publish a task spec or plan so other agents can see intent
 - `choir state <api> <channel>`  
-  list what you owe and what you are waiting on; bounded, and every row carries the command that answers it and that command's risk
+  list what you owe and what you are waiting on; every row carries the command that answers it and its risk
 
 **review**
 
@@ -94,9 +94,9 @@ The signed-operation API is the primary agent path: it carries actor identity an
 - `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]`  
   answer a review you were assigned
 - `choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'`  
-  say something on a review; append-only and permanent, and the comment id is your retry identity
+  say something on a review; append-only, and the comment id is your retry identity
 - `choir viewed <api> <key-file> <viewer> <review-id>`  
-  record that you read a review, so its author can tell "reviewed and ignored" from "nobody looked"; first read only, resubmitting is refused
+  record that you read a review; first read only, resubmitting is refused
 - `choir slash <api> <node-key-file> <id> <reviewer> '<reason>'`  
   invalidate one reviewer's approval; operator-only and never moves a ref
 - `choir abandon <api> <node-key-file> <id>`  
@@ -107,86 +107,86 @@ The signed-operation API is the primary agent path: it carries actor identity an
 **checks**
 
 - `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running|errored [evidence] [--ref <repo:ref>]`  
-  report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
+  report one automated check's outcome on a commit; any runner or person can report by signing, and the node never runs the check
 - `choir checks <api> <git-oid>`  
   every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running, 4 could not be run
 
 **trust**
 
 - `choir witness <api> <key-file> <channel>`  
-  cosign the node's current ref-state attestation (D67); the snapshot id is read from the view rather than passed, so a witness cannot attest a ref-state it did not look at, and the node may not witness its own
+  cosign the node's current ref-state attestation (D67); the snapshot id is read from the view, and the node may not witness its own
 - `choir vouch <api> <key-file> <channel> <subject> [note]`  
-  vouch for another operator; both ends need a key bound in the log, it authorizes nothing on its own, and there is no score
+  vouch for another operator; both ends need a key bound in the log, and it authorizes nothing on its own
 - `choir unvouch <api> <key-file> <channel> <subject> '<reason>'`  
-  withdraw a vouch; the edge leaves the view and both ops stay in the log, so vouching again is allowed and starts a fresh clock
+  withdraw a vouch; both ops stay in the log, and vouching again starts a fresh clock
 
 **reading the node**
 
 - `choir schema <api>`  
   print this node's machine-readable API description and its live capabilities
 - `choir log <api> [--from <n>] [--verify] [--keys <file>]`  
-  read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag
+  read log entries from a cursor; --verify checks continuity, recomputes every hash and verifies the signatures whose keys you hold
 - `choir appeal <api> <attempt-id>`  
   appeal a rejected newcomer attempt for operator adjudication; never grants privilege
 - `choir profile <api> <channel>`  
   what the log records about one actor: keys and their age, changes owned, verdicts given, checks reported
 - `choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]`  
-  find a term across every repository you may read; the term is literal, not a pattern
+  find a literal term across every repository you may read
 - `choir triage <api>`  
-  every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
+  every review and change in a bucket (landed, awaiting verdicts, changes requested, approved awaiting landing), most actionable first, capped, with truncation marked in-band
 - `choir funnel <api>`  
-  the contribution funnel from admission to first verdict, and the steepest drop between two stages; counts what this credential may read, and reports the first-contact stage as null rather than inventing a zero
+  the contribution funnel from admission to first verdict and the steepest drop between stages; counts what this credential may read, and reports an unmeasured stage as null
 - `choir view <api> [--limit <n>] [--offset <n>]`  
-  read the materialized view, its ref-state attestation and the node's health counters; map-shaped sections page 200 rows at a time, with `<section>_omitted` and `paging.next` describing the rest
+  read the materialized view, its ref-state attestation and the node's health counters; map-shaped sections page 200 rows at a time, with `<section>_omitted` and `paging.next`
 
 **operating a node**
 
 - `choir invite <api> <name> <owner/repo> [read|write]`  
-  mint an invite and print the one link to send; the same thing the node's /people page does, for when a terminal is where you are
+  mint an invite and print the one link to send; the same thing the /people page does
 - `choir asks <api>`  
   who has asked for access and is waiting on an answer (D72)
 - `choir grant <api> <request-id> <owner/repo> [read|write]`  
-  let one of them in; the link they already hold becomes their invite, so there is nothing to send
+  let one of them in; the link they already hold becomes their invite
 - `choir decline <api> <request-id>`  
-  drop a pending request; their link then reads as one that was never valid
+  drop a pending request; their link then reads as never valid
 - `choir runner <config-file>`  
-  drive one workspace lifecycle step for an orchestrator; a JSON request on stdin, a JSON result on stdout
+  drive one workspace lifecycle step for an orchestrator; JSON request on stdin, JSON result on stdout
 - `choir bind <api> <node-key-file> <operator> <key-hex> [channel]`  
   record in the log that a key belongs to an operator; operator-only and never moves a ref
 - `choir revoke <api> <node-key-file> <key-hex> '<reason>'`  
   withdraw a key binding; terminal, and the attribution row survives
 - `choir acl render <api> <acl-file>`  
-  rewrite an ACL file's trailing comments to name the person behind each handle; the grants themselves are copied through unchanged, and a handle the node can no longer name loses its comment
+  rewrite an ACL file's trailing comments to name the person behind each handle; grants are copied through unchanged
 - `choir repo create <api> <owner/repo.git>`  
-  create a repository on a running node, hooked into the sequencer from its first push, without restarting anything; needs a node-wide write grant, answers 409 rather than an error when it already exists, and prints the clone URL because cloning is what happens next
+  create a repository on a running node, sequenced from its first push; needs a node-wide write grant, answers 409 when it already exists, and prints the clone URL
 - `choir repo list <api>`  
-  the repositories on a node this credential can read, one per line; an ACL narrows the list rather than refusing it, and the command says which of the two empty answers it is giving
+  the repositories on a node this credential can read, one per line; an ACL narrows the list rather than refusing it
 - `choir repo url <api> <owner/repo.git>`  
-  the clone URL for a repository, with the one line of git configuration that makes pushing to it work; the credential is never put in the URL, because a URL is pasted into shells, screenshots and issue trackers and a token in one is a token in all three
+  the clone URL for a repository, and the one line of git configuration that makes pushing work; the credential is never put in the URL
 - `choir node serve [--state <dir>] [--port <n>] [--create <owner/repo.git>] [-- <daemon flags>]`  
-  run the node in this terminal, deriving its repository root, credential and trusted-key file from the layout `choir init` wrote, so starting one takes the same arguments as creating one — none; execs the daemon rather than wrapping it, so signals and the exit code reach the real process
+  run the node in this terminal, deriving root, credential and trusted keys from what `choir init` wrote; execs the daemon so signals and the exit code reach the real process
 - `choir node install [--state <dir>] [--port <n>] [-- <daemon flags>]`  
-  hand the node to this machine's service manager — a launchd agent on macOS, a systemd user unit on Linux — so it survives a logout, a crash and a reboot; the unit runs `choir node serve`, so a flag changing later never means re-rendering it
+  hand the node to launchd (macOS) or a systemd user unit (Linux) so it survives logout, crash and reboot; the unit runs `choir node serve`
 - `choir node tls <domain> --user <account> [--port <n>] [--dry-run | --staging]`  
-  obtain a Let's Encrypt certificate for this node and wire up its renewal: certbot, a deploy hook that re-projects the pair and restarts the node because the daemon reads its certificate once at bind, and the two-line marker `node serve` reads. The only command here that expects root, and it has a name so it appears in sudo's log as itself; `--user` is required rather than inferred, because under sudo this process is root and the node deliberately is not
+  obtain a Let's Encrypt certificate for this node and wire up renewal: certbot, a deploy hook that re-projects the pair and restarts the node, and the marker `node serve` reads; the only command here that expects root, and `--user` is required
 - `choir node stop `  
-  stop the supervised node for this boot, leaving the unit in place so it returns at next login; `node uninstall` is the one that ends it
+  stop the supervised node for this boot, leaving the unit in place; `node uninstall` is the one that ends it
 - `choir node restart `  
-  reload the unit and start it again, which is how a rebuilt binary reaches the running node; the unit is torn down and re-bootstrapped rather than kicked, because a kick relaunches the arguments the service manager cached rather than the ones on disk
+  reload the unit and start it again, which is how a rebuilt binary reaches the running node
 - `choir node uninstall `  
-  stop the node and remove its unit so it does not come back; the state directory is kept, because the keys, the repositories and the op log are in it and no command of ours deletes those
+  stop the node and remove its unit; the state directory, with the keys, repositories and op log, is kept
 - `choir node logs [<lines>] [--state <dir>]`  
-  the tail of the node's log, wherever this machine's service manager was told to write it; defaults to the last 30 lines
+  the tail of the node's log; defaults to the last 30 lines
 - `choir node status [<api>]`  
-  what the node is doing right now: health, the commit actually serving, the sequencer's position and its measured p99 against the 100 ms gate, and how much this credential can see; sections a narrower credential may not read say so rather than reading as an idle node
+  health, the commit serving, the sequencer's position and its p99 against the 100 ms gate, and how much this credential can see
 - `choir doctor [<api>] [--state <dir>]`  
-  check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails. On a machine that is *hosting* a node it adds six rows — bind address, TLS, certificate expiry, linger, whether the unit is running, and whether the public URL answers
+  check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers
 - `choir backup verify <backup-dir>`  
-  whether a backup can be restored from, which is a different claim from whether one was written; checks the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, and refuses a backup that carries a key or a credential — every check local, nothing asked of the node it is a copy of
+  whether a backup can be restored from: the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, refusing a backup that carries a key or credential; every check local
 - `choir backup restore <backup-dir> <target-root>`  
-  turn a backup back into a node, and refuse to say it worked until the restored node has accepted a real push: it reads and refuses before it writes a byte, unbundles the git objects before the first boot, then rehearses on a port it picks itself and proves the append chained onto what it replayed; exit 3 means a secret only you can supply is missing
+  turn a backup back into a node and prove it by accepting a real push: reads and refuses before writing, unbundles git objects before the first boot, rehearses on a port it picks; exit 3 means a secret only you can supply is missing
 - `choir repair <log-file> --verify | --truncate-tail`  
-  inspect a stopped node's op log, or repair a tail that was still being written; `--verify` walks the hash chain and changes nothing, `--truncate-tail` quarantines the partial record to a sidecar before cutting, and damage anywhere but the tail is refused rather than patched over
+  inspect a stopped node's op log, or repair a tail that was still being written; `--verify` changes nothing, `--truncate-tail` quarantines the partial record before cutting, and damage anywhere but the tail is refused
 
 Most commands take the node's URL first. Put `node = <url>` in `.choir/config`, in the working directory or any parent, and it is filled in when omitted. `choir <command> --help` prints one command's spec.
 

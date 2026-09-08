@@ -116,34 +116,27 @@ class Choir:
 
     def choir_submit_batch(self, **arguments):
         """Same, in array order; the primary path for agent workloads
-        (throughput figures live in the build log, not here, so they
-        cannot go stale)
 
         Arguments become the JSON request body.
         """
         return self._request("POST", "/api/submit-batch", body=arguments)
 
     def choir_view(self, **arguments):
-        """The materialized view plus the latest ref-state attestation,
-        durable key bindings, T2 new-actor review outcomes, T3
-        concentration, T4 newcomer harm, complete-view growth, the commit
-        this daemon was built from, and the sequencer's measured decision
-        latency against the 100 ms gate. On a node running an ACL you are
-        served your own slice: the repositories your credential may read,
-        plus reviews you were assigned to; the node-wide sections need a
-        node-wide grant. A repository missing from the response is one
-        you were not granted, not one that is gone. Every map-shaped
-        section is bounded: `limit` rows each (200 by default, 1000 at
-        most), `offset` rows skipped in key order, `<section>_omitted`
-        counting what this page left out, and `paging.next` naming the
-        request that fetches the rest or being null when there is none
+        """The materialized view plus the latest ref-state attestation, key
+        bindings, T2 review outcomes, T3 concentration, T4 newcomer harm,
+        view growth, the build commit, and the sequencer's p99 against
+        the 100 ms gate. Under an ACL you get your own slice; node-wide
+        sections need a node-wide grant, and a missing repository is one
+        you were not granted. Map-shaped sections are bounded: `limit`
+        rows (200 default, 1000 max), `offset`, `<section>_omitted`, and
+        `paging.next`
 
         Arguments become the query string: limit, offset.
         """
         return self._request("GET", "/api/view", query=arguments)
 
     def choir_appeal(self, **arguments):
-        """Record an appeal for a rejected newcomer attempt; it requests
+        """Record an appeal for a rejected newcomer attempt; requests
         operator adjudication and never changes privilege
 
         Arguments become the JSON request body.
@@ -152,12 +145,10 @@ class Choir:
 
     def choir_log(self, **arguments):
         """Ordered log entries, the catch-up and sync primitive. Absolute
-        `from`: entries evicted from the in-memory window are served from
-        the persisted log (`source` says which), and a node that cannot
-        reach that far back answers 409 rather than a page with a hole in
-        it. Each entry carries its hash, parent and author signature so
-        pages can be chained, replayed and checked against the chain a
-        second reader holds; SYNC.md is that procedure
+        `from`; evicted entries are served from the persisted log
+        (`source` says which), and a node that cannot reach back answers
+        409. Each entry carries hash, parent and author signature;
+        SYNC.md is the verification procedure
 
         Arguments become the query string: from.
         """
@@ -187,47 +178,32 @@ class Choir:
         return self._request("GET", "/api/reviews", query=arguments)
 
     def choir_schema(self):
-        """This surface, machine-readable and versioned, plus what this
-        particular node will accept — the description an agent
-        generates a client from (D17)
+        """This surface, machine-readable and versioned, plus what this node
+        will accept; the description an agent generates a client from
+        (D17)
 
         Takes no arguments.
         """
         return self._request("GET", "/api/schema")
 
     def choir_search(self, **arguments):
-        """Search repository contents, file names or commit messages.
-        Node-wide by default: every repository your credential may read,
-        each at its own HEAD, which is why `rev` is accepted only
-        alongside a single `repo`. A repository you were not granted is
-        absent from the results and, asked for by name, is answered
-        exactly as one that does not exist. Unindexed -- one `git grep`
-        per repository -- so `limit` bounds what comes back while
-        `matches` still counts everything found, and `truncated` says
-        which happened. The same search the browser pages run, so the two
-        cannot disagree about what a match is
+        """Search repository contents, file names or commit messages across
+        every repository you may read, each at HEAD; `rev` needs a single
+        `repo`. Ungranted repositories are absent, or answered as
+        nonexistent by name. Unindexed (`git grep`): `limit` bounds the
+        results, `matches` counts everything, `truncated` says which
 
         Arguments become the query string: q, in, repo, rev, limit.
         """
         return self._request("GET", "/api/search", query=arguments)
 
     def choir_profile(self, **arguments):
-        """One actor's standing, counted out of the view you may already
-        see: the keys bound to them and how many ops ago, changes they
-        own, reviews they were assigned and the verdicts they gave,
-        approvals slashed, checks they reported. It is a reading of
-        `/api/view` and never a wider one -- two callers with different
-        grants get different numbers about the same actor, which is the
-        point. `vouches` names the operator whose graph it is (a vouch is
-        between operators, so `ops/agent` reads `ops`), who vouches for
-        them and whether each edge points both ways. D24 wants key age,
-        vouches, scoped grants and bonds against approval inflation; two
-        of the four are reported here as inputs, because a score would be
-        a weighting of one against the other that nobody has measured.
-        Scoped grants exist since D66 and are absent from this reading on
-        purpose: a time-locked grant lives in the node's authorization
-        files rather than in the log, so nothing counted out of the view
-        can see one
+        """One actor's standing out of the view you may see: bound keys and
+        their age, changes owned, reviews assigned and verdicts given,
+        approvals slashed, checks reported, and `vouches` with direction.
+        Two callers with different grants get different numbers. No
+        score; time-locked grants (D66) live outside the log and are not
+        counted
 
         Arguments become the query string: channel.
         """

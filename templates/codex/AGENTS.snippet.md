@@ -25,34 +25,34 @@ curl — it signs correctly and exits 0/1 for accepted/rejected:
 
 For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` before the subcommand. Credentials are read from the named file, never an environment variable.
 
-- `choir key <key-file> [name]` — mint a key and print the line the operator registers; pass your channel name to print the bound form
-- `choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]` — redeem the one link an operator sent you and set this machine up in one step: an actor key at ~/.choir/agent.key, the issued token at ~/.choir/auth (0600), a git credential helper scoped to that node so `git clone` and `git push` need no token in the URL, and the node's URL in ~/.choir/config so no later command has to be told it; --user names the account, which most invites leave for you to pick and which the op log then keeps forever -- the link form asks for it on the terminal when the invite left it open, and refuses rather than guessing when there is no terminal to ask; the three-argument form is the agent's, takes the invite from a file, answers with JSON and touches neither git nor your home directory; on a node started with --invite-binds-keys the key is registered by the redemption itself
-- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...` — provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree this change declares it works within
-- `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>` — publish an immutable change revision after committing and pushing its Git object
-- `choir propose [reviewer]... [--key-file <path>] [--channel <name>] [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]...` — create a change, push its commits and request review, with no arguments at all; run it from a git checkout, which is where the node, the repository and the branch come from, while the key and the channel come from what `choir join` left in ~/.choir -- every one of them has a flag to override it; the revision is checkpointed on the way, and the branch name is the change identity, so re-running after an amend updates the same proposal; a leading `<key-file> <channel>` pair is still accepted, recognised by the first argument being a file that exists
-- `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>` — owner-sign and recoverably archive a bound workspace; exact retries are idempotent
-- `choir schema <api>` — print this node's machine-readable API description and its live capabilities
-- `choir log <api> [--from <n>] [--verify] [--keys <file>]` — read log entries from a cursor; --verify checks continuity, recomputes every hash, and verifies the signatures whose keys you hold — SYNC.md as a flag
-- `choir batch <api> <key-file> <channel> <ops-file>` — sign and submit many operations as one batch — the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op in order
-- `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...` — request review on a commit; name no reviewers and the node draws them
-- `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]` — answer a review you were assigned
-- `choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'` — say something on a review; append-only and permanent, and the comment id is your retry identity
-- `choir viewed <api> <key-file> <viewer> <review-id>` — record that you read a review, so its author can tell "reviewed and ignored" from "nobody looked"; first read only, resubmitting is refused
-- `choir witness <api> <key-file> <channel>` — cosign the node's current ref-state attestation (D67); the snapshot id is read from the view rather than passed, so a witness cannot attest a ref-state it did not look at, and the node may not witness its own
-- `choir vouch <api> <key-file> <channel> <subject> [note]` — vouch for another operator; both ends need a key bound in the log, it authorizes nothing on its own, and there is no score
-- `choir unvouch <api> <key-file> <channel> <subject> '<reason>'` — withdraw a vouch; the edge leaves the view and both ops stay in the log, so vouching again is allowed and starts a fresh clock
-- `choir appeal <api> <attempt-id>` — appeal a rejected newcomer attempt for operator adjudication; never grants privilege
-- `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'` — publish a task spec or plan so other agents can see intent
-- `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running|errored [evidence] [--ref <repo:ref>]` — report one automated check's outcome on a commit; any runner or a person can report by signing, and the node never runs the check
-- `choir checks <api> <git-oid>` — every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running, 4 could not be run
-- `choir profile <api> <channel>` — what the log records about one actor: keys and their age, changes owned, verdicts given, checks reported
-- `choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]` — find a term across every repository you may read; the term is literal, not a pattern
-- `choir reviews <api> <reviewer>` — your pending review queue
-- `choir triage <api>` — every review and change classified into a bucket — landed, awaiting verdicts, changes requested, approved awaiting landing — ranked most-actionable-first, capped, with truncation marked in-band
-- `choir state <api> <channel>` — list what you owe and what you are waiting on; bounded, and every row carries the command that answers it and that command's risk
-- `choir skill install [--into <dir>]` — install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
-- `choir view <api> [--limit <n>] [--offset <n>]` — read the materialized view, its ref-state attestation and the node's health counters; map-shaped sections page 200 rows at a time, with `<section>_omitted` and `paging.next` describing the rest
-- `choir doctor [<api>] [--state <dir>]` — check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails. On a machine that is *hosting* a node it adds six rows — bind address, TLS, certificate expiry, linger, whether the unit is running, and whether the public URL answers
+- `choir key <key-file> [name]`: mint a key and print the line the operator registers; pass your channel name to print the bound form
+- `choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]`: redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, and the node URL in ~/.choir/config; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory
+- `choir workspace <api> <owner/repo> <name> [--base <git-oid> --owner <channel> --key-file <path> --change <id> --idempotency-key <key>] [--path <prefix>]...`: provision a CoW workspace; advanced flags owner-sign an exact base and stable change, and each --path owner-signs a subtree
+- `choir checkpoint <api> <key-file> <channel> <change-id> <workspace-id> <git-oid>`: publish an immutable change revision after committing and pushing its git object
+- `choir propose [reviewer]... [--key-file <path>] [--channel <name>] [--api <url>] [--repo <owner/repo>] [--remote <name>] [--onto <branch>] [--change <id>] [--path <prefix>]...`: create a change, push its commits and request review, with no arguments; run from a git checkout, with the key and channel from ~/.choir, every value overridable by flag; re-running after an amend updates the same proposal; a leading `<key-file> <channel>` pair is still accepted
+- `choir workspace-archive <api> <key-file> <channel> <owner/repo> <name> <change-id> <idempotency-key>`: owner-sign and recoverably archive a bound workspace; exact retries are idempotent
+- `choir schema <api>`: print this node's machine-readable API description and its live capabilities
+- `choir log <api> [--from <n>] [--verify] [--keys <file>]`: read log entries from a cursor; --verify checks continuity, recomputes every hash and verifies the signatures whose keys you hold
+- `choir batch <api> <key-file> <channel> <ops-file>`: sign and submit many operations as one batch, the primary path for agent workloads; one op per line, `-` reads stdin, one result line per op
+- `choir review <api> <key-file> <channel> <id> <git-oid> [--ref <repo:ref>] [reviewer]...`: request review on a commit; name no reviewers and the node draws them
+- `choir verdict <api> <key-file> <reviewer> <id> approve|request-changes [note]`: answer a review you were assigned
+- `choir comment <api> <key-file> <channel> <review-id> <comment-id> '<body>'`: say something on a review; append-only, and the comment id is your retry identity
+- `choir viewed <api> <key-file> <viewer> <review-id>`: record that you read a review; first read only, resubmitting is refused
+- `choir witness <api> <key-file> <channel>`: cosign the node's current ref-state attestation (D67); the snapshot id is read from the view, and the node may not witness its own
+- `choir vouch <api> <key-file> <channel> <subject> [note]`: vouch for another operator; both ends need a key bound in the log, and it authorizes nothing on its own
+- `choir unvouch <api> <key-file> <channel> <subject> '<reason>'`: withdraw a vouch; both ops stay in the log, and vouching again starts a fresh clock
+- `choir appeal <api> <attempt-id>`: appeal a rejected newcomer attempt for operator adjudication; never grants privilege
+- `choir intent <api> <key-file> <channel> <subject> <kind> '<body>'`: publish a task spec or plan so other agents can see intent
+- `choir check <api> <key-file> <channel> <git-oid> <name> passed|failed|running|errored [evidence] [--ref <repo:ref>]`: report one automated check's outcome on a commit; any runner or person can report by signing, and the node never runs the check
+- `choir checks <api> <git-oid>`: every check reported on a commit, and one verdict; exits 0 passed, 1 failed or unreported, 3 still running, 4 could not be run
+- `choir profile <api> <channel>`: what the log records about one actor: keys and their age, changes owned, verdicts given, checks reported
+- `choir search <api> <term> [--in files|code|commits] [--repo owner/name] [--rev R] [--limit N]`: find a literal term across every repository you may read
+- `choir reviews <api> <reviewer>`: your pending review queue
+- `choir triage <api>`: every review and change in a bucket (landed, awaiting verdicts, changes requested, approved awaiting landing), most actionable first, capped, with truncation marked in-band
+- `choir state <api> <channel>`: list what you owe and what you are waiting on; every row carries the command that answers it and its risk
+- `choir skill install [--into <dir>]`: install the choir agent skill (default .claude/skills), rendered from this binary's own surface table; re-run after upgrading
+- `choir view <api> [--limit <n>] [--offset <n>]`: read the materialized view, its ref-state attestation and the node's health counters; map-shaped sections page 200 rows at a time, with `<section>_omitted` and `paging.next`
+- `choir doctor [<api>] [--state <dir>]`: check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers
 <!-- /generated -->
 
 Signatures above are generated; these conventions are not, and they are

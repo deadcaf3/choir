@@ -135,9 +135,9 @@ Authentication is passed as flags: `choir --auth-file ~/.choir/auth --auth-user 
 
 | Command | What it does |
 |:--|:--|
-| `choir host` | take this machine from nothing to a running node and print the… |
+| `choir host` | take this machine from nothing to a running node and print its… |
 | `choir key` | mint a key and print the line the operator registers |
-| `choir join` | redeem the one link an operator sent you and set this machine… |
+| `choir join` | redeem an invite link and set this machine up: actor key at… |
 | `choir workspace` | provision a CoW workspace |
 | `choir propose` | create a change, push its commits and request review, with no… |
 | `choir reviews` | your pending review queue |
