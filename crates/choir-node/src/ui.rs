@@ -1741,9 +1741,25 @@ mod tests {
     /// light-canonical with dark as the deviation, and both spellings
     /// satisfy the property this test is for. What actually has to hold
     /// is that a system preference is honoured **and** that both
-    /// `data-theme` overrides exist to beat it — a reader who has chosen
-    /// must win over the machine that guessed. That is what the three
-    /// assertions below say.
+    /// `data-theme` overrides beat it — a reader who has chosen must win
+    /// over the machine that guessed.
+    ///
+    /// **Existing is not beating, and the difference is one selector.**
+    /// `:root[data-theme="light"]` and `:root:not([data-theme="light"])`
+    /// score the same, (0,2,0): a `:root` pseudo-class and an attribute
+    /// are both class-level, and `:not()` contributes only its argument.
+    /// Equal specificity is settled by source order, and the media query
+    /// is written below the light block — so an *unguarded* query would
+    /// win over a reader who explicitly chose light, on every machine
+    /// set to dark. Nothing else here would see it: every token is
+    /// defined, every component is clean, and the page is simply the
+    /// palette that reader said they did not want.
+    ///
+    /// The guard is what makes it right, so the guard is what is
+    /// asserted. This is not the sheet's arrangement today being pinned
+    /// for its own sake: the same property could be had by moving the
+    /// block instead, and a sheet that does that will fail this and
+    /// should be read before it is changed to pass.
     #[test]
     fn the_token_block_is_present_and_theme_complete() {
         let sheet = include_str!("ui.css");
@@ -1761,6 +1777,21 @@ mod tests {
         assert!(
             sheet.contains(r#":root[data-theme="dark"]"#),
             "manual dark override lost"
+        );
+        // The chosen palette must survive the guessed one. Either the
+        // query excludes the reader who chose, or the block that serves
+        // them is written after it; the sheet does the first.
+        let query = sheet
+            .find("@media (prefers-color-scheme:dark)")
+            .expect("the dark palette is still carried by a media query");
+        let light = sheet
+            .find(r#":root[data-theme="light"]"#)
+            .expect("checked above");
+        assert!(
+            sheet[query..].contains(r#":root:not([data-theme="light"])"#) || light > query,
+            "the dark media query neither excludes an explicit light choice nor is \
+             written above it, and the two selectors score the same — so a reader who \
+             chose light is served dark on any machine set to dark"
         );
         assert!(
             sheet.contains("prefers-reduced-motion"),
