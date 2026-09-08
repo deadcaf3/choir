@@ -3,7 +3,15 @@ name = "choir-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 authors.workspace = true
+
+# Not a release artifact yet. The bridge needs a GitHub App private key
+# and an upstream to mirror before it does anything, and D21 makes it the
+# follower half of a pair. It ships when there is an operator story for
+# it, not because it happens to build.
+[package.metadata.dist]
+dist = false
 
 [dependencies]
 choir-fs = { path = "../choir-fs" }

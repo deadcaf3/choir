@@ -3,7 +3,14 @@ name = "choir-merge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 authors.workspace = true
+
+# Not a release artifact. `choir-revert-scan` is a falsification run
+# against repositories the operator already has; it reports a number
+# about a corpus, and shipping it invites reading ours as theirs.
+[package.metadata.dist]
+dist = false
 
 [dependencies]
 diffy = "0.4"

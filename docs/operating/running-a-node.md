@@ -13,6 +13,38 @@ policy behind each flag has its own page: `docs/operating/authorization.md`,
 
 The daemon serves **git smart-HTTP** and the **platform API** on one port (default **8417**). Every repository is served with a `pre-receive` hook or it is not sequenced, so make them with `choir repo create` against a running node, or `--create` at startup; a bare repository that arrives any other way — restored from a bundle, copied in — is adopted and hooked at the next start. With no arguments, the binary uses `./repos` and port 8417; configured invocations must supply both `<repo-root>` and `<port>` before any flags.
 
+## Getting the binaries
+
+One command, no Rust toolchain and no OpenSSL headers. macOS and Linux,
+x86-64 and arm64:
+
+```bash
+curl -fsSL https://<release-host>/choir-node-installer.sh | sh   # choir-node, choir-ssh
+curl -fsSL https://<release-host>/choir-cli-installer.sh | sh    # choir, choir-mcp
+```
+
+Take both: every command on this page is `choir`, and `choir node serve`
+execs the daemon the first line installed. Both land in `$CARGO_HOME/bin`
+(`~/.cargo/bin` by default), and each release publishes a `SHA256` beside
+every archive with a `sha256.sum` over the set. `<release-host>` is a
+placeholder until the first release is cut.
+
+`cargo binstall choir-node choir-cli` fetches the same archives.
+
+**From source** is the audited path and still supported: what you run is
+what you compiled, from a tree you can read. It needs the toolchain and
+the headers the [README](../../README.md#requirements) lists.
+
+```bash
+cargo build --release -p choir-node -p choir-cli
+export PATH="$PWD/target/release:$PATH"
+```
+
+A prebuilt daemon reports the commit it was built from the same way a
+source-built one does — `choir node status` and `choir --version` read a
+stamp the release workflow sets, not a `git rev-parse` in whatever
+directory you are standing in.
+
 ## One command
 
 ```bash

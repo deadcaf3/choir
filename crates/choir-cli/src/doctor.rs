@@ -358,7 +358,8 @@ fn node_check(api: Option<&str>, auth: Option<&str>, curl: bool) -> Check {
 /// inputs differently from the commands it is diagnosing is checking a
 /// configuration nobody runs.
 pub fn run(api: Option<&str>, auth: Option<&str>) -> Vec<Check> {
-    let mut checks = tool_checks();
+    let mut checks = vec![self_check()];
+    checks.extend(tool_checks());
     let curl = checks
         .iter()
         .any(|c| c.name == "curl" && c.status == Status::Pass);
@@ -366,6 +367,74 @@ pub fn run(api: Option<&str>, auth: Option<&str>) -> Vec<Check> {
     checks.push(auth_check(auth));
     checks.push(node_check(api, auth, curl));
     checks
+}
+
+/// What this `choir` is: its version, the commit it was built from, and
+/// the file it is running as.
+///
+/// First in the report because every other line describes the machine
+/// and this one describes the thing doing the reporting. The common
+/// support question after there are two ways to obtain the binary is
+/// "which one am I running" — an old copy in `~/.cargo/bin` shadowing a
+/// new one in a build tree answers every other check identically.
+///
+/// The stamp source is carried through rather than summarised: `env`
+/// means something set `CHOIR_GIT_HEAD` at build time, which is the
+/// release workflow and the on-box installer; `git` means a build in a
+/// checkout; `unavailable` means neither, and the commit reads
+/// `unknown`. See `crates/choir-node/build.rs`.
+///
+/// Deliberately not claimed: *which* installer put it there. The shell
+/// installer writes no receipt (the self-updater that would consume one
+/// is off, on purpose), so a binary in `$CARGO_HOME/bin` could equally
+/// have come from `cargo install` or `cargo binstall`. Naming one of
+/// them would be a guess printed as a fact, in the one command whose
+/// whole job is to stop people guessing.
+fn self_check() -> Check {
+    let Ok(exe) = std::env::current_exe() else {
+        // Not a failure: the binary plainly ran. It just cannot say
+        // which file it is, which is a curiosity rather than a fault.
+        return Check::warn(
+            "choir",
+            format!(
+                "{} {} (this process cannot name its own path)",
+                env!("CARGO_PKG_VERSION"),
+                choir_node::build_line()
+            ),
+        );
+    };
+    let where_ = if crate::supervise::in_build_directory(&exe) {
+        "a build directory"
+    } else if in_cargo_home(&exe) {
+        "an install directory"
+    } else {
+        "not an install or build directory"
+    };
+    Check::pass(
+        "choir",
+        format!(
+            "{} {}, {} ({where_})",
+            env!("CARGO_PKG_VERSION"),
+            choir_node::build_line(),
+            exe.display()
+        ),
+    )
+}
+
+/// Whether a path sits in the `bin` directory both installers write to.
+///
+/// `CARGO_HOME` before `HOME/.cargo`, in that order, because that is the
+/// order the shell installer resolves it in and this has to agree with
+/// the thing it is describing.
+fn in_cargo_home(exe: &std::path::Path) -> bool {
+    let bin = match std::env::var_os("CARGO_HOME") {
+        Some(home) => PathBuf::from(home).join("bin"),
+        None => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(".cargo").join("bin"),
+            None => return false,
+        },
+    };
+    exe.parent() == Some(bin.as_path())
 }
 
 /// The six facts that describe a machine *hosting* a node, as opposed
