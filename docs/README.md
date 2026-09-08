@@ -25,7 +25,8 @@ with a link to the node when the publishing workflow supplies that address
 
 | You want | Read |
 |:--|:--|
-| What this is and how the pieces fit | [Architecture](architecture.md) |
+| To know what this is and whether you want it | [Why choir exists](why.md) |
+| How the pieces fit | [Architecture](architecture.md) |
 | To run a node | [Running a node](operating/running-a-node.md) |
 | To use a node | [The CLI and HTTP API](using/cli.md) |
 | To get a change reviewed and landed | [The contribution workflow](using/workflow.md) |
@@ -59,7 +60,7 @@ rather than configuration:
 | [The CLI and HTTP API](using/cli.md) | Every command and endpoint, generated from one table |
 | [The contribution workflow](using/workflow.md) | Workspace to landed ref, and the review rules that bite in practice |
 | [Agent templates](../templates/README.md) | Drop-in harness snippets for Claude Code, Codex and Cursor |
-| [`agents.md`](../agents.md) | The same surface written for an agent that has never seen choir |
+| [`AGENTS.md`](../AGENTS.md) | The same surface written for an agent that has never seen choir |
 
 ## Reference
 
@@ -67,7 +68,7 @@ rather than configuration:
 |:--|:--|
 | [Troubleshooting](reference/troubleshooting.md) | Symptoms, causes, fixes |
 | [`ERRORS.md`](../ERRORS.md) | Every rejection code and its repair hint — generated from the node's own table |
-| [`SYNC.md`](../SYNC.md) | Catching up on a log, and verifying a page's hash chain and signatures without trusting the node that served it |
+| [`SYNC.md`](../SYNC.md) | Catching up on a log, and replaying a page's hash chain and signatures so what the node served is checkable |
 | [`DECISIONS.md`](../DECISIONS.md) | What each `D<n>` in the code means, and which are one-way doors |
 | [Bridge permissions](../crates/choir-bridge/PERMISSIONS.md) | The minimum GitHub App grants, and what must not be granted |
 
@@ -82,7 +83,7 @@ it against its source and fails when they differ. Regenerate with
 | The surface block in [using/cli.md](using/cli.md) | `crates/choir-cli/src/surface.rs` |
 | `theme/choir-tokens.css`, the book's palette | `crates/choir-node/src/ui.css` |
 | The cheat-sheet block in [the README](../README.md) | `crates/choir-cli/src/surface.rs` |
-| [`agents.md`](../agents.md), `/llms.txt`, `/api/schema` | `crates/choir-cli/src/surface.rs` |
+| [`AGENTS.md`](../AGENTS.md), `/llms.txt`, `/api/schema` | `crates/choir-cli/src/surface.rs` |
 | [`ERRORS.md`](../ERRORS.md) | `crates/choir-node/src/reject.rs` |
 | The command lists in [`templates/`](../templates/README.md) | `crates/choir-cli/src/surface.rs` |
 

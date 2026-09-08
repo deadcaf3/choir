@@ -146,3 +146,10 @@ Do not put AI or tool attribution in commit messages.
    implementation, and any hashed struct you added.
 
 Security issues do not go here. See [`SECURITY.md`](SECURITY.md).
+
+## For the operator
+
+What has to be set in the GitHub UI rather than in a file — repository
+settings, Pages, the custom domain and the two repository variables
+`.github/workflows/pages.yml` reads — is a checklist in
+[`.github/README-metadata.md`](.github/README-metadata.md).

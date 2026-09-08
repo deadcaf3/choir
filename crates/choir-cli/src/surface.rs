@@ -1,7 +1,7 @@
 //! The agent-facing surface, as data, and the generators that render it.
 //!
 //! `choir --help`, `docs/using/cli.md`, the README's cheat-sheet, the
-//! three `templates/` snippets, the root `agents.md` and the node's
+//! three `templates/` snippets, the root `AGENTS.md` and the node's
 //! `llms.txt` all describe one surface. Hand-maintained, they drift —
 //! and they had already started to: the API table carried a throughput
 //! figure that three later measurements had superseded.
@@ -866,8 +866,8 @@ pub const ENDPOINTS: &[Endpoint] = &[
                   entries evicted from the in-memory window are served from the persisted log \
                   (`source` says which), and a node that cannot reach that far back answers 409 \
                   rather than a page with a hole in it. Each entry carries its hash, parent and \
-                  author signature so pages can be chained and verified without trusting the \
-                  node; SYNC.md is that procedure",
+                  author signature so pages can be chained, replayed and checked against the \
+                  chain a second reader holds; SYNC.md is that procedure",
         mcp: Some(McpTool {
             name: "choir_log",
             input_schema: LOG_MCP_SCHEMA,
@@ -951,8 +951,8 @@ pub const ENDPOINTS: &[Endpoint] = &[
                   with different grants get different numbers about the same actor, which is \
                   the point. `vouches` names the operator whose graph it is (a vouch is between \
                   operators, so `ops/agent` reads `ops`), who vouches for them and whether each \
-                  edge points both ways. D24 wants key age, vouches, scoped grants and bonds for \
-                  Sybil resistance; two of the four are reported here as inputs, because a \
+                  edge points both ways. D24 wants key age, vouches, scoped grants and bonds against \
+                  approval inflation; two of the four are reported here as inputs, because a \
                   score would be a weighting of one against the other that nobody has \
                   measured. Scoped grants exist since D66 and are absent from this reading on \
                   purpose: a time-locked grant lives in the node's authorization files rather \
@@ -975,7 +975,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
         method: "GET",
         path: "/sync.md",
         purpose: "The sync contract, in full: cursor semantics and how to verify a page's \
-                  hash chain and author signatures without trusting the node serving them",
+                  hash chain and author signatures so a page is replayable and checkable",
         mcp: None,
     },
     Endpoint {
@@ -1358,7 +1358,7 @@ pub fn command_bullets() -> String {
     out
 }
 
-/// `agents.md`: the generated choir reference for coding agents.
+/// `AGENTS.md`: the generated choir reference for coding agents.
 #[must_use]
 pub fn agents_md() -> String {
     format!(
@@ -1642,7 +1642,7 @@ pub const SKILL_DIR: &str = "choir";
 
 /// The installable agent skill.
 ///
-/// Rendered from the same table as `--help` and `agents.md` at the moment
+/// Rendered from the same table as `--help` and `AGENTS.md` at the moment
 /// of installation, so — unlike docs baked in as static files — the
 /// installed skill can never describe a different version than the binary
 /// that wrote it. Re-installing after an upgrade refreshes it.
@@ -1813,7 +1813,7 @@ pub fn artifacts(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Stri
         std::fs::read_to_string(root.join(rel)).map_err(|e| format!("{rel}: {e}"))
     };
     let mut out = vec![
-        (root.join("agents.md"), agents_md()),
+        (root.join("AGENTS.md"), agents_md()),
         (root.join("crates/choir-node/src/llms.txt"), llms_txt()),
         (
             root.join("crates/choir-node/src/contribute.html"),
