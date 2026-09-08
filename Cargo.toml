@@ -118,8 +118,9 @@ publish-jobs = []
 plan-jobs = ["./gate-quick"]
 # Extra steps spliced into every build job, resolved relative to
 # `.github/workflows/`. One step, and it is the build stamp:
-# `.github/workflows/build-setup.yml`.
-github-build-setup = "build-setup.yml"
+# `.github/build-setup.yml`, one level up, because GitHub parses every
+# file under `workflows/` as a workflow and this one is a step list.
+github-build-setup = "../build-setup.yml"
 
 # No self-updater. `choir` telling itself to fetch a new binary is a
 # second, unaudited install path, and the one command that installs it
