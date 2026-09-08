@@ -285,8 +285,8 @@ choir_view() {
 	choir_run view "$@"
 }
 
-# choir doctor [<api>]
-#   check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails
+# choir doctor [<api>] [--state <dir>]
+#   check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails. On a machine that is *hosting* a node it adds six rows — bind address, TLS, certificate expiry, linger, whether the unit is running, and whether the public URL answers
 choir_doctor() {
 	choir_run doctor "$@"
 }

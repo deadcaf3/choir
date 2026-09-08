@@ -15,6 +15,7 @@ mod credential;
 mod deploy;
 mod doctor;
 mod gate;
+mod host;
 mod init;
 mod insight;
 mod install_policy;
