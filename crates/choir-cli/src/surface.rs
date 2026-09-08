@@ -316,16 +316,6 @@ const APPEAL_MCP_SCHEMA: &str = r#"{
 /// Every `choir` subcommand, in help order.
 pub const COMMANDS: &[Command] = &[
     Command {
-        name: "init",
-        args: "[<state-dir>] [--port <n>] [--force]",
-        summary: "set up a node on this machine from nothing: a repository root, a credential \
-                  at 0600, an actor key the node will trust, and a .choir/config so the other \
-                  commands stop asking which node you mean; refuses and names what exists \
-                  rather than overwriting a token nothing can reissue",
-        agent_facing: false,
-        group: "getting started",
-    },
-    Command {
         name: "host",
         args: "[--domain <name> | --public [--ip <addr>] | --public-name <name>] \
                [--port <n>] [--repo <owner/name.git>] [--invite <name>] [--state <dir>] \
@@ -340,6 +330,16 @@ pub const COMMANDS: &[Command] = &[
                   than `node host` for the reason `init` is not `node init`: `choir node …` \
                   is the family for a node that exists, and this is what you run when there \
                   is not one yet",
+        agent_facing: false,
+        group: "getting started",
+    },
+    Command {
+        name: "init",
+        args: "[<state-dir>] [--port <n>] [--force]",
+        summary: "set up a node on this machine from nothing: a repository root, a credential \
+                  at 0600, an actor key the node will trust, and a .choir/config so the other \
+                  commands stop asking which node you mean; refuses and names what exists \
+                  rather than overwriting a token nothing can reissue",
         agent_facing: false,
         group: "getting started",
     },
@@ -1304,6 +1304,7 @@ pub fn cli_doc_surface() -> String {
 /// Checked against [`COMMANDS`] by the surface test: a name here that no
 /// longer exists fails rather than silently rendering nothing.
 pub const DAY_ONE: &[&str] = &[
+    "host",
     "key",
     "join",
     "workspace",

@@ -3,15 +3,15 @@
   "commands": [
     {
       "agent_facing": false,
-      "args": "[<state-dir>] [--port <n>] [--force]",
-      "name": "init",
-      "summary": "set up a node on this machine from nothing: a repository root, a credential at 0600, an actor key the node will trust, and a .choir/config so the other commands stop asking which node you mean; refuses and names what exists rather than overwriting a token nothing can reissue"
-    },
-    {
-      "agent_facing": false,
       "args": "[--domain <name> | --public [--ip <addr>] | --public-name <name>] [--port <n>] [--repo <owner/name.git>] [--invite <name>] [--state <dir>] [--yes] [--dry-run] [--foreground] [-- <daemon flags>]",
       "name": "host",
       "summary": "take this machine from nothing to a running node and print the URL people use; bare it binds loopback in seconds, --domain issues a Let's Encrypt certificate for a name you already own, and --public wears a magic-DNS name over this box's address so a VPS with no domain can still be reached over TLS — the node refuses a public bind without one. `--foreground` execs the daemon instead of installing a unit, for a container whose runtime is already the supervisor. Named `host` rather than `node host` for the reason `init` is not `node init`: `choir node …` is the family for a node that exists, and this is what you run when there is not one yet"
+    },
+    {
+      "agent_facing": false,
+      "args": "[<state-dir>] [--port <n>] [--force]",
+      "name": "init",
+      "summary": "set up a node on this machine from nothing: a repository root, a credential at 0600, an actor key the node will trust, and a .choir/config so the other commands stop asking which node you mean; refuses and names what exists rather than overwriting a token nothing can reissue"
     },
     {
       "agent_facing": true,
