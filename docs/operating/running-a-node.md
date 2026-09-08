@@ -33,7 +33,7 @@ placeholder until the first release is cut.
 
 **From source** is the audited path and still supported: what you run is
 what you compiled, from a tree you can read. It needs the toolchain and
-the headers the [README](../../README.md#requirements) lists.
+the headers the [README](../../README.md#install) lists.
 
 ```bash
 cargo build --release -p choir-node -p choir-cli
