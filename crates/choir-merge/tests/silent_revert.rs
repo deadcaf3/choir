@@ -149,6 +149,8 @@ fn absorbing_reports_sums_every_counter_including_the_skips() {
         skipped_no_base: 1,
         lines_relocated: 3,
         paths_all_relocated: 1,
+        lines_surviving_elsewhere: 5,
+        findings_all_surviving: 2,
         findings: Vec::new(),
     };
     a.absorb(a.clone());
@@ -161,6 +163,72 @@ fn absorbing_reports_sums_every_counter_including_the_skips() {
     assert_eq!(a.skipped_no_base, 2);
     assert_eq!(a.lines_relocated, 6);
     assert_eq!(a.paths_all_relocated, 2);
+    assert_eq!(a.lines_surviving_elsewhere, 10);
+    assert_eq!(a.findings_all_surviving, 4);
+}
+
+/// A reverted line that is sitting in the merge result, in another
+/// file, is counted as surviving -- and still reported.
+///
+/// This is the refactor shape the relocation cancellation cannot see:
+/// the destination addition is attributable to the author's own
+/// proposal, so it never enters the injected set, so it cancels
+/// nothing. Both halves are asserted, because counting it without
+/// reporting it would be the filter this measurement declines to add.
+#[test]
+fn a_reverted_line_still_present_in_the_result_is_counted_and_still_reported() {
+    let out_of = Blobs {
+        base: "a\nfn moved_body() { work(); }\n".into(),
+        target: "a\nfn moved_body() { work(); }\n".into(),
+        proposed: "a\nfn moved_body() { work(); }\n".into(),
+        result: "a\n".into(),
+    };
+    // The author proposed this file's new content, so the arriving line
+    // is attributable here and is never an injection.
+    let into = Blobs {
+        base: "b\n".into(),
+        target: "b\n".into(),
+        proposed: "b\nfn moved_body() { work(); }\n".into(),
+        result: "b\nfn moved_body() { work(); }\n".into(),
+    };
+    let mut report = ScanReport::default();
+    scan_merge(
+        "m",
+        &[("out.rs".into(), out_of), ("into.rs".into(), into)],
+        &mut report,
+    );
+    assert_eq!(
+        report.lines_relocated, 0,
+        "the existing cancellation cannot see this shape; if it can, this \
+         test is now asserting the wrong thing"
+    );
+    assert_eq!(report.lines_surviving_elsewhere, 1);
+    assert_eq!(report.findings_all_surviving, 1);
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "surviving lines are counted, never silently dropped"
+    );
+    assert_eq!(
+        report.findings[0].reverted,
+        vec!["fn moved_body() { work(); }".to_string()]
+    );
+}
+
+/// The counter must not fire on a line that genuinely left the tree.
+#[test]
+fn a_reverted_line_absent_from_the_result_does_not_count_as_surviving() {
+    let lost = Blobs {
+        base: "a\nfn work() { real(); }\n".into(),
+        target: "a\nfn work() { real(); }\n".into(),
+        proposed: "a\nfn work() { real(); }\n".into(),
+        result: "a\n".into(),
+    };
+    let mut report = ScanReport::default();
+    scan_merge("m", &[("lost.rs".into(), lost)], &mut report);
+    assert_eq!(report.lines_surviving_elsewhere, 0);
+    assert_eq!(report.findings_all_surviving, 0);
+    assert_eq!(report.findings.len(), 1);
 }
 
 #[test]

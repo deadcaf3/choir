@@ -85,14 +85,21 @@ fn main() {
     println!("  skipped large      {}", total.skipped_large);
     println!("  lines relocated    {}", total.lines_relocated);
     println!("  paths all moved    {}", total.paths_all_relocated);
+    println!("  lines surviving    {}", total.lines_surviving_elsewhere);
     println!("  findings           {}", total.findings.len());
+    println!("  of those, surviving {}", total.findings_all_surviving);
     println!("  merges violating   {:.4}", total.merge_violation_rate());
     // Said every run, because the number is the part that travels and
     // this is the part that keeps it honest.
     println!(
         "\n  A finding is evidence, not proof: a merge whose conflicts a\n  \
          human resolved by hand may legitimately drop lines neither\n  \
-         parent dropped. Look at the findings before quoting the rate."
+         parent dropped. \"Surviving\" counts reverted lines still\n  \
+         present somewhere in the result, which is what a refactor that\n  \
+         moves code looks like; they are counted and still reported,\n  \
+         because presence is a cheap test a short line passes by\n  \
+         accident. The true rate is between the two.\n  \
+         Look at the findings before quoting either number."
     );
 }
 

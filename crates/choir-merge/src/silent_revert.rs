@@ -165,6 +165,14 @@ pub struct ScanReport {
     /// Paths whose whole apparent violation was relocation, and which
     /// therefore produced no finding.
     pub paths_all_relocated: usize,
+    /// Distinct lines reported as reverted that are nonetheless present
+    /// somewhere in the merge result. Counted, never cancelled: see
+    /// [`scan_merge`] on why this is a second number and not a filter.
+    pub lines_surviving_elsewhere: usize,
+    /// Findings every one of whose reverted lines survives somewhere in
+    /// the result, and which carry no injection either. These are the
+    /// candidates for refactor noise rather than lost work.
+    pub findings_all_surviving: usize,
     /// The violations, in the order found.
     pub findings: Vec<Finding>,
 }
@@ -196,6 +204,8 @@ impl ScanReport {
         self.skipped_large += other.skipped_large;
         self.lines_relocated += other.lines_relocated;
         self.paths_all_relocated += other.paths_all_relocated;
+        self.lines_surviving_elsewhere += other.lines_surviving_elsewhere;
+        self.findings_all_surviving += other.findings_all_surviving;
         self.findings.extend(other.findings);
     }
 }
@@ -257,6 +267,33 @@ fn is_evidence(line: &str) -> bool {
 /// never across merges: content leaving one commit and appearing in
 /// another, later, is not a move, and treating it as one would hide the
 /// exact class this scan exists to count.
+///
+/// # Survival, which is a second number rather than a second filter
+///
+/// That cancellation requires the line to be *unattributable at both
+/// ends*. A refactor that moves a function into a file the author was
+/// already editing does not qualify: the destination addition is
+/// attributable to `base -> proposed`, so it never enters the injected
+/// set, so it cannot cancel anything, and the source removal is reported
+/// as a reversion of work that is sitting in the result untouched. On
+/// `git/git` that is most of what the raw findings are -- the object
+/// database refactor moving blocks out of `object-file.c` reads as
+/// fourteen reverted lines.
+///
+/// [`ScanReport::lines_surviving_elsewhere`] counts reverted lines that
+/// are present somewhere in this merge's result, and
+/// [`ScanReport::findings_all_surviving`] counts findings made entirely
+/// of them.
+///
+/// **They are counted and still reported.** Cancelling them would be the
+/// stronger detector and the weaker measurement: line presence anywhere
+/// in a result is a cheap test that a short or idiomatic line passes by
+/// accident, so silently dropping on it would remove true findings with
+/// no way to see how many. The kill criterion for this measurement was
+/// fixed before any number was known, and a filter added after seeing
+/// the data is exactly the move that discipline forbids. Two numbers let
+/// a reader bound the answer from both sides; one number chosen after
+/// the fact lets them do neither.
 pub fn scan_merge(merge: &str, paths: &[(String, Blobs)], report: &mut ScanReport) {
     use std::collections::BTreeSet;
 
@@ -290,6 +327,16 @@ pub fn scan_merge(merge: &str, paths: &[(String, Blobs)], report: &mut ScanRepor
         .collect();
     report.lines_relocated += relocated.len();
 
+    // Every line the merge result holds, across the paths this merge
+    // touched. A reverted line found here left its file and did not
+    // leave the tree.
+    let survives: BTreeSet<&str> = paths
+        .iter()
+        .flat_map(|(_, blobs)| blobs.result.lines())
+        .filter(|l| is_evidence(l))
+        .collect();
+
+    let mut surviving_lines: BTreeSet<String> = BTreeSet::new();
     for mut finding in raw {
         finding.reverted.retain(|l| !relocated.contains(l));
         finding.injected.retain(|l| !relocated.contains(l));
@@ -297,8 +344,18 @@ pub fn scan_merge(merge: &str, paths: &[(String, Blobs)], report: &mut ScanRepor
             report.paths_all_relocated += 1;
             continue;
         }
+        let outlives: Vec<&String> = finding
+            .reverted
+            .iter()
+            .filter(|l| survives.contains(l.as_str()))
+            .collect();
+        if finding.injected.is_empty() && outlives.len() == finding.reverted.len() {
+            report.findings_all_surviving += 1;
+        }
+        surviving_lines.extend(outlives.into_iter().cloned());
         report.findings.push(finding);
     }
+    report.lines_surviving_elsewhere += surviving_lines.len();
 }
 
 /// Runs `git` in `repo` with lazy fetching disabled, returning stdout.
