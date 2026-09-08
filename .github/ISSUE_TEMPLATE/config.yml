@@ -1,0 +1,13 @@
+# Blank issues are off so every report arrives with the two facts that
+# make it reproducible: what `choir doctor` said, and which build the node
+# was serving.
+#
+# There is no `contact_links` entry for the security advisory form,
+# deliberately: that form's URL contains the owner and repository name,
+# which are not known to a tracked file here. `03-security.yml` sends
+# people to the Security tab instead, which is a click rather than a URL.
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://docs.choirs.dev/
+    about: The book, including the API reference, published from main.

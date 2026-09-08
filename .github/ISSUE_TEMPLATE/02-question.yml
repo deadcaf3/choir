@@ -1,0 +1,29 @@
+name: Question
+description: How does this work, or why does it work that way?
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before asking why something is the way it is, check
+        `DECISIONS.md`. Every significant choice here is a numbered row
+        with its reasoning and whether it is a one-way door, and code
+        comments cite those numbers. The answer is often already written.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+
+  - type: input
+    id: looked
+    attributes:
+      label: Where you already looked
+      description: >
+        A decision number, a docs page, a rustdoc type — so the answer
+        can correct the page that failed you rather than only you.
+      placeholder: DECISIONS.md D24, docs/using/workflow.md
+    validations:
+      required: false

@@ -7,7 +7,7 @@
 Use GitHub's private vulnerability reporting on this repository
 (*Security* → *Report a vulnerability*), which opens a private advisory
 visible only to the maintainers. If that is unavailable to you, write to
-`<security-contact>`.
+`deadcaf3@pm.me`.
 
 Include what you need to make the problem reproducible: the version or
 commit, the configuration flags the node was started with, and the
@@ -33,8 +33,9 @@ look like vulnerabilities and are not.
 - **The operation log is readable by anyone holding a read grant on the
   repository.** It carries every ref update, review, verdict and key
   binding, with author signatures. It is designed to be replayed and
-  checked by people who do not trust the node. Treat anything you submit
-  as durable and visible to that audience.
+  checked by anyone holding that grant, against the copy they already
+  have. Treat anything you submit as durable and visible to that
+  audience.
 - **A compare-and-swap rejection is a normal outcome**, not a denial of
   service. Two writers racing one ref means one of them is told which
   head it lost to.
@@ -85,10 +86,13 @@ Reports in these areas are the ones worth your time and mine:
 
 ## Verifying a release yourself
 
-You do not have to trust a node to check what it served you. `choir log
---verify` walks the hash chain, recomputes every hash, and verifies the
-signatures for the keys you hold. [`SYNC.md`](SYNC.md) is the contract it
-implements, and every node serves that document at `GET /sync.md`.
+What a node serves is replayable and checkable. `choir log --verify`
+walks the hash chain, recomputes every hash, and verifies the signatures
+for the keys you hold. It is not a transparency log: there are no
+inclusion proofs, so a node serving two divergent histories is caught by
+two readers comparing, not by either alone. [`SYNC.md`](SYNC.md) is the
+contract it implements, and every node serves that document at
+`GET /sync.md`.
 
 Release artifacts carry a `SHA256SUMS` file and a CycloneDX SBOM per
 binary.

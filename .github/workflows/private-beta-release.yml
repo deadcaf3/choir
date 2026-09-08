@@ -1,5 +1,12 @@
 name: Private beta release
 
+# Dispatch only, and two of its three jobs will not start on a fresh
+# repository: `staging` and `production` want self-hosted runners
+# labelled `choir-staging` and `choir-production`. Without those runners
+# registered, pressing "Run workflow" queues those jobs until the run is
+# cancelled. `package` runs on a GitHub-hosted runner and is the half
+# that works out of the box.
+
 on:
   workflow_dispatch:
     inputs:

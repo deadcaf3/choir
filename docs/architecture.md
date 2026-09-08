@@ -139,4 +139,4 @@ Three rules govern them:
 | To run one | `docs/operating/running-a-node.md` |
 | To use one | `docs/using/cli.md` |
 | Why a decision went the way it did | `DECISIONS.md` |
-| To catch up on a log without trusting the node | `SYNC.md` |
+| To catch up on a log and check the page you were served | `SYNC.md` |

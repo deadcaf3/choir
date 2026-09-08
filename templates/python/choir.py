@@ -156,8 +156,8 @@ class Choir:
         the persisted log (`source` says which), and a node that cannot
         reach that far back answers 409 rather than a page with a hole in
         it. Each entry carries its hash, parent and author signature so
-        pages can be chained and verified without trusting the node;
-        SYNC.md is that procedure
+        pages can be chained, replayed and checked against the chain a
+        second reader holds; SYNC.md is that procedure
 
         Arguments become the query string: from.
         """
@@ -221,9 +221,9 @@ class Choir:
         point. `vouches` names the operator whose graph it is (a vouch is
         between operators, so `ops/agent` reads `ops`), who vouches for
         them and whether each edge points both ways. D24 wants key age,
-        vouches, scoped grants and bonds for Sybil resistance; two of the
-        four are reported here as inputs, because a score would be a
-        weighting of one against the other that nobody has measured.
+        vouches, scoped grants and bonds against approval inflation; two
+        of the four are reported here as inputs, because a score would be
+        a weighting of one against the other that nobody has measured.
         Scoped grants exist since D66 and are absent from this reading on
         purpose: a time-locked grant lives in the node's authorization
         files rather than in the log, so nothing counted out of the view
