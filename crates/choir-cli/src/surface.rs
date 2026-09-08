@@ -326,6 +326,24 @@ pub const COMMANDS: &[Command] = &[
         group: "getting started",
     },
     Command {
+        name: "host",
+        args: "[--domain <name> | --public [--ip <addr>] | --public-name <name>] \
+               [--port <n>] [--repo <owner/name.git>] [--invite <name>] [--state <dir>] \
+               [--yes] [--dry-run] [--foreground] [-- <daemon flags>]",
+        summary: "take this machine from nothing to a running node and print the URL people \
+                  use; bare it binds loopback in seconds, --domain issues a Let's Encrypt \
+                  certificate for a name you already own, and --public wears a magic-DNS \
+                  name over this box's address so a VPS with no domain can still be reached \
+                  over TLS — the node refuses a public bind without one. `--foreground` \
+                  execs the daemon instead of installing a unit, for a container whose \
+                  runtime is already the supervisor. Named `host` rather \
+                  than `node host` for the reason `init` is not `node init`: `choir node …` \
+                  is the family for a node that exists, and this is what you run when there \
+                  is not one yet",
+        agent_facing: false,
+        group: "getting started",
+    },
+    Command {
         name: "key",
         args: "<key-file> [name]",
         summary: "mint a key and print the line the operator registers; \
@@ -722,6 +740,19 @@ pub const COMMANDS: &[Command] = &[
         group: "operating a node",
     },
     Command {
+        name: "node tls",
+        args: "<domain> --user <account> [--port <n>] [--dry-run | --staging]",
+        summary: "obtain a Let's Encrypt certificate for this node and wire up its renewal: \
+                  certbot, a deploy hook that re-projects the pair and restarts the node \
+                  because the daemon reads its certificate once at bind, and the two-line \
+                  marker `node serve` reads. The only command here that expects root, and it \
+                  has a name so it appears in sudo's log as itself; `--user` is required \
+                  rather than inferred, because under sudo this process is root and the node \
+                  deliberately is not",
+        agent_facing: false,
+        group: "operating a node",
+    },
+    Command {
         name: "node stop",
         args: "",
         summary: "stop the supervised node for this boot, leaving the unit in place so it \
@@ -768,11 +799,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "doctor",
-        args: "[<api>]",
+        args: "[<api>] [--state <dir>]",
         summary: "check everything the other commands assume: the binaries this workspace \
                   shells out to, the auth file and its mode, and whether a node answers; \
                   each failure prints the command that fixes it, and a missing optional \
-                  tool warns rather than fails",
+                  tool warns rather than fails. On a machine that is *hosting* a node it \
+                  adds six rows — bind address, TLS, certificate expiry, linger, whether \
+                  the unit is running, and whether the public URL answers",
         // The one command worth reaching for when nothing else works,
         // so it is not gated on being an agent's habit.
         agent_facing: true,

@@ -50,7 +50,7 @@ For an authenticated node, place `[--auth-file <path>] [--auth-user <name>]` bef
 - `choir state <api> <channel>` — list what you owe and what you are waiting on; bounded, and every row carries the command that answers it and that command's risk
 - `choir skill install [--into <dir>]` — install the choir agent skill (default .claude/skills), rendered from this binary's own surface table so it can never document another version; re-run after upgrading and unchanged files are left alone
 - `choir view <api> [--limit <n>] [--offset <n>]` — read the materialized view, its ref-state attestation and the node's health counters; map-shaped sections page 200 rows at a time, with `<section>_omitted` and `paging.next` describing the rest
-- `choir doctor [<api>]` — check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails
+- `choir doctor [<api>] [--state <dir>]` — check everything the other commands assume: the binaries this workspace shells out to, the auth file and its mode, and whether a node answers; each failure prints the command that fixes it, and a missing optional tool warns rather than fails. On a machine that is *hosting* a node it adds six rows — bind address, TLS, certificate expiry, linger, whether the unit is running, and whether the public URL answers
 <!-- /generated -->
 - `GET $CHOIR_API/api/view` shows where every workspace and ref you can
   read points; prefer it over guessing. `GET $CHOIR_API/api/log?from=N` is the

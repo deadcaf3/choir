@@ -1120,3 +1120,48 @@ fn a_lapsed_node_grant_closes_the_node_wide_sections() {
         );
     }
 }
+
+/// Creating a repository is a node-wide write, and the ACL table has to
+/// say so.
+///
+/// It did not. The handler had said since it was written that this asks
+/// for `@node` write, but the path was absent from the endpoint table,
+/// so it fell through to the catch-all and every node with an ACL
+/// answered 404 to `choir repo create` — which is every node that has
+/// issued a second credential, and every node `choir host` stands up,
+/// since an accounts file is refused without an ACL.
+#[test]
+fn creating_a_repository_needs_a_node_write_and_is_reachable_with_one() {
+    let (url, _key, _work, _acl) = served(
+        "repo-create",
+        "alice @node write\nbob owner/thing.git own\n",
+        &[],
+    );
+    let create = format!("{url}/api/repo");
+    let body = r#"{"name":"owner/new.git"}"#;
+
+    // The operator's own credential: the grant this needs, and the one
+    // `choir host` writes into the file it creates.
+    let (status, answer) = curl(&["-u", "alice:a", "-X", "POST", "-d", body, &create]);
+    assert_eq!(
+        status, 201,
+        "an @node write could not create a repository, so no ACL'd node can: {answer}"
+    );
+
+    // Owning one repository is not authority over the node. It must
+    // still be refused, and refused as a denial rather than as a 404
+    // that reads like a broken build.
+    let (status, answer) = curl(&[
+        "-u",
+        "bob:b",
+        "-X",
+        "POST",
+        "-d",
+        r#"{"name":"owner/another.git"}"#,
+        &create,
+    ]);
+    assert_eq!(
+        status, 403,
+        "repository ownership became node authority: {answer}"
+    );
+}

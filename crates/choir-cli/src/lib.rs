@@ -46,6 +46,8 @@ pub mod doctor;
 // Same reason as `docs`: intra-doc links in the module's own header.
 pub mod init;
 // Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod host;
+// Same reason as `docs`: the module's own header carries intra-doc links.
 pub mod join;
 pub mod mcp;
 // Same reason as `docs`: the module's own header carries intra-doc
@@ -71,6 +73,8 @@ pub mod supervise;
 /// Colour, and the "did you mean" a refusal needs to be useful.
 pub mod style;
 pub mod surface;
+// Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod tls;
 pub mod triage;
 
 /// `SYNC.md`'s checks over a served log page.

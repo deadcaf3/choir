@@ -565,6 +565,497 @@ fn checked_level(level: &str) -> &str {
 /// `name` is a *display* name (D46). The account handle is minted by the
 /// node, so the string the op log carries forever is never one an
 /// operator typed at half past midnight.
+/// `choir host` — a fresh machine to a running node.
+///
+/// The composition, not a reimplementation: every step here is a call
+/// into the thing that already did it, and the value this adds is the
+/// order, the refusals between the steps, and the fact that a reader
+/// does not have to know which of three orders applies to their machine
+/// before they have run anything.
+///
+/// Two lines go to stdout at the end — the URL and, when one was asked
+/// for, the invite link — because those are the two things a person
+/// copies out of this. Everything else is stderr, so `choir host` inside
+/// a pipeline yields the addresses and nothing else.
+fn host(rest: &[&str]) -> ! {
+    let style = choir_cli::style::Style::for_stderr();
+    let options = match choir_cli::host::parse(rest, state_dir()) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("{} {error}", style.red("choir host:"));
+            std::process::exit(2);
+        }
+    };
+    let layout = choir_cli::serve::Layout::new(&options.state, options.port);
+    let user = choir_cli::host::username();
+    let mut done: Vec<String> = Vec::new();
+    let retry = rerun_line(rest);
+    eprintln!();
+
+    // 1. The state directory. Skipped rather than refused when it is
+    //    already there: `choir host` is the command people re-run after
+    //    pasting a sudo line, and a setup command that cannot be run
+    //    twice is one that strands them at step two.
+    if layout.missing().is_empty() {
+        step(
+            "state",
+            &format!("{} (already here, kept)", options.state.display()),
+        );
+    } else {
+        let plan = choir_cli::init::Plan::new(&options.state, options.port);
+        if let Err(error) = choir_cli::init::run(&plan, false) {
+            host_failed(&done, "state", &error, &retry);
+        }
+        step(
+            "state",
+            &format!(
+                "{} — credential, key, trusted keys",
+                options.state.display()
+            ),
+        );
+    }
+    done.push("state".to_string());
+
+    // The two files that make this a node other people can join, both
+    // created here rather than by `init`, because a node somebody is
+    // *hosting* is by definition one others are meant to reach, and a
+    // `--invite` that answers 503 is the whole command failing at its
+    // last line.
+    //
+    // They come as a pair and the daemon insists on it: an issued grant
+    // with no table to grade it against is a grant to every repository.
+    // The table this writes is the smallest one that is not a lie — the
+    // operator's own credential keeps everything, and every account
+    // issued afterwards holds exactly what its invite carried.
+    if !layout.acl.exists() {
+        let acl = "# Who may reach what (D29). `<user> <repo|*|@node> <level>`,\n\
+                   # levels read < propose < write < own. Issued grants (D36) are\n\
+                   # merged with this file; `own` and `@node` are granted here only.\n\
+                   choir * own\n\
+                   choir @node write\n";
+        if let Err(error) = choir_fs::write_atomic_private(&layout.acl, acl) {
+            host_failed(
+                &done,
+                "acl",
+                &format!("{}: {error}", layout.acl.display()),
+                &retry,
+            );
+        }
+    }
+    if !layout.accounts.exists() {
+        if let Err(error) = choir_fs::write_atomic_private(&layout.accounts, "") {
+            host_failed(
+                &done,
+                "accounts",
+                &format!("{}: {error}", layout.accounts.display()),
+                &retry,
+            );
+        }
+    }
+
+    // 2. The certificate, or the reason there is none.
+    let name = options.exposure.name();
+    match &name {
+        None => step("certificate", "not needed — this node binds loopback only"),
+        Some(name) => {
+            let sudo = tls_line(name, &user, options.port, options.dry_run);
+            match layout.tls() {
+                Some((cert, _)) if !options.dry_run && std::fs::File::open(&cert).is_ok() => {
+                    match choir_cli::tls::expiry(&cert) {
+                        Ok(when) => step(
+                            "certificate",
+                            &format!("already issued, valid until {when}"),
+                        ),
+                        Err(_) => step(
+                            "certificate",
+                            &format!("already issued — {}", cert.display()),
+                        ),
+                    }
+                }
+                _ => {
+                    let firewall = choir_cli::host::firewall_hint(options.port, true);
+                    let mut paste = vec![sudo];
+                    if let Some(line) = firewall {
+                        paste.push(line);
+                    }
+                    handover(
+                        &done,
+                        &format!(
+                            "a certificate for {name} has to be issued as root.\n  \
+                             certbot writes /etc/letsencrypt, and the renewal hook that keeps\n  \
+                             this working for the next two years lives there too. Paste this:"
+                        ),
+                        &paste,
+                        &retry,
+                    );
+                }
+            }
+            done.push("certificate".to_string());
+        }
+    }
+
+    // 3. Linger. A `systemd --user` unit without it is stopped when the
+    //    user logs out, which on a VPS is roughly one minute after the
+    //    node was installed.
+    match choir_cli::host::linger(&user) {
+        None | Some(true) => {}
+        Some(false) if options.yes => {
+            eprintln!(
+                "  {}  {:14}  off — this node will stop when {user} logs out",
+                style.cyan("!!"),
+                style.dim("linger")
+            );
+        }
+        Some(false) => handover(
+            &done,
+            &format!(
+                "linger is off for {user}, so systemd stops this node at logout.\n  \
+                 One line fixes it for the life of the machine:"
+            ),
+            &[format!("sudo loginctl enable-linger {user}")],
+            &format!("{retry}          (or add --yes to accept a node that dies at logout)"),
+        ),
+    }
+    if choir_cli::host::linger(&user) == Some(true) {
+        step("linger", &format!("on for {user}"));
+    }
+
+    // 4. The address, written down before the node starts, because it is
+    //    what every client command will read back — including the one
+    //    that mints the invite, whose link is built from the URL it was
+    //    reached at.
+    let url = options.exposure.url(options.port);
+    if let Err(error) = choir_fs::write_atomic(&layout.public_url, format!("{url}\n")) {
+        host_failed(
+            &done,
+            "address",
+            &format!("{}: {error}", layout.public_url.display()),
+            &retry,
+        );
+    }
+    if let Err(error) = choir_fs::write_atomic(
+        std::path::Path::new(".choir/config"),
+        format!(
+            "# Which node the `choir` commands talk to when they are not\n\
+             # given one. Written by `choir host`: this machine is the node.\n\
+             node = {url}\n"
+        ),
+    ) {
+        eprintln!("  {} .choir/config: {error}", style.cyan("!!"));
+    }
+    step("address", &url);
+
+    // 5. Supervision — or becoming the thing that would have been
+    //    supervised. In a container the runtime is the supervisor and
+    //    PID 1 should be the daemon, so this execs rather than installs.
+    //    Same `exec` as `choir node serve`: signals and the exit code
+    //    the daemon uses to ask for supervision (75) reach the real
+    //    process rather than a wrapper.
+    if options.foreground {
+        step(
+            "foreground",
+            "becoming the daemon; the runtime supervises it",
+        );
+        eprintln!();
+        let program = match choir_cli::serve::find_daemon() {
+            Ok(program) => program,
+            Err(error) => host_failed(&done, "foreground", &error, &retry),
+        };
+        match choir_cli::serve::plan(program, &layout, &[], &options.extra) {
+            Ok(invocation) => {
+                let error = choir_cli::serve::exec(&invocation);
+                host_failed(&done, "foreground", &error, &retry);
+            }
+            Err(error) => host_failed(&done, "foreground", &error, &retry),
+        }
+    }
+    match install_unit(&options.state, options.port, &options.extra) {
+        Ok((unit, _)) => step("supervised", &unit.display().to_string()),
+        Err(error) => host_failed(&done, "supervised", &error, &retry),
+    }
+    done.push("supervised".to_string());
+
+    // 6. Readiness. Everything after this is a request to a daemon the
+    //    service manager was asked to start a moment ago.
+    let client = match choir_cli::mcp::HttpClient::new(&url, Some(&layout.auth), None) {
+        Ok(client) => client,
+        Err(error) => host_failed(&done, "healthy", &error, &retry),
+    };
+    match choir_cli::host::wait_healthy(&client, 30) {
+        Ok(()) => step("healthy", &format!("{url}/healthz")),
+        // The log, not the retry line, is what answers this one: the
+        // unit is installed and the service manager is restarting it
+        // every two seconds into whatever it is failing on, and running
+        // `choir host` again would install the same unit again.
+        Err(error) => host_failed(
+            &done,
+            "healthy",
+            &format!(
+                "{error}\n           it says why in {}",
+                layout.log.display()
+            ),
+            &format!("choir node logs --state {}", options.state.display()),
+        ),
+    }
+    done.push("healthy".to_string());
+
+    // 7. A first repository, and a first person.
+    if let Some(repo) = &options.repo {
+        let endpoint = choir_cli::surface::endpoint("POST", "/api/repo")
+            .expect("the repo endpoint is in the table");
+        match client.request(endpoint, &serde_json::json!({ "name": repo })) {
+            Ok((status, _)) if (200..300).contains(&status) => {
+                step("repository", &format!("{url}/{repo}"));
+            }
+            Ok((409, _)) => step("repository", &format!("{repo} was already there")),
+            Ok((status, body)) => {
+                host_failed(&done, "repository", &format!("{status}: {body}"), &retry)
+            }
+            Err(error) => host_failed(&done, "repository", &error, &retry),
+        }
+        done.push("repository".to_string());
+    }
+    let mut link: Option<String> = None;
+    if let Some(who) = &options.invite {
+        let repo = options.repo.clone().unwrap_or_default();
+        let endpoint = choir_cli::surface::endpoint("POST", "/api/accounts/invite")
+            .expect("the invite endpoint is in the table");
+        let body = serde_json::json!({
+            "display_name": who,
+            "grants": [grant_line(&repo, "write")],
+        });
+        match client.request(endpoint, &body) {
+            Ok((status, text)) if (200..300).contains(&status) => {
+                let answer: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                let issued = answer["join_url"]
+                    .as_str()
+                    .or_else(|| answer["invite"].as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                step("invited", who);
+                link = Some(issued);
+            }
+            Ok((status, body)) => {
+                host_failed(&done, "invited", &format!("{status}: {body}"), &retry)
+            }
+            Err(error) => host_failed(&done, "invited", &error, &retry),
+        }
+    }
+
+    // The advisories that are not steps: things this deliberately did
+    // not do, each with the one line that does it.
+    eprintln!();
+    if name.is_some() {
+        if let Some(line) = choir_cli::host::firewall_hint(options.port, true) {
+            eprintln!(
+                "  {} a firewall is running here and this command did not touch it.\n    {line}\n",
+                style.cyan("note:")
+            );
+        }
+    } else {
+        eprintln!(
+            "  {} nobody outside this machine can reach a loopback node. To share it:\n    {}\n",
+            style.dim("share:"),
+            choir_cli::host::share_hint(options.port)
+        );
+    }
+    eprintln!("  {} choir doctor\n", style.dim("check it:"));
+
+    // The two things a person copies out of this.
+    println!("{url}");
+    if let Some(link) = link {
+        println!("{link}");
+    }
+    std::process::exit(0)
+}
+
+/// The `sudo` line `choir host` asks for, spelled out.
+fn tls_line(domain: &str, user: &str, port: u16, dry_run: bool) -> String {
+    let mut line = format!("sudo choir node tls {domain} --user {user} --port {port}");
+    if dry_run {
+        line.push_str(" --dry-run");
+    }
+    line
+}
+
+/// The same `choir host` invocation, to print as the thing to run next.
+fn rerun_line(rest: &[&str]) -> String {
+    let mut line = "choir host".to_string();
+    for argument in rest {
+        line.push(' ');
+        line.push_str(argument);
+    }
+    line
+}
+
+/// `choir node tls` — obtain the certificate and wire up its renewal.
+///
+/// The only command in this binary that expects to be run as root, and
+/// the only one that writes outside the state directory. Both facts are
+/// checked before anything happens rather than discovered halfway
+/// through, because a half-done certificate step leaves a marker naming
+/// files that are not there — and the node reads that marker at every
+/// start.
+fn node_tls(rest: &[&str]) -> ! {
+    let style = choir_cli::style::Style::for_stderr();
+    let command = "choir node tls";
+    let mut domain: Option<&str> = None;
+    let mut user: Option<String> = None;
+    let mut port = 8417u16;
+    let mut issuance = choir_cli::tls::Issuance::Live;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--dry-run" => {
+                issuance = choir_cli::tls::Issuance::DryRun;
+                i += 1;
+            }
+            "--staging" => {
+                issuance = choir_cli::tls::Issuance::Staging;
+                i += 1;
+            }
+            flag @ ("--user" | "--port") => {
+                let Some(value) = rest.get(i + 1) else {
+                    eprintln!("{command}: {flag} needs a value");
+                    std::process::exit(2);
+                };
+                match flag {
+                    "--user" => user = Some((*value).to_string()),
+                    _ => match value.parse() {
+                        Ok(n) => port = n,
+                        Err(_) => {
+                            eprintln!("{command}: --port needs a port number, not {value:?}");
+                            std::process::exit(2);
+                        }
+                    },
+                }
+                i += 2;
+            }
+            other if !other.starts_with('-') && domain.is_none() => {
+                domain = Some(other);
+                i += 1;
+            }
+            other => {
+                eprintln!("{command}: unknown option {other:?}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(domain) = domain else {
+        eprintln!(
+            "{command}: which name is the certificate for?\n\n  \
+             sudo choir node tls <domain> --user <the account the node runs as>"
+        );
+        std::process::exit(2);
+    };
+    // Required, never inferred. Under `sudo` the running account is
+    // root, and falling back to `SUDO_USER` would name the operator's
+    // own account — which is exactly the account the node does not run
+    // as. The failure would be silent: a marker and a cert pair landing
+    // in the wrong home while the node keeps serving plaintext.
+    let Some(user) = user else {
+        eprintln!(
+            "{command}: --user is required — which unprivileged account does the node\n  \
+             run as? Under sudo this process is root, and guessing would put the\n  \
+             certificate in the wrong home while the node kept serving plaintext.\n\n  \
+             sudo choir node tls {domain} --user $(id -un)"
+        );
+        std::process::exit(2);
+    };
+    let home = home_of(&user).unwrap_or_else(|| {
+        eprintln!("{command}: no such user: {user}");
+        std::process::exit(1);
+    });
+    let plan = choir_cli::tls::Plan::new(domain, port, &user, &home);
+    let challenge = choir_cli::tls::Challenge::for_state(&plan.state);
+    let uid = choir_cli::tls::uid();
+    if let Err(problems) = choir_cli::tls::preflight(&plan, challenge, &uid) {
+        eprintln!("\n  {} {problems}\n", style.red(&format!("{command}:")));
+        std::process::exit(1);
+    }
+    eprintln!();
+    if challenge == choir_cli::tls::Challenge::Http01 {
+        eprintln!(
+            "  {} HTTP-01: port 80 must be reachable from the internet now and at\n         \
+             every renewal. There is no $HOME/.choir/cloudflare.ini here, which is\n         \
+             what selects DNS-01 instead.\n",
+            style.dim("method:")
+        );
+    }
+    let (steps, failure) = match choir_cli::tls::apply(&plan, challenge, issuance, &uid) {
+        Ok(steps) => (steps, None),
+        Err((steps, error)) => (steps, Some(error)),
+    };
+    for one in &steps {
+        match &one.outcome {
+            Ok(detail) => step(&one.what, detail),
+            Err(error) => eprintln!(
+                "  {}  {:14}  {error}",
+                style.red("--"),
+                style.dim(&one.what)
+            ),
+        }
+    }
+    if let Some(error) = failure {
+        eprintln!(
+            "\n  {} {error}\n\n  \
+             nothing the node reads was changed, so it is still serving whatever it\n  \
+             was serving before.\n",
+            style.red("stopped:")
+        );
+        std::process::exit(1);
+    }
+    if issuance == choir_cli::tls::Issuance::DryRun {
+        eprintln!(
+            "\n  {} the path works and no certificate was issued. Run it again\n  \
+             without --dry-run.\n",
+            style.green("dry run:")
+        );
+        std::process::exit(0);
+    }
+    eprintln!(
+        "\n  {} renewal is certbot's own timer; the hook above re-projects the pair\n  \
+         and restarts the node, because the daemon reads its certificate once at\n  \
+         bind and has no reload.\n\n  \
+         {} back as {user}: choir host --domain {domain} --port {port}\n",
+        style.dim("renewal:"),
+        style.dim("then:")
+    );
+    println!("{}", plan.url());
+    std::process::exit(0)
+}
+
+/// One account's home directory, out of the password database.
+///
+/// `getent passwd` where it exists, falling back to `dscl` on macOS,
+/// because `choir node tls` names an account other than the one running
+/// it and `HOME` describes the wrong one.
+fn home_of(user: &str) -> Option<std::path::PathBuf> {
+    if let Some(out) = std::process::Command::new("getent")
+        .args(["passwd", user])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let field = text.trim().split(':').nth(5)?;
+        if !field.is_empty() {
+            return Some(std::path::PathBuf::from(field));
+        }
+    }
+    let out = std::process::Command::new("dscl")
+        .args([".", "-read", &format!("/Users/{user}"), "NFSHomeDirectory"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = text.trim().strip_prefix("NFSHomeDirectory:")?.trim();
+    match field.is_empty() {
+        true => None,
+        false => Some(std::path::PathBuf::from(field)),
+    }
+}
+
 fn invite(api: &str, auth: AuthOptions<'_>, name: &str, repo: &str, level: &str) -> ! {
     let answer = operator_call(
         api,
@@ -2739,6 +3230,120 @@ fn supervisor(command: &str) -> choir_cli::supervise::Supervisor {
     }
 }
 
+/// One line of `choir host`'s progress.
+///
+/// Every sub-step prints one of these as it happens rather than a
+/// summary at the end, because the steps have wildly different
+/// durations — `init` is a few files, `certbot` is a network round trip
+/// with a challenge in it — and a command that prints nothing for
+/// fifteen seconds is a command people interrupt.
+fn step(what: &str, detail: &str) {
+    let style = choir_cli::style::Style::for_stderr();
+    eprintln!("  {}  {:14}  {detail}", style.green("ok"), style.dim(what));
+}
+
+/// `choir host` stopping to hand one thing back to the person running it.
+///
+/// Exit 3, not 1: "everything up to here worked and something only you
+/// can supply is missing" is a different outcome from "this failed", and
+/// `choir restore` already spends 3 on exactly that distinction. A
+/// `sudo` line and a re-run is the shape, every time.
+fn handover(done: &[String], why: &str, paste: &[String], retry: &str) -> ! {
+    let style = choir_cli::style::Style::for_stderr();
+    eprintln!("\n  {} {why}\n", style.cyan("next:"));
+    for line in paste {
+        eprintln!("    {line}");
+    }
+    eprintln!("\n  {} {retry}", style.dim("then:"));
+    if !done.is_empty() {
+        eprintln!("\n  {} {}", style.dim("already done:"), done.join(", "));
+    }
+    eprintln!();
+    std::process::exit(3)
+}
+
+/// `choir host` giving up, having said what it got through.
+fn host_failed(done: &[String], what: &str, why: &str, retry: &str) -> ! {
+    let style = choir_cli::style::Style::for_stderr();
+    eprintln!("\n  {} {what}: {why}\n", style.red("failed"));
+    if !done.is_empty() {
+        eprintln!("  {} {}\n", style.dim("already done:"), done.join(", "));
+    }
+    eprintln!("  {} {retry}\n", style.dim("retry:"));
+    std::process::exit(1)
+}
+
+/// Renders the supervision file and hands the node to the service
+/// manager, returning the unit written and the `choir` it runs.
+///
+/// Factored out of `choir node install` when `choir host` needed to do
+/// exactly this as one of its steps. Not "install, but quieter": the
+/// same refusals in the same order, because the way a first-run command
+/// goes wrong is by being a *second* implementation of the thing it is
+/// composing, one refusal short.
+///
+/// # Errors
+///
+/// Returns the sentence the caller should print, for a machine with no
+/// service manager, a `choir` in a build directory, a state directory
+/// with no node in it, or a service manager that refused.
+fn install_unit(
+    state: &std::path::Path,
+    port: u16,
+    extra: &[String],
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let Some(supervisor) = choir_cli::supervise::Supervisor::detect() else {
+        return Err(format!(
+            "no service manager known for {}\n\n  \
+             run it in the foreground instead: choir node serve",
+            std::env::consts::OS
+        ));
+    };
+    // Refused rather than warned about: a unit pointing into a build
+    // directory breaks on the next `cargo clean`, and it breaks at
+    // reboot, which is the moment nobody is watching.
+    let exe = std::env::current_exe().map_err(|_| "cannot find my own path".to_string())?;
+    if choir_cli::supervise::in_build_directory(&exe) {
+        return Err(format!(
+            "this `choir` lives in a build directory:\n    {}\n\n  \
+             a unit pointing there stops working at the next `cargo clean`,\n  \
+             and it stops working at reboot. install it first:\n\n    \
+             cargo build --release -p choir-cli -p choir-node\n    \
+             cp target/release/choir target/release/choir-node ~/.local/bin/",
+            exe.display()
+        ));
+    }
+    // The same refusal `serve` makes, made before a unit exists rather
+    // than after the service manager has started failing to run it every
+    // ten seconds.
+    let layout = choir_cli::serve::Layout::new(state, port);
+    if !layout.missing().is_empty() {
+        return Err(format!(
+            "no node in {} yet\n\n  create one: choir init",
+            state.display()
+        ));
+    }
+    let home = home_dir();
+    let unit = supervisor.unit_path(&home);
+    if let Some(parent) = unit.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let body = supervisor.render(&exe, state, port, extra);
+    choir_fs::write_atomic(&unit, body)
+        .map_err(|error| format!("write {}: {error}", unit.display()))?;
+    let steps = supervisor.commands(choir_cli::supervise::Action::Install, &home);
+    // The teardown step fails when nothing is loaded, which is exactly
+    // the first-install case.
+    let last = steps.len().saturating_sub(1);
+    for (at, step) in steps.iter().enumerate() {
+        if !run_step(step, at != last) {
+            return Err("the service manager refused".to_string());
+        }
+    }
+    Ok((unit, exe))
+}
+
 /// Runs one service-manager command, reporting the ones that matter.
 ///
 /// `launchctl bootout` on a job that is not loaded fails, and that
@@ -3026,6 +3631,14 @@ fn main() {
                 }
             }
         }
+        // Beside `init` rather than under `node`, and for the same
+        // reason: `choir node …` is the family for a node that exists,
+        // and this is the command you run when there is not one yet.
+        ["host", rest @ ..] if auth.is_empty() => host(rest),
+        // The privileged step, with a name, so that it appears in
+        // `--help`, in the shell history and in sudo's log as itself
+        // rather than as an argument to something friendlier.
+        ["node", "tls", rest @ ..] => node_tls(rest),
         // The one command whose whole point is that the node is
         // already running: everything else about a repository assumes
         // it exists, and until this there was no way to make one
@@ -3197,80 +3810,18 @@ fn main() {
             let style = choir_cli::style::Style::for_stdout();
             let command = "choir node install";
             let options = node_options(command, rest);
-            let supervisor = supervisor(command);
-            // Refused rather than warned about: a unit pointing into a
-            // build directory breaks on the next `cargo clean`, and it
-            // breaks at reboot, which is the moment nobody is watching.
-            let Ok(exe) = std::env::current_exe() else {
-                eprintln!(
-                    "{} cannot find my own path",
-                    style.red(&format!("{command}:"))
-                );
-                std::process::exit(1);
-            };
-            if choir_cli::supervise::in_build_directory(&exe) {
-                eprintln!(
-                    "{} this `choir` lives in a build directory:\n    {}\n\n  \
-                     a unit pointing there stops working at the next `cargo clean`,\n  \
-                     and it stops working at reboot. install it first:\n\n    \
-                     cargo build --release -p choir-cli -p choir-node\n    \
-                     cp target/release/choir target/release/choir-node ~/.local/bin/",
-                    style.red(&format!("{command}:")),
-                    exe.display()
-                );
-                std::process::exit(1);
-            }
-            // The same refusal `serve` makes, made before a unit exists
-            // rather than after the service manager has started failing
-            // to run it every ten seconds.
             let layout = choir_cli::serve::Layout::new(&options.state, options.port);
-            if !layout.missing().is_empty() {
-                eprintln!(
-                    "{} no node in {} yet\n\n  create one: choir init",
-                    style.red(&format!("{command}:")),
-                    options.state.display()
-                );
-                std::process::exit(1);
-            }
-            let home = home_dir();
-            let unit = supervisor.unit_path(&home);
-            if let Some(parent) = unit.parent() {
-                if let Err(error) = std::fs::create_dir_all(parent) {
-                    eprintln!(
-                        "{} create {}: {error}",
-                        style.red(&format!("{command}:")),
-                        parent.display()
-                    );
+            let unit = match install_unit(&options.state, options.port, &options.extra) {
+                Ok((unit, _)) => unit,
+                Err(error) => {
+                    eprintln!("{} {error}", style.red(&format!("{command}:")));
                     std::process::exit(1);
                 }
-            }
-            let body = supervisor.render(&exe, &options.state, options.port, &options.extra);
-            if let Err(error) = choir_fs::write_atomic(&unit, body) {
-                eprintln!(
-                    "{} write {}: {error}",
-                    style.red(&format!("{command}:")),
-                    unit.display()
-                );
-                std::process::exit(1);
-            }
-            let steps = supervisor.commands(choir_cli::supervise::Action::Install, &home);
-            // The teardown step fails when nothing is loaded, which is
-            // exactly the first-install case.
-            let last = steps.len().saturating_sub(1);
-            for (at, step) in steps.iter().enumerate() {
-                if !run_step(step, at != last) {
-                    eprintln!(
-                        "{} the service manager refused",
-                        style.red(&format!("{command}:"))
-                    );
-                    std::process::exit(1);
-                }
-            }
+            };
             note(
                 "installed",
                 &[
                     ("unit", unit.display().to_string()),
-                    ("runs", format!("{} node serve", exe.display())),
                     ("state", options.state.display().to_string()),
                     ("log", layout.log.display().to_string()),
                 ],
@@ -3353,6 +3904,24 @@ fn main() {
                 style.dim("kept"),
                 state_dir().display()
             );
+            // The one thing `choir host` created that is not under the
+            // state directory, and the one this command cannot remove:
+            // it belongs to root. Left in place it is harmless — it
+            // exits early when the marker is gone — but a renewal hook
+            // nobody knows about is a renewal hook nobody removes, so it
+            // is named rather than merely survived.
+            let hook =
+                std::path::Path::new(choir_cli::tls::HOOK_DIR).join(choir_cli::tls::HOOK_NAME);
+            if hook.exists() {
+                eprintln!(
+                    "  {} {}\n    it does nothing once {} is gone; to remove it and the\n    \
+                     certificate as well:\n\n      sudo rm {}\n      sudo certbot delete\n",
+                    style.cyan("renewal hook still installed:"),
+                    hook.display(),
+                    state_dir().join("tls.enabled").display(),
+                    hook.display(),
+                );
+            }
         }
         ["node", "logs", rest @ ..] => {
             let style = choir_cli::style::Style::for_stdout();
@@ -3428,7 +3997,17 @@ fn main() {
         // argument. Everything else refuses without one; this one has
         // to keep working on a machine that has no node yet, because
         // "there is no node configured" is one of the things it reports.
-        ["doctor", rest @ ..] if rest.len() <= 1 => {
+        ["doctor", rest @ ..] if rest.len() <= 3 => {
+            // `--state` for the same reason `node serve` takes one: a
+            // machine can hold more than one node's state directory, and
+            // the host half of this report is entirely about one of them.
+            let (state, rest) = match rest {
+                [head @ .., "--state", dir] | ["--state", dir, head @ ..] => {
+                    (std::path::PathBuf::from(*dir), head.to_vec())
+                }
+                other if other.len() <= 1 => (state_dir(), other.to_vec()),
+                _ => usage(),
+            };
             let configured = configured_node();
             let api = rest.first().copied().map(str::to_string).or(configured);
             // The effective credential, not merely a given one: the
@@ -3436,7 +4015,17 @@ fn main() {
             // a node whose credential this command would have used.
             let effective = api.as_deref().and_then(|api| auth.file_for(api));
             let credential = effective.or(auth.file);
-            let checks = choir_cli::doctor::run(api.as_deref(), credential);
+            let mut checks = choir_cli::doctor::run(api.as_deref(), credential);
+            // The six host facts, and only on a machine that has a node:
+            // "linger is off" told to a laptop that only ever clones is
+            // six rows of noise on a report whose whole value is that
+            // every row means something.
+            if choir_cli::serve::Layout::new(&state, 8417)
+                .missing()
+                .is_empty()
+            {
+                checks.extend(choir_cli::doctor::host(&state, credential));
+            }
             let style = choir_cli::style::Style::for_stdout();
             // Above the checks, because the first question is "what is
             // this machine" and every check below reads differently

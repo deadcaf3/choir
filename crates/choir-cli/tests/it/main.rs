@@ -16,6 +16,7 @@ mod deploy;
 mod doctor;
 mod first_run;
 mod gate;
+mod host;
 mod init;
 mod insight;
 mod install_policy;
