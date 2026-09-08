@@ -930,7 +930,7 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
     assert!(!out.status.success(), "must refuse without a repos.list");
     assert!(String::from_utf8_lossy(&out.stderr).contains("no repos.list"));
 
-    // A served repo with no forgejo remote is named but not fatal, and
+    // A served repo with no remote at all is named but not fatal, and
     // comments are skipped.
     std::fs::write(
         home.join(".choir/repos.list"),
@@ -944,7 +944,7 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
         out.status.success(),
         "an unconfigured follower must not fail the run"
     );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("NO forgejo remote"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("NO remote"));
 
     // Configured: the push happens for real, into a second bare repo.
     git("git init -q \"$HOME/work\" && cd \"$HOME/work\" \
@@ -963,6 +963,31 @@ fn the_follower_feed_pushes_every_listed_repo_and_names_the_unmirrored() {
     assert!(
         shown.status.success(),
         "the follower never received the ref"
+    );
+
+    // A second remote is a second follower, with nothing in choirctl to
+    // edit: the feed enumerates the bare repo's remotes rather than
+    // naming one. This is what a public mirror beside the private one
+    // costs, and the test is here so that "every remote" cannot quietly
+    // regress to "the first remote" or "the one called forgejo".
+    git("git init -q --bare \"$HOME/public.git\" \
+         && git --git-dir \"$HOME/.choir/repos/agents/demo.git\" remote add github \"$HOME/public.git\"");
+    let out = sh(remote);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("follower updated: agents/demo.git -> forgejo")
+            && stdout.contains("follower updated: agents/demo.git -> github"),
+        "both followers must be fed, and each named: {stdout}"
+    );
+    let public = sh("git --git-dir \"$HOME/public.git\" rev-parse refs/heads/main");
+    assert!(
+        public.status.success(),
+        "the second follower never received the ref"
     );
 
     // A configured push that fails is the one thing that fails the run.

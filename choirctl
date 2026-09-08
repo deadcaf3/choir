@@ -76,16 +76,27 @@ node_ssh() {
       "choir@$ip" "$@"
 }
 
-# The follower is fed on-box from the node's own bare repos, so it can
-# never hold a commit the canonical node has not sequenced (D21). Every
-# repo in the node host's ~/.choir/repos.list is pushed, not just the
-# canonical one: an imported repo can leave the node the only holder of
-# its git objects, and a follower that mirrors one repo reads like a
-# follower that mirrors all of them. A repo whose
-# bare has no `forgejo` remote is named on every run rather than
+# The followers are fed on-box from the node's own bare repos, so none
+# can ever hold a commit the canonical node has not sequenced (D21).
+# Every repo in the node host's ~/.choir/repos.list is pushed, not just
+# the canonical one: an imported repo can leave the node the only holder
+# of its git objects, and a follower that mirrors one repo reads like a
+# follower that mirrors all of them.
+#
+# A follower is any remote the bare repo carries. A bare repo on the
+# node has no origin, it *is* the origin, so every remote on it is one
+# an operator added on purpose, and enumerating them is what makes this
+# list-free: adding a public mirror is `git remote add` on the node host
+# and nothing here to edit. This used to name `forgejo` and push to it
+# alone, which was the same list-of-one that has rotted here before.
+# A repo with no remote at all is named on every run rather than
 # silently skipped — unconfigured means "no second copy yet", and that
-# should stay annoying until an operator configures it on the node
-# host. Exit is nonzero only when a configured push fails.
+# should stay annoying until an operator configures one. Exit is
+# nonzero only when a configured push fails.
+#
+# No force, deliberately. A follower that diverged from the node is a
+# fault to surface, not a state to overwrite, and a push that refuses
+# is the whole of that surfacing.
 follower_feed() {
   node_ssh '
     [ -f "$HOME/.choir/repos.list" ] || { echo "follower: no repos.list on the node host" >&2; exit 1; }
@@ -93,16 +104,19 @@ follower_feed() {
     while IFS= read -r repo; do
       case $repo in ""|"#"*) continue ;; esac
       bare=$HOME/.choir/repos/$repo
-      if ! git --git-dir "$bare" remote get-url forgejo >/dev/null 2>&1; then
-        echo "follower: $repo has NO forgejo remote — its objects have no second copy yet" >&2
+      remotes=$(git --git-dir "$bare" remote 2>/dev/null)
+      if [ -z "$remotes" ]; then
+        echo "follower: $repo has NO remote — its objects have no second copy yet" >&2
         continue
       fi
-      if git --git-dir "$bare" push -q forgejo "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"; then
-        echo "follower updated: $repo"
-      else
-        echo "follower: push FAILED for $repo" >&2
-        failed=1
-      fi
+      for follower in $remotes; do
+        if git --git-dir "$bare" push -q "$follower" "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"; then
+          echo "follower updated: $repo -> $follower"
+        else
+          echo "follower: push FAILED for $repo -> $follower" >&2
+          failed=1
+        fi
+      done
     done < "$HOME/.choir/repos.list"
     [ -z "$failed" ]
   '
@@ -697,7 +711,7 @@ install-cli)
 
   sync [repo]      push to the node, then the follower (the usual one)
   push [repo]      push this repo to the node only (--all and --tags)
-  mirror           push to the private Forgejo follower only
+  mirror           push to the pre-flip Forgejo follower only (legacy)
   url [repo]       clone/push URL including credentials
 
   people           open the console: who is here, who is asking, invites
