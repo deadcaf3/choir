@@ -1694,6 +1694,20 @@ impl Node {
                             invite = Some(id);
                         }
                         None if internal_ok => {}
+                        // No credential, but this node has published
+                        // something and this request is asking for it.
+                        // The caller becomes `@anon` and every check
+                        // downstream runs unchanged: the browse handler
+                        // asks the same `readable()` it asks for a
+                        // signed-in reader, and the git route asks the
+                        // same `git_requirement`. There is no second
+                        // authorization rule here, which is the point --
+                        // a public repository is one the ACL says
+                        // `@anon` may read, and nothing else about the
+                        // node changes.
+                        None if anon_may_try(acl.as_deref(), &request) => {
+                            user = acl::ANON.to_string();
+                        }
                         None => {
                             // A browser that can run the ceremony is shown
                             // the page instead of the challenge, because
@@ -2900,6 +2914,55 @@ fn is_browser_route(url: &str) -> bool {
         || path == "/reviews"
         || path == "/r"
         || path.starts_with("/r/")
+}
+
+/// Whether an unauthenticated request may be evaluated as
+/// [`acl::ANON`] instead of refused.
+///
+/// **This grants nothing.** It decides only whether the ACL is asked at
+/// all; the answer still comes from the table, under a principal that
+/// can hold at most `read` on repositories somebody named. A node whose
+/// ACL mentions `@anon` nowhere is unchanged by this function, because
+/// the first question it asks is whether the principal holds anything.
+///
+/// The route test is an allowlist and not a denylist, which is the
+/// whole of its security argument. `/api/view` and `/api/log` are `GET`
+/// requests that serve the op log, so "a safe method" would have
+/// published the log; the reachable set is the browse surface plus the
+/// read half of git smart-HTTP, and a route that is neither is refused
+/// here whatever it would have answered.
+///
+/// `/reviews` is excluded from the browse half deliberately: it is the
+/// *reader's own* queue, so for a caller who is every stranger at once
+/// it is either empty or somebody else's, and neither is a page worth
+/// serving.
+fn anon_may_try(acl: Option<&acl::Effective>, request: &tiny_http::Request) -> bool {
+    let Some(table) = acl else {
+        // No ACL means every authenticated credential reaches every
+        // repository, which is exactly the deployment in which silently
+        // adding an unauthenticated one would be worst.
+        return false;
+    };
+    if !table.holds_anything(acl::ANON) {
+        return false;
+    }
+    let method = request.method().as_str();
+    let url = request.url();
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    if repo_from_path(url).is_some() {
+        // The git half: whatever `git_requirement` calls a read. Asking
+        // it rather than matching on the path keeps this in step with
+        // the route table it is about; a push is `Level::Propose`, which
+        // `@anon` cannot parse its way into holding.
+        return matches!(
+            acl::git_requirement(method, url),
+            Some((_, acl::Level::Read))
+        );
+    }
+    if method != "GET" && method != "HEAD" {
+        return false;
+    }
+    path == "/" || path == "/index.html" || path == "/r" || path.starts_with("/r/")
 }
 
 /// Answers a browser-surface request with a page.

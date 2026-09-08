@@ -211,3 +211,47 @@ Two rules worth knowing before you rely on it:
 
 - **An issued grant may carry a deadline too**, in the same spelling: `{"grants":["owner/demo write until=1788000000"]}`. The join page says so in words the holder can act on ("push to owner/demo, until in about 90 days"). The invite is single-use and short-lived; the grants it hands over last as long as their own fourth column says, or forever without one.
 - **The generated `authorized_keys` is generated.** Point `sshd` at it once (`AuthorizedKeysFile /path/to/repos/.choir/authorized_keys` in `sshd_config`, alongside the account setup in [Git over SSH](transports.md#git-over-ssh-d31)) and never edit it: it is rewritten on every account change, and a hand-added line disappears with the next one.
+
+## Publishing a repository to everybody (D78)
+
+Every browse route is behind the auth gate: a reader with no account meets
+the sign-in page, not a repository. That is right for a private beta and
+wrong for source that is already public elsewhere, so one line in the ACL
+opens one repository:
+
+```text
+@anon    owner/project.git    read
+```
+
+`@anon` is the reader who presented no credential. Naming it beside a
+repository is what publishes that repository: an unauthenticated browse or
+fetch of it is evaluated under that principal instead of refused, and every
+check after the gate is the one that was already there. There is no second
+authorization rule and no flag; the table answers "may this caller read
+this" the same way for a stranger as for an account holder.
+
+**It cannot be authenticated as.** Account names are ASCII letters, digits,
+`-`, `_` and `.`, so the leading `@` is unspellable in the one place a name
+gets chosen. A user called `anon`, with no `@`, is an ordinary account and
+is not this principal.
+
+**Three grants it will not take**, each refused when the file parses rather
+than when a request arrives, so the failure is a node that will not start:
+
+| Written | Refused because |
+|:--|:--|
+| `@anon @node auditor` | that scope is the op log and the audit surface |
+| `@anon * read` | name each public repository, so adding a private one later is not a publication nobody typed |
+| `@anon o/r write` | a write path for a caller carrying no credential |
+
+**What opens, and what does not.** The browse surface for that repository
+and the read half of git smart-HTTP, so `git clone` works with no
+credentials. Not `/api/view` or `/api/log`, which are `GET` requests that
+serve the op log; not `/reviews`, which is the reader's own queue and means
+nothing for a principal that is every stranger at once; and not
+`git-receive-pack`, which needs `propose` and above, which `@anon` cannot
+hold. A repository nobody published answers exactly as one that does not
+exist, so the wall never confirms which private repositories are here.
+
+Pair it with `--site-repo owner/project` to make that repository the front
+page, which is what a node serving a single open-source project wants.

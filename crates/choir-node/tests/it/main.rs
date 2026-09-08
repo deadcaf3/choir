@@ -13,6 +13,7 @@
 //! added to this harness must not assert on wall-clock time, mutate
 //! process globals (env, cwd, allocator), or bind fixed ports.
 
+mod public_read;
 mod support;
 
 mod access;

@@ -13,12 +13,20 @@
 //! carrying a deadline (D66):
 //!
 //! ```text
-//! # <user>   <repo|*|@node>   <level>   [until=<unix seconds>]
-//! alice      owner/project    own
-//! alice      owner/notes      read
-//! bob        owner/project    write     until=1788000000
-//! carol      @node            auditor
+//! # <user|@anon>   <repo|*|@node>   <level>   [until=<unix seconds>]
+//! alice           owner/project    own
+//! alice           owner/notes      read
+//! bob             owner/project    write     until=1788000000
+//! carol           @node            auditor
+//! @anon           owner/project    read
 //! ```
+//!
+//! The last line is the one that publishes something. [`ANON`] is the
+//! reader who presented no credential, and naming a repository beside it
+//! is how that repository stops being behind the wall. It may hold only
+//! `read`, only on repositories written out one per line, and never
+//! `@node`; those three are refused by [`Acl::parse`], so a file that
+//! would publish more than the operator typed does not load at all.
 //!
 //! **A grant with a deadline stops mattering when the deadline passes,**
 //! and nothing sweeps: the table is dated on every request, so a lapse
@@ -181,6 +189,26 @@ impl Grant {
     }
 }
 
+/// The reader who presented no credential.
+///
+/// Granting this principal `read` on a repository is what makes that
+/// repository public: the node stops refusing an unauthenticated
+/// browse or fetch of it and evaluates the ACL under this name instead,
+/// so one table answers "may this caller read this" for strangers and
+/// account holders alike rather than a second rule existing beside it.
+///
+/// It cannot be authenticated as. Account names are ASCII alphanumerics
+/// with `-`, `_` and `.`, so the leading `@` is unspellable in the one
+/// place a name is chosen -- the same property that makes `@node`
+/// unforgeable as a repository name. Nothing here relies on a check
+/// somewhere else refusing to issue it.
+///
+/// What it may hold is deliberately narrow, and enforced in
+/// [`Acl::parse`] rather than at the point of use: never `@node`, never
+/// `*`, and never a level above [`Level::Read`]. A grant that would let
+/// a stranger write is not refused later, it does not parse.
+pub const ANON: &str = "@anon";
+
 /// A parsed ACL file: which users hold which grants, and until when.
 ///
 /// Empty means nobody holds anything, which under a configured ACL denies
@@ -234,6 +262,31 @@ impl Acl {
             };
             let scope = parse_scope(target).map_err(|e| format!("line {number}: {e}"))?;
             let level = parse_level(&scope, level).map_err(|e| format!("line {number}: {e}"))?;
+            if user == ANON {
+                // The reserved principal, and the only one nobody
+                // authenticates as. Three refusals rather than one,
+                // because each is a different way to hand the internet
+                // more than "read this repository".
+                if matches!(scope, Scope::Node) {
+                    return Err(format!(
+                        "line {number}: `{ANON}` may not hold `@node` — that scope is the op \
+                         log and the audit surface, and this principal is every stranger"
+                    ));
+                }
+                if matches!(scope, Scope::AllRepos) {
+                    return Err(format!(
+                        "line {number}: `{ANON}` may not hold `*` — name each repository that \
+                         is meant to be public, so adding a private one later is not a \
+                         publication nobody typed"
+                    ));
+                }
+                if level > Level::Read {
+                    return Err(format!(
+                        "line {number}: `{ANON}` may hold only `read` — a level above it is a \
+                         write path for a caller that presented no credential"
+                    ));
+                }
+            }
             let until = deadline
                 .map(parse_deadline)
                 .transpose()
@@ -357,6 +410,19 @@ pub struct Effective {
 }
 
 impl Effective {
+    /// Whether `user` holds any live grant at all.
+    ///
+    /// Asked of [`ANON`] before an unauthenticated request is evaluated
+    /// under that name, so a node whose table never mentions it keeps
+    /// refusing strangers at the gate rather than walking the whole
+    /// request to reach the same answer. It is a question about the
+    /// table and not an authorization: what the caller may actually
+    /// reach is still [`Effective::allows`], repository by repository.
+    #[must_use]
+    pub fn holds_anything(&self, user: &str) -> bool {
+        self.grants.get(user).is_some_and(|held| !held.is_empty())
+    }
+
     /// Whether `user` holds at least `level` over `scope`.
     #[must_use]
     pub fn allows(&self, user: &str, scope: &Scope, level: Level) -> bool {
@@ -1499,6 +1565,51 @@ mod tests {
         let acl = parse("bob * write");
         assert!(acl.allows_repo("bob", "anything/at-all", Level::Write));
         assert!(!acl.allows("bob", &Scope::Node, Level::Read));
+    }
+
+    /// The three grants `@anon` must not parse into holding.
+    ///
+    /// Refused in the parser rather than at the point of use, so the
+    /// failure is a node that will not start on a file somebody typed
+    /// wrong, instead of a node that starts and serves more than the
+    /// operator meant. Each line here is a different way to say "the
+    /// internet", and only the narrow one is a sentence the file has.
+    #[test]
+    fn the_anonymous_principal_cannot_be_granted_more_than_one_repository_to_read() {
+        // The op log and the audit surface.
+        let node = Acl::parse("@anon @node auditor").expect_err("refused");
+        assert!(node.contains("@node"), "{node}");
+        // Every repository, including the ones added next month.
+        let all = Acl::parse("@anon * read").expect_err("refused");
+        assert!(all.contains('*'), "{all}");
+        // A write path for a caller that presented nothing.
+        let write = Acl::parse("@anon o/r write").expect_err("refused");
+        assert!(write.contains("read"), "{write}");
+
+        // The one thing it may hold, so the three refusals above are
+        // about what they name rather than about the principal.
+        let ok = parse("@anon o/r read");
+        assert!(ok.allows_repo(ANON, "o/r", Level::Read));
+        assert!(!ok.allows_repo(ANON, "o/other", Level::Read));
+        assert!(!ok.allows_repo(ANON, "o/r", Level::Propose));
+        assert!(ok.holds_anything(ANON));
+        assert!(!ok.holds_anything("nobody"));
+    }
+
+    /// Every other principal keeps the grammar it had.
+    ///
+    /// The guards above are keyed on one exact name. A rule that leaked
+    /// onto ordinary users would take `*` and `@node` away from the
+    /// operator, which is most of what the file is for.
+    #[test]
+    fn the_restriction_is_the_reserved_name_and_not_the_grammar() {
+        let acl = parse("bob * write\ncarol @node auditor\nanon o/r write");
+        assert!(acl.allows_repo("bob", "any/thing", Level::Write));
+        assert!(acl.allows("carol", &Scope::Node, Level::Read));
+        // A user literally called `anon`, with no `@`, is an ordinary
+        // account name and is not this principal.
+        assert!(acl.allows_repo("anon", "o/r", Level::Write));
+        assert!(!acl.holds_anything(ANON));
     }
 
     #[test]
