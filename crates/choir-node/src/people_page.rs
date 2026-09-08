@@ -138,8 +138,19 @@ pub(crate) fn render(
                     grant. Create one and these become answerable.</p>",
         );
     }
-    for request in &waiting {
-        request_card(&mut h, request, repos);
+    if !waiting.is_empty() {
+        // A table, not a stack of cards. The console is a list of
+        // decisions and the operator is scanning it — who asked, what
+        // they said, and the two answers — so it is the one shape on
+        // this surface built for scanning. As cards, four requests were
+        // four bordered boxes each with its own heading, and the thing
+        // being compared across them was two lines of text.
+        h.push_str("<table><thead><tr><th>who</th><th>what they said</th>");
+        h.push_str("<th>answer</th></tr></thead><tbody>");
+        for request in &waiting {
+            request_row(&mut h, request, repos);
+        }
+        h.push_str("</tbody></table>");
     }
     h.push_str("</section>");
 
@@ -195,22 +206,23 @@ fn contact_form(h: &mut String, contact: Option<&str>) {
     h.push_str("</p></form></section>");
 }
 
-/// One pending request, with the two answers to it.
+/// One pending request as a row, with the two answers to it.
 ///
 /// Two separate forms rather than two buttons in one, so that declining
 /// cannot pick up a half-filled repository selection and so that neither
-/// button can be reached by pressing return in the other's field.
-fn request_card(h: &mut String, request: &RequestSummary, repos: &[String]) {
-    h.push_str("<article class=\"card\"><h3>");
+/// button can be reached by pressing return in the other's field. Both
+/// forms live in the last cell, which is what makes this a table of
+/// decisions rather than a table with a stray control beside it.
+fn request_row(h: &mut String, request: &RequestSummary, repos: &[String]) {
+    h.push_str("<tr><td>");
     h.push_str(&esc(&request.display_name));
-    h.push_str("</h3>");
+    h.push_str("</td><td>");
     if request.about.is_empty() {
-        h.push_str("<p class=\"mono\">They wrote nothing.</p>");
+        h.push_str("<span class=\"muted\">They wrote nothing.</span>");
     } else {
-        h.push_str("<p>");
         h.push_str(&esc(&request.about));
-        h.push_str("</p>");
     }
+    h.push_str("</td><td>");
     if !repos.is_empty() {
         h.push_str("<form method=\"post\" action=\"/people\"><p>");
         h.push_str("<input type=\"hidden\" name=\"action\" value=\"grant\">");
@@ -227,11 +239,11 @@ fn request_card(h: &mut String, request: &RequestSummary, repos: &[String]) {
     h.push_str("\">");
     h.push_str("<button type=\"submit\">Decline</button>");
     h.push_str(
-        " <span class=\"mono\">their link stops working, and says only that it is not \
+        " <span class=\"muted\">their link stops working, and says only that it is not \
          valid</span>",
     );
     h.push_str("</p></form>");
-    h.push_str("</article>");
+    h.push_str("</td></tr>");
 }
 
 /// Who has an account, and what each of them may reach.

@@ -160,8 +160,28 @@ fn shell(title: &str, theme: Option<&str>) -> String {
 }
 
 /// Closes the head, opens the body, and writes the brand header.
+///
+/// Every page here is `task` — one column of prose at the reading
+/// measure. See [`body_classed`] for the one that carries more.
 fn body(h: &mut String, headline: &str, sub: &str) {
-    h.push_str("</head><body class=\"task\">");
+    body_classed(h, headline, sub, "");
+}
+
+/// [`body`], with an extra class on the `<body>` element.
+///
+/// The front door alone is additionally `door`, which is what takes the
+/// display step on its title: it is the only page here whose job is to
+/// be read from the top by somebody who has not decided to care yet. A
+/// parameter rather than a second `body`, because the two differ by one
+/// attribute and a copy would be a second place to fix the next time
+/// this shell changes.
+fn body_classed(h: &mut String, headline: &str, sub: &str, extra: &str) {
+    h.push_str("</head><body class=\"task");
+    if !extra.is_empty() {
+        h.push(' ');
+        h.push_str(extra);
+    }
+    h.push_str("\">");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     h.push_str("<header class=\"top\"><h1>");
     h.push_str(&esc(headline));
@@ -828,7 +848,13 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
          repository at a time, ordered by a single writer. Every write is a signed \
          operation in one log.\">",
     );
-    body(&mut h, "choir", "private beta");
+    // Set like a page of a book: a title, a lede at the reading measure,
+    // three short sections, one block of commands, and the form last.
+    // `body.door` is what takes the display step on the title; every
+    // other page on this surface tops out one step below it, because
+    // this is the only one whose job is to be read from the top by
+    // somebody who has not decided to care yet.
+    body_classed(&mut h, "choir", "private beta", "door");
     h.push_str("<section>");
     h.push_str(
         "<p class=\"lede\">A node where agents and people work on the same repositories at \
@@ -837,9 +863,14 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
          clear.</p>",
     );
     // Three claims rather than a paragraph. This is the one page read by
-    // somebody who has not decided to care yet, and the steps list is the
-    // surface's existing way of saying "here are the parts of this".
-    h.push_str("<ol class=\"steps\">");
+    // somebody who has not decided to care yet.
+    //
+    // A `ul` of headed paragraphs rather than the numbered `ol.steps`
+    // the commands below use, and the difference is not styling: these
+    // three are not a sequence. Numbering them said "first this, then
+    // that" about three simultaneous properties, which is the kind of
+    // small lie a reader notices without being able to say why.
+    h.push_str("<ul class=\"claims\">");
     h.push_str(
         "<li><h3>One order</h3><p>A single writer sequences every change, so two agents \
          pushing at once get one history rather than a race. Nothing waits for a lock, \
@@ -854,7 +885,7 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
          later work can build on, not an error that blocks the queue. Work continues \
          without a human referee standing in the middle of it.</p></li>",
     );
-    h.push_str("</ol>");
+    h.push_str("</ul>");
 
     // What it is like to use, in the three commands it actually takes.
     // Deliberately the same three as the per-repository contribute page,
@@ -862,6 +893,13 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     // product from the one behind it is worse than a front door with no
     // description. `NODE` and `REPO` stay placeholders: this page is
     // static by construction and must not learn this node's own address.
+    //
+    // One block, not three. Every word of the copy below is the copy
+    // this page already carried; what changed is that the commands are
+    // now a single listing a reader can take whole, with the prose as
+    // annotation beside it rather than three wells with paragraphs
+    // wedged between them. Three separate wells made three commands look
+    // like three procedures.
     h.push_str("<h2>What using it looks like</h2>");
     h.push_str(
         "<p>Three commands, and then the git you already know. There is no registration \
@@ -880,26 +918,31 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
         "<p class=\"muted\">You need <code>choir</code> first. One command, no toolchain:</p>\
          <pre class=\"cmd\">curl -fsSL https://RELEASE-HOST/choir-cli-installer.sh | sh</pre>",
     );
-    h.push_str("<ol class=\"steps\">");
+    h.push_str("<pre class=\"session\">");
     h.push_str(
-        "<li><h3><code>choir join</code></h3><p>Redeem the \
-         invite your operator sent you. It mints your key and stores your token.</p>\
-         <pre class=\"cmd\">choir join NODE ~/.choir/invite ~/.choir/agent.key</pre></li>",
+        "<span class=\"said\"># Redeem the invite your operator sent you. It mints \
+                your key and stores your token.</span>\n",
+    );
+    h.push_str("<span class=\"cmd\">choir join NODE ~/.choir/invite ~/.choir/agent.key</span>\n\n");
+    h.push_str(
+        "<span class=\"said\"># Point git at that token once, then clone normally. The \
+                token never enters\n# the URL, so it cannot leak through `git remote -v`.\
+                </span>\n",
     );
     h.push_str(
-        "<li><h3><code>choir git-credential</code></h3>\
-         <p>Point git at that token once, then clone normally. The token never enters the \
-         URL, so it cannot leak through <code>git remote -v</code>.</p>\
-         <pre class=\"cmd\">git config --global credential.helper \
-         '!choir git-credential ~/.choir/choir.auth'\ngit clone NODE/REPO.git</pre></li>",
+        "<span class=\"cmd\">git config --global credential.helper \\\n  \
+         '!choir git-credential ~/.choir/choir.auth'\ngit clone NODE/REPO.git</span>\n\n",
     );
     h.push_str(
-        "<li><h3><code>choir propose</code></h3><p>Commit on \
-         a branch as you always would, then propose it. Run it again after an amend and it \
-         updates the same proposal rather than opening a second one.</p>\
-         <pre class=\"cmd\">choir propose ~/.choir/agent.key &lt;your-channel&gt;</pre></li>",
+        "<span class=\"said\"># Commit on a branch as you always would, then propose \
+                it. Run it again\n# after an amend and it updates the same proposal rather \
+                than opening a second one.</span>\n",
     );
-    h.push_str("</ol>");
+    h.push_str(
+        "<span class=\"cmd\">choir propose ~/.choir/agent.key &lt;your-channel&gt;\
+                </span>",
+    );
+    h.push_str("</pre>");
 
     // The honest state of the thing, on the page rather than in a reply
     // to an email. A private beta that does not say it is one reads as a
