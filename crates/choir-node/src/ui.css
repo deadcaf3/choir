@@ -657,6 +657,8 @@ td summary{padding:var(--sp-0);display:inline-block}
    survives a very long commit message. */
 table.listing{table-layout:auto;width:100%}
 table.listing td:first-child{white-space:nowrap}
+table.listing a.dir{font-weight:var(--fw-medium)}
+table.listing td.when{text-align:right}
 table.listing td.subject{max-width:0;width:100%;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-300);
   color:var(--muted)}
@@ -840,17 +842,12 @@ b.theme.here{color:var(--strong);font-weight:var(--fw-medium)}
   color:var(--faint)}
 b.tab.here .count{color:var(--muted)}
 
-/* Three panes at the repository root: what work is in flight, what
-   files exist, what the README says. Flex rather than grid, and
-   wrapping rather than a breakpoint — the component block may not
-   author raw values, and a media query is a raw length by definition.
-   A basis plus `flex-wrap` reaches the same place. */
-.panes{display:flex;flex-wrap:wrap;align-items:flex-start;
-  gap:var(--sp-10) var(--sp-12)}
-.pane{min-width:0;display:flex;flex-direction:column}
-.pane-reviews{flex:4 1 var(--side)}
-.pane-files{flex:4 1 var(--side)}
-.pane-content{flex:7 1 var(--measure)}
+/* Three panes at the repository root, stacked in one column: what work
+   is in flight, what files exist, what the README says. Side by side
+   they clipped every listing row to a fragment; one column gives the
+   file table the whole page and keeps name, subject and age on a line. */
+.panes{display:flex;flex-direction:column;gap:var(--sp-8)}
+.pane{min-width:0;margin-bottom:var(--sp-0)}
 .pane-content>.readme{margin-top:var(--sp-0)}
 .pane>h2:first-child{margin-top:var(--sp-0)}
 
@@ -874,12 +871,6 @@ table.flight .why.mono{white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;margin-top:var(--sp-0)}
 table.flight td:first-child a{overflow-wrap:normal}
 .more{margin:var(--sp-3) var(--sp-0) var(--sp-0);font-size:var(--fs-300)}
-.pane-files td:first-child{max-width:var(--sp-0);overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
-.pane-files td.when{white-space:nowrap;text-align:right;width:1%;
-  padding-left:var(--sp-3)}
-.pane-files .why{display:block;font-size:var(--fs-200);overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
 
 /* ------------------------------------------------------------------
    THE REVIEW PAGE — the product.

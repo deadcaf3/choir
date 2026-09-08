@@ -2033,20 +2033,18 @@ fn tree(
         h.push_str(&plural(tags.len(), "tag", "tags"));
         h.push_str("</span></span></div>");
     }
-    // The repository root is three panes side by side: what work is in
+    // The repository root is three panes in one column: what work is in
     // flight, what files exist, and what the README says. A repository
     // many agents are writing at once is one where "what is happening"
-    // outranks "what is here", so the reviews pane comes first and the
-    // reader never has to go looking for it. Inside a directory there is
-    // no such question to answer, so those pages stay a single column.
+    // outranks "what is here", so the reviews pane comes first. Inside a
+    // directory there is no such question to answer, so those pages
+    // carry the listing and the README alone.
     let file_count = rows.len();
     if path.is_empty() {
         h.push_str("<div class=\"panes\">");
         reviews_pane(&mut h, dir, repo, platform);
-        h.push_str("<section class=\"pane pane-files\"><h2>");
-        h.push_str(&plural(file_count, "entry", "entries"));
-        h.push_str("<span class=\"mono muted\">");
-        h.push_str(&esc(&oid[..oid.len().min(12)]));
+        h.push_str("<section class=\"pane pane-files\"><h2>Files<span class=\"count\">");
+        h.push_str(&file_count.to_string());
         h.push_str("</span></h2>");
     } else {
         h.push_str("<section>");
@@ -2102,51 +2100,29 @@ fn tree(
             // label below is the other way round on purpose: a reader
             // must see the name the repository has, not its encoding.
             h.push_str(&esc(&url_path(&name)));
+            h.push_str("\" class=\"");
+            h.push_str(if is_dir { "dir" } else { "file" });
             h.push_str("\">");
-            if is_dir {
-                h.push_str("<span class=\"muted\">/</span>");
-            }
             h.push_str(&esc(leaf));
             h.push_str("</a>");
-            // Subject and age, the two columns that turn a file list into
-            // a description of what is happening in the repository. A
-            // path git cannot date is left blank rather than filled with
-            // a guess.
-            //
-            // The root's files pane is one narrow column of three, and
-            // four columns in it clip to nothing — the subject rendered
-            // as `re`, and the size fell off the edge entirely. Dropping
-            // the subject would have been the easy fix and the wrong
-            // one: a listing of bare names is a directory, and saying
-            // what each path is *for* is why this column exists. So in
-            // the pane it stacks under the name instead of beside it,
-            // where it has the width to be read. The directory pages
-            // have the whole page, and keep all four columns.
-            if path.is_empty() {
-                if let Some((subject, _)) = touched.as_ref() {
-                    h.push_str("<span class=\"why muted\">");
-                    h.push_str(&esc(subject));
-                    h.push_str("</span>");
-                }
-                h.push_str("</td>");
-            } else {
-                h.push_str("</td><td class=\"subject muted\">");
-                if let Some((subject, _)) = touched.as_ref() {
-                    h.push_str(&esc(subject));
-                }
-                h.push_str("</td>");
+            // Name, subject, age, size: one row per entry at every
+            // level. The subject is the column that turns a file list
+            // into a description of what is happening; it truncates
+            // rather than wraps. A path git cannot date is left blank
+            // rather than filled with a guess.
+            h.push_str("</td><td class=\"subject muted\">");
+            if let Some((subject, _)) = touched.as_ref() {
+                h.push_str(&esc(subject));
             }
-            h.push_str("<td class=\"when muted\">");
+            h.push_str("</td><td class=\"when muted\">");
             if let Some((_, at)) = touched.as_ref() {
                 h.push_str(&esc(&ago(now, *at)));
             }
-            h.push_str("</td>");
-            if !path.is_empty() {
-                h.push_str("<td class=\"num muted\">");
+            h.push_str("</td><td class=\"num muted\">");
+            if !is_dir {
                 h.push_str(&esc(&size));
-                h.push_str("</td>");
             }
-            h.push_str("</tr>");
+            h.push_str("</td></tr>");
         }
         h.push_str("</tbody></table>");
     }
@@ -2179,10 +2155,7 @@ fn tree(
         } else if path.is_empty() {
             // An empty third pane reads as a broken layout. Saying what
             // is missing, and what would fill it, does not.
-            h.push_str(
-                "<p class=\"lede\">No README at this revision. A <code>README.md</code> in \
-                 the repository root renders here.</p>",
-            );
+            h.push_str("<p class=\"muted\">No README at this revision.</p>");
         }
         if path.is_empty() {
             h.push_str("</section></div>");
@@ -2927,10 +2900,7 @@ fn reviews_pane(
         // Not an error, and not this reader's to fix: a node started
         // without `--keys-file` has no platform at all, and the browse
         // surface still works. Saying so beats an empty pane.
-        h.push_str(
-            "</h2><p class=\"muted\">This node runs without the platform, so it holds no \
-             reviews.</p></aside>",
-        );
+        h.push_str("</h2><p class=\"muted\">No platform on this node, so no reviews.</p></aside>");
         return;
     };
     let all = platform.reviews_for_repo(repo);
@@ -2950,10 +2920,7 @@ fn reviews_pane(
     }
     h.push_str("</h2>");
     if open.is_empty() {
-        h.push_str(
-            "<p class=\"muted\">Nothing proposes to land here yet. A review names the ref \
-                    it targets, and appears in this pane from the moment it is requested.</p>",
-        );
+        h.push_str("<p class=\"muted\">No open reviews.</p>");
         h.push_str("</aside>");
         return;
     }
