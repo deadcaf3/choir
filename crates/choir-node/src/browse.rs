@@ -4615,7 +4615,15 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
     if bar.signed_in == Some(true) {
         h.push_str("<a href=\"/reviews\">reviews</a>");
     }
-    h.push_str("<a href=\"/status\">node</a>");
+    // The node's own telemetry, gated like the queue above it. D78's
+    // reachable set is an allowlist and `/status` is not in it, so a bar
+    // that offered it to every stranger was offering the sign-in page
+    // under another name. Publishing the page instead would be widening
+    // what an unauthenticated caller reads, which is a decision for the
+    // ACL and not for a link.
+    if bar.signed_in == Some(true) {
+        h.push_str("<a href=\"/status\">node</a>");
+    }
     if bar.account && bar.signed_in == Some(true) {
         h.push_str("<a href=\"/account\">account</a>");
     }

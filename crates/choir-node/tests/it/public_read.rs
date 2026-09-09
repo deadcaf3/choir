@@ -348,3 +348,65 @@ fn presenting_a_repository_nobody_published_keeps_the_landing_page() {
          for a repository this node has not published: {front}"
     );
 }
+
+/// Every link the bar offers a stranger is one the stranger can follow.
+///
+/// The bar has two shapes and `identified` picks between them, but D78
+/// spells its principal `@anon` while that test only knew `anon`, so a
+/// stranger was handed the signed-in shape: no way in, and links to
+/// `/reviews`, `/account` and `/status`, each of which answered with the
+/// sign-in page. The palette was the worst of them, because it is on
+/// every page, nothing about it is private, and clicking `dark` is the
+/// most ordinary thing a reader does.
+///
+/// Asserted by following the links rather than by naming them, so a link
+/// added to the bar later is covered without anybody remembering to add
+/// it here.
+#[test]
+fn the_bar_offers_a_stranger_no_link_they_cannot_follow() {
+    let s = served("bar", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+    let front = anon_body(&s.base);
+
+    let nav = front
+        .split_once("<nav class=\"chrome-nav\">")
+        .and_then(|(_, rest)| rest.split_once("</nav>"))
+        .map(|(nav, _)| nav.to_string())
+        .expect("the front door draws a bar");
+
+    let mut followed = 0;
+    for piece in nav.split("href=\"").skip(1) {
+        let href = piece.split('"').next().expect("a quoted href");
+        // The book is a different origin and a different server (D76).
+        if href.starts_with("http") {
+            continue;
+        }
+        let href = href.replace("&amp;", "&");
+        let target = format!("{}{href}", s.base);
+        if href == "/signin" {
+            // The one link whose destination is a refusal on purpose:
+            // D74 serves the sign-in page *with* a `401`, so the browser
+            // knows the session it holds is not one. What matters here
+            // is that it renders the page it promises rather than
+            // bouncing the reader somewhere else.
+            assert!(
+                anon_body(&target).contains("action=\"/signin\""),
+                "the way in did not render the form"
+            );
+            followed += 1;
+            continue;
+        }
+        let status = anon(&target);
+        assert!(
+            status < 400,
+            "the bar offers a stranger {href}, which answers {status}"
+        );
+        followed += 1;
+    }
+    assert!(followed >= 2, "the bar drew almost nothing: {nav}");
+
+    // And it offers the way in, which the signed-in shape withheld.
+    assert!(
+        nav.contains("href=\"/signin\""),
+        "a stranger was given no way to sign in: {nav}"
+    );
+}

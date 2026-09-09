@@ -2793,8 +2793,16 @@ fn respond_static_script(request: tiny_http::Request) -> std::io::Result<(u16, u
 /// rather than the comparison at each call site, because the bar's two
 /// shapes and the comment box's gate are the same question and must not
 /// start disagreeing about the answer.
+///
+/// [`acl::ANON`] is the third name and the one that was missing. D78
+/// gives a reader who presented nothing a principal, so `user` became
+/// `@anon` rather than `anon` and every test here said "somebody". The
+/// bar then took its signed-in shape for a stranger: no way in, and
+/// links to `/reviews` and `/account`, both of which answered them with
+/// the sign-in page. It is spelled `@anon` precisely because no account
+/// can be, so it belongs here beside the other name for nobody.
 fn identified(user: &str) -> bool {
-    !user.is_empty() && user != "anon"
+    !user.is_empty() && user != "anon" && user != acl::ANON
 }
 
 /// The chrome facts for one request: the palette this reader chose and
@@ -3001,7 +3009,17 @@ fn anon_may_try(acl: Option<&acl::Effective>, request: &tiny_http::Request) -> b
     if method != "GET" && method != "HEAD" {
         return false;
     }
-    path == "/" || path == "/index.html" || path == "/r" || path.starts_with("/r/")
+    // The palette. Presentation and nothing else: it reads no
+    // repository, writes one cookie, and its only side effect on the
+    // response is a `Location` that `safe_return_to` has already
+    // reduced to a single-leading-slash path. Withholding it put the
+    // one control every page renders behind the wall, so a stranger
+    // clicking `dark` was answered with the sign-in page.
+    path == "/theme"
+        || path == "/"
+        || path == "/index.html"
+        || path == "/r"
+        || path.starts_with("/r/")
 }
 
 /// Answers a browser-surface request with a page.
