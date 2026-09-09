@@ -2728,11 +2728,20 @@ const REFERRER_POLICY: &[u8] = b"same-origin";
 /// nothing at all on `Enter`. Nothing in the served HTML was wrong, which
 /// is why no assertion over the HTML could have caught it.
 ///
+/// `img-src 'self' data:` is what lets a README render a diagram or a
+/// screenshot the repository itself carries. It is the narrowest widening
+/// that renders anything: `'self'` is this node, `data:` is bytes already
+/// in the page, and every third-party host stays refused -- so a badge
+/// from a shield service still does not load, and cannot, because
+/// fetching one would tell that service who is reading this repository
+/// and when. That is D28 and D59's whole point, and it is worth more than
+/// a row of badges.
+///
 /// `'self'` is still the whole guarantee that matters here: a form on
 /// this surface can submit to this origin and to no other, so no page
 /// this node renders can be turned into a way of posting a reader's
 /// input somewhere else.
-const BROWSER_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+const BROWSER_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 /// [`BROWSER_CSP`] plus permission to run [`ui::WEBAUTHN_JS`] and to
 /// `fetch` this node (D39), carried by the two pages with a ceremony on
@@ -2758,7 +2767,7 @@ const BROWSER_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form
 /// at bind, and a host without `openssl` fell back to `'unsafe-inline'`
 /// — a weaker policy than intended, reached silently, visible only in a
 /// served header. That path is gone rather than documented.
-const SCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
+const SCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
 
 /// Serves [`ui::WEBAUTHN_JS`], the only script this node has.
 ///
