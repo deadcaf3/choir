@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;padding:0}
+body{width:1200px;height:630px;overflow:hidden;
+  background:#faf8f4;
+  background-image:
+    radial-gradient(72% 60% at 50% -10%,rgba(59,74,148,.16),transparent 68%),
+    radial-gradient(46% 44% at 90% 4%,rgba(122,84,16,.10),transparent 70%);
+  font-family:ui-serif,"New York","Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  position:relative;display:flex;align-items:center;justify-content:center}
+/* the accent edge, the one place the card spends colour as a shape */
+.edge{position:absolute;left:0;top:0;bottom:0;width:14px;background:#3b4a94}
+.mid{display:flex;flex-direction:column;align-items:center;gap:34px}
+.word{font-size:172px;line-height:1;letter-spacing:-.028em;color:#12100e;font-weight:600}
+/* the stave: four hairlines, fading at both ends */
+.stave{width:300px;height:26px;
+  background-image:repeating-linear-gradient(180deg,rgba(38,35,31,.22) 0 1px,transparent 1px 8px);
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 22%,#000 78%,transparent);
+  mask-image:linear-gradient(90deg,transparent,#000 22%,#000 78%,transparent)}
+</style></head><body><div class="edge"></div>
+<div class="mid"><div class="word">choir</div><div class="stave"></div></div>
+</body></html>

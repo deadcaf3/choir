@@ -185,10 +185,13 @@ fn shell(title: &str, theme: Option<&str>) -> String {
 
 /// Closes the head, opens the body, and writes the brand header.
 ///
-/// Every page here is `task` — one column of prose at the reading
-/// measure. See [`body_classed`] for the one that carries more.
+/// Every page here is `task gate` — one column of prose at the reading
+/// measure, centred, with its one form drawn as the page's one object.
+/// See [`body_classed`] for the front door, which is `task door`.
 fn body(h: &mut String, headline: &str, sub: &str) {
-    body_classed(h, headline, sub, "");
+    // `gate`: one short form, or one sentence about why there is not
+    // one. The front door is the exception and passes `door` instead.
+    body_classed(h, headline, sub, "gate");
 }
 
 /// [`body`], with an extra class on the `<body>` element.
@@ -887,12 +890,41 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     // somebody who has not decided to care yet.
     body_classed(&mut h, "choir", "private beta", "door");
     h.push_str("<section>");
+    // Two sentences, two jobs. The first is the claim, set at the
+    // display size and addressed to somebody who has not decided to care
+    // yet; the second is what makes the claim mean something, set as
+    // prose under it. They were one paragraph, which asked a reader to
+    // find the claim inside four lines of qualification.
     h.push_str(
-        "<p class=\"lede\">A node where agents and people work on the same repositories at \
-         the same time. Every write is a signed operation in one ordered log, and a merge \
-         conflict is a state the history can hold rather than an error somebody has to \
-         clear.</p>",
+        "<p class=\"lede\">Agents and people, working on the same repositories at the same \
+         time.</p>",
     );
+    h.push_str(
+        "<p class=\"hero-sub\">Every write is a signed operation in one ordered log, and a \
+         merge conflict is a state the history can hold rather than an error somebody has \
+         to clear.</p>",
+    );
+    // The ways in, at the top rather than only at the bottom. Three at
+    // most, and each one conditional on the node actually offering it:
+    // a door that renders a control for something this deployment does
+    // not do is the defect the `publishes` branch below already exists
+    // to avoid, one screen higher up.
+    //
+    // `#ask` rather than a route, because the form is on this page. A
+    // fragment is also the one href the walk-the-front-door test skips,
+    // for the good reason that there is nothing at the other end of it
+    // to answer with a status code.
+    h.push_str("<p class=\"cta\">");
+    if door.asking {
+        h.push_str("<a class=\"btn go\" href=\"#ask\">Ask for access</a>");
+        h.push_str("<a class=\"btn\" href=\"/signin\">Sign in</a>");
+    } else {
+        h.push_str("<a class=\"btn go\" href=\"/signin\">Sign in</a>");
+    }
+    if door.publishes {
+        h.push_str("<a class=\"btn\" href=\"/r/\">Read the source</a>");
+    }
+    h.push_str("</p>");
     // Three claims rather than a paragraph. This is the one page read by
     // somebody who has not decided to care yet.
     //
@@ -1035,7 +1067,7 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     // names the two ways in rather than in the header, because a reader
     // who is *not* getting in today is exactly who it is for.
     if let Some(docs) = door.docs {
-        h.push_str("<p class=\"next-doc\"><a class=\"pill docs\" rel=\"external\" href=\"");
+        h.push_str("<p class=\"next-doc\"><a class=\"pill docs btn\" rel=\"external\" href=\"");
         h.push_str(&esc(docs));
         h.push_str("\">Read the documentation →</a></p>");
     }
@@ -1083,7 +1115,7 @@ fn ask_section(h: &mut String, contact: Option<&str>) {
          <input id=\"ask-about\" name=\"about\" maxlength=\"280\"></p>",
     );
     h.push_str(
-        "<p><button id=\"ask-go\" type=\"button\">Ask for access</button></p>\
+        "<p><button id=\"ask-go\" class=\"go\" type=\"button\">Ask for access</button></p>\
          <p id=\"ask-said\" hidden></p>",
     );
     h.push_str("</form>");

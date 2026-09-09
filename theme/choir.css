@@ -151,6 +151,7 @@ body,
 .content h5,
 .content h6 {
   font-family: var(--font-sans);
+  text-wrap: balance;
   color: var(--strong);
   font-weight: var(--fw-bold);
   letter-spacing: var(--tr-heading);
@@ -158,10 +159,15 @@ body,
 }
 
 .content h1 {
+  font-family: var(--serif);
   font-size: var(--fs-900);
   line-height: var(--lh-tight);
   letter-spacing: var(--tr-display);
   margin-block: var(--sp-4) var(--sp-6);
+}
+
+.content h2 {
+  font-family: var(--serif);
 }
 
 /* An accent rule on the section head. It is the one ornament in this
@@ -474,6 +480,19 @@ body,
 
 #menu-bar .icon-button,
 #menu-bar i,
+#menu-bar {
+  background: var(--ground);
+  border-bottom: var(--bw-hair) solid var(--hairline);
+}
+
+@supports (backdrop-filter: blur(1px)) {
+  #menu-bar {
+    background: color-mix(in srgb, var(--ground) 78%, transparent);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+  }
+}
+
 #menu-bar a {
   color: var(--icons);
   transition: color 120ms var(--ease-out);
@@ -485,6 +504,8 @@ body,
 }
 
 .menu-title {
+  font-family: var(--serif);
+  letter-spacing: var(--tr-heading);
   font-weight: var(--fw-medium);
   letter-spacing: var(--tr-heading);
   color: var(--strong);
@@ -631,6 +652,21 @@ mark {
 /* -------------------------------------------------------------------------
    10. Motion and print.
    ---------------------------------------------------------------------- */
+/* One declaration, no script: moving between two pages of the book
+   cross-fades rather than blinking white. Ignored by every browser that
+   has not implemented it, and cancelled by the reduced-motion block
+   below in the ones that have. */
+@view-transition {
+  navigation: auto;
+}
+
+/* The sidebar's current chapter, as a marker rather than as a filled
+   box: the accent on the leading edge, a tint behind it, and the title
+   in the strong ink. */
+.chapter li.chapter-item a.active {
+  border-radius: var(--r-sm);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

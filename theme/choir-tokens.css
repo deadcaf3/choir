@@ -12,23 +12,26 @@
 /* choir node browser surface — design tokens + choir components.
    =========================================================================
    TWO HALVES, ONE SHEET, BOTH OURS. Above the CHOIR COMPONENTS marker is
-   the token block: every colour, size, radius, shadow and duration this
-   surface is allowed to use, named once. Below it is the component block,
-   which styles this node's pages out of those tokens.
+   the token block: every colour, size, radius, shadow, gradient and
+   duration this surface is allowed to use, named once. Below it is the
+   component block, which styles this node's pages out of those tokens.
 
-   This file is self-contained on purpose. It was once kept in sync with a
-   separate repository's design system, which made choir's stylesheet a
-   mirror of something not present in this tree — a rule no contributor
-   here could follow. The tokens are choir's now. No font files ship, so
-   the stacks name system faces only.
+   This file is self-contained on purpose. No font files ship, so the
+   stacks name system faces only — including the display serif, which is
+   already on every machine this surface is read on.
 
    THE RULE: no colour, size, radius, shadow or duration is authored below
    the marker. The component block references `var(--…)` and nothing else.
    A value that does not exist yet gets a token in the block above first.
-   Two tests enforce this — `the_component_sheet_authors_no_raw_values`
-   catches a raw value, and `every_component_token_is_defined_by_the_token_block`
-   catches a `var()` naming a token nobody defined, which a browser drops
-   in silence.
+   Four tests enforce it — a raw value below the marker, a `var()` naming
+   a token nobody defined, a translucent wash painted as text, and a box
+   pinned to a fixed width.
+
+   TWO REGISTERS, ONE SYSTEM. The reading pages (the front door, signing
+   in, redeeming an invite, a refusal) are set as a page of a book: a
+   display serif, a measure, air. The tool pages (browsing, reviewing,
+   the console) are set as an instrument: all sans, dense, precise. Same
+   palette, same spacing, same motion; two voices.
    ========================================================================= */
 
 :root{
@@ -39,10 +42,17 @@
      and a request this surface makes to nobody. */
   --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   --font-mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  /* The reading register. `ui-serif` resolves to New York on Apple
+     platforms and to the reader's serif elsewhere; the named faces are
+     the fallbacks that actually exist on Windows and on Linux desktops.
+     It is used for one thing — the title of a page somebody reads rather
+     than operates — and that restraint is what keeps it from reading as
+     a theme. */
+  --font-display:ui-serif,"New York","Iowan Old Style","Palatino Linotype",
+    Palatino,"Book Antiqua",Georgia,serif;
 
   /* A 16px root, so a rem is a round number and the space scale below
-     lands on a 4px grid without a decimal in sight. The previous 17px
-     root made every one of these a fraction of a pixel. */
+     lands on a 4px grid without a decimal in sight. */
   --fs-100:0.6875rem;  /* 11px — micro labels, table eyebrows */
   --fs-200:0.75rem;    /* 12px — captions, meta, counts */
   --fs-300:0.8125rem;  /* 13px — code, oids, dense tables */
@@ -52,14 +62,26 @@
   --fs-700:1.3125rem;  /* 21px — h3 */
   --fs-800:1.625rem;   /* 26px — h2 */
   --fs-900:2.125rem;   /* 34px — h1 */
-  --fs-1000:2.75rem;   /* 44px — the front door's title */
-  --fs-1100:3.5rem;    /* 56px — reserved; nothing sets it today */
+  --fs-1000:2.75rem;   /* 44px — the top of the fixed scale */
+  --fs-1100:3.5rem;    /* 56px — the ceiling the display step reaches */
 
-  --lh-tight:1.14;
+  /* Fluid steps. A door read on a phone and a door read on a 27-inch
+     display are the same page at two sizes, and picking one fixed size
+     means picking which of the two is wrong. `clamp` interpolates
+     between the steps above rather than beside them, so the scale is
+     still the scale. These are the only viewport-relative lengths in the
+     sheet, and they are here rather than in a media query because a
+     breakpoint is a raw length by definition and the component block may
+     not author one. */
+  --fs-display:clamp(2.125rem,1.35rem + 3.4vw,3.5rem);   /* the front door's title */
+  --fs-title:clamp(1.75rem,1.35rem + 1.9vw,2.75rem);     /* every other task page */
+  --fs-lede:clamp(1.0625rem,1rem + 0.4vw,1.3125rem);     /* the sentence under it */
+
+  --lh-tight:1.08;
   --lh-snug:1.3;
   --lh-normal:1.5;
   --lh-copy:1.65;   /* prose: the front door and a README */
-  --lh-code:1.55;
+  --lh-code:1.6;
 
   --fw-regular:400;
   --fw-medium:500;
@@ -67,13 +89,14 @@
 
   /* Tracking is nearly zero on purpose. `system-ui` is drawn for screen
      text at these sizes and does not want the optical correction a
-     display face does; only the largest step and the small-caps
-     eyebrows get one. */
-  --tr-display:-0.021em;
-  --tr-heading:-0.011em;
+     display face does; only the largest steps and the small-caps
+     eyebrows get one. The serif takes a touch more negative tracking
+     than the sans, because it is set larger. */
+  --tr-display:-0.026em;
+  --tr-heading:-0.012em;
   --tr-body:0;
   --tr-mono:0;
-  --tr-caps:0.075em;   /* eyebrows, small-caps labels */
+  --tr-caps:0.085em;   /* eyebrows, small-caps labels */
 
   /* ---- space (4px grid at a 16px root) ----------------------------- */
   --sp-0:0;
@@ -91,18 +114,26 @@
   --sp-28:7rem;      /* 112 */
   --sp-40:10rem;     /* 160 */
 
+  /* The page's own margins, as tokens rather than as a media query, so
+     the narrow-viewport override below is the only place a breakpoint
+     is written and the component block stays free of lengths. */
+  --pad-x:var(--sp-8);
+  --pad-y:var(--sp-10);
+  --pad-card:var(--sp-6);
+  --gap-pane:var(--sp-10);
+
   /* ---- radii ------------------------------------------------------
-     Nothing on this surface is rounder than 4px, and only a count badge
-     is pill-shaped. A radius is a decoration, and this sheet spends its
-     hierarchy on type and whitespace instead. The names survive the
-     change so every call site keeps compiling; the values are what the
-     redesign is.
+     A radius is a decoration, and this sheet still spends its hierarchy
+     on type and whitespace. But nothing rounded at all reads as a
+     terminal dump rather than as a made thing, so the scale is small,
+     consistent, and used on the four shapes that are genuinely objects:
+     a well, a card, a control, a badge.
      ------------------------------------------------------------------ */
-  --r-xs:1px;
-  --r-sm:2px;
-  --r-md:3px;
-  --r-lg:4px;
-  --r-xl:4px;
+  --r-xs:3px;
+  --r-sm:5px;
+  --r-md:9px;
+  --r-lg:14px;
+  --r-xl:20px;
   --r-pill:999px;
 
   /* ---- borders ----------------------------------------------------- */
@@ -111,39 +142,67 @@
   --bw-0:0;
   --bw-2:2px;
   --bw-4:4px;         /* the outer radius of the focus ring */
-  --bw-rule:2px;      /* the accent tick, thinner than it was */
+  --bw-rule:2px;      /* the accent tick */
   --border:var(--bw-1) solid var(--line);
   --border-hair:var(--bw-hair) solid var(--hairline);
   --border-accent:var(--bw-1) solid var(--accent-line);
 
   /* ---- motion -----------------------------------------------------
-     There is almost nothing here to reduce, which is the intent: the
-     only transitions left are colour flips on hover and focus.
+     Short, eased, and never more than one property in flight that the
+     reader did not ask for. The entrance is 320ms because that is about
+     where a rise stops reading as movement and starts reading as the
+     page having arrived; the state flips are 60–120ms because a hover
+     that takes longer than that feels loose.
      ------------------------------------------------------------------ */
   --dur-1:60ms;    /* state flips: hover, focus */
   --dur-2:120ms;
   --dur-3:180ms;
   --dur-4:240ms;
+  --dur-5:320ms;   /* an element arriving */
+  --dur-6:520ms;   /* the one long one: the door's title */
   --ease-out:cubic-bezier(.22,.61,.36,1);
   --ease-in-out:cubic-bezier(.45,.05,.55,.95);
   --ease-emphatic:cubic-bezier(.16,.84,.24,1);
   --ease-linear:linear;
+  /* A stagger, so a list arrives as a list rather than as a block. */
+  --delay-1:40ms;
+  --delay-2:90ms;
+  --delay-3:140ms;
+  --delay-4:190ms;
+  --delay-5:240ms;
+  --delay-6:290ms;
+  /* How far something travels on the way in, and how far a control
+     lifts under the cursor. Both deliberately small enough to read as
+     weight rather than as animation. */
+  --rise:0.75rem;
+  --lift:-1px;
 
   /* ---- layout ------------------------------------------------------ */
   --measure:36rem;      /* a book's measure: ~66 characters at 16px */
   --search:20rem;       /* the one search box: a field, not a banner */
-  --article:40rem;      /* prose that carries code, slightly wider */
+  --article:42rem;      /* prose that carries code, slightly wider */
   --side:17rem;         /* a narrow pane */
   --toc:14rem;
   --topbar-h:3rem;
-  --page-max:72rem;
+  --page-max:76rem;
   --tool-header-h:2.75rem;
+  --card-min:14rem;     /* a claim on the front door, before it wraps */
   /* One column of a three-up conflict. A floor rather than a width, so
      the columns stack rather than overflow when the viewport cannot
      give three of them this much. */
   --col-min:15rem;
+  /* The blur behind the chrome bar, so what scrolls under it is present
+     without being legible. */
+  --blur-1:14px;
+  /* Whether a listing shows the commit subject at all. A column that has
+     been truncated to two characters is not a column; it is noise where
+     a column used to be. Carried as a token because the component block
+     may not author a breakpoint, and the narrow override below is the
+     one place that decides. */
+  --col-subject:table-cell;
 
   /* ---- z ----------------------------------------------------------- */
+  --z-under:-1;
   --z-base:0;
   --z-sticky:10;
   --z-header:20;
@@ -152,42 +211,64 @@
   --z-palette:50;
 }
 
+/* A phone is not a desktop with less room; it is a different page
+   margin. This is the sheet's one breakpoint, and it moves tokens
+   rather than layout — every component below reads the same names and
+   none of them knows a viewport width exists. */
+@media (max-width:52rem){
+  :root{
+    --pad-x:var(--sp-5);
+    --pad-y:var(--sp-6);
+    --pad-card:var(--sp-5);
+    --gap-pane:var(--sp-8);
+  }
+}
+@media (max-width:34rem){
+  :root{
+    --pad-x:var(--sp-4);
+    --pad-card:var(--sp-4);
+    --col-subject:none;
+  }
+}
+
 /* =========================================================================
    LIGHT — the canonical palette, and the one the surface is designed in.
 
-   Warm neutral greys: the ground is an off-white with a little yellow in
-   it and the ink is a warm near-black, never `#000`. The previous sheet
-   was dark-canonical with a cool blue cast and a cyan accent that glowed;
-   it read as a dashboard. This one is meant to read as a page.
+   Warm neutral greys: the ground is a paper white with a little yellow
+   in it and the ink is a warm near-black, never `#000`. The accent is a
+   deep indigo — one hue, used for links, for the current selection, and
+   for the single decisive control on a page that has one.
 
    Every ratio below is measured against `--ground` unless it says
-   otherwise, and every body and secondary text token clears 4.5:1.
+   otherwise, and every body and secondary text token clears 4.5:1. The
+   test that proves it checks every ink against every ground in both
+   palettes, so a nudge for taste cannot quietly drop one under the bar.
    ====================================================================== */
 :root,
 :root[data-theme="light"],:root.light:not([data-theme="dark"]),:root.rust:not([data-theme="dark"]){
   color-scheme:light;
 
-  --ground:#faf9f7;          /* page */
-  --surface:#ffffff;         /* the one bordered region, when there is one */
+  --ground:#faf8f4;          /* page */
+  --surface:#ffffff;         /* a card, a pane, the chrome bar */
   --card:#ffffff;
-  --raise:#f1efeb;           /* hover fills, inputs */
-  --sunken:#f4f2ee;          /* code wells, diffs */
+  --raise:#f0ece4;           /* hover fills, inputs */
+  --sunken:#f4f1ea;          /* code wells, diffs */
 
-  --ink:#22201d;             /* body copy      — 15.4:1 */
-  --strong:#111010;          /* headings       — 18.1:1 */
-  --muted:#5a554e;           /* secondary      —  7.0:1 */
-  --faint:#6e6960;           /* tertiary, meta —  5.2:1 (4.8:1 on --raise) */
-  --inverse:#ffffff;         /* text on an accent fill — 6.7:1 */
+  --ink:#26231f;             /* body copy      — 14.6:1 */
+  --strong:#12100e;          /* headings       — 17.9:1 */
+  --muted:#57524a;           /* secondary      —  7.5:1 */
+  --faint:#6a645b;           /* tertiary, meta —  5.7:1 */
+  --inverse:#ffffff;         /* text on an accent fill — 7.2:1 */
 
-  --line:rgba(34,32,29,.13);
-  --hairline:rgba(34,32,29,.07);
-  --line-strong:rgba(34,32,29,.26);
+  --line:rgba(38,35,31,.13);
+  --hairline:rgba(38,35,31,.07);
+  --line-strong:rgba(38,35,31,.26);
 
-  --accent:#2b5f8f;          /* the one accent: a quiet slate blue */
-  --accent-ink:#1f4b73;      /* accent as text/links — 8.6:1 */
-  --accent-hover:#143451;
-  --accent-tint:rgba(43,95,143,.08);
-  --accent-line:rgba(43,95,143,.34);
+  --accent:#3b4a94;          /* the one accent: a deep indigo */
+  --accent-ink:#33418a;      /* accent as text/links — 7.9:1 */
+  --accent-hover:#232f6e;
+  --accent-tint:rgba(59,74,148,.08);
+  --accent-line:rgba(59,74,148,.32);
 
   /* Status colours are desaturated and live on text and thin rules. The
      `-tint` washes are backgrounds only; a foreground always takes the
@@ -201,33 +282,57 @@
      from the control. Written as a `box-shadow` pair because several
      controls draw their own border and an `outline` on those sits
      outside it at an inconsistent distance. */
-  --focus:#1f4b73;
+  --focus:#33418a;
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
-  --selection:rgba(43,95,143,.16);
+  --selection:rgba(59,74,148,.16);
 
-  /* Depth is carried by whitespace and hairlines, so the first shadow is
-     nothing at all and the other two exist only for a control that
-     genuinely floats. Nothing on this surface does today. */
-  --shadow-1:none;
-  --shadow-2:0 1px 2px rgba(34,32,29,.07);
-  --shadow-3:0 1px 3px rgba(34,32,29,.09),0 8px 24px -16px rgba(34,32,29,.2);
-  --shadow-inset:none;
+  /* Depth is still carried mostly by whitespace and hairlines. What
+     these add is the small amount of separation a card needs to sit on
+     the page rather than be drawn on it: one contact shadow and one
+     wide, very light ambient one. Warm, never neutral black. */
+  --shadow-1:0 1px 1px rgba(38,35,31,.04);
+  --shadow-2:0 1px 2px rgba(38,35,31,.05),0 8px 20px -14px rgba(38,35,31,.22);
+  --shadow-3:0 1px 2px rgba(38,35,31,.05),0 14px 32px -18px rgba(38,35,31,.28),
+             0 30px 60px -40px rgba(38,35,31,.3);
+  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+
+  /* The light behind the page. Two very wide, very weak radial washes
+     at the top, so the first screen has a horizon and the rest of the
+     page settles onto plain paper. Nothing here is legible as a colour;
+     it is legible as depth. */
+  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.13),transparent 68%);
+  --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(122,84,16,.09),transparent 70%);
+  /* A rule that fades out rather than stopping. Used under an eyebrow
+     and above the footer, where a full-strength line across the page
+     would be the loudest thing on it. */
+  --rule-fade:linear-gradient(90deg,var(--line),rgba(38,35,31,0));
+  /* The stave: the one ornament on this surface, and the only place the
+     name of the product shows up as a shape. Four hairlines, a musical
+     staff at rest. */
+  --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
+  /* The same figure at mark size: three rules in the accent, drawn into
+     a box the size of a capital letter. */
+  --stave-mark:repeating-linear-gradient(90deg,var(--accent) 0 2px,transparent 2px 5px);
+  /* A card's fill. A hair lighter at the top than at the bottom, which
+     is what makes a flat rectangle read as a surface catching light. */
+  --card-wash:linear-gradient(180deg,#ffffff,#fdfbf8);
+  --sunken-wash:linear-gradient(180deg,#f4f1ea,#f7f4ee);
 
   /* Syntax: one hue family plus three signals, all ≥ 4.5:1 on
      `--sunken`, which is the surface code is set on. */
-  --syn-plain:#22201d;
-  --syn-comment:#6e6960;
-  --syn-keyword:#1f4b73;
-  --syn-type:#3a5c8a;
-  --syn-func:#2f4f76;
+  --syn-plain:#26231f;
+  --syn-comment:#6a645b;
+  --syn-keyword:#33418a;
+  --syn-type:#2f5c7e;
+  --syn-func:#2c5170;
   --syn-string:#1a6b47;
   --syn-number:#7a5410;
   --syn-const:#6a4485;
   --syn-macro:#8f4520;
-  --syn-punct:#5a554e;
+  --syn-punct:#57524a;
   --syn-added:rgba(26,107,71,.1);
   --syn-removed:rgba(168,50,58,.09);
-  --syn-gutter:#726c63;
+  --syn-gutter:#6f6960;
 }
 
 /* =========================================================================
@@ -241,114 +346,137 @@
   :root:not([data-theme="light"]){
     color-scheme:dark;
 
-    --ground:#141311;
+    --ground:#131211;
     --surface:#1a1917;
     --card:#1a1917;
     --raise:#232120;
-    --sunken:#100f0e;
+    --sunken:#0f0e0d;
 
-    --ink:#d6d1c8;           /* 12.2:1 */
-    --strong:#f5f2ec;        /* 16.6:1 */
-    --muted:#9a938a;         /*  6.1:1 */
-    --faint:#918a80;         /*  5.4:1 (4.7:1 on --raise) */
-    --inverse:#141311;
+    --ink:#d9d4cb;           /* 12.4:1 */
+    --strong:#f6f3ed;        /* 16.9:1 */
+    --muted:#9d968c;         /*  6.3:1 */
+    --faint:#948d83;         /*  5.6:1 */
+    --inverse:#131211;
 
-    --line:rgba(214,209,200,.14);
-    --hairline:rgba(214,209,200,.07);
-    --line-strong:rgba(214,209,200,.28);
+    --line:rgba(217,212,203,.14);
+    --hairline:rgba(217,212,203,.07);
+    --line-strong:rgba(217,212,203,.28);
 
-    --accent:#6f9ecb;
-    --accent-ink:#8fb6dd;    /*  8.8:1 */
-    --accent-hover:#b3d0ec;
-    --accent-tint:rgba(143,182,221,.11);
-    --accent-line:rgba(143,182,221,.36);
+    --accent:#7f8fd8;
+    --accent-ink:#a3b0e8;    /*  8.7:1 */
+    --accent-hover:#c3ccf4;
+    --accent-tint:rgba(163,176,232,.12);
+    --accent-line:rgba(163,176,232,.36);
 
     --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
     --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
     --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
     --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
 
-    --focus:#8fb6dd;
+    --focus:#a3b0e8;
     --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
-    --selection:rgba(143,182,221,.24);
+    --selection:rgba(163,176,232,.26);
 
-    --shadow-1:none;
-    --shadow-2:0 1px 2px rgba(0,0,0,.5);
-    --shadow-3:0 1px 3px rgba(0,0,0,.5),0 8px 24px -16px rgba(0,0,0,.7);
-    --shadow-inset:none;
+    --shadow-1:0 1px 1px rgba(0,0,0,.4);
+    --shadow-2:0 1px 2px rgba(0,0,0,.5),0 8px 20px -14px rgba(0,0,0,.8);
+    --shadow-3:0 1px 2px rgba(0,0,0,.5),0 14px 32px -18px rgba(0,0,0,.75),
+               0 30px 60px -40px rgba(0,0,0,.9);
+    --shadow-inset:inset 0 1px 0 rgba(255,255,255,.04);
 
-    --syn-plain:#d6d1c8;
-    --syn-comment:#918a80;
-    --syn-keyword:#8fb6dd;
+    --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
+    --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+    --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
+    --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
+  /* The same figure at mark size: three rules in the accent, drawn into
+     a box the size of a capital letter. */
+  --stave-mark:repeating-linear-gradient(90deg,var(--accent) 0 2px,transparent 2px 5px);
+    --card-wash:linear-gradient(180deg,#1d1c1a,#191816);
+    --sunken-wash:linear-gradient(180deg,#0f0e0d,#121110);
+
+    --syn-plain:#d9d4cb;
+    --syn-comment:#948d83;
+    --syn-keyword:#a3b0e8;
     --syn-type:#a9c8e6;
     --syn-func:#b9cfe8;
     --syn-string:#8ecfa8;
     --syn-number:#d9b571;
     --syn-const:#c3a8e0;
     --syn-macro:#e0a17e;
-    --syn-punct:#9a938a;
+    --syn-punct:#9d968c;
     --syn-added:rgba(108,195,154,.12);
     --syn-removed:rgba(232,138,144,.12);
-    --syn-gutter:#938c81;
+    --syn-gutter:#968f85;
   }
 }
 
 /* Manual override — duplicated rather than `@extend`'d because plain CSS
    has no mixins and the attribute must beat the media query above. The
    generator that cuts this block for the book widens both theme
-   selectors by name, so neither may be reworded. */
+   selectors by name, so neither may be reworded, and a test compares the
+   two spellings declaration by declaration. */
 :root[data-theme="dark"],:root.coal:not([data-theme="light"]),:root.navy:not([data-theme="light"]),:root.ayu:not([data-theme="light"]){
   color-scheme:dark;
 
-  --ground:#141311;
+  --ground:#131211;
   --surface:#1a1917;
   --card:#1a1917;
   --raise:#232120;
-  --sunken:#100f0e;
+  --sunken:#0f0e0d;
 
-  --ink:#d6d1c8;
-  --strong:#f5f2ec;
-  --muted:#9a938a;
-  --faint:#918a80;
-  --inverse:#141311;
+  --ink:#d9d4cb;
+  --strong:#f6f3ed;
+  --muted:#9d968c;
+  --faint:#948d83;
+  --inverse:#131211;
 
-  --line:rgba(214,209,200,.14);
-  --hairline:rgba(214,209,200,.07);
-  --line-strong:rgba(214,209,200,.28);
+  --line:rgba(217,212,203,.14);
+  --hairline:rgba(217,212,203,.07);
+  --line-strong:rgba(217,212,203,.28);
 
-  --accent:#6f9ecb;
-  --accent-ink:#8fb6dd;
-  --accent-hover:#b3d0ec;
-  --accent-tint:rgba(143,182,221,.11);
-  --accent-line:rgba(143,182,221,.36);
+  --accent:#7f8fd8;
+  --accent-ink:#a3b0e8;
+  --accent-hover:#c3ccf4;
+  --accent-tint:rgba(163,176,232,.12);
+  --accent-line:rgba(163,176,232,.36);
 
   --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
   --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
   --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
   --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
 
-  --focus:#8fb6dd;
+  --focus:#a3b0e8;
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
-  --selection:rgba(143,182,221,.24);
+  --selection:rgba(163,176,232,.26);
 
-  --shadow-1:none;
-  --shadow-2:0 1px 2px rgba(0,0,0,.5);
-  --shadow-3:0 1px 3px rgba(0,0,0,.5),0 8px 24px -16px rgba(0,0,0,.7);
-  --shadow-inset:none;
+  --shadow-1:0 1px 1px rgba(0,0,0,.4);
+  --shadow-2:0 1px 2px rgba(0,0,0,.5),0 8px 20px -14px rgba(0,0,0,.8);
+  --shadow-3:0 1px 2px rgba(0,0,0,.5),0 14px 32px -18px rgba(0,0,0,.75),
+             0 30px 60px -40px rgba(0,0,0,.9);
+  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.04);
 
-  --syn-plain:#d6d1c8;
-  --syn-comment:#918a80;
-  --syn-keyword:#8fb6dd;
+  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
+  --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+  --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
+  --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
+  /* The same figure at mark size: three rules in the accent, drawn into
+     a box the size of a capital letter. */
+  --stave-mark:repeating-linear-gradient(90deg,var(--accent) 0 2px,transparent 2px 5px);
+  --card-wash:linear-gradient(180deg,#1d1c1a,#191816);
+  --sunken-wash:linear-gradient(180deg,#0f0e0d,#121110);
+
+  --syn-plain:#d9d4cb;
+  --syn-comment:#948d83;
+  --syn-keyword:#a3b0e8;
   --syn-type:#a9c8e6;
   --syn-func:#b9cfe8;
   --syn-string:#8ecfa8;
   --syn-number:#d9b571;
   --syn-const:#c3a8e0;
   --syn-macro:#e0a17e;
-  --syn-punct:#9a938a;
+  --syn-punct:#9d968c;
   --syn-added:rgba(108,195,154,.12);
   --syn-removed:rgba(232,138,144,.12);
-  --syn-gutter:#938c81;
+  --syn-gutter:#968f85;
 }
 
 /* --- legacy aliases -----------------------------------------------------
@@ -358,9 +486,10 @@
 :root{
   --sans:var(--font-sans);
   --mono:var(--font-mono);
-  --serif:var(--font-sans);
+  --serif:var(--font-display);
   --tint:var(--accent-tint);
   --tint-line:var(--accent-line);
   --shadow:var(--shadow-2);
   --shadow-lg:var(--shadow-3);
+  --icons:var(--faint);
 }

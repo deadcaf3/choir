@@ -974,6 +974,11 @@ pub(crate) fn refusal(
 /// to everyone in the channel, so the repository, the inviter and the
 /// username stay in the page body where only the holder of the link
 /// sees them.
+///
+/// Drawn from `scripts/card.html` by `scripts/render_card.sh`, in the
+/// same palette and the same display face as the front door. A binary
+/// with no generator is a file nobody can correct, and this one spent a
+/// redesign carrying the palette of the surface before last.
 pub(crate) const CARD: &[u8] = include_bytes!("card.png");
 
 /// Where [`CARD`] is served. Named once because the route, the
