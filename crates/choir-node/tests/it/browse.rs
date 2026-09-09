@@ -2438,17 +2438,19 @@ fn a_not_modified_response_carries_the_same_policy_as_the_page() {
     }
 }
 
-/// The repository root answers "what is happening here" before "what is
-/// here".
+/// The repository root leads with the listing and rails everything else.
 ///
-/// A repository several agents are writing at once is one where the work
-/// in flight is the first thing a reader needs, so the root page leads
-/// with the reviews pane and puts the file listing beside it rather than
-/// above it. The assertion is positional on purpose: a page that merely
-/// mentions the review somewhere would satisfy a `contains` and still
-/// bury it under the files.
+/// This used to lead with the work in flight, on the argument that a
+/// repository several agents are writing at once is one where "what is
+/// happening" outranks "what is here". Measured against the page, the
+/// argument cost more than it bought: equal panes gave an empty "no open
+/// reviews" card half the front page while every commit subject beside
+/// it truncated mid-word, and the empty case is the common one. The work
+/// in flight keeps its place in the rail, where it is still positional
+/// rather than merely present -- a page that mentions the review
+/// somewhere would satisfy a `contains` and still have buried it.
 #[test]
-fn the_repository_root_leads_with_the_work_in_flight() {
+fn the_repository_root_leads_with_the_listing_and_rails_the_rest() {
     let work = std::env::temp_dir().join("choir-node-browse-root-panes");
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).expect("temp root");
@@ -2504,36 +2506,46 @@ fn the_repository_root_leads_with_the_work_in_flight() {
     let (status, _, page) = get(&format!("{base}/r/agents/one"), &[]);
     assert_eq!(status, 200);
 
-    // Three panes, in the order the reader needs them. Split on the
-    // markup, never on the class name: every one of these names also
-    // appears in the inline stylesheet, so a `contains("pane-files")`
-    // matches the CSS and passes on a page with no panes at all. The
-    // first draft of this test did exactly that.
+    // Split on the markup, never on the class name: every one of these
+    // names also appears in the inline stylesheet, so a
+    // `contains("pane-files")` matches the CSS and passes on a page with
+    // no panes at all. The first draft of this test did exactly that.
     let (before_files, after_files) = page
         .split_once("<section class=\"pane pane-files\">")
         .unwrap_or_else(|| panic!("the root page has no files pane: {page}"));
     assert!(
-        before_files.contains("<aside class=\"pane pane-reviews\">"),
-        "the reviews pane does not come before the files pane: {page}"
+        !before_files.contains("<aside class=\"pane pane-reviews\">"),
+        "the rail comes before the listing it is a rail to: {page}"
+    );
+    assert!(
+        after_files.contains("<div class=\"rail\">"),
+        "the rail does not follow the listing: {page}"
     );
     assert!(
         after_files.contains("<section class=\"pane pane-content\">"),
         "the content pane does not come after the files pane: {page}"
     );
 
-    // The review is *in* the first pane, not merely on the page.
-    assert!(
-        before_files.contains("r-inflight"),
-        "the work in flight is not in the leading pane: {before_files}"
-    );
-    assert!(
-        before_files.contains("/r/agents/one/review/r-inflight"),
-        "the review is named but not linked: {before_files}"
-    );
-    // And the file listing is still the files pane's job.
+    // The listing leads, and it is still the listing.
     assert!(
         after_files.contains("only.txt"),
         "the files pane lost the listing: {after_files}"
+    );
+
+    // The review is *in* the rail, not merely on the page. A pane that
+    // draws nothing when the queue is empty must still draw the queue.
+    let rail = after_files
+        .split_once("<div class=\"rail\">")
+        .and_then(|(_, rest)| rest.split_once("<section class=\"pane pane-content\">"))
+        .map(|(rail, _)| rail)
+        .expect("the rail sits between the listing and the README");
+    assert!(
+        rail.contains("<aside class=\"pane pane-reviews\">"),
+        "the work in flight is not in the rail: {rail}"
+    );
+    assert!(
+        rail.contains("/r/agents/one/review/r-inflight"),
+        "the review is named but not linked: {rail}"
     );
 }
 
@@ -2820,4 +2832,153 @@ fn contribute_page_is_not_a_hole_in_the_acl() {
         get(&format!("{base}/r/agents/one/contribute"), &["-u", "bob:b"]);
     assert_eq!(status, 404, "a reader with no grant was served: {body}");
     assert!(!body.contains("choir join"), "the refusal leaked the page");
+}
+
+/// The repository front page carries the furniture a reader orients by.
+///
+/// Four claims, each of which was a gap measured against what every code
+/// host puts on this page. The listing says who wrote last and what they
+/// called it, instead of leaving the reader to open the history. The rail
+/// names both licences rather than picking one file and calling it "the"
+/// licence, which for a dual-licensed repository is a false statement.
+/// The revision is named once, not twice a hand's width apart. And an
+/// empty review queue draws nothing at all, because a card saying "no
+/// open reviews" was taking a share of the page from the listing, which
+/// is what the reader actually came for.
+#[test]
+fn the_repository_front_page_says_what_state_it_is_in() {
+    let work = std::env::temp_dir().join("choir-node-browse-frontpage");
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("temp root");
+
+    let mut table = AuthTable::new();
+    table.insert("alice".into(), "a".into());
+    let mut node =
+        Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds free port");
+    let port = node.port();
+    node.create_repo("agents/one.git").expect("repo created");
+    let bare = work.join("repos/agents/one.git");
+    node.enable_platform(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::generate(),
+        )
+        .expect("platform starts"),
+    );
+    std::thread::spawn(move || node.serve_forever());
+    let base = format!("http://127.0.0.1:{port}");
+
+    // The conventional place, which gitweb has read for twenty years.
+    std::fs::write(bare.join("description"), "What this one is for.\n").expect("description");
+
+    let clone = work.join("clone");
+    let url = format!("http://alice:a@127.0.0.1:{port}/agents/one.git");
+    assert!(git(&work, &["clone", "-q", &url, clone.to_str().unwrap()])
+        .status
+        .success());
+    for (name, body) in [
+        ("README.md", "# the project\n"),
+        ("CONTRIBUTING.md", "push a branch\n"),
+        ("LICENSE-MIT", "mit\n"),
+        ("LICENSE-APACHE", "apache\n"),
+        ("SECURITY.md", "report it\n"),
+    ] {
+        std::fs::write(clone.join(name), body).expect("file");
+    }
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(
+        git(&clone, &["commit", "-q", "-m", "lay the documents out"])
+            .status
+            .success()
+    );
+    // `tag.gpgSign` is on in some contributors' global config, and this
+    // helper only turns off `commit.gpgsign`. A lightweight tag is what
+    // the rail reads anyway.
+    assert!(git(&clone, &["-c", "tag.gpgsign=false", "tag", "v1.2.3"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "HEAD:main"])
+        .status
+        .success());
+    assert!(git(&clone, &["push", "-q", "origin", "v1.2.3"])
+        .status
+        .success());
+
+    let (status, _headers, page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{page}");
+
+    // Who wrote last, and what they called it.
+    let bar = page
+        .split_once("<div class=\"commitbar\">")
+        .and_then(|(_, rest)| rest.split_once("</div>"))
+        .map(|(bar, _)| bar)
+        .expect("the listing carries a commit bar");
+    assert!(
+        bar.contains("lay the documents out"),
+        "the commit bar does not name the commit: {bar}"
+    );
+
+    // Both licences, under the names of the licences.
+    let rail = page
+        .split_once("<aside class=\"pane pane-about\">")
+        .and_then(|(_, rest)| rest.split_once("</aside>"))
+        .map(|(rail, _)| rail)
+        .expect("the front page carries an About rail");
+    assert!(
+        rail.contains("What this one is for."),
+        "the rail dropped the description: {rail}"
+    );
+    for wanted in [">MIT<", ">Apache-2.0<", "v1.2.3"] {
+        assert!(
+            rail.contains(wanted),
+            "the rail is missing {wanted}: {rail}"
+        );
+    }
+    assert!(
+        rail.contains("Written by"),
+        "the rail names nobody who wrote here: {rail}"
+    );
+
+    // The revision, once. The ref picker below the header names it, so
+    // the header does not.
+    let sub = page
+        .split_once("<div class=\"sub\">")
+        .and_then(|(_, rest)| rest.split_once("</div>"))
+        .map(|(sub, _)| sub)
+        .expect("the header carries its metadata row");
+    // The bare word as its own pill, not the word inside `/commits/main`:
+    // the links have to keep naming the revision they point at.
+    assert!(
+        !sub.contains("<span class=\"pill\">main</span>"),
+        "the header names the revision the picker already names: {sub}"
+    );
+
+    // An empty queue draws no card.
+    // The whole stylesheet is inlined into every page, so the bare class
+    // name matches the rule that styles it. Only the markup counts.
+    assert!(
+        !page.contains("<aside class=\"pane pane-reviews\""),
+        "an empty review queue still drew a pane"
+    );
+
+    // And the other documents are one click from the README.
+    let tabs = page
+        .split_once("<nav class=\"doctabs\">")
+        .and_then(|(_, rest)| rest.split_once("</nav>"))
+        .map(|(tabs, _)| tabs)
+        .expect("the README carries a strip of the other documents");
+    for wanted in [
+        "CONTRIBUTING.md",
+        "LICENSE-MIT",
+        "LICENSE-APACHE",
+        "SECURITY.md",
+    ] {
+        assert!(
+            tabs.contains(wanted),
+            "the strip is missing {wanted}: {tabs}"
+        );
+    }
+
+    std::fs::remove_dir_all(&work).ok();
 }

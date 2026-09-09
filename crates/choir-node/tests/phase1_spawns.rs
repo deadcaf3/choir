@@ -128,7 +128,14 @@ fn a_page_render_stays_inside_its_git_spawn_budget() {
     for (path, measured, budget) in [
         // The repository front page, spawn by spawn: resolve HEAD, read
         // refs/heads/, list the tree, read refs/tags/, count commits,
-        // walk the listing's dates, then size and read the README.
+        // walk the listing's dates, walk the authors, then size and read
+        // the README.
+        //
+        // The ninth is `tip_and_authors`, and it is one rather than two
+        // on purpose: the commit bar wants the newest commit and the
+        // About rail wants everyone who has written here, and both come
+        // out of the same newest-first `git log`. Splitting them into the
+        // two queries they read as would have cost a tenth.
         //
         // Two of those were removed by measuring rather than by
         // guessing. The dates were one `git log` per row until
@@ -136,7 +143,7 @@ fn a_page_render_stays_inside_its_git_spawn_budget() {
         // refs/heads/ was read twice per render -- once to decide what
         // to call HEAD, once to fill the ref picker -- until this file
         // was asked what the nine were actually doing.
-        ("/r/agents/one/", 8u64, 9u64),
+        ("/r/agents/one/", 9u64, 10u64),
         // A forty-file directory, at three. It is *cheaper* than the
         // root, which carries refs, a commit count and a readme that a
         // subdirectory does not -- and it does not grow with the number

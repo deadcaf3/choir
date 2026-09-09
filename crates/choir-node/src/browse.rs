@@ -1781,6 +1781,279 @@ fn last_touches(
     found
 }
 
+/// How far back the front page looks for who has written here.
+///
+/// Bounded for the reason [`TOUCH_WALK`] is bounded: the rail is a
+/// summary, and a repository with a hundred thousand commits in it must
+/// not make its own front page linear in them. A history longer than
+/// this is reported as the authors of its most recent commits, and the
+/// rail says `+` so the number is not read as the whole truth.
+const AUTHOR_WALK: usize = 2000;
+
+/// The commit a listing is of: who wrote it, what they called it, when.
+struct Tip {
+    author: String,
+    subject: String,
+    at: i64,
+}
+
+/// The tip commit and everyone who has written here, in one walk.
+///
+/// Two answers from one subprocess because they come from the same
+/// place: `git log`, newest first, over one revision. The first record
+/// is the commit this listing is of; every record's author is the set
+/// the rail names. Asking separately would be two spawns on a page whose
+/// cost is counted in them (`tests/phase1_spawns.rs`), and this page had
+/// exactly one to spend.
+///
+/// The `bool` is whether the walk hit [`AUTHOR_WALK`], so a caller can
+/// say "at least this many" rather than state a count it did not finish
+/// counting.
+fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool) {
+    let depth = format!("-{AUTHOR_WALK}");
+    let Ok(text) = git_text(dir, &["log", &depth, "--format=%an%x00%at%x00%s", oid]) else {
+        return (None, Vec::new(), false);
+    };
+    let mut tip: Option<Tip> = None;
+    let mut authors: Vec<String> = Vec::new();
+    let mut walked = 0usize;
+    for line in text.lines() {
+        let mut fields = line.splitn(3, '\0');
+        let (Some(author), Some(at), Some(subject)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        walked += 1;
+        if tip.is_none() {
+            tip = Some(Tip {
+                author: author.to_string(),
+                subject: subject.to_string(),
+                at: at.trim().parse().unwrap_or_default(),
+            });
+        }
+        // Linear rather than a set: the list this builds is rendered in
+        // first-seen order, which is most-recently-active first, and a
+        // repository's author count is small enough that the scan costs
+        // less than the ordering would cost to put back.
+        if !authors.iter().any(|seen| seen == author) {
+            authors.push(author.to_string());
+        }
+    }
+    (tip, authors, walked >= AUTHOR_WALK)
+}
+
+/// The one row above a listing that says what state it is in.
+///
+/// Who last wrote, what they called it, and when -- the three facts a
+/// reader checks before reading anything else, and the three that were
+/// previously spread between the header, the ref bar and the first row
+/// of the table.
+fn commit_bar(h: &mut String, repo: &str, oid: &str, tip: &Tip, now: i64) {
+    h.push_str("<div class=\"commitbar\"><span class=\"who\">");
+    h.push_str(&esc(&tip.author));
+    h.push_str("</span><a class=\"what\" href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/commit/");
+    h.push_str(&esc(oid));
+    h.push_str("\">");
+    h.push_str(&esc(&tip.subject));
+    h.push_str("</a><span class=\"when muted\">");
+    h.push_str(&esc(&ago(now, tip.at)));
+    h.push_str("</span></div>");
+}
+
+/// The repository's own one-line description, if its operator wrote one.
+///
+/// `git init` leaves a `description` file carrying a sentence telling you
+/// to replace it, and gitweb has read that file for twenty years, so this
+/// is the conventional place rather than a new one this node invented.
+/// The placeholder is treated as absent, because a front page repeating
+/// "Unnamed repository; edit this file" is worse than one saying nothing.
+fn described(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("description")).ok()?;
+    let line = text.lines().next()?.trim();
+    if line.is_empty() || line.starts_with("Unnamed repository") {
+        return None;
+    }
+    Some(line.to_string())
+}
+
+/// The documents a repository is expected to carry, as the rail finds
+/// them: by name, in the listing already read, so this costs no spawn.
+///
+/// Exact names rather than a pattern, because `LICENSE-APACHE` is a
+/// licence and `LICENSED_UNDER_PROTEST.md` is somebody's essay, and a
+/// rail that links the second one under the word "License" is stating
+/// something untrue about the repository.
+fn doc_link(names: &[String], wanted: &[&str]) -> Option<String> {
+    wanted
+        .iter()
+        .find(|name| names.iter().any(|have| have == *name))
+        .map(|name| (*name).to_string())
+}
+
+/// Every licence a repository carries, each under the name of the
+/// licence rather than the name of the file.
+///
+/// Dual licensing is the normal case in this ecosystem and a rail that
+/// picked one file and called it "License" would be describing the
+/// repository wrongly -- it says both, in the order the file names sort,
+/// and falls back to the bare word only for a repository carrying one
+/// unnamed `LICENSE`.
+fn licences(names: &[String]) -> Vec<(&'static str, String)> {
+    [
+        ("MIT", "LICENSE-MIT"),
+        ("Apache-2.0", "LICENSE-APACHE"),
+        ("License", "LICENSE"),
+        ("License", "LICENSE.md"),
+        ("License", "COPYING"),
+    ]
+    .into_iter()
+    .filter(|(_, file)| names.iter().any(|have| have == file))
+    .map(|(label, file)| (label, file.to_string()))
+    .collect()
+}
+
+/// The rail beside the listing: what this repository is, what it is
+/// licensed as, where it is up to, and who has written it.
+///
+/// Everything here is already on disk or already read, except the author
+/// list, which shares [`tip_and_authors`]' one walk with the commit bar.
+#[allow(clippy::too_many_arguments)]
+fn about_pane(
+    h: &mut String,
+    dir: &Path,
+    repo: &str,
+    rev: &str,
+    names: &[String],
+    tags: &[String],
+    authors: &[String],
+    more_authors: bool,
+) {
+    let about = described(dir);
+    let licences = licences(names);
+    let contributing = doc_link(names, &["CONTRIBUTING.md", "CONTRIBUTING"]);
+    let security = doc_link(names, &["SECURITY.md", "SECURITY"]);
+    let latest = tags.last();
+    // A rail with one item in it is a rail worth drawing; a rail with
+    // none is the empty card this page just stopped drawing elsewhere.
+    if about.is_none()
+        && licences.is_empty()
+        && contributing.is_none()
+        && security.is_none()
+        && latest.is_none()
+        && authors.is_empty()
+    {
+        return;
+    }
+    h.push_str("<aside class=\"pane pane-about\"><h2>About</h2>");
+    if let Some(about) = about.as_deref() {
+        h.push_str("<p class=\"says\">");
+        h.push_str(&esc(about));
+        h.push_str("</p>");
+    }
+    h.push_str("<ul class=\"facts\">");
+    if !licences.is_empty() {
+        h.push_str("<li><span class=\"muted\">");
+        h.push_str(if licences.len() == 1 {
+            "License"
+        } else {
+            "Licenses"
+        });
+        h.push_str("</span> ");
+        for (n, (label, file)) in licences.iter().enumerate() {
+            if n > 0 {
+                h.push_str(" \u{b7} ");
+            }
+            h.push_str("<a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/blob/");
+            h.push_str(&esc(rev));
+            h.push('/');
+            h.push_str(&esc(&url_path(file)));
+            h.push_str("\">");
+            h.push_str(&esc(label));
+            h.push_str("</a>");
+        }
+        h.push_str("</li>");
+    }
+    let mut doc = |label: &str, file: &Option<String>| {
+        if let Some(file) = file.as_deref() {
+            h.push_str("<li><a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/blob/");
+            h.push_str(&esc(rev));
+            h.push('/');
+            h.push_str(&esc(&url_path(file)));
+            h.push_str("\">");
+            h.push_str(&esc(label));
+            h.push_str("</a></li>");
+        }
+    };
+    doc("Contributing", &contributing);
+    doc("Security policy", &security);
+    if let Some(tag) = latest {
+        h.push_str("<li><span class=\"muted\">Latest tag</span> <a href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/tree/");
+        h.push_str(&esc(&url_path(tag)));
+        h.push_str("\" class=\"mono\">");
+        h.push_str(&esc(tag));
+        h.push_str("</a></li>");
+    }
+    h.push_str("</ul>");
+    if !authors.is_empty() {
+        h.push_str("<h2>Written by<span class=\"count\">");
+        h.push_str(&authors.len().to_string());
+        if more_authors {
+            h.push('+');
+        }
+        h.push_str("</span></h2><ul class=\"who\">");
+        // Most recently active first, which is the order the walk found
+        // them in, and the order a reader asking "who is here now" wants.
+        for author in authors.iter().take(PANE_ROWS) {
+            h.push_str("<li>");
+            h.push_str(&esc(author));
+            h.push_str("</li>");
+        }
+        h.push_str("</ul>");
+    }
+    h.push_str("</aside>");
+}
+
+/// The strip over the README: the other documents, one click away.
+///
+/// Links rather than tabs that switch in place, because this surface
+/// runs no script. What it buys is the same thing GitHub's tab strip
+/// buys -- a reader who wants the licence or the contributing guide
+/// finds it without going back to the listing to look for the file.
+fn readme_tabs(h: &mut String, repo: &str, rev: &str, names: &[String]) {
+    let mut others: Vec<(&str, String)> = Vec::new();
+    if let Some(file) = doc_link(names, &["CONTRIBUTING.md", "CONTRIBUTING"]) {
+        others.push(("Contributing", file));
+    }
+    others.extend(licences(names));
+    if let Some(file) = doc_link(names, &["SECURITY.md", "SECURITY"]) {
+        others.push(("Security", file));
+    }
+    if others.is_empty() {
+        return;
+    }
+    h.push_str("<nav class=\"doctabs\">");
+    for (label, file) in others {
+        h.push_str("<a href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/blob/");
+        h.push_str(&esc(rev));
+        h.push('/');
+        h.push_str(&esc(&url_path(&file)));
+        h.push_str("\">");
+        h.push_str(&esc(label));
+        h.push_str("</a>");
+    }
+    h.push_str("</nav>");
+}
+
 /// The commit one path was last changed by: its subject and its timestamp.
 ///
 /// A subprocess per call, so a listing does not use it per row any more
@@ -2009,8 +2282,23 @@ fn tree(
     // at the repository root — inside a directory it is the breadcrumb
     // that answers "where am I", and repeating the picker there just
     // pushes the listing further down the page.
+    // Read once, used three times: the ref bar names the tags, the rail
+    // names the newest, the commit bar and the rail split one author
+    // walk. Hoisted out of the ref-bar block below because that block is
+    // where they used to be read and the rail is drawn after it.
+    let (tip, authors, more_authors, tags, root_names) = if path.is_empty() {
+        let (tip, authors, more) = tip_and_authors(dir, &oid);
+        (
+            tip,
+            authors,
+            more,
+            tag_names(dir),
+            rows.iter().map(|(_, name, _)| name.clone()).collect(),
+        )
+    } else {
+        (None, Vec::new(), false, Vec::new(), Vec::new())
+    };
     if path.is_empty() {
-        let tags = tag_names(dir);
         let commits = git_text(dir, &["rev-list", "--count", &oid])
             .ok()
             .and_then(|text| text.trim().parse::<u64>().ok());
@@ -2033,19 +2321,22 @@ fn tree(
         h.push_str(&plural(tags.len(), "tag", "tags"));
         h.push_str("</span></span></div>");
     }
-    // The repository root is three panes in one column: what work is in
-    // flight, what files exist, and what the README says. A repository
-    // many agents are writing at once is one where "what is happening"
-    // outranks "what is here", so the reviews pane comes first. Inside a
-    // directory there is no such question to answer, so those pages
-    // carry the listing and the README alone.
+    // The repository root is the listing, a rail beside it, and the
+    // README under both. The listing leads: it is what a reader came for
+    // and it is the pane that can use the width, and the rail's two
+    // cards each draw nothing when they have nothing rather than holding
+    // a share of the page open for news that has not arrived. Inside a
+    // directory there is no rail to draw, so those pages carry the
+    // listing and the README alone.
     let file_count = rows.len();
     if path.is_empty() {
         h.push_str("<div class=\"panes\">");
-        reviews_pane(&mut h, dir, repo, platform);
         h.push_str("<section class=\"pane pane-files\"><h2>Files<span class=\"count\">");
         h.push_str(&file_count.to_string());
         h.push_str("</span></h2>");
+        if let Some(tip) = tip.as_ref() {
+            commit_bar(&mut h, repo, &oid, tip, now_secs());
+        }
     } else {
         h.push_str("<section>");
     }
@@ -2127,6 +2418,30 @@ fn tree(
         h.push_str("</tbody></table>");
     }
     h.push_str("</section>");
+    // The rail: what is in flight, and what this repository is. One
+    // column rather than two panes, so the listing keeps the width and
+    // these stack beside it the way a sidebar does. Either half draws
+    // nothing when it has nothing, and a rail with neither is a rail
+    // that never opens.
+    if path.is_empty() {
+        let mut rail = String::new();
+        reviews_pane(&mut rail, dir, repo, platform);
+        about_pane(
+            &mut rail,
+            dir,
+            repo,
+            rev,
+            &root_names,
+            &tags,
+            &authors,
+            more_authors,
+        );
+        if !rail.is_empty() {
+            h.push_str("<div class=\"rail\">");
+            h.push_str(&rail);
+            h.push_str("</div>");
+        }
+    }
     // The README, under the listing, the way every code host has put it
     // since the convention started. At every level, not just the root: a
     // README beside a directory's files is documentation for exactly the
@@ -2143,6 +2458,9 @@ fn tree(
             h.push_str("<section class=\"readme\"><h2>");
             h.push_str(&esc(&name));
             h.push_str("</h2>");
+            if path.is_empty() {
+                readme_tabs(&mut h, repo, rev, &root_names);
+            }
             h.push_str(&crate::readme::render(
                 &body,
                 crate::readme::Base {
@@ -2895,12 +3213,15 @@ fn reviews_pane(
     repo: &str,
     platform: Option<&crate::platform::Platform>,
 ) {
-    h.push_str("<aside class=\"pane pane-reviews\"><h2>Reviews");
+    // A pane with nothing in it is not information, it is furniture. A
+    // node with no platform has no reviews to have, and a repository with
+    // an empty queue is saying so by having no rail -- neither is news
+    // worth a card, and both used to take a share of the page from the
+    // listing, which is the thing the reader came for. What this node
+    // offers still belongs somewhere a reader can find it, and that is
+    // `/status`, which answers about the node rather than about every
+    // repository on it.
     let Some(platform) = platform else {
-        // Not an error, and not this reader's to fix: a node started
-        // without `--keys-file` has no platform at all, and the browse
-        // surface still works. Saying so beats an empty pane.
-        h.push_str("</h2><p class=\"muted\">No platform on this node, so no reviews.</p></aside>");
         return;
     };
     let all = platform.reviews_for_repo(repo);
@@ -2910,6 +3231,10 @@ fn reviews_pane(
     let (archived, open): (Vec<_>, Vec<_>) = all
         .iter()
         .partition(|(_, r)| r["archived"].as_bool().unwrap_or(false));
+    if open.is_empty() && archived.is_empty() {
+        return;
+    }
+    h.push_str("<aside class=\"pane pane-reviews\"><h2>Reviews");
     h.push_str("<span class=\"count\">");
     h.push_str(&open.len().to_string());
     h.push_str("</span>");
@@ -4727,9 +5052,16 @@ fn repo_header(
     h.push_str("\">");
     h.push_str(&esc(repo));
     h.push_str("</a></h1><div class=\"sub\">");
-    h.push_str("<span class=\"pill\">");
-    h.push_str(&esc(rev));
-    h.push_str("</span><span class=\"pill mono\">");
+    // The repository root draws a ref picker under this header, and the
+    // picker's first control is the revision's name. Printing it here as
+    // well put `main` twice on one screen, a hand's width apart, which
+    // reads as two different facts rather than one repeated.
+    if !(path.is_empty() && here == "tree") {
+        h.push_str("<span class=\"pill\">");
+        h.push_str(&esc(rev));
+        h.push_str("</span>");
+    }
+    h.push_str("<span class=\"pill mono\">");
     h.push_str(&esc(&oid[..oid.len().min(12)]));
     h.push_str("</span>");
     if here != "commits" {

@@ -1074,10 +1074,56 @@ b.tab.here .count{color:var(--muted)}
   background-image:var(--card-wash);border:var(--border-hair);
   border-radius:var(--r-lg);padding:var(--pad-card);
   box-shadow:var(--shadow-1)}
-.pane-reviews{flex:4 1 var(--side)}
-.pane-files{flex:4 1 var(--side)}
+/* The listing leads and the rails follow. Equal weights put an empty
+   "no open reviews" card on half the front page while every commit
+   subject beside it truncated mid-word, which is the wrong half of the
+   page to spend on the question nobody asked. */
+.pane-files{flex:7 1 var(--measure)}
+.pane-reviews{flex:2 1 var(--side)}
+.pane-about{flex:2 1 var(--side)}
 .pane-content{flex:7 1 var(--measure)}
 .pane-content>.readme{margin-top:var(--sp-0)}
+
+/* The rail beside the listing: what is in flight, then what this
+   repository is. One flex child holding both cards, so the listing keeps
+   its width whether the rail carries two of them or one. */
+.rail{flex:2 1 var(--side);min-width:0;display:flex;flex-direction:column;
+  gap:var(--gap-pane)}
+.rail>.pane{flex:0 0 auto}
+
+/* The one row above a listing that says what state it is in: who wrote
+   last, what they called it, when. The subject takes the slack and
+   truncates, because the two facts around it are short and fixed and it
+   is the one that can be any length at all. */
+.commitbar{display:flex;align-items:baseline;gap:var(--sp-3);
+  padding:var(--sp-1) var(--sp-0) var(--sp-3);
+  margin-bottom:var(--sp-2);border-bottom:var(--border-hair)}
+.commitbar .who{white-space:nowrap;color:var(--strong);
+  font-weight:var(--fw-medium)}
+.commitbar .what{flex:1 1 var(--sp-0);min-width:0;color:var(--ink);
+  text-decoration:none;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.commitbar .what:hover{color:var(--accent-ink);text-decoration:underline}
+.commitbar .when{white-space:nowrap;font-size:var(--fs-200)}
+
+/* The About rail. Two plain lists: what this repository carries, and who
+   has been writing it. */
+.pane-about .says{margin:var(--sp-0) var(--sp-0) var(--sp-4);color:var(--ink)}
+ul.facts,ul.who{list-style:none;margin:var(--sp-0);padding:var(--sp-0);
+  display:flex;flex-direction:column;gap:var(--sp-2);
+  font-size:var(--fs-300)}
+ul.who li{color:var(--muted)}
+.pane-about h2+ul.facts{margin-top:var(--sp-0)}
+.pane-about ul.facts+h2{margin-top:var(--sp-6)}
+
+/* The other documents, over the README. Links and not tabs that switch
+   in place: this surface runs no script, and what a tab strip is for is
+   finding the licence without going back to the listing to look. */
+nav.doctabs{display:flex;flex-wrap:wrap;gap:var(--sp-4);
+  margin:var(--sp-0) var(--sp-0) var(--sp-5);padding-bottom:var(--sp-3);
+  border-bottom:var(--border-hair);font-size:var(--fs-300)}
+nav.doctabs a{color:var(--muted);text-decoration:none}
+nav.doctabs a:hover{color:var(--accent-ink);text-decoration:underline}
 
 /* The in-flight list. One row per review: state, what it is, how far
    through its verdicts it is. */
