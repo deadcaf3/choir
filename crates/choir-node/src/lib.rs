@@ -1593,6 +1593,37 @@ impl Node {
                 // holds, because a robots policy withheld behind a `401`
                 // is a robots policy nothing reads.
                 let robots_route = method == "GET" && public_path == ui::ROBOTS_PATH;
+                // D78 made publishing the ACL's answer, and the front door
+                // has to give the same answer. A node serving source a
+                // stranger may read has something better to show them than
+                // a page saying what choir is, and with `--site-repo` that
+                // something is the repository itself: `browse::scope` turns
+                // `/` into its tree. A node that publishes nothing is
+                // unchanged, which is where the landing page still earns
+                // its place -- it is what a node shows when it has nothing
+                // to show.
+                //
+                // A closure, and last but one in the chain that uses it, so
+                // that no request other than one for the front door pays a
+                // table lookup to answer a question only the front door
+                // asks. `in_session` stays behind it because that one is a
+                // lock as well as a lookup.
+                let front_door_published = || {
+                    acl.as_ref()
+                        .is_some_and(|table| match site_repo.as_deref() {
+                            // `--site-repo` narrows `/` to one repository, so
+                            // whether the front door is public is that
+                            // repository's grant and not the table's in
+                            // general: a node presenting one project while
+                            // publishing a different one has published nothing
+                            // that a stranger typing the bare host name reaches.
+                            Some(site) => table.allows_repo(acl::ANON, site, acl::Level::Read),
+                            // Otherwise `/` is the index, which lists exactly
+                            // what this reader may read, so one grant is enough
+                            // to make it a page rather than an empty list.
+                            None => table.holds_anything(acl::ANON),
+                        })
+                };
                 let public = signin_route
                     || asking_route
                     || robots_route
@@ -1608,6 +1639,7 @@ impl Node {
                         && matches!(public_path.as_str(), "/" | "/index.html")
                         && authenticated
                         && header(&request, "authorization").is_none()
+                        && !front_door_published()
                         && !in_session());
                 if public {
                     if let Some(retry) = public_rate.check() {

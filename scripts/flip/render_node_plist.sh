@@ -4,8 +4,8 @@
 # secrets, or touching launchd.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 19 ]; then
-  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 20 ]; then
+  echo "usage: render_node_plist.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn] [site-repo]" >&2
   exit 2
 fi
 
@@ -51,9 +51,26 @@ BEHIND_TLS_PROXY=${18:-}
 # A non-empty 19th argument turns on WebAuthn (D71), same position
 # and same meaning as the systemd renderer's.
 WEBAUTHN=${19:-}
+# A non-empty 20th argument is the one repository this node presents as
+# its site (D78), same position and same meaning as the systemd
+# renderer's. Presentation and not a grant: it decides what `/` renders,
+# never who may read it, and a repository it hides is still clonable by
+# whoever could clone it before.
+SITE_REPO=${20:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_plist.sh: tls-cert and tls-key must be given together" >&2
   exit 2
+fi
+# `serve_single_repository` refuses a name this node could not hold, and
+# that refusal is a node that will not start. Checking the shape here
+# turns it into a renderer that will not render, on the same reasoning
+# as the TLS pair above.
+if [ -n "$SITE_REPO" ]; then
+  case "$SITE_REPO" in
+    */*/*|/*|*/) echo "render_node_plist.sh: site-repo must be owner/name" >&2; exit 2 ;;
+    */*) : ;;
+    *) echo "render_node_plist.sh: site-repo must be owner/name" >&2; exit 2 ;;
+  esac
 fi
 
 # The served repos come from a file (one `owner/name.git` per line,
@@ -94,6 +111,10 @@ fi
 
 if [ -n "$ACCOUNTS" ]; then
   printf '    <string>--accounts-file</string><string>%s</string>\n' "$ACCOUNTS"
+fi
+
+if [ -n "$SITE_REPO" ]; then
+  printf '    <string>--site-repo</string><string>%s</string>\n' "$SITE_REPO"
 fi
 
 if [ -n "$BEHIND_TLS_PROXY" ]; then

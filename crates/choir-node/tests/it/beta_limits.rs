@@ -117,6 +117,9 @@ fn unit_argv() -> Vec<String> {
             "/srv/choir/accounts.jsonl",
             "behind-tls-proxy",
             "on",
+            // The site-repo slot, empty: this test is about the beta's
+            // ceilings, and the service user is the argument after it.
+            "",
             "choir",
         ])
         .output()

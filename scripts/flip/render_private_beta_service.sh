@@ -73,8 +73,18 @@ if grep -qx 'passkeys=enabled' "$STATE/private-beta.manifest"; then
   BETA_WEBAUTHN=on
 fi
 
+# D78's site repository, from operator state rather than from the
+# manifest: the manifest governs the beta's limits and feature set, and
+# which project this node's front page shows is neither. Absent, the node
+# opens on the index of whatever the ACL publishes, exactly as it did
+# before the file existed.
+BETA_SITE_REPO=""
+if [ -f "$STATE/site-repo" ]; then
+  BETA_SITE_REPO=$(sed -n 1p "$STATE/site-repo")
+fi
+
 sh "$HERE/render_node_service.sh" choir-node "$BIN" "$ROOT" "$PORT" \
   "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$LOG" "$STATE/repos.list" \
   "$STATE/newcomer-audit.jsonl" "$STATE/newcomer-adjudications.jsonl" \
   "$STATE/protected-refs" require-scope '' '' "$STATE/acl" \
-  "$BETA_ACCOUNTS" behind-tls-proxy "$BETA_WEBAUTHN" "$SERVICE_USER"
+  "$BETA_ACCOUNTS" behind-tls-proxy "$BETA_WEBAUTHN" "$BETA_SITE_REPO" "$SERVICE_USER"

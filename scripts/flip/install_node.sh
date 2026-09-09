@@ -157,6 +157,20 @@ if [[ -f "$PUBLIC_URL_FILE" && ! -f "$TLS_MARKER" ]] \
   && [[ "$(sed -n 1p "$PUBLIC_URL_FILE")" == https://* ]]; then
   BEHIND_TLS_PROXY="behind-tls-proxy"
 fi
+# D78's site repository: the one project this node presents, so `/` is
+# its source rather than an index or a page about the software serving
+# it. A file whose contents are the value, unlike the passkeys marker,
+# because there is a name to carry and no sensible default to guess -- a
+# node holding two repositories cannot be told which is the site by the
+# fact that it holds them.
+#
+# Presentation only, so an absent file is not a downgrade: the node then
+# opens on the index of whatever the ACL publishes, which is what every
+# node did before this existed.
+SITE_REPO=""
+if [[ -f "$STATE/site-repo" ]]; then
+  SITE_REPO=$(sed -n 1p "$STATE/site-repo")
+fi
 # D71 WebAuthn, marker-driven like the scope gate: the ceremony page,
 # enrolment, and the browser write path are one switch, and it needs an
 # accounts file to be worth anything since a credential is enrolled on an
@@ -198,13 +212,18 @@ if [[ -f "$POLICY_MARKER" ]]; then
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" \
+    "$SITE_REPO" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
-    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" > "$PLIST"
+    "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" \
+    "$SITE_REPO" > "$PLIST"
+fi
+if [[ -n "$SITE_REPO" ]]; then
+  echo "site repository set ($STATE/site-repo): / is $SITE_REPO, not an index"
 fi
 if [[ -n "$ACL" ]]; then
   echo "per-repository authorization enabled ($ACL): ungranted access is refused"

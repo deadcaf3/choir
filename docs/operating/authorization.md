@@ -265,4 +265,14 @@ git smart-HTTP, so `git clone` works with no credentials. **What does not:**
 `/api/view`, `/api/log`, `/reviews`, and `git-receive-pack`. An unpublished
 repository answers exactly as one that does not exist.
 
-Pair with `--site-repo owner/project` to make that repository the front page.
+**The front door follows the table.** Publish anything to `@anon` and `/`
+stops being the landing page: it renders what that reader may read. Pair
+with `--site-repo owner/project` and `/` is that repository's files, the
+way a forge shows a project. Publish nothing and `/` is the landing page
+it always was, which is what a node shows when it has nothing to show.
+
+The two are separate: `--site-repo` decides what `/` renders and the ACL
+decides who may read it, so a node presenting a repository it has not
+published still meets a stranger with the landing page. Set it from
+`<state>/site-repo`, one line holding `owner/name`; both installers read
+that file and pass the flag.

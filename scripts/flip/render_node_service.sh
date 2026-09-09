@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 20 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn] [private-beta-service-user]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 21 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn] [site-repo] [private-beta-service-user]" >&2
   exit 2
 fi
 
@@ -63,10 +63,33 @@ BEHIND_TLS_PROXY=${18:-}
 # offering self-service credentials always offered browser signing
 # with them.
 WEBAUTHN=${19:-}
-PRIVATE_BETA=${20:-}
+# Same contract as the plist renderer: a non-empty 20th argument is the
+# one repository this node presents as its site (D78), so `/` is that
+# repository rather than an index. It sits at 20 on both renderers, ahead
+# of the Linux-only service user, for the reason the accounts file gives
+# at 17: every argument the two platforms share keeps the same position,
+# and a flag added to one and forgotten on the other stays a diff between
+# two files fed the same inputs.
+#
+# Presentation, never a grant. It decides what `/` renders; who may read
+# it is the ACL's answer, and a repository this hides is still clonable
+# by whoever could clone it before.
+SITE_REPO=${20:-}
+PRIVATE_BETA=${21:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
   exit 2
+fi
+# `serve_single_repository` refuses a name this node could not hold, and
+# that refusal is a node that will not start. Checking the shape here
+# turns it into a renderer that will not render, on the same reasoning
+# as the TLS pair above.
+if [ -n "$SITE_REPO" ]; then
+  case "$SITE_REPO" in
+    */*/*|/*|*/) echo "render_node_service.sh: site-repo must be owner/name" >&2; exit 2 ;;
+    */*) : ;;
+    *) echo "render_node_service.sh: site-repo must be owner/name" >&2; exit 2 ;;
+  esac
 fi
 if [ -n "$PRIVATE_BETA" ]; then
   [ -n "$ACL" ] || { echo "render_node_service.sh: private beta needs an ACL" >&2; exit 2; }
@@ -106,6 +129,9 @@ if [ -n "$ACL" ]; then
 fi
 if [ -n "$ACCOUNTS" ]; then
   EXEC="$EXEC --accounts-file $ACCOUNTS"
+fi
+if [ -n "$SITE_REPO" ]; then
+  EXEC="$EXEC --site-repo $SITE_REPO"
 fi
 if [ -n "$BEHIND_TLS_PROXY" ]; then
   EXEC="$EXEC --behind-tls-proxy"
