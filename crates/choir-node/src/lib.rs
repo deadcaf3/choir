@@ -1341,6 +1341,20 @@ fn create_repo_in(root: &Path, name: &str) -> std::io::Result<PathBuf> {
     {
         return Err(std::io::Error::other("git init failed"));
     }
+    // `git init` takes the branch from the host's `init.defaultBranch`,
+    // so without this the name in `HEAD` is decided by a config file
+    // this node does not own -- and a node whose host says `master`
+    // while every push says `main` advertises a default branch that
+    // never comes into existence. Pinned rather than passed as
+    // `--initial-branch`, which git only learned in 2.28.
+    if !std::process::Command::new("git")
+        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+        .current_dir(&path)
+        .status()?
+        .success()
+    {
+        return Err(std::io::Error::other("git symbolic-ref failed"));
+    }
     configure_repo_in(root, &path)?;
     Ok(path)
 }
@@ -2459,6 +2473,19 @@ impl Node {
                         let outcome = respond_git_denial(request, &denial);
                         access.finish(log, &user, &outcome);
                         return;
+                    }
+                }
+                // The ref advertisement is the one request where an
+                // unsettled `HEAD` is observable, so the repair happens
+                // here rather than on every git request. Repositories
+                // created before `create_repo_in` pinned the branch heal
+                // on the next fetch anybody makes, which is what stops
+                // this needing a migration.
+                if request.method().as_str() == "GET" && request.url().contains("/info/refs") {
+                    if let Some(name) = repo_from_path(request.url()) {
+                        if let Ok(bare) = repo_path_in(&root, &name) {
+                            settle_head(&bare);
+                        }
                     }
                 }
                 // Platform-enabled daemons pass the sequencer callback
@@ -3860,6 +3887,57 @@ pub(crate) fn repo_from_path(url: &str) -> Option<String> {
         .map(|i| i + 4)
         .or_else(|| path.ends_with(".git").then_some(path.len()))?;
     Some(path[1..end].to_string())
+}
+
+/// Points `HEAD` at a branch that exists, when it does not already.
+///
+/// A repository whose `HEAD` names a branch nobody ever created
+/// advertises no default branch at all, and git's own behaviour then
+/// splits in two: a plain `git clone` fetches every ref and guesses,
+/// while anything that has to *infer* the default -- `--depth`,
+/// `--single-branch`, most CI checkouts -- asks for `HEAD`'s branch, is
+/// told nothing, and reports an empty repository. The first of those is
+/// what a test does and the second is what a stranger does, which is how
+/// this survived a suite that clones on every run.
+///
+/// Best-effort and silent, because it is a repair on a read path: a
+/// repository it cannot fix advertises exactly what it advertised
+/// before. It never repoints a `HEAD` that already resolves, so a
+/// deliberately chosen default branch is left alone.
+fn settle_head(repo: &Path) {
+    let born = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if born {
+        return;
+    }
+    let Ok(out) = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", "refs/heads"])
+        .current_dir(repo)
+        .output()
+    else {
+        return;
+    };
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let branches: Vec<&str> = listing.lines().filter(|line| !line.is_empty()).collect();
+    // `main`, then `master`, then whatever is there: the repaired answer
+    // must not depend on the order git happens to list refs in.
+    let target = branches
+        .iter()
+        .find(|name| **name == "refs/heads/main")
+        .or_else(|| branches.iter().find(|name| **name == "refs/heads/master"))
+        .or_else(|| branches.first())
+        .copied();
+    if let Some(target) = target {
+        let _ = std::process::Command::new("git")
+            .args(["symbolic-ref", "HEAD", target])
+            .current_dir(repo)
+            .status();
+    }
 }
 
 /// Checks a request's basic-auth credentials against the table; returns
