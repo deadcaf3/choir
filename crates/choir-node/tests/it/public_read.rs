@@ -443,9 +443,13 @@ fn a_link_to_published_source_previews_as_a_card() {
         repo.contains("property=\"og:image\" content=\"http://127.0.0.1:"),
         "the card has no absolute image: {repo}"
     );
+    // The repository's own card, not the node's. That split arrived
+    // later than this test did; `each_repository_has_a_card_of_its_own`
+    // is where the drawing is asserted, and this is here so the two
+    // cannot drift.
     assert!(
-        repo.contains("/static/card.png"),
-        "the image is not the card this node serves: {repo}"
+        repo.contains("/static/card/open/source.png"),
+        "the image is not this repository's card: {repo}"
     );
     assert!(
         repo.contains("property=\"og:title\" content=\"open/source\""),
@@ -465,8 +469,166 @@ fn a_link_to_published_source_previews_as_a_card() {
         index.contains("property=\"og:image\""),
         "the index carries no card: {index}"
     );
+    // A page about no repository falls back to the node's own card,
+    // because there is no name to draw.
+    assert!(
+        index.contains("/static/card.png"),
+        "the index did not fall back to the node's card: {index}"
+    );
     assert!(
         !index.contains("open/source\">"),
         "a page about no repository named one in its card: {index}"
+    );
+}
+
+/// The crawl policy follows the ACL, which is the table that decides
+/// what is public in the first place (D78).
+///
+/// The old policy was static and said `Disallow: /`, justified in its
+/// own comment by "every one of those paths already answers `401` to a
+/// crawler". D78 made that false and nothing followed it: the node was
+/// telling every search engine not to look at the one thing it had just
+/// been changed to show them.
+#[test]
+fn the_crawl_policy_opens_exactly_what_the_table_published() {
+    let s = served("robots", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+    let policy = anon_body(&format!("{}/robots.txt", s.base));
+
+    assert!(
+        policy.contains("\nAllow: /r/open/source$\n"),
+        "the published repository is not crawlable: {policy}"
+    );
+    assert!(
+        policy.contains("\nAllow: /r/open/source/\n"),
+        "the published repository's pages are not crawlable: {policy}"
+    );
+    // The unpublished one must not be named at all. A crawl policy that
+    // listed it would disclose a private repository to every crawler on
+    // the internet, which is a worse leak than the browse surface's,
+    // because this file is fetched by things that keep it.
+    assert!(
+        !policy.contains("closed"),
+        "the crawl policy named an unpublished repository: {policy}"
+    );
+    // And the blanket refusal stays under the specific permissions.
+    // Longest match wins, so this is what keeps everything else shut.
+    assert!(
+        policy.contains("\nDisallow: /\n"),
+        "the blanket disallow is gone: {policy}"
+    );
+    assert!(
+        policy.contains(&format!("Sitemap: {}/sitemap.xml", s.base)),
+        "the policy points at no sitemap: {policy}"
+    );
+
+    // A node that publishes nothing is unchanged, which is what stops
+    // this inviting crawlers into a wall of 401s on the next node.
+    let shut = served("robots-shut", "alice\t*\twrite\n");
+    let policy = anon_body(&format!("{}/robots.txt", shut.base));
+    assert!(
+        !policy.contains("Allow: /r/"),
+        "a node publishing nothing offered its repositories to crawlers: {policy}"
+    );
+}
+
+/// The sitemap lists what the ACL published, and nothing else.
+#[test]
+fn the_sitemap_lists_the_published_repositories() {
+    let s = served("sitemap", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+    let map = anon_body(&format!("{}/sitemap.xml", s.base));
+
+    assert!(map.starts_with("<?xml"), "not an XML document: {map}");
+    assert!(
+        map.contains(&format!("<loc>{}/r/open/source</loc>", s.base)),
+        "the published repository is missing: {map}"
+    );
+    assert!(
+        map.contains(&format!("<loc>{}/</loc>", s.base)),
+        "the front door is missing: {map}"
+    );
+    assert!(
+        !map.contains("closed"),
+        "the sitemap named an unpublished repository: {map}"
+    );
+}
+
+/// A repository page's preview image is drawn for that repository.
+///
+/// Every card being the same image made a channel full of links look
+/// like one link repeated. The route draws from the name in the URL and
+/// checks nothing, which is what keeps it from becoming a way to ask
+/// whether a repository exists.
+#[test]
+fn each_repository_has_a_card_of_its_own() {
+    let s = served("cards", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+
+    let head = anon_body(&format!("{}/r/open/source", s.base));
+    assert!(
+        head.contains(&format!(
+            "og:image\" content=\"{}/static/card/open/source.png\"",
+            s.base
+        )),
+        "the page does not point at its own card: {head}"
+    );
+
+    let png = std::process::Command::new("curl")
+        .args(["-s", "-o", "-"])
+        .arg(format!("{}/static/card/open/source.png", s.base))
+        .output()
+        .expect("curl runs");
+    assert_eq!(
+        &png.stdout[..8],
+        &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+        "the card is not a PNG"
+    );
+
+    // Two repositories, two different images. Identical bytes would mean
+    // the name never reached the drawing.
+    let other = std::process::Command::new("curl")
+        .args(["-s", "-o", "-"])
+        .arg(format!("{}/static/card/open/other.png", s.base))
+        .output()
+        .expect("curl runs");
+    assert_ne!(
+        png.stdout, other.stdout,
+        "two repositories were given the same card"
+    );
+
+    // A name outside the grammar is refused rather than drawn.
+    for bad in [
+        "/static/card/open.png",
+        "/static/card/a/b/c.png",
+        "/static/card/open/source",
+    ] {
+        assert_eq!(anon(&format!("{}{bad}", s.base)), 404, "{bad} was drawn");
+    }
+
+    // And a crawler that honours the policy may fetch them.
+    let policy = anon_body(&format!("{}/robots.txt", s.base));
+    assert!(
+        policy.contains("\nAllow: /static/card/\n"),
+        "the cards are disallowed to the crawlers that render them: {policy}"
+    );
+}
+
+/// The way in is in the footer, on every page, for a reader who is not
+/// signed in and nobody else.
+#[test]
+fn the_way_in_is_quiet_but_present() {
+    let s = served("wayin", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+    let page = anon_body(&format!("{}/r/open/source", s.base));
+
+    let (_, footer) = page.split_once("<footer>").expect("a footer");
+    assert!(
+        footer.contains("href=\"/signin\""),
+        "an operator has no way in but to type the path: {footer}"
+    );
+    let (_, nav) = page
+        .split_once("<nav class=\"chrome-nav\">")
+        .expect("a bar");
+    let (nav, _) = nav.split_once("</nav>").expect("a closed bar");
+    assert!(
+        !nav.contains("href=\"/signin\""),
+        "the bar is selling the door again: {nav}"
     );
 }

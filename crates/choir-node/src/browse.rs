@@ -1007,7 +1007,7 @@ fn index(
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -1299,7 +1299,7 @@ fn search(
         return Rendered {
             status: 200,
             etag: None,
-            html: close(h),
+            html: close(h, chrome.signed_in),
         };
     }
 
@@ -1318,7 +1318,7 @@ fn search(
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -2503,7 +2503,7 @@ fn tree(
                 }
             ),
         )),
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -2584,7 +2584,7 @@ fn blob(
     Rendered {
         status: 200,
         etag: Some(tag(&oid, path)),
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -2926,7 +2926,7 @@ fn commits(
     Rendered {
         status: 200,
         etag: Some(tag(&oid, "commits")),
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -2972,7 +2972,7 @@ fn commit(dir: &Path, repo: &str, oid: &str, chrome: Chrome<'_>, origin: Option<
     Rendered {
         status: 200,
         etag: Some(tag(&id, "commit")),
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -3478,7 +3478,7 @@ fn contribute(
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -3582,7 +3582,7 @@ fn reviews(
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -3635,7 +3635,7 @@ fn owed(
         return Rendered {
             status: 200,
             etag: None,
-            html: close(h),
+            html: close(h, chrome.signed_in),
         };
     };
     let rows: Vec<(String, String, serde_json::Value)> = platform
@@ -3695,7 +3695,7 @@ fn owed(
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -3966,7 +3966,7 @@ fn review(
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -4379,7 +4379,7 @@ pub(crate) fn profile_page(
         return Rendered {
             status: 200,
             etag: None,
-            html: close(h),
+            html: close(h, chrome.signed_in),
         };
     }
 
@@ -4511,7 +4511,7 @@ pub(crate) fn profile_page(
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -4576,7 +4576,7 @@ fn empty(repo: &str, chrome: Chrome<'_>) -> Rendered {
     Rendered {
         status: 200,
         etag: None,
-        html: close(h),
+        html: close(h, chrome.signed_in),
     }
 }
 
@@ -4700,7 +4700,13 @@ fn shell(title: &str, bar: Bar<'_>) -> String {
     if let Some(origin) = bar.origin {
         h.push_str("<meta property=\"og:image\" content=\"");
         h.push_str(&esc(origin));
-        h.push_str(crate::ui::CARD_PATH);
+        // A card drawn for this repository where there is one, and the
+        // node's own where there is not. Both are public and neither
+        // reads the repository, so this says nothing the page does not.
+        match bar.scope {
+            Some((repo, _)) => h.push_str(&esc(&crate::card::path(repo))),
+            None => h.push_str(crate::ui::CARD_PATH),
+        }
         h.push_str("\">");
     }
     h.push_str(crate::ui::STYLE);
@@ -5216,8 +5222,25 @@ fn repo_header(
     h.push_str("</header><main id=\"main\">");
 }
 
-/// Closing tags and the same footer promise the D28 page makes.
-fn close(mut h: String) -> String {
+/// Closing tags, the footer promise the D28 page makes, and the way in.
+///
+/// The way in lives here rather than in the bar, which is where it used
+/// to be and where it did not belong. `chrome` drew `sign in` as the
+/// most prominent control on the page for any reader the node had
+/// identified as nobody, and after D78 that reader is ordinarily a
+/// stranger reading published source who cannot have an account here --
+/// so the loudest thing on the page was a door that would refuse them.
+///
+/// It is still a door and somebody still needs it: an operator arriving
+/// at their own node has to get in, and "type the path" is a worse
+/// answer than a quiet link. The footer is where a link nobody is being
+/// sold belongs.
+///
+/// `None` renders nothing. That is the refusal pages' state, where the
+/// caller has not been identified and a guess would put `sign in` in
+/// front of somebody already signed in, on the page where they have just
+/// been told something went wrong.
+fn close(mut h: String, signed_in: Option<bool>) -> String {
     // Not "read-only" any more, and the merge is where that became
     // false: the review page now carries D39's verdict and comment
     // controls, so a footer under them claiming the surface takes no
@@ -5225,7 +5248,11 @@ fn close(mut h: String) -> String {
     // still true is the half worth keeping — those buttons do not bypass
     // the signed-op API, they use it. The D28 node page keeps the full
     // sentence, because that page really does offer nothing.
-    h.push_str("</main><footer>Every write here is a signed operation.</footer>");
+    h.push_str("</main><footer>Every write here is a signed operation.");
+    if signed_in == Some(false) {
+        h.push_str(" <a href=\"/signin\">sign in</a>");
+    }
+    h.push_str("</footer>");
     h.push_str("</body></html>");
     h
 }
