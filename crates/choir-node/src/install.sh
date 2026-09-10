@@ -12,9 +12,8 @@
 # The trust boundary is TLS plus whoever runs the node. Read the script
 # before piping it anywhere, which is why it is short.
 #
-# Usage, once served:
-#   curl -fsSL https://<node>/download/install.sh | sh
-#   curl -fsSL https://<node>/download/install.sh | sh -s -- choir-cli choir-node
+# Usage, once served: fetch it from a node and pipe it to sh. It takes
+# package names as arguments and installs both when given none.
 set -eu
 
 BASE="__CHOIR_DOWNLOAD_BASE__"
@@ -34,9 +33,14 @@ case "$BASE" in
 	;;
 esac
 
-# `choir-cli` alone by default: `choir` and `choir-mcp` are what somebody
-# joining a node needs, and the daemon is only wanted by whoever runs one.
-APPS=${*:-choir-cli}
+# Everything, by default. The first version installed `choir-cli` alone,
+# on the reasoning that somebody joining a node does not run one -- and
+# that made the second line of our own quick start fail, because
+# `choir host` execs the daemon. A default that needs an argument to
+# match the documented path is the wrong default, and the daemon is
+# 2.9 MiB of download, which is no reason to hand somebody a
+# `command not found` one step later. Pass names to narrow it.
+APPS=${*:-choir-cli choir-node}
 
 case $(uname -s) in
 Darwin) os=apple-darwin ;;

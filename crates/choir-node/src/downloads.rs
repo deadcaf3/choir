@@ -202,8 +202,8 @@ pub(crate) fn index(dir: &std::path::Path, origin: &str, theme: Option<&str>) ->
     h.push_str(INSTALLER_NAME);
     h.push_str(" | sh</pre>");
     h.push_str(
-        "<p class=\"muted\">The daemon as well as the client: append \
-         <code>| sh -s -- choir-cli choir-node</code>.</p>",
+        "<p class=\"muted\">That installs the client and the daemon. For the client alone, \
+         pass it a name: <code>sh -s -- choir-cli</code>.</p>",
     );
 
     if rows.is_empty() {

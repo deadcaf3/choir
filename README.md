@@ -29,7 +29,7 @@ Needs only `git`. Everything comes from the node serving this
 repository. The last command prints your own node URL:
 
 ```bash
-curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli choir-node
+curl -fsSL https://choirs.dev/download/install.sh | sh
 choir host
 ```
 
@@ -67,10 +67,11 @@ archive it fetches come from the one host you typed:
 curl -fsSL https://choirs.dev/download/install.sh | sh
 ```
 
-That is `choir` and `choir-mcp`. For the daemon as well:
+That is `choir`, `choir-mcp`, `choir-node` and `choir-ssh`, 3.5 MiB of
+download. For the client alone, pass it a name:
 
 ```bash
-curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli choir-node
+curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli
 ```
 
 Each archive is checked against the `SHA256` published beside it.

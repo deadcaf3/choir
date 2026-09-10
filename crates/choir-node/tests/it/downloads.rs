@@ -232,50 +232,53 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).expect("temp root");
 
-    // A release-shaped archive: `choir-cli-<target>/` holding an
-    // executable and a licence, so the installer's "anything executable
-    // in there" rule has both cases to sort.
+    // Two release-shaped archives, because the installer given no
+    // arguments installs both packages -- the property this test is
+    // here for. Each holds one directory named after itself with an
+    // executable and a licence in it, so the "anything executable in
+    // there" rule has both cases to sort.
     let target = target();
-    let stage = work.join(format!("choir-cli-{target}"));
-    std::fs::create_dir_all(&stage).expect("stage");
-    let fake = stage.join("choir");
-    std::fs::write(&fake, "#!/bin/sh\necho i-am-choir\n").expect("fake binary");
-    std::process::Command::new("chmod")
-        .args(["+x"])
-        .arg(&fake)
-        .status()
-        .expect("chmod runs");
-    std::fs::write(stage.join("LICENSE-MIT"), "a licence").expect("licence");
-
-    let archive = format!("choir-cli-{target}.tar.xz");
-    let tarred = std::process::Command::new("tar")
-        .args(["-cJf", &archive, &format!("choir-cli-{target}")])
-        .current_dir(&work)
-        .status()
-        .expect("tar runs");
-    assert!(tarred.success(), "could not build a test archive");
-
     let shelf = work.join("shelf");
     std::fs::create_dir_all(&shelf).expect("shelf");
-    std::fs::rename(work.join(&archive), shelf.join(&archive)).expect("archive onto the shelf");
+    for (package, binary) in [("choir-cli", "choir"), ("choir-node", "choir-node")] {
+        let stage = work.join(format!("{package}-{target}"));
+        std::fs::create_dir_all(&stage).expect("stage");
+        let fake = stage.join(binary);
+        std::fs::write(&fake, format!("#!/bin/sh\necho i-am-{binary}\n")).expect("fake binary");
+        std::process::Command::new("chmod")
+            .args(["+x"])
+            .arg(&fake)
+            .status()
+            .expect("chmod runs");
+        std::fs::write(stage.join("LICENSE-MIT"), "a licence").expect("licence");
 
-    // The digest, in the format the release publishes it in.
-    let sum = std::process::Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(&archive)
-        .current_dir(&shelf)
-        .output()
-        .expect("shasum runs");
-    let hex = String::from_utf8_lossy(&sum.stdout)
-        .split_whitespace()
-        .next()
-        .expect("a digest")
-        .to_string();
-    std::fs::write(
-        shelf.join(format!("{archive}.sha256")),
-        format!("{hex} *{archive}\n"),
-    )
-    .expect("digest file");
+        let archive = format!("{package}-{target}.tar.xz");
+        let tarred = std::process::Command::new("tar")
+            .args(["-cJf", &archive, &format!("{package}-{target}")])
+            .current_dir(&work)
+            .status()
+            .expect("tar runs");
+        assert!(tarred.success(), "could not build a test archive");
+        std::fs::rename(work.join(&archive), shelf.join(&archive)).expect("onto the shelf");
+
+        // The digest, in the format the release publishes it in.
+        let sum = std::process::Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(&archive)
+            .current_dir(&shelf)
+            .output()
+            .expect("shasum runs");
+        let hex = String::from_utf8_lossy(&sum.stdout)
+            .split_whitespace()
+            .next()
+            .expect("a digest")
+            .to_string();
+        std::fs::write(
+            shelf.join(format!("{archive}.sha256")),
+            format!("{hex} *{archive}\n"),
+        )
+        .expect("digest file");
+    }
 
     let mut table = AuthTable::new();
     table.insert("op".into(), "o".into());
@@ -297,6 +300,10 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     let script_path = work.join("install.sh");
     std::fs::write(&script_path, &script.stdout).expect("save the script");
 
+    // No arguments. `choir host` is the second line of the documented
+    // quick start and it execs the daemon, so an installer whose default
+    // leaves the daemon out hands the reader `command not found` one
+    // step later. That was the first version's default.
     let run = std::process::Command::new("sh")
         .arg(&script_path)
         .env("CARGO_HOME", &home)
@@ -309,17 +316,22 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
         String::from_utf8_lossy(&run.stderr)
     );
 
-    let installed = home.join("bin/choir");
-    assert!(
-        installed.is_file(),
-        "nothing was installed: {}{}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let ran = std::process::Command::new(&installed)
-        .output()
-        .expect("the installed binary runs");
-    assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "i-am-choir");
+    for binary in ["choir", "choir-node"] {
+        let installed = home.join("bin").join(binary);
+        assert!(
+            installed.is_file(),
+            "{binary} was not installed by default: {}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let ran = std::process::Command::new(&installed)
+            .output()
+            .expect("the installed binary runs");
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout).trim(),
+            format!("i-am-{binary}")
+        );
+    }
     assert!(
         !home.join("bin/LICENSE-MIT").exists(),
         "the installer copied a licence in beside the binaries"

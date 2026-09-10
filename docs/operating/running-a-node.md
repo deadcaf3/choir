@@ -22,14 +22,14 @@ One command, no Rust toolchain and no OpenSSL headers. macOS and Linux,
 x86-64 and arm64:
 
 ```bash
-curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli choir-node
+curl -fsSL https://choirs.dev/download/install.sh | sh
 ```
 
-Take both: every command on this page is `choir`, and `choir node serve`
-execs the daemon. The four binaries land in `$CARGO_HOME/bin`
-(`~/.cargo/bin` by default) as `choir-node`, `choir-ssh`, `choir` and
-`choir-mcp`; each archive is checked against the `SHA256` beside it on
-the shelf.
+That installs both packages, which is what this page needs: every command
+here is `choir`, and `choir node serve` execs the daemon. The four
+binaries land in `$CARGO_HOME/bin` (`~/.cargo/bin` by default) as
+`choir-node`, `choir-ssh`, `choir` and `choir-mcp`; each archive is
+checked against the `SHA256` beside it on the shelf.
 
 The node renders that installer from the `Host` you asked it on, so the
 script and the archives come from the same origin and no address is
