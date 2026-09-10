@@ -820,6 +820,7 @@ pub(crate) fn render(
         console,
         docs,
         signed_in,
+        origin,
     };
     // A page that reads the repository off disk must not start describing
     // one that is not there. Without this, `resolve` fails and the reader
@@ -4656,6 +4657,52 @@ fn shell(title: &str, bar: Bar<'_>) -> String {
     h.push_str("<title>");
     h.push_str(&esc(title));
     h.push_str("</title>");
+    // The card a link to this page renders as, wherever it is pasted.
+    //
+    // Every address on this surface is now shareable — D78 published the
+    // repository and D76 put it at the apex — and a shared address with
+    // no preview is the grey rectangle `ui::CARD` was drawn to replace.
+    // The invite page has had one since it existed; the source did not,
+    // which is the wrong way round for the half a stranger actually
+    // reaches.
+    //
+    // **Not `title`.** The obvious version of this put the page's own
+    // title in `og:title`, and that is a disclosure: `/p/<name>`
+    // renders a narrowed profile byte-identically to an unknown one so
+    // a reader cannot tell "withheld" from "no such actor", and it does
+    // that by swapping the heading -- which reaches the text of the
+    // page and not an attribute in its head. The name came straight
+    // back out in the card. `vouches::a_per_repository_reader_is_shown_
+    // no_part_of_the_graph` caught it.
+    //
+    // So the card names the repository, from the same field the search
+    // box already scopes to, and nothing on a page that is about no
+    // repository. Both are public on any page that has them, and a page
+    // that must be indistinguishable from its sibling has neither.
+    //
+    // The description is fixed and node-wide for the reason the title is
+    // not per-page: a preview is rendered by somebody else's server into
+    // a channel that may hold more people than the link was sent to, and
+    // the repository's own words are one fetch away for anybody who
+    // opens it.
+    h.push_str(
+        "<meta property=\"og:type\" content=\"website\">\
+         <meta property=\"og:description\" content=\"Source on a choir node. Every write is a \
+         signed operation in one ordered log, and a merge conflict is a committed value.\">\
+         <meta name=\"twitter:card\" content=\"summary_large_image\">\
+         <meta property=\"og:title\" content=\"",
+    );
+    h.push_str(&esc(bar.scope.map_or("choir", |(repo, _)| repo)));
+    h.push_str("\">");
+    // Absolute, because the server fetching it has no page to resolve a
+    // relative path against. Omitted rather than guessed when the
+    // request carried no `Host`, on the same reasoning as `node_url`.
+    if let Some(origin) = bar.origin {
+        h.push_str("<meta property=\"og:image\" content=\"");
+        h.push_str(&esc(origin));
+        h.push_str(crate::ui::CARD_PATH);
+        h.push_str("\">");
+    }
     h.push_str(crate::ui::STYLE);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
@@ -4728,6 +4775,21 @@ pub(crate) struct Chrome<'a> {
     /// somebody already signed in, on the page where they have just been
     /// told something went wrong.
     pub(crate) signed_in: Option<bool>,
+    /// The scheme and host this request arrived on, for the absolute
+    /// URLs a social preview needs.
+    ///
+    /// A preview is fetched by somebody else's server, which has no page
+    /// to resolve a relative path against, so `og:image` has to be
+    /// absolute. Omitted rather than guessed when the request carried no
+    /// `Host`, on the same reasoning as [`node_url`] and the invite
+    /// page: this node deliberately learns no address of its own, and a
+    /// guessed one in a card is a card pointing at somewhere else.
+    ///
+    /// Not reader-specific, so unlike every other field here it survives
+    /// [`Chrome::refusal`]: two readers on the same host are owed the
+    /// same card, and a refusal page that dropped it would still be
+    /// byte-identical to its sibling.
+    pub(crate) origin: Option<&'a str>,
 }
 
 impl<'a> Chrome<'a> {
@@ -4761,6 +4823,7 @@ impl<'a> Chrome<'a> {
             console: false,
             docs: self.docs,
             signed_in: None,
+            origin: self.origin,
         }
     }
 }
@@ -4795,6 +4858,8 @@ pub(crate) struct Bar<'a> {
     /// Whether this request carries a credential. See
     /// [`Chrome::signed_in`].
     pub(crate) signed_in: Option<bool>,
+    /// Where this request arrived. See [`Chrome::origin`].
+    pub(crate) origin: Option<&'a str>,
 }
 
 impl<'a> Bar<'a> {
@@ -4810,6 +4875,7 @@ impl<'a> Bar<'a> {
             console: chrome.console,
             docs: chrome.docs,
             signed_in: chrome.signed_in,
+            origin: chrome.origin,
         }
     }
 
@@ -4825,6 +4891,7 @@ impl<'a> Bar<'a> {
             console: chrome.console,
             docs: chrome.docs,
             signed_in: chrome.signed_in,
+            origin: chrome.origin,
         }
     }
 
@@ -4840,6 +4907,7 @@ impl<'a> Bar<'a> {
             console: chrome.console,
             docs: chrome.docs,
             signed_in: chrome.signed_in,
+            origin: chrome.origin,
         }
     }
 
@@ -4855,6 +4923,7 @@ impl<'a> Bar<'a> {
             console: chrome.console,
             docs: chrome.docs,
             signed_in: chrome.signed_in,
+            origin: chrome.origin,
         }
     }
 }
@@ -4931,9 +5000,19 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
     // page, so the only way to find a review you had been drawn for was
     // to already know which repository it was against.
     h.push_str("<nav class=\"chrome-nav\">");
-    if bar.signed_in == Some(false) {
-        h.push_str("<a class=\"go\" href=\"/signin\">sign in</a>");
-    }
+    // No `sign in` link. The bar renders it for a reader the node has
+    // identified as nobody, and after D78 that reader is the ordinary
+    // case rather than the exceptional one: a stranger reading published
+    // source. Offering them the way in put the most prominent control on
+    // the page in front of the one person it does nothing for -- this
+    // node issues no accounts from that page, so the link led to a form
+    // that would refuse them.
+    //
+    // `/signin` is untouched and still answers, with D74's `401`, to
+    // anybody who types it. That is the whole of the operator's path in
+    // and the reason this is a rendering change rather than a removal:
+    // what a node needs is a way in, not a way in advertised to readers
+    // who have no account to sign into.
     if bar.scope.is_some() && !bar.site {
         h.push_str("<a href=\"/r/\">repositories</a>");
     }

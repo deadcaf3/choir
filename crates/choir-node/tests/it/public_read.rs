@@ -382,19 +382,6 @@ fn the_bar_offers_a_stranger_no_link_they_cannot_follow() {
         }
         let href = href.replace("&amp;", "&");
         let target = format!("{}{href}", s.base);
-        if href == "/signin" {
-            // The one link whose destination is a refusal on purpose:
-            // D74 serves the sign-in page *with* a `401`, so the browser
-            // knows the session it holds is not one. What matters here
-            // is that it renders the page it promises rather than
-            // bouncing the reader somewhere else.
-            assert!(
-                anon_body(&target).contains("action=\"/signin\""),
-                "the way in did not render the form"
-            );
-            followed += 1;
-            continue;
-        }
         let status = anon(&target);
         assert!(
             status < 400,
@@ -404,9 +391,82 @@ fn the_bar_offers_a_stranger_no_link_they_cannot_follow() {
     }
     assert!(followed >= 2, "the bar drew almost nothing: {nav}");
 
-    // And it offers the way in, which the signed-in shape withheld.
+    // And it does *not* offer the way in, which is the reverse of what
+    // this test asserted when it was written.
+    //
+    // The old assertion was right for the node it was written against:
+    // one where a reader with no credential was somebody who had not
+    // signed in yet, so the way in was the one thing to offer them. D78
+    // made that reader the ordinary case instead -- a stranger reading
+    // published source -- and this node issues them no account, so the
+    // most prominent control in the bar led to a form that would refuse
+    // them. The link came out; the route did not.
     assert!(
-        nav.contains("href=\"/signin\""),
-        "a stranger was given no way to sign in: {nav}"
+        !nav.contains("href=\"/signin\""),
+        "the bar still sends a stranger to a form that has nothing for \
+         them: {nav}"
+    );
+    // The way in is still there for whoever types it, which is what
+    // makes this a rendering change rather than a removal. D74's `401`
+    // is the deliberate status, so the assertion is on the form.
+    assert!(
+        anon_body(&format!("{}/signin", s.base)).contains("action=\"/signin\""),
+        "typing /signin no longer reaches a sign-in form"
+    );
+}
+
+/// A link to published source, pasted anywhere, renders as a card.
+///
+/// The invite page has had a preview since it existed; the browse
+/// surface had none, which was the wrong way round once D76 put the
+/// source at the apex and D78 made it readable -- the half a stranger
+/// actually reaches was the half that rendered as a grey rectangle.
+///
+/// The image has to be absolute, because the server fetching it has no
+/// page to resolve a relative path against, and the title has to come
+/// from the repository rather than the page: `og:title` set from the
+/// page title leaked a name out of `/p/<name>`, whose whole job is to be
+/// indistinguishable from an unknown one.
+#[test]
+fn a_link_to_published_source_previews_as_a_card() {
+    let s = served("card", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+
+    let head = |path: &str| {
+        let body = anon_body(&format!("{}{path}", s.base));
+        body.split_once("</head>")
+            .map(|(head, _)| head.to_string())
+            .expect("a page with a head")
+    };
+
+    let repo = head("/r/open/source");
+    assert!(
+        repo.contains("property=\"og:image\" content=\"http://127.0.0.1:"),
+        "the card has no absolute image: {repo}"
+    );
+    assert!(
+        repo.contains("/static/card.png"),
+        "the image is not the card this node serves: {repo}"
+    );
+    assert!(
+        repo.contains("property=\"og:title\" content=\"open/source\""),
+        "the card does not name the repository: {repo}"
+    );
+    // The image must actually be fetchable by a stranger's preview
+    // server, which is a different question from it being named.
+    assert_eq!(
+        anon(&format!("{}/static/card.png", s.base)),
+        200,
+        "the card the preview points at is not reachable"
+    );
+
+    // A page about no repository carries the card and names none.
+    let index = head("/r/");
+    assert!(
+        index.contains("property=\"og:image\""),
+        "the index carries no card: {index}"
+    );
+    assert!(
+        !index.contains("open/source\">"),
+        "a page about no repository named one in its card: {index}"
     );
 }
