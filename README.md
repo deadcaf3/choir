@@ -25,11 +25,11 @@ A merge conflict is a committed value. Plain `git clone`, `fetch` and
 
 ## Quick start
 
-Needs only `git`. The last command prints the node URL:
+Needs `git` and [rustup](https://rustup.rs/). Everything comes from the
+node serving this repository. The last command prints your own node URL:
 
 ```bash
-curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
-curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
+cargo install --git https://choirs.dev/choir/choir.git choir-cli choir-node
 choir host
 ```
 
@@ -39,7 +39,7 @@ and a config file, then installs the daemon under launchd or systemd.
 Narrated demo, no install:
 
 ```bash
-git clone https://github.com/deadcaf3/choir
+git clone https://choirs.dev/choir/choir.git
 cd choir
 cargo run -p choir-demo
 ```
@@ -48,28 +48,29 @@ cargo run -p choir-demo
 
 ## Install
 
-**Prebuilt**, macOS and Linux, x86-64 and arm64, with a `SHA256` per
-archive and a `sha256.sum` over the set:
+**From the node**, with [rustup](https://rustup.rs/). One clone URL, no
+account and no forge:
+
+```bash
+cargo install --git https://choirs.dev/choir/choir.git choir-cli choir-node
+```
+
+`choir-cli` is `choir` and `choir-mcp`; `choir-node` is the daemon and
+`choir-ssh`, only if you run one. All land in `$CARGO_HOME/bin`
+(`~/.cargo/bin` by default).
+
+**Prebuilt**, macOS and Linux, x86-64 and arm64, no toolchain, with a
+`SHA256` per archive and a `sha256.sum` over the set. A node serves git
+and the platform API and nothing else, so these come from the release
+host:
 
 ```bash
 curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
-```
-
-That is `choir` and `choir-mcp`. Node binaries, only if you run one:
-
-```bash
 curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
 ```
 
-Both land in `$CARGO_HOME/bin` (`~/.cargo/bin` by default).
-[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
-`cargo binstall choir-cli choir-node`.
-
-**From source**, with [rustup](https://rustup.rs/):
-
-```bash
-cargo install --git https://github.com/deadcaf3/choir choir-cli choir-node
-```
+[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) fetches
+the same archives: `cargo binstall choir-cli choir-node`.
 
 Nothing is on a package registry.
 

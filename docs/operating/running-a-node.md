@@ -18,31 +18,34 @@ any flags.
 
 ## Getting the binaries
 
-One command, no Rust toolchain and no OpenSSL headers. macOS and Linux,
-x86-64 and arm64:
+One command, from the node serving the source, needing only
+[rustup](https://rustup.rs/):
+
+```bash
+cargo install --git https://choirs.dev/choir/choir.git choir-cli choir-node
+```
+
+Take both: every command on this page is `choir`, and `choir node serve`
+execs the daemon. The four binaries land in `$CARGO_HOME/bin`
+(`~/.cargo/bin` by default) as `choir-node`, `choir-ssh`, `choir` and
+`choir-mcp`.
+
+Prebuilt instead, no toolchain and no OpenSSL headers, macOS and Linux,
+x86-64 and arm64. A node serves git and the platform API and nothing
+else, so these come from the release host, which publishes a `SHA256`
+per archive and a `sha256.sum`:
 
 ```bash
 curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
 curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
 ```
 
-Take both: every command on this page is `choir`, and `choir node serve`
-execs the daemon. The four binaries land in `$CARGO_HOME/bin`
-(`~/.cargo/bin` by default) as `choir-node`, `choir-ssh`, `choir` and
-`choir-mcp`; each release publishes a `SHA256` per archive and a
-`sha256.sum`.
-
-`cargo binstall choir-node choir-cli` fetches the same archives. From a git
-checkout, needing only a Rust toolchain:
-
-```bash
-cargo install --git https://github.com/deadcaf3/choir choir-cli choir-node
-```
+`cargo binstall choir-node choir-cli` fetches the same archives.
 
 Neither package pulls in `choir-actor`, the one crate that needs this
 workspace's `LIBSQLITE3_FLAGS`.
 
-**From source**: the toolchain and headers the
+**From a checkout you already have**: the toolchain and headers the
 [README](../../README.md#install) lists, then:
 
 ```bash
