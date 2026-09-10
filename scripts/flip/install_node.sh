@@ -171,6 +171,14 @@ SITE_REPO=""
 if [[ -f "$STATE/site-repo" ]]; then
   SITE_REPO=$(sed -n 1p "$STATE/site-repo")
 fi
+# D79's release shelf: a directory of prebuilt binaries the node serves
+# unauthenticated at /download/. The directory's existence is the switch,
+# because that is also the thing an operator does to publish -- there is
+# no state where the marker is set and the files are not there.
+DOWNLOADS=""
+if [ -d "$STATE/downloads" ]; then
+  DOWNLOADS="$STATE/downloads"
+fi
 # D71 WebAuthn, marker-driven like the scope gate: the ceremony page,
 # enrolment, and the browser write path are one switch, and it needs an
 # accounts file to be worth anything since a credential is enrolled on an
@@ -213,17 +221,21 @@ if [[ -f "$POLICY_MARKER" ]]; then
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "$PROTECTED_REFS" "$REQUIRE_SCOPE" \
     "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" \
-    "$SITE_REPO" > "$PLIST"
+    "$SITE_REPO" "" "$DOWNLOADS" > "$PLIST"
   echo "review gate enabled ($PROTECTED_REFS)"
 else
   sh "$HERE/render_node_plist.sh" "$LABEL" "$BIN" "$ROOT" "$PORT" \
     "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$STATE/node.log" "$REPOS_LIST" \
     "$NEWCOMER_AUDIT" "$NEWCOMER_ADJUDICATIONS" "" "$REQUIRE_SCOPE" \
     "$TLS_CERT" "$TLS_KEY" "$ACL" "$ACCOUNTS" "$BEHIND_TLS_PROXY" "$WEBAUTHN" \
-    "$SITE_REPO" > "$PLIST"
+    "$SITE_REPO" "" "$DOWNLOADS" > "$PLIST"
 fi
 if [[ -n "$SITE_REPO" ]]; then
   echo "site repository set ($STATE/site-repo): / is $SITE_REPO, not an index"
+fi
+if [[ -n "$DOWNLOADS" ]]; then
+  count=$(ls -1 "$DOWNLOADS" 2>/dev/null | wc -l | tr -d " ")
+  echo "release shelf set ($DOWNLOADS): $count files at /download/, unauthenticated"
 fi
 if [[ -n "$ACL" ]]; then
   echo "per-repository authorization enabled ($ACL): ungranted access is refused"

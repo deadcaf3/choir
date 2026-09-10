@@ -120,6 +120,8 @@ struct Slots<'a> {
     accounts: Option<&'a str>,
     proxy: bool,
     site: Option<&'a str>,
+    /// The D79 release shelf, at slot 22 on both platforms.
+    downloads: Option<&'a str>,
 }
 
 impl<'a> Slots<'a> {
@@ -133,6 +135,7 @@ impl<'a> Slots<'a> {
             accounts: None,
             proxy: false,
             site: None,
+            downloads: None,
         }
     }
 
@@ -155,7 +158,7 @@ impl<'a> Slots<'a> {
     }
 
     fn after_accounts(self) -> bool {
-        self.proxy || self.site.is_some()
+        self.proxy || self.site.is_some() || self.downloads.is_some()
     }
 
     /// Appends the slots to a renderer invocation, absent ones standing
@@ -188,14 +191,20 @@ impl<'a> Slots<'a> {
         }
         if self.proxy {
             command.arg("behind-tls-proxy");
-        } else if self.site.is_some() {
+        } else if self.site.is_some() || self.downloads.is_some() {
             command.arg("");
         }
         // Slot 19 is [webauthn], which these helpers do not exercise, so
         // it stands empty between the proxy and the site repository --
         // the same stand-in every absent slot above uses.
-        if let Some(repo) = self.site {
-            command.args(["", repo]);
+        if self.site.is_some() || self.downloads.is_some() {
+            command.args(["", self.site.unwrap_or("")]);
+        }
+        // Slot 21 is the Linux-only service user, which is why the shelf
+        // is 22 rather than 21: the arguments both platforms share keep
+        // the same position, and this renderer has nothing to put in 21.
+        if let Some(dir) = self.downloads {
+            command.args(["", dir]);
         }
     }
 }
@@ -603,6 +612,50 @@ fn plist_argv(plist: &str) -> Vec<String> {
 }
 
 /// Split on a single space deliberately: a double space yields an empty
+/// The release shelf reaches the daemon from both supervisors, or from
+/// neither (D79).
+///
+/// Its own test rather than another axis on the cross-product above:
+/// that loop is about policy gates interacting, and a directory of
+/// binaries interacts with none of them. What it shares with those gates
+/// is the failure they were written for -- a flag added to one
+/// supervisor and forgotten on the other, which reads to an operator as
+/// a node that ignored the directory they created.
+#[test]
+fn both_supervisors_serve_the_release_shelf_or_neither_does() {
+    for downloads in [None, Some("/state/downloads")] {
+        let slots = Slots {
+            downloads,
+            ..Slots::none()
+        };
+        let plist = plist_argv(&render_tls(slots));
+        let unit = unit_argv(&render_unit_tls(slots));
+        assert!(
+            plist.len() >= 10,
+            "extracted {} arguments; the renderer did not run",
+            plist.len()
+        );
+        assert_eq!(
+            plist.iter().any(|arg| arg == "--downloads-dir"),
+            downloads.is_some(),
+            "--downloads-dir must appear exactly when the shelf slot is set"
+        );
+        assert_eq!(
+            plist
+                .windows(2)
+                .find(|pair| pair[0] == "--downloads-dir")
+                .map(|pair| pair[1].clone())
+                .as_deref(),
+            downloads,
+            "the shelf reached the daemon as a different directory than it was given"
+        );
+        assert_eq!(
+            plist, unit,
+            "launchd and systemd must start the node with identical arguments"
+        );
+    }
+}
+
 /// element, which is how the empty-policy splice is caught below.
 fn unit_argv(unit: &str) -> Vec<String> {
     let line = unit
@@ -635,6 +688,7 @@ fn both_supervisors_launch_the_node_with_the_same_arguments() {
                                     accounts,
                                     proxy,
                                     site,
+                                    downloads: None,
                                 };
                                 let plist = plist_argv(&render_tls(slots));
                                 let unit = unit_argv(&render_unit_tls(slots));

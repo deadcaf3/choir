@@ -31,6 +31,7 @@ pub mod accounts;
 pub mod acl;
 mod bound;
 mod browse;
+mod downloads;
 pub mod hooks;
 mod join_page;
 pub mod limits;
@@ -303,6 +304,11 @@ pub struct Node {
     /// submissions as the only mutation path.
     browser_writes: bool,
     site_repo: Option<String>,
+    /// The release shelf (D79): a directory whose files are served
+    /// unauthenticated under [`downloads::PREFIX`], or `None` on a node
+    /// that publishes no binaries. Unset is the default, and a node that
+    /// never gets this flag has no route at all.
+    downloads: Option<std::path::PathBuf>,
     /// Free-space floor used by the authenticated readiness endpoint.
     ready_min_free_bytes: u64,
     /// Running request totals, exported by `/metrics`. Shared with every
@@ -439,6 +445,7 @@ impl Node {
             queue: None,
             queue_in_flight: std::sync::Arc::new(queue_api::InFlight::default()),
             site_repo: None,
+            downloads: None,
             scheme,
             listener_scheme,
             internal_token: choir_identity::ActorKey::generate().actor_id().to_hex(),
@@ -525,6 +532,36 @@ impl Node {
             return Err(invalid());
         }
         self.site_repo = Some(repo.to_string());
+        Ok(())
+    }
+
+    /// Serves `dir` as the release shelf: prebuilt binaries, their
+    /// digests, and an installer that fetches them from this node (D79).
+    ///
+    /// Everything under `/download/` is then readable with no
+    /// credential. That is the point of it — an install command a
+    /// stranger cannot run installs nothing — and it is why the consent
+    /// is this call rather than a grant in the ACL: D78 made the ACL the
+    /// answer for *a repository*, and a shelf is not one. It has no
+    /// owner, no history and no scope to name in the table, only files
+    /// an operator deliberately placed in one directory.
+    ///
+    /// Nothing is ever written here, and nothing is fetched. Placing a
+    /// release on the shelf is an operator action outside this process.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a path that is not an existing directory. A shelf that
+    /// does not resolve is a route that answers `404` to every reader
+    /// while the operator believes they published something.
+    pub fn publish_downloads(&mut self, dir: std::path::PathBuf) -> std::io::Result<()> {
+        if !dir.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("not a directory to publish: {}", dir.display()),
+            ));
+        }
+        self.downloads = Some(dir);
         Ok(())
     }
 
@@ -1483,6 +1520,7 @@ impl Node {
             let api_body_limit = self.api_body_limit;
             let browser_writes = self.browser_writes;
             let site_repo = self.site_repo.clone();
+            let downloads = self.downloads.clone();
             let ready_min_free_bytes = self.ready_min_free_bytes;
             let counters = std::sync::Arc::clone(&self.counters);
             let started_unix = self.started_unix;
@@ -1607,6 +1645,16 @@ impl Node {
                 // holds, because a robots policy withheld behind a `401`
                 // is a robots policy nothing reads.
                 let robots_route = method == "GET" && public_path == ui::ROBOTS_PATH;
+                // D79. The shelf answers whatever the reader holds, for
+                // the same reason the robots policy does: an install
+                // command behind a `401` installs nothing, and the
+                // operator already consented by naming the directory.
+                // Absent the flag there is no route here at all, so a
+                // node that publishes no binaries is unchanged.
+                let downloads_route = downloads.is_some()
+                    && method == "GET"
+                    && (public_path == downloads::PREFIX.trim_end_matches('/')
+                        || public_path.starts_with(downloads::PREFIX));
                 // D78 made publishing the ACL's answer, and the front door
                 // has to give the same answer. A node serving source a
                 // stranger may read has something better to show them than
@@ -1641,6 +1689,7 @@ impl Node {
                 let public = signin_route
                     || asking_route
                     || robots_route
+                    || downloads_route
                     || matches!((method, public_path.as_str()), ("GET" | "POST", "/join"))
                     || (method == "GET" && public_path == ui::CARD_PATH)
                     // The landing page replaces the challenge only for a
@@ -1687,6 +1736,9 @@ impl Node {
                         respond_card(request)
                     } else if robots_route {
                         respond_robots(request)
+                    } else if downloads_route {
+                        let shelf = downloads.as_deref().expect("the route needs a shelf");
+                        respond_download(request, &public_path, shelf, scheme)
                     } else {
                         respond_join(
                             request,
@@ -2045,18 +2097,18 @@ impl Node {
                             .is_none()
                     });
                     let docs = docs_url(&root);
+                    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
                     let page = account_page::render(
                         accounts.as_deref(),
                         &user,
                         session_user_present,
                         console,
-                        header(&request, "host")
-                            .map(|host| format!("{scheme}://{host}"))
-                            .as_deref(),
+                        origin.as_deref(),
                         browse::Chrome {
                             site: None,
                             theme: chosen_theme(&request),
                             here: "/account",
+                            origin: origin.as_deref(),
                             account: true,
                             console,
                             docs: docs.as_deref(),
@@ -2851,6 +2903,11 @@ fn identified(user: &str) -> bool {
 fn reader_chrome(request: &tiny_http::Request) -> browse::Chrome<'static> {
     browse::Chrome {
         site: None,
+        // No preview on a refusal. These pages are a `404` and a `403`
+        // that must stay byte-identical, and they are not addresses
+        // anybody shares; the signature is `'static` for the same
+        // reason, so there is nowhere to borrow a host from anyway.
+        origin: None,
         theme: chosen_theme(request),
         // Deliberately not the failing address: these pages are
         // refusals, and a palette link that returns the reader to the
@@ -3566,6 +3623,124 @@ fn respond_robots(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
     served(request, response, 200, bytes)
 }
 
+/// Serves the release shelf: the index, the installer, or one file
+/// (D79).
+///
+/// The installer is rendered from the request's own `Host` rather than
+/// read off the shelf, which is what makes the script fetch from the
+/// node that served it without this process ever learning an address of
+/// its own. A `Host` that is not a hostname is refused rather than
+/// guessed around: it is about to be pasted into a shell script.
+///
+/// A name that is not [`downloads::safe_name`] is a `404` and not a
+/// `400`, because the difference between "refused" and "absent" is
+/// exactly the disclosure a traversal probe is fishing for.
+fn respond_download(
+    request: tiny_http::Request,
+    path: &str,
+    shelf: &std::path::Path,
+    scheme: &'static str,
+) -> std::io::Result<(u16, u64)> {
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let Some(origin) = origin.filter(|origin| downloads::safe_origin(origin)) else {
+        return respond_plain(
+            request,
+            400,
+            "this route needs a Host header\n",
+            b"no-store",
+        );
+    };
+    let name = path.strip_prefix(downloads::PREFIX).unwrap_or("");
+
+    if name.is_empty() {
+        let page = downloads::index(shelf, &origin, chosen_theme(&request));
+        return respond_page(request, 200, page, None);
+    }
+
+    if name == downloads::INSTALLER_NAME {
+        // `no-store`, unlike everything else here: the body carries the
+        // host it was asked for, so a shared cache holding one copy
+        // would hand the next reader a script pointing somewhere else.
+        // `Vary: Host` says the same thing to a cache that stores it
+        // anyway, on the reasoning `respond_page` gives for `Vary:
+        // Cookie`.
+        let body = downloads::installer(&origin);
+        let bytes = body.len() as u64;
+        let response = tiny_http::Response::from_string(body)
+            .with_header(
+                tiny_http::Header::from_bytes(
+                    &b"Content-Type"[..],
+                    &b"text/plain; charset=utf-8"[..],
+                )
+                .expect("static header"),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                    .expect("static header"),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Vary"[..], &b"Host"[..]).expect("static header"),
+            );
+        return served(request, response, 200, bytes);
+    }
+
+    let missing = |request| respond_plain(request, 404, "no such file\n", b"no-store");
+    if !downloads::safe_name(name) {
+        return missing(request);
+    }
+    // `symlink_metadata`, so a link on the shelf is a link and not the
+    // thing it points at. The shelf is a public directory, and following
+    // one out of it is how `/etc` ends up being served by a route that
+    // only ever meant to hand out tarballs.
+    let file = shelf.join(name);
+    let Ok(meta) = std::fs::symlink_metadata(&file) else {
+        return missing(request);
+    };
+    let Ok(handle) = std::fs::File::open(&file) else {
+        return missing(request);
+    };
+    if !meta.is_file() {
+        return missing(request);
+    }
+    let response = tiny_http::Response::from_file(handle)
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                downloads::content_type(name).as_bytes(),
+            )
+            .expect("static header"),
+        )
+        // Five minutes, not a year: these bytes are a file on a disk an
+        // operator can replace, unlike [`respond_card`]'s, which can
+        // only change with a new binary.
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=300"[..])
+                .expect("static header"),
+        );
+    served(request, response, 200, meta.len())
+}
+
+/// One line of text, for a route whose readers are `curl` rather than
+/// browsers.
+fn respond_plain(
+    request: tiny_http::Request,
+    status: u16,
+    body: &str,
+    cache: &[u8],
+) -> std::io::Result<(u16, u64)> {
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body.to_string())
+        .with_status_code(status)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], cache).expect("static header"),
+        );
+    served(request, response, status, bytes)
+}
+
 /// The most a pre-auth request body may be (D57).
 ///
 /// Two hex credentials and an ssh public key, with room to spare. It is
@@ -3621,6 +3796,9 @@ fn respond_join(
     let chrome = browse::Chrome {
         site: None,
         theme,
+        // `join_page` mints its own preview tags, deliberately naming no
+        // repository and no issuer, so the bar does not add a second set.
+        origin: None,
         // Empty: these pages carry no navigation bar, so there is no
         // palette link that would need somewhere to return to — and an
         // address that did carry one would be carrying the invite secret
@@ -4124,10 +4302,12 @@ fn respond_people(
     body_limit: std::num::NonZeroU64,
 ) -> std::io::Result<(u16, u64)> {
     let docs = docs_url(root);
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
     let chrome = browse::Chrome {
         site: None,
         theme: chosen_theme(&request),
         here: "/people",
+        origin: origin.as_deref(),
         account: true,
         // Reaching this page at all means holding `@node write`, which is
         // what the console link is gated on — the refusal below is the
@@ -4434,10 +4614,12 @@ fn respond_account_token(
     scheme: &'static str,
 ) -> std::io::Result<(u16, u64)> {
     let docs = docs_url(root);
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
     let chrome = browse::Chrome {
         site: None,
         theme: chosen_theme(&request),
         here: "/account",
+        origin: origin.as_deref(),
         account: true,
         console: acl.is_some_and(|table| {
             table
@@ -5028,6 +5210,9 @@ fn handle_ui(
     let chrome = browse::Chrome {
         site: None,
         theme: chosen_theme(&request),
+        // Behind the auth gate and not an address anybody pastes into a
+        // chat window, so it takes no preview and needs no scheme here.
+        origin: None,
         here: "/status",
         account: passkeys,
         console: acl.is_some_and(|table| {

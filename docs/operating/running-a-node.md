@@ -18,29 +18,29 @@ any flags.
 
 ## Getting the binaries
 
-One command, from the node serving the source, needing only
-[rustup](https://rustup.rs/):
+One command, no Rust toolchain and no OpenSSL headers. macOS and Linux,
+x86-64 and arm64:
 
 ```bash
-cargo install --git https://choirs.dev/choir/choir.git choir-cli choir-node
+curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli choir-node
 ```
 
 Take both: every command on this page is `choir`, and `choir node serve`
 execs the daemon. The four binaries land in `$CARGO_HOME/bin`
 (`~/.cargo/bin` by default) as `choir-node`, `choir-ssh`, `choir` and
-`choir-mcp`.
+`choir-mcp`; each archive is checked against the `SHA256` beside it on
+the shelf.
 
-Prebuilt instead, no toolchain and no OpenSSL headers, macOS and Linux,
-x86-64 and arm64. A node serves git and the platform API and nothing
-else, so these come from the release host, which publishes a `SHA256`
-per archive and a `sha256.sum`:
+The node renders that installer from the `Host` you asked it on, so the
+script and the archives come from the same origin and no address is
+configured anywhere. Any node with a shelf serves its own:
+`https://<node>/download/`.
+
+From source instead, needing only [rustup](https://rustup.rs/):
 
 ```bash
-curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
-curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
+cargo install --git https://choirs.dev/choir/choir.git choir-cli choir-node
 ```
-
-`cargo binstall choir-node choir-cli` fetches the same archives.
 
 Neither package pulls in `choir-actor`, the one crate that needs this
 workspace's `LIBSQLITE3_FLAGS`.
@@ -252,6 +252,39 @@ Hot-reload: trusted keys, channel bindings, push-certificate signers, reviewers,
 > second `user:token` line can clone every repo, push to any unprotected ref
 > and provision workspaces anywhere. **Do not issue a second credential
 > without an ACL.** `choir host` writes one.
+
+## Serving your own binaries
+
+`--downloads-dir <dir>` publishes one directory at `/download/`, with no
+credential (D79). Three things are served there and only three: an index
+of the directory, any file in it by exact name, and `install.sh`, which
+the node renders from the `Host` of the request rather than reading off
+the shelf. That is what lets the script fetch from the node it came from
+without anybody configuring an address.
+
+The installers run `./choirctl deploy` with the flag whenever
+`~/.choir/downloads` exists, so creating the directory is the switch:
+
+```bash
+./choirctl publish-release            # or: publish-release v0.1.0
+./choirctl deploy
+```
+
+`publish-release` reads `owner/name` from `~/.choir/release-repo` and
+copies that release's archives and digests onto the shelf. It
+deliberately leaves two things behind: the packaging tool's own
+`*-installer.sh`, which carries the release host baked in at build time
+and would send a reader straight back to it, and `source.tar.gz`, which
+the node already serves over git at a revision a reader can name.
+
+**The node is not the builder.** CI builds and publishes; this changes
+where a reader fetches from. The digests served beside the archives
+prove the transfer, not the build, so the trust boundary is TLS plus
+whoever runs the node.
+
+Names are one path segment of `[A-Za-z0-9._-]`, dotfiles are refused and
+symlinks are not followed, so the shelf can only hand out a regular file
+an operator put directly in it.
 
 ## Behind a TLS proxy
 

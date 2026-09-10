@@ -432,6 +432,31 @@ push)
   sh "$HERE/scripts/flip/push_canonical.sh" "$PORT" "${2:-choir/choir.git}"
   ;;
 
+publish-release)
+  # D79. Puts the release archives on the node's shelf, so the install
+  # command on our own front door fetches from the node it names. Runs
+  # on the node host in remote mode, because that is where the shelf is
+  # and copying tarballs through this laptop is a detour.
+  tag=${2:-latest}
+  # Where CI publishes, as `owner/name`, in a file rather than in this
+  # script: an installation's forge is a local fact, and a tracked
+  # default is a slug every other operator would have to remember to
+  # change.
+  if [ ! -f "$STATE/release-repo" ]; then
+    echo "no $STATE/release-repo — write the owner/name CI publishes to, e.g." >&2
+    echo "  echo owner/name > $STATE/release-repo" >&2
+    exit 2
+  fi
+  from=$(sed -n 1p "$STATE/release-repo")
+  if remote_node; then
+    node_ssh "sh -s -- '$from' '$tag' \"\$HOME/.choir/downloads\"" \
+      < "$HERE/scripts/flip/publish_release.sh"
+    echo "shelf: run ./choirctl deploy so the daemon is started with --downloads-dir"
+    exit 0
+  fi
+  sh "$HERE/scripts/flip/publish_release.sh" "$from" "$tag" "$STATE/downloads"
+  ;;
+
 mirror)
   # Repo -> the private Forgejo follower on the mirror VM.
   if remote_node; then
@@ -712,6 +737,7 @@ install-cli)
   sync [repo]      push to the node, then the follower (the usual one)
   push [repo]      push this repo to the node only (--all and --tags)
   mirror           push to the pre-flip Forgejo follower only (legacy)
+  publish-release [tag]   put the release archives on the node's /download/ shelf
   url [repo]       clone/push URL including credentials
 
   people           open the console: who is here, who is asking, invites

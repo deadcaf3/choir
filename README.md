@@ -25,11 +25,11 @@ A merge conflict is a committed value. Plain `git clone`, `fetch` and
 
 ## Quick start
 
-Needs `git` and [rustup](https://rustup.rs/). Everything comes from the
-node serving this repository. The last command prints your own node URL:
+Needs only `git`. Everything comes from the node serving this
+repository. The last command prints your own node URL:
 
 ```bash
-cargo install --git https://choirs.dev/choir/choir.git choir-cli choir-node
+curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli choir-node
 choir host
 ```
 
@@ -59,18 +59,28 @@ cargo install --git https://choirs.dev/choir/choir.git choir-cli choir-node
 `choir-ssh`, only if you run one. All land in `$CARGO_HOME/bin`
 (`~/.cargo/bin` by default).
 
-**Prebuilt**, macOS and Linux, x86-64 and arm64, no toolchain, with a
-`SHA256` per archive and a `sha256.sum` over the set. A node serves git
-and the platform API and nothing else, so these come from the release
-host:
+**Prebuilt**, macOS and Linux, x86-64 and arm64, no toolchain. Served by
+the node, which also renders the installer, so the script and every
+archive it fetches come from the one host you typed:
 
 ```bash
-curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-cli-installer.sh | sh
-curl -fsSL https://github.com/deadcaf3/choir/releases/latest/download/choir-node-installer.sh | sh
+curl -fsSL https://choirs.dev/download/install.sh | sh
 ```
 
-[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) fetches
-the same archives: `cargo binstall choir-cli choir-node`.
+That is `choir` and `choir-mcp`. For the daemon as well:
+
+```bash
+curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli choir-node
+```
+
+Each archive is checked against the `SHA256` published beside it.
+[`https://choirs.dev/download/`](https://choirs.dev/download/) lists
+what is there, and the installer is plain text: read it first.
+
+The archives are **built by CI, not by the node**, and the digests prove
+the transfer rather than the build. Releases are also on
+[GitHub](https://github.com/deadcaf3/choir/releases) if you would rather
+take them from there.
 
 Nothing is on a package registry.
 

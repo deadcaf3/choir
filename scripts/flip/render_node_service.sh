@@ -15,8 +15,8 @@
 # install_node_linux.sh does.
 set -eu
 
-if [ "$#" -lt 11 ] || [ "$#" -gt 21 ]; then
-  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn] [site-repo] [private-beta-service-user]" >&2
+if [ "$#" -lt 11 ] || [ "$#" -gt 22 ]; then
+  echo "usage: render_node_service.sh <label> <bin> <root> <port> <auth> <keys> <reviewers> <log> <repos-file> <newcomer-audit> <newcomer-adjudications> [protected-refs] [require-scope] [tls-cert] [tls-key] [acl] [accounts] [behind-tls-proxy] [webauthn] [site-repo] [private-beta-service-user] [downloads-dir]" >&2
   exit 2
 fi
 
@@ -76,6 +76,9 @@ WEBAUTHN=${19:-}
 # by whoever could clone it before.
 SITE_REPO=${20:-}
 PRIVATE_BETA=${21:-}
+# The release shelf, at 22 on both platforms so the shared arguments
+# keep the same position (slot 21 is the Linux-only service user).
+DOWNLOADS=${22:-}
 if [ -n "$TLS_CERT$TLS_KEY" ] && { [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; }; then
   echo "render_node_service.sh: tls-cert and tls-key must be given together" >&2
   exit 2
@@ -89,6 +92,22 @@ if [ -n "$SITE_REPO" ]; then
     */*/*|/*|*/) echo "render_node_service.sh: site-repo must be owner/name" >&2; exit 2 ;;
     */*) : ;;
     *) echo "render_node_service.sh: site-repo must be owner/name" >&2; exit 2 ;;
+  esac
+fi
+# The shelf is a directory the node serves unauthenticated (D79), so the
+# renderer refuses a value that is not an absolute path with no
+# whitespace in it: this lands unquoted in an ExecStart line, and a value
+# that word-splits there is a daemon launched with arguments nobody
+# wrote.
+if [ -n "$DOWNLOADS" ]; then
+  case "$DOWNLOADS" in
+    /*) : ;;
+    *) echo "render_node_service.sh: downloads-dir must be an absolute path with no spaces" >&2; exit 2 ;;
+  esac
+  # `[[:space:]]`, not `[\ \t]`: inside a shell bracket expression `\t`
+  # is the letter t, so that spelling refused every path with a t in it.
+  case "$DOWNLOADS" in
+    *[[:space:]]*) echo "render_node_service.sh: downloads-dir must be an absolute path with no spaces" >&2; exit 2 ;;
   esac
 fi
 if [ -n "$PRIVATE_BETA" ]; then
@@ -132,6 +151,9 @@ if [ -n "$ACCOUNTS" ]; then
 fi
 if [ -n "$SITE_REPO" ]; then
   EXEC="$EXEC --site-repo $SITE_REPO"
+fi
+if [ -n "$DOWNLOADS" ]; then
+  EXEC="$EXEC --downloads-dir $DOWNLOADS"
 fi
 if [ -n "$BEHIND_TLS_PROXY" ]; then
   EXEC="$EXEC --behind-tls-proxy"

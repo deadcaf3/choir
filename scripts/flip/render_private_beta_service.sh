@@ -83,8 +83,18 @@ if [ -f "$STATE/site-repo" ]; then
   BETA_SITE_REPO=$(sed -n 1p "$STATE/site-repo")
 fi
 
+# D79's release shelf: a directory of prebuilt binaries the node serves
+# unauthenticated at /download/. The directory's existence is the switch,
+# because that is also the thing an operator does to publish -- there is
+# no state where the marker is set and the files are not there.
+BETA_DOWNLOADS=""
+if [ -d "$STATE/downloads" ]; then
+  BETA_DOWNLOADS="$STATE/downloads"
+fi
+
 sh "$HERE/render_node_service.sh" choir-node "$BIN" "$ROOT" "$PORT" \
   "$STATE/auth" "$STATE/keys" "$STATE/reviewers" "$LOG" "$STATE/repos.list" \
   "$STATE/newcomer-audit.jsonl" "$STATE/newcomer-adjudications.jsonl" \
   "$STATE/protected-refs" require-scope '' '' "$STATE/acl" \
-  "$BETA_ACCOUNTS" behind-tls-proxy "$BETA_WEBAUTHN" "$BETA_SITE_REPO" "$SERVICE_USER"
+  "$BETA_ACCOUNTS" behind-tls-proxy "$BETA_WEBAUTHN" "$BETA_SITE_REPO" "$SERVICE_USER" \
+  "$BETA_DOWNLOADS"

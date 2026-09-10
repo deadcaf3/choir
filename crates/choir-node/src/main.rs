@@ -15,7 +15,8 @@
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
 //! [--quota-push-bytes n] [--quota-workspaces n]
 //! [--api-body-limit bytes] [--batch-limit operations] [--ready-min-free-bytes bytes]
-//! [--read-only-browser] [--site-repo owner/name] [--passkeys]
+//! [--read-only-browser] [--site-repo owner/name] [--downloads-dir path]
+//! [--passkeys]
 //! [--behind-tls-proxy]
 //! [--bind addr] [--ssh-handoff path]
 //! [--accounts-file path [--ssh-authorized-keys path [--ssh-shim path]]]
@@ -325,6 +326,7 @@ fn run() -> std::io::Result<()> {
         "--batch-limit",
         "--ready-min-free-bytes",
         "--site-repo",
+        "--downloads-dir",
         "--ci-command",
         "--queue-tree",
     ] {
@@ -486,6 +488,15 @@ fn run() -> std::io::Result<()> {
     if let Some(site) = flag_value("--site-repo") {
         node.serve_single_repository(site)?;
         eprintln!("site: this node presents {site} and no repository index");
+    }
+    // D79. Checked here rather than at first request: a shelf that does
+    // not resolve is a route answering 404 to every reader while the
+    // operator believes they published something, and startup is the one
+    // moment somebody is watching.
+    if let Some(dir) = flag_value("--downloads-dir") {
+        node.publish_downloads(std::path::PathBuf::from(dir))?;
+        let count = std::fs::read_dir(dir).map_or(0, |entries| entries.flatten().count());
+        eprintln!("downloads: serving {count} files from {dir} at /download/, unauthenticated");
     }
     // One writer per state dir, process-enforced: a second daemon on the
     // same root would append to the same ops.jsonl and fork the chain.
