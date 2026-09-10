@@ -31,6 +31,11 @@ fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         ])
         .args(args)
         .current_dir(dir)
+        // Without this git also reads the system config, which on macOS
+        // names `osxkeychain` ahead of any `-c credential.helper`: it
+        // answers `get` with whatever an earlier run stored for this
+        // loopback port, and `store` blocks on the login keychain.
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -278,6 +283,10 @@ fn the_credential_helper_clones_without_a_token_in_the_url() {
     let cloned = git(
         &s.work,
         &[
+            // An empty value resets the helper list, so the one under
+            // test is the only helper git consults.
+            "-c",
+            "credential.helper=",
             "-c",
             &format!("credential.helper={helper}"),
             "clone",
