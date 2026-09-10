@@ -27,6 +27,13 @@
 //! named after this one. Every relative link in every README on this
 //! node was dead, and dead in a way that looked like a missing
 //! repository rather than a bad link.
+//!
+//! A fifth: **a heading carries the id its `#fragment` link names**.
+//! CommonMark has no anchors. GitHub derives one from the heading text
+//! and READMEs are written against that, `[Run a node](#run-a-node)`, so
+//! the derivation here is GitHub's and a link that works there works
+//! here. Without it every in-page link on every README was a click that
+//! did nothing.
 
 use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
 
@@ -118,12 +125,66 @@ pub(crate) fn render(markdown: &str, base: Base<'_>) -> String {
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
 
+    let mut events: Vec<Event<'_>> = Parser::new_ext(markdown, options)
+        .filter_map(|event| sanitize(event, base))
+        .collect();
+    name_headings(&mut events);
     let mut html = String::with_capacity(markdown.len());
-    pulldown_cmark::html::push_html(
-        &mut html,
-        Parser::new_ext(markdown, options).filter_map(|event| sanitize(event, base)),
-    );
+    pulldown_cmark::html::push_html(&mut html, events.into_iter());
     html
+}
+
+/// Rule 5. Gives each heading that has no id the one GitHub would derive
+/// for it, so `[x](#x)` lands where its author saw it land.
+///
+/// The text is gathered from the events up to the heading's end, which
+/// is why this runs over the collected stream rather than inside
+/// [`sanitize`]: at the start tag the text has not been seen yet. A
+/// repeat gets `-1`, `-2`, ... in document order, as on GitHub.
+fn name_headings(events: &mut [Event<'_>]) {
+    let mut seen: std::collections::HashMap<String, usize> = Default::default();
+    let mut at = 0;
+    while at < events.len() {
+        if !matches!(events[at], Event::Start(Tag::Heading { id: None, .. })) {
+            at += 1;
+            continue;
+        }
+        let mut text = String::new();
+        let mut end = at + 1;
+        while end < events.len() {
+            match &events[end] {
+                Event::End(TagEnd::Heading(_)) => break,
+                Event::Text(t) | Event::Code(t) => text.push_str(t),
+                _ => {}
+            }
+            end += 1;
+        }
+        let stem = slug(&text);
+        if !stem.is_empty() {
+            let count = seen.entry(stem.clone()).or_insert(0);
+            let name = if *count == 0 {
+                stem.clone()
+            } else {
+                format!("{stem}-{count}")
+            };
+            *count += 1;
+            if let Event::Start(Tag::Heading { id, .. }) = &mut events[at] {
+                *id = Some(CowStr::Boxed(name.into_boxed_str()));
+            }
+        }
+        at = end;
+    }
+}
+
+/// GitHub's heading slug: lowercased, spaces to hyphens, and everything
+/// that is not a letter, a digit, a hyphen or an underscore dropped.
+/// Letters outside ASCII stay, because GitHub keeps them.
+fn slug(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
 }
 
 /// One event, as it is allowed to appear on the page — or `None`.
@@ -258,7 +319,7 @@ mod tests {
              | a | b |\n|---|---|\n| 1 | 2 |\n",
             ROOT,
         );
-        assert!(html.contains("<h1>"), "no heading: {html}");
+        assert!(html.contains("<h1 id=\"title\">"), "no heading: {html}");
         assert!(html.contains("<strong>bold</strong>"), "no bold: {html}");
         assert!(html.contains("<code>"), "no code span: {html}");
         assert!(html.contains("<li>"), "no list: {html}");
@@ -359,5 +420,31 @@ mod tests {
             html.contains("href=\"/r/agents/demo/blob/main/docs/caf%C3%A9.md\""),
             "a name outside ASCII was left unencoded: {html}"
         );
+    }
+
+    /// A `#fragment` link names the id GitHub would derive, so the
+    /// heading has to carry exactly that id or the link goes nowhere:
+    /// the plain case, a repeat, inline code with punctuation, and
+    /// letters outside ASCII.
+    #[test]
+    fn a_heading_carries_the_id_its_fragment_link_names() {
+        let html = render(
+            "[go](#run-a-node)\n\n## Run a node\n\n## Run a node\n\n## Use `choir join`!\n\n## Über café\n",
+            ROOT,
+        );
+        assert!(html.contains("<h2 id=\"run-a-node\">"), "{html}");
+        assert!(
+            html.contains("<h2 id=\"run-a-node-1\">"),
+            "a repeated heading was not suffixed: {html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"use-choir-join\">"),
+            "inline code or punctuation changed the slug: {html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"über-café\">"),
+            "letters outside ASCII were dropped: {html}"
+        );
+        assert!(html.contains("href=\"#run-a-node\""), "{html}");
     }
 }

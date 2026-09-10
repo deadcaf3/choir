@@ -1442,9 +1442,10 @@ fn the_readme_renders_on_the_repository_page_and_carries_no_markup() {
         .and_then(|rest| rest.split("</section>").next())
         .expect("no README section on the repository page");
 
-    // Rendered, not dumped: the fixture's `# hello` is a heading here.
+    // Rendered, not dumped: the fixture's `# hello` is a heading here,
+    // carrying the id a `#hello` link in the same README would name.
     assert!(
-        readme.contains("<h1>hello</h1>"),
+        readme.contains("<h1 id=\"hello\">hello</h1>"),
         "the README was not rendered as markdown: {readme}"
     );
     assert!(

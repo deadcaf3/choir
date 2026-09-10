@@ -1014,6 +1014,8 @@ table.listing tr:hover .dir::before{background:var(--accent-line)}
    headings that step down from the page's own, nothing drawn around
    it. */
 section.readme{margin-top:var(--sp-0)}
+/* A `#fragment` target stops clear of the sticky top bar, not under it. */
+section.readme [id]{scroll-margin-top:calc(var(--topbar-h) + var(--sp-5))}
 section.readme>h2{font-size:var(--fs-100);letter-spacing:var(--tr-caps);
   text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
   margin:var(--sp-0) var(--sp-0) var(--sp-6)}
