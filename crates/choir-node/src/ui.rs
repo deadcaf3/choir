@@ -1018,9 +1018,126 @@ pub(crate) const ROBOTS: &str = concat!(
     "User-agent: *\n",
     "Allow: /$\n",
     "Allow: /static/card.png\n",
+    "Allow: /static/card/\n",
     "Disallow: /join\n",
     "Disallow: /\n",
 );
+
+/// The crawl policy for a node that publishes something, built from the
+/// table that decides what is published.
+///
+/// [`ROBOTS`] above is the policy for a node that publishes nothing, and
+/// its reasoning was load-bearing: *"every one of those paths already
+/// answers `401` to a crawler, and a search result quoting a refusal
+/// page is the only thing crawling them could produce."* D78 made that
+/// false. A published repository answers `200` to anybody, and the node
+/// was still telling every crawler not to look at the one thing it had
+/// been changed to show them.
+///
+/// So the policy is derived rather than written, for the same reason the
+/// front door is (see `front_door_published`): a static `Allow: /r/`
+/// would be right here and wrong on the next node, inviting crawlers
+/// into a wall of `401`s that the old comment correctly refused to do.
+/// Editing the ACL file rewrites this, because the table is watched and
+/// this reads the table.
+///
+/// **Longest match wins** (RFC 9309), which is what lets a specific
+/// `Allow` sit under the blanket `Disallow: /` and beat it. Each
+/// repository gets two lines: the bare path and the subtree, because
+/// `/r/owner/name` and `/r/owner/name/tree/main` are both pages and only
+/// the second is a prefix match of the first with a separator.
+///
+/// `/join` keeps its explicit `Disallow` even though the blanket covers
+/// it: an invite link that reaches an index is an invite spent by a
+/// crawler, and a later `Allow` added above must not quietly outrank it.
+pub(crate) fn robots(repos: &[String], downloads: bool, origin: Option<&str>) -> String {
+    if repos.is_empty() && !downloads {
+        return ROBOTS.to_string();
+    }
+    let mut out = String::with_capacity(256);
+    out.push_str("User-agent: *\n");
+    out.push_str("Allow: /$\n");
+    out.push_str("Allow: ");
+    out.push_str(CARD_PATH);
+    out.push('\n');
+    // The per-repository cards. A crawler that honours this file and
+    // cannot fetch the image renders the grey rectangle the card exists
+    // to replace, so the policy has to allow the picture as well as the
+    // page it is on.
+    out.push_str("Allow: ");
+    out.push_str(crate::card::PREFIX);
+    out.push('\n');
+    for repo in repos {
+        out.push_str("Allow: /r/");
+        out.push_str(repo);
+        out.push_str("$\n");
+        out.push_str("Allow: /r/");
+        out.push_str(repo);
+        out.push_str("/\n");
+    }
+    if downloads {
+        // The shelf is a page that answers a question somebody types
+        // into a search engine -- "how do I install this" -- and it is
+        // the one page here whose whole content is an instruction.
+        out.push_str("Allow: /download/\n");
+    }
+    out.push_str("Disallow: /join\n");
+    out.push_str("Disallow: /\n");
+    // Absolute per RFC 9309, which is why this takes an origin at all.
+    // Omitted rather than guessed when the request carried no `Host`, on
+    // the same reasoning as every other absolute URL this node mints.
+    if let Some(origin) = origin {
+        out.push_str("Sitemap: ");
+        out.push_str(origin);
+        out.push_str(SITEMAP_PATH);
+        out.push('\n');
+    }
+    out
+}
+
+/// Where [`sitemap`] is served, named once for the reason
+/// [`CARD_PATH`] is.
+pub(crate) const SITEMAP_PATH: &str = "/sitemap.xml";
+
+/// Every address on this node worth an index entry, as a sitemap.
+///
+/// The same table as [`robots`], answering the other half of the
+/// question: that one says what a crawler *may* fetch, this says what is
+/// there. A node that publishes nothing renders an empty `urlset` rather
+/// than a refusal, because the document discloses only what the ACL has
+/// already made public and an empty one is the honest answer.
+///
+/// **Repository roots only, and no deeper.** Every file, tree and commit
+/// page is reachable by following links from the root, which is what a
+/// crawler does; enumerating them here would be a document that grows
+/// with the history and goes stale the moment anybody pushes. The
+/// addresses listed are the ones that are stable: the front door, each
+/// published repository, and the shelf.
+///
+/// No `lastmod`. It would have to come from the tip commit's date, which
+/// means a `git log` per repository per crawl -- a spawn budget spent on
+/// a hint, and the tip is what a crawler learns by fetching the page
+/// anyway.
+pub(crate) fn sitemap(origin: &str, repos: &[String], downloads: bool) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    let mut url = |path: &str| {
+        out.push_str("  <url><loc>");
+        out.push_str(&esc(origin));
+        out.push_str(&esc(path));
+        out.push_str("</loc></url>\n");
+    };
+    url("/");
+    for repo in repos {
+        url(&format!("/r/{repo}"));
+    }
+    if downloads {
+        url("/download/");
+    }
+    out.push_str("</urlset>\n");
+    out
+}
 
 pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
 

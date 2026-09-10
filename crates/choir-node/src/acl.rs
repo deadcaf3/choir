@@ -487,6 +487,37 @@ impl Effective {
         names
     }
 
+    /// Every repository `user` may read, by name, sorted.
+    ///
+    /// For writing a crawl policy and a sitemap out of the table that
+    /// already decides what is public (D78), rather than out of a second
+    /// list somebody has to remember to edit. `owners` above is the
+    /// shape this follows: a description of the ACL, never a decision.
+    ///
+    /// **[`Scope::AllRepos`] contributes nothing**, because this returns
+    /// names and `*` is not one. That is not a gap for the caller this
+    /// exists for: D78 refuses `*` to [`ANON`] at parse time, so the
+    /// anonymous reader's grants are always explicit repositories. A
+    /// caller asking about somebody who does hold `*` gets the repos
+    /// they were named on and must not read the empty tail as "nothing
+    /// else"; [`Effective::allows_repo`] answers that question.
+    #[must_use]
+    pub fn readable_repos(&self, user: &str) -> Vec<String> {
+        let Some(held) = self.grants.get(user) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = held
+            .iter()
+            .filter_map(|(granted, at)| match granted {
+                Scope::Repo(name) if *at >= Level::Read => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// A key identifying everything a filtered response depends on:
     /// the reader and the grants they hold, rendered canonically.
     ///
@@ -1594,6 +1625,41 @@ mod tests {
         assert!(!ok.allows_repo(ANON, "o/r", Level::Propose));
         assert!(ok.holds_anything(ANON));
         assert!(!ok.holds_anything("nobody"));
+    }
+
+    /// The enumeration the crawl policy and the sitemap are built from.
+    #[test]
+    fn readable_repos_names_what_a_principal_may_read_and_nothing_else() {
+        let acl = Acl::parse(
+            "@anon open/source read\n\
+             @anon another/one read\n\
+             alice closed/thing write\n\
+             bob * write\n",
+        )
+        .expect("a table");
+        let table = acl.at(0);
+
+        assert_eq!(
+            table.readable_repos(ANON),
+            vec!["another/one".to_string(), "open/source".to_string()],
+            "sorted, so two nodes with the same grants write the same file"
+        );
+        assert!(
+            table.readable_repos("nobody").is_empty(),
+            "a principal with no grants named a repository"
+        );
+        // `write` implies `read`, so a grant above the level still lists.
+        assert_eq!(
+            table.readable_repos("alice"),
+            vec!["closed/thing".to_string()]
+        );
+        // `*` is not a name. The caller that matters cannot hold it --
+        // D78 refuses it to `@anon` at parse time -- and a caller that
+        // does must not read the empty tail as "nothing else".
+        assert!(
+            table.readable_repos("bob").is_empty(),
+            "a wildcard grant was expanded into names it does not have"
+        );
     }
 
     /// Every other principal keeps the grammar it had.

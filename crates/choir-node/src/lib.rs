@@ -31,6 +31,7 @@ pub mod accounts;
 pub mod acl;
 mod bound;
 mod browse;
+mod card;
 mod downloads;
 pub mod hooks;
 mod join_page;
@@ -1645,6 +1646,12 @@ impl Node {
                 // holds, because a robots policy withheld behind a `401`
                 // is a robots policy nothing reads.
                 let robots_route = method == "GET" && public_path == ui::ROBOTS_PATH;
+                // Beside the crawl policy and public for the same
+                // reason: it lists only what the ACL has already
+                // published, so there is nothing in it a `401` would
+                // protect, and a sitemap behind a wall is a sitemap
+                // nothing reads.
+                let sitemap_route = method == "GET" && public_path == ui::SITEMAP_PATH;
                 // D79. The shelf answers whatever the reader holds, for
                 // the same reason the robots policy does: an install
                 // command behind a `401` installs nothing, and the
@@ -1689,9 +1696,17 @@ impl Node {
                 let public = signin_route
                     || asking_route
                     || robots_route
+                    || sitemap_route
                     || downloads_route
                     || matches!((method, public_path.as_str()), ("GET" | "POST", "/join"))
                     || (method == "GET" && public_path == ui::CARD_PATH)
+                    // A card per repository, drawn from the name in the
+                    // URL and nothing else -- so this checks no ACL and
+                    // touches no disk. An image that only repeats its own
+                    // address back discloses nothing, which is what lets
+                    // it answer before the wall and what stops a card
+                    // becoming a way to ask whether a repository exists.
+                    || (method == "GET" && public_path.starts_with(card::PREFIX))
                     // The landing page replaces the challenge only for a
                     // request that presented nothing. A credential that
                     // was presented and is wrong still gets the `401`,
@@ -1734,8 +1749,12 @@ impl Node {
                         )
                     } else if public_path == ui::CARD_PATH {
                         respond_card(request)
+                    } else if public_path.starts_with(card::PREFIX) {
+                        respond_repo_card(request, &public_path)
                     } else if robots_route {
-                        respond_robots(request)
+                        respond_robots(request, acl.as_deref(), downloads.is_some(), scheme)
+                    } else if sitemap_route {
+                        respond_sitemap(request, acl.as_deref(), downloads.is_some(), scheme)
                     } else if downloads_route {
                         let shelf = downloads.as_deref().expect("the route needs a shelf");
                         respond_download(request, &public_path, shelf, scheme)
@@ -3603,18 +3622,108 @@ fn respond_card(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
     served(request, response, 200, bytes)
 }
 
+/// Serves a card drawn for one repository (see [`card::png`]).
+///
+/// The name is taken from the URL and checked against the grammar a
+/// repository name has, then drawn. It is deliberately *not* looked up:
+/// a route that answered `404` for a name this node does not hold would
+/// be a way to enumerate the ones it does, and the picture is a function
+/// of the string either way.
+fn respond_repo_card(request: tiny_http::Request, path: &str) -> std::io::Result<(u16, u64)> {
+    let missing = |request| respond_plain(request, 404, "no such card\n", b"no-store");
+    let Some(repo) = path
+        .strip_prefix(card::PREFIX)
+        .and_then(|rest| rest.strip_suffix(".png"))
+    else {
+        return missing(request);
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return missing(request);
+    };
+    if !provision::safe_segment(owner) || !provision::safe_segment(name) {
+        return missing(request);
+    }
+    let bytes = card::png(repo);
+    let len = bytes.len() as u64;
+    let response = tiny_http::Response::from_data(bytes)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..])
+                .expect("static header"),
+        )
+        // A day, not [`respond_card`]'s year: these bytes change with the
+        // drawing code, so a redeploy that redraws the card must not be
+        // waiting on a year-old cache to expire.
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..])
+                .expect("static header"),
+        );
+    served(request, response, 200, len)
+}
+
 /// Serves [`ui::ROBOTS`].
 ///
 /// An hour rather than [`respond_card`]'s year: the card's bytes can only
 /// change with a new binary, but a crawl policy is the kind of thing an
 /// operator wants to take effect the same afternoon they change it, and
 /// a year-long cache on the wrong policy is not recallable.
-fn respond_robots(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
-    let bytes = ui::ROBOTS.len() as u64;
-    let response = tiny_http::Response::from_string(ui::ROBOTS)
+fn respond_robots(
+    request: tiny_http::Request,
+    acl: Option<&acl::Effective>,
+    downloads: bool,
+    scheme: &'static str,
+) -> std::io::Result<(u16, u64)> {
+    let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
+    let repos = acl
+        .map(|table| table.readable_repos(acl::ANON))
+        .unwrap_or_default();
+    let policy = ui::robots(&repos, downloads, origin.as_deref());
+    let bytes = policy.len() as u64;
+    let response = tiny_http::Response::from_string(policy)
         .with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
                 .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=3600"[..])
+                .expect("static header"),
+        );
+    served(request, response, 200, bytes)
+}
+
+/// Serves [`ui::sitemap`].
+///
+/// An hour, like the crawl policy beside it and unlike the card: both
+/// are derived from a file an operator edits, and a day-long cache on a
+/// document naming a repository they have just unpublished is the wrong
+/// way for this to be wrong.
+fn respond_sitemap(
+    request: tiny_http::Request,
+    acl: Option<&acl::Effective>,
+    downloads: bool,
+    scheme: &'static str,
+) -> std::io::Result<(u16, u64)> {
+    let Some(origin) = header(&request, "host").map(|host| format!("{scheme}://{host}")) else {
+        // Every entry is an absolute URL, so with no `Host` there is no
+        // document to render rather than a shorter one.
+        return respond_plain(
+            request,
+            400,
+            "this route needs a Host header\n",
+            b"no-store",
+        );
+    };
+    let repos = acl
+        .map(|table| table.readable_repos(acl::ANON))
+        .unwrap_or_default();
+    let body = ui::sitemap(&origin, &repos, downloads);
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"application/xml; charset=utf-8"[..],
+            )
+            .expect("static header"),
         )
         .with_header(
             tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=3600"[..])
