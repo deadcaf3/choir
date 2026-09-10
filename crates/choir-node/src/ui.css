@@ -183,6 +183,11 @@
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
   --blur-1:14px;
+  --blur-2:24px;        /* the chrome's glass, deeper than a card's */
+  /* One step between a row's entrance and the next. Multiplied in the
+     component block and never authored there: `calc(var(--stagger) * 4)`
+     is a token doing arithmetic, not a duration. */
+  --stagger:22ms;
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block
@@ -289,7 +294,7 @@
      at the top, so the first screen has a horizon and the rest of the
      page settles onto plain paper. Nothing here is legible as a colour;
      it is legible as depth. */
-  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.13),transparent 68%);
+  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.18),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(122,84,16,.09),transparent 70%);
   /* A rule that fades out rather than stopping. Used under an eyebrow
      and above the footer, where a full-strength line across the page
@@ -519,9 +524,9 @@ img,svg,canvas{max-width:100%}
    state, so cancelling them shows the page rather than an empty one. */
 @media (prefers-reduced-motion:reduce){
   :root{--dur-1:0ms;--dur-2:0ms;--dur-3:0ms;--dur-4:0ms;--dur-5:0ms;--dur-6:0ms;
-    --rise:0;--lift:0}
+    --rise:0;--lift:0;--stagger:0ms}
   html{scroll-behavior:auto}
-  *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
+  *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;animation-timeline:auto !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
 }
 
 /* =========================================================================
@@ -544,13 +549,35 @@ img,svg,canvas{max-width:100%}
    node cross-fades instead of blinking white. */
 @view-transition{navigation:auto}
 
-/* Arriving. Used on the reading pages, where the first screen is the
-   whole argument; the tool pages render instantly and unanimated,
-   because somebody operating an instrument did not ask for a curtain. */
+/* Arriving. Every page rises in, the tool pages included. This sheet
+   used to hold the tool pages still, on the grounds that somebody
+   operating an instrument did not ask for a curtain -- true of a private
+   beta whose readers were its operators. The front door is the source
+   now (D78) and most of its readers are arriving for the first time; for
+   them the instrument *is* the first screen, and a page that assembles
+   itself in a third of a second says "made" where one that pops says
+   "dumped". The distances are one token, the delays are short, and
+   `prefers-reduced-motion` cancels all of it. */
 @keyframes rise{
   from{opacity:0;transform:translateY(var(--rise))}
   to{opacity:1;transform:none}
 }
+/* A row arriving: opacity alone, because a transform on a table row is
+   not honoured everywhere, and a row that fades beside one that slides
+   reads as a bug rather than as a choice. */
+@keyframes fade{from{opacity:0}to{opacity:1}}
+/* Between pages. The bar and the title are named, so a navigation inside
+   this node carries them across instead of fading them out and back in:
+   the chrome stays put and the title glides to its new text. The rest
+   of the page cross-fades, and its own entrance below does the rising.
+   Ignored entirely by a browser without view transitions, which then
+   gets the entrance alone. */
+.chrome{view-transition-name:chrome}
+header.top h1{view-transition-name:title}
+::view-transition-old(root){animation:fade var(--dur-2) var(--ease-out) both reverse}
+::view-transition-new(root){animation:fade var(--dur-3) var(--ease-out) both}
+::view-transition-group(chrome),::view-transition-group(title){
+  animation-duration:var(--dur-4);animation-timing-function:var(--ease-emphatic)}
 
 body{background:var(--ground);color:var(--ink);margin:0 auto;
   padding:var(--pad-y) var(--pad-x) var(--sp-20);max-width:var(--page-max);
@@ -571,6 +598,57 @@ body.task header.top,body.task main>section{
   animation:rise var(--dur-5) var(--ease-out) both}
 body.task main>section{animation-delay:var(--delay-2)}
 body.task main>section+section{animation-delay:var(--delay-4)}
+/* The tool pages, arriving in order: the tray under the head, then the
+   panes left to right, then the rows of whichever list the page is. The
+   head itself does not move: it is the element the view transition
+   carries from page to page, and an entrance that faded it would hand
+   that transition an invisible snapshot to glide to. On a first load it
+   is simply there, which is what a title is for. */
+.repobar{animation:rise var(--dur-5) var(--ease-out) both;
+  animation-delay:var(--delay-1)}
+main>section,.panes>.pane,.rail>.pane{
+  animation:rise var(--dur-5) var(--ease-out) both;
+  animation-delay:var(--delay-2)}
+.rail>.pane:nth-child(1){animation-delay:var(--delay-3)}
+.rail>.pane:nth-child(2){animation-delay:var(--delay-4)}
+.panes>.pane-content{animation-delay:var(--delay-4)}
+/* The README is below the fold on most screens, so its entrance is tied
+   to the scroll where the browser can do that: it rises as it comes
+   into view rather than having risen while nobody was looking. A
+   browser without scroll timelines ignores the two lines and keeps the
+   timed entrance above. */
+@supports (animation-timeline:view()){
+  .panes>.pane-content{animation-timeline:view();
+    animation-range:entry 0% entry 35%;animation-delay:var(--sp-0)}
+}
+/* Rows, one after another for a screen's worth and then all at once:
+   past the fold, a stagger is a delay nobody is watching. */
+tbody tr{animation:fade var(--dur-4) var(--ease-out) both;
+  animation-delay:calc(var(--delay-3) + var(--stagger) * 25)}
+tbody tr:nth-child(1){animation-delay:calc(var(--delay-3) + var(--stagger) * 1)}
+tbody tr:nth-child(2){animation-delay:calc(var(--delay-3) + var(--stagger) * 2)}
+tbody tr:nth-child(3){animation-delay:calc(var(--delay-3) + var(--stagger) * 3)}
+tbody tr:nth-child(4){animation-delay:calc(var(--delay-3) + var(--stagger) * 4)}
+tbody tr:nth-child(5){animation-delay:calc(var(--delay-3) + var(--stagger) * 5)}
+tbody tr:nth-child(6){animation-delay:calc(var(--delay-3) + var(--stagger) * 6)}
+tbody tr:nth-child(7){animation-delay:calc(var(--delay-3) + var(--stagger) * 7)}
+tbody tr:nth-child(8){animation-delay:calc(var(--delay-3) + var(--stagger) * 8)}
+tbody tr:nth-child(9){animation-delay:calc(var(--delay-3) + var(--stagger) * 9)}
+tbody tr:nth-child(10){animation-delay:calc(var(--delay-3) + var(--stagger) * 10)}
+tbody tr:nth-child(11){animation-delay:calc(var(--delay-3) + var(--stagger) * 11)}
+tbody tr:nth-child(12){animation-delay:calc(var(--delay-3) + var(--stagger) * 12)}
+tbody tr:nth-child(13){animation-delay:calc(var(--delay-3) + var(--stagger) * 13)}
+tbody tr:nth-child(14){animation-delay:calc(var(--delay-3) + var(--stagger) * 14)}
+tbody tr:nth-child(15){animation-delay:calc(var(--delay-3) + var(--stagger) * 15)}
+tbody tr:nth-child(16){animation-delay:calc(var(--delay-3) + var(--stagger) * 16)}
+tbody tr:nth-child(17){animation-delay:calc(var(--delay-3) + var(--stagger) * 17)}
+tbody tr:nth-child(18){animation-delay:calc(var(--delay-3) + var(--stagger) * 18)}
+tbody tr:nth-child(19){animation-delay:calc(var(--delay-3) + var(--stagger) * 19)}
+tbody tr:nth-child(20){animation-delay:calc(var(--delay-3) + var(--stagger) * 20)}
+tbody tr:nth-child(21){animation-delay:calc(var(--delay-3) + var(--stagger) * 21)}
+tbody tr:nth-child(22){animation-delay:calc(var(--delay-3) + var(--stagger) * 22)}
+tbody tr:nth-child(23){animation-delay:calc(var(--delay-3) + var(--stagger) * 23)}
+tbody tr:nth-child(24){animation-delay:calc(var(--delay-3) + var(--stagger) * 24)}
 
 /* skip link */
 .skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
@@ -585,11 +663,15 @@ body.task main>section+section{animation-delay:var(--delay-4)}
    line of plain text rather than a row of outlined lozenges.
    ------------------------------------------------------------------ */
 header.top{padding-bottom:var(--sp-0);margin-bottom:var(--sp-8)}
-h1{font-size:var(--fs-800);line-height:var(--lh-tight);letter-spacing:var(--tr-heading);
+h1{font-size:var(--fs-900);line-height:var(--lh-tight);letter-spacing:var(--tr-display);
   color:var(--strong);margin:var(--sp-0);font-weight:var(--fw-bold);
   overflow-wrap:break-word}
-h1 a{color:inherit;text-decoration:none}
+h1 a{color:inherit;text-decoration:none;transition:color var(--dur-2) var(--ease-out)}
 h1 a:hover{color:var(--accent-ink)}
+/* `owner/` is the address and `name` is the thing, so the owner is set
+   back a step: the eye lands on the name and reads the owner as its
+   qualifier, the way a path reads. */
+h1 .owner{color:var(--muted);font-weight:var(--fw-regular)}
 /* A section head is an eyebrow: small, spaced capitals, quiet, and
    trailed by a rule that fades out across the page. The rule is what
    makes a stretch of page read as a section without a box around it. */
@@ -613,15 +695,29 @@ h3{font-size:var(--fs-500);color:var(--strong);letter-spacing:var(--tr-heading);
 /* The one that is a state rather than a fact keeps the accent, because
    "this is the thing you are looking at" is what the accent is for. */
 .pill.on{color:var(--accent-ink)}
-.pill a{color:var(--accent-ink);text-decoration:none}
-.pill a:hover{text-decoration:underline}
+/* A link in the subtitle is a chip when the cursor is on it: the same
+   text, a wash behind it. Padding with a matching negative margin, so
+   the chip has room and the line does not move. */
+.pill a{color:var(--accent-ink);text-decoration:none;
+  padding:var(--sp-1) var(--sp-2);margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));
+  border-radius:var(--r-sm);
+  transition:background-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+.pill a:hover{background:var(--accent-tint);color:var(--accent-hover)}
 /* The clone URL is the one string on the surface that exists to be
    taken rather than read, so it is set into the page like a field and
    selects whole on a single click. */
 .pill.clone{background:var(--sunken);color:var(--ink);
   padding:var(--sp-1) var(--sp-3);border:var(--border-hair);
   border-radius:var(--r-pill);min-width:0;overflow-wrap:anywhere;
-  -webkit-user-select:all;user-select:all}
+  box-shadow:var(--shadow-inset);cursor:text;
+  -webkit-user-select:all;user-select:all;
+  transition:border-color var(--dur-2) var(--ease-out),
+             background-color var(--dur-2) var(--ease-out),
+             box-shadow var(--dur-2) var(--ease-out)}
+/* Under the cursor it becomes the field it behaves as. */
+.pill.clone:hover{border-color:var(--accent-line);background:var(--surface);
+  box-shadow:var(--shadow-1)}
 
 /* ------------------------------------------------------------------
    SECTIONS
@@ -654,9 +750,22 @@ tr>td:last-child,tr>th:last-child{padding-right:var(--sp-0)}
 thead th{font-size:var(--fs-100);text-transform:uppercase;
   letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium);
   border-bottom:var(--border)}
+/* A long list keeps its column heads in view, parked under the bar. Only
+   the tables set straight on the page: inside a card the ground colour
+   would be the wrong one. */
+main>section>table>thead th{position:sticky;
+  top:calc(var(--topbar-h) + var(--sp-5));background:var(--ground);
+  z-index:var(--z-base)}
 tbody tr:last-child>td{border-bottom:var(--bw-0) solid transparent}
-tbody tr{transition:background-color var(--dur-1) var(--ease-out)}
-tbody tr:hover{background:var(--raise)}
+tbody tr>td{transition:background-color var(--dur-2) var(--ease-out),
+             box-shadow var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+tbody tr:hover>td{background:var(--raise)}
+/* The wash is a rounded slab, not a stripe. */
+tbody tr:hover>td:first-child{
+  border-top-left-radius:var(--r-sm);border-bottom-left-radius:var(--r-sm)}
+tbody tr:hover>td:last-child{
+  border-top-right-radius:var(--r-sm);border-bottom-right-radius:var(--r-sm)}
 tr.group th{color:var(--muted);font-family:var(--font-mono);
   font-size:var(--fs-200);text-transform:none;letter-spacing:var(--tr-mono)}
 /* The current selection: the one place besides a link that spends the
@@ -769,11 +878,17 @@ summary:hover{color:var(--accent-ink)}
 /* A deep path is the ordinary case, so the breadcrumb wraps rather than
    widening the page: `anywhere` because a single segment can be longer
    than a phone is wide and has no space in it to break at. */
-nav.crumbs{margin-top:var(--sp-3);font-size:var(--fs-300);color:var(--muted);
+nav.crumbs{margin-top:var(--sp-3);font-size:var(--fs-300);color:var(--faint);
   font-family:var(--font-mono);overflow-wrap:anywhere;line-height:var(--lh-normal)}
+nav.crumbs a{color:var(--muted);text-decoration:none;
+  padding:var(--sp-1) var(--sp-2);margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));
+  border-radius:var(--r-sm);
+  transition:background-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+nav.crumbs a:hover{background:var(--accent-tint);color:var(--accent-ink)}
 pre.code{background-image:var(--sunken-wash);border:var(--border-hair);
-  border-radius:var(--r-md);
-  padding:var(--sp-4);overflow-x:auto;font-family:var(--font-mono);
+  border-radius:var(--r-lg);box-shadow:var(--shadow-inset),var(--shadow-1);
+  padding:var(--sp-5);overflow-x:auto;font-family:var(--font-mono);
   font-size:var(--fs-300);line-height:var(--lh-code);color:var(--syn-plain);
   margin:var(--sp-4) var(--sp-0)}
 /* The blob view's line numbers: a column of tabular figures, right
@@ -782,7 +897,8 @@ pre.code{background-image:var(--sunken-wash);border:var(--border-hair);
    five-digit line numbers of any real file overflowed it into the first
    characters of their own source line. */
 pre.code .ln{display:inline-block;min-width:var(--sp-10);
-  padding-right:var(--sp-4);color:var(--syn-gutter);text-align:right;
+  padding-right:var(--sp-3);margin-right:var(--sp-4);color:var(--syn-gutter);text-align:right;
+  border-right:var(--border-hair);
   font-variant-numeric:tabular-nums;
   -webkit-user-select:none;user-select:none}
 /* `--syn-added` and `--syn-removed` are washes, i.e. background tokens;
@@ -813,24 +929,43 @@ td summary{padding:var(--sp-0);display:inline-block}
 .repobar{display:flex;align-items:center;flex-wrap:wrap;
   gap:var(--sp-3) var(--sp-5);margin:var(--sp-6) var(--sp-0) var(--sp-6);
   padding:var(--sp-3) var(--sp-4);border:var(--border-hair);
-  border-radius:var(--r-md);background:var(--raise)}
+  border-radius:var(--r-lg);background-image:var(--card-wash);
+  box-shadow:var(--shadow-1),var(--shadow-inset)}
 .repobar .counts{display:flex;flex-wrap:wrap;gap:var(--sp-4);
   font-size:var(--fs-300);color:var(--faint);
   font-variant-numeric:tabular-nums}
+.repobar .counts a{color:var(--muted);text-decoration:none;
+  padding:var(--sp-1) var(--sp-2);margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));
+  border-radius:var(--r-sm);
+  transition:background-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+.repobar .counts a:hover{background:var(--accent-tint);color:var(--accent-ink)}
 /* The revision picker. A `<details>`, because this surface runs no
    script and a `<select>` without script is a control that changes
    nothing when a reader uses it. The open panel is positioned static,
    not absolute: an overlay that cannot be dismissed by a click handler
    is a trap on a page with no handlers. */
 .picker{margin:var(--sp-0)}
-.picker>summary{display:inline-block;cursor:pointer;
-  padding:var(--sp-1) var(--sp-3);border:var(--border);
-  border-radius:var(--r-pill);background:var(--surface);
+/* The revision is the state this page is in, which is what the accent
+   is for: a tinted chip with a mark, where every other control is
+   plain. */
+.picker>summary{display:inline-flex;align-items:center;gap:var(--sp-2);
+  cursor:pointer;list-style:none;
+  padding:var(--sp-1) var(--sp-3);border:var(--bw-1) solid var(--accent-line);
+  border-radius:var(--r-pill);background:var(--accent-tint);
   box-shadow:var(--shadow-1);
-  font-family:var(--font-mono);font-size:var(--fs-300);color:var(--strong);
-  transition:border-color var(--dur-1) var(--ease-out),
-             color var(--dur-1) var(--ease-out)}
-.picker>summary:hover{border-color:var(--accent-line);color:var(--accent-ink)}
+  font-family:var(--font-mono);font-size:var(--fs-300);color:var(--accent-ink);
+  font-weight:var(--fw-medium);
+  transition:border-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out),
+             box-shadow var(--dur-2) var(--ease-out),
+             transform var(--dur-2) var(--ease-out)}
+.picker>summary::-webkit-details-marker{display:none}
+/* The branch mark: a ring, drawn from a border like the state dots. */
+.picker>summary::before{content:"";border-radius:var(--r-pill);
+  border:var(--bw-rule) solid currentColor}
+.picker>summary:hover{border-color:var(--accent);color:var(--accent-hover);
+  box-shadow:var(--shadow-2);transform:translateY(var(--lift))}
 .picker h3{font-size:var(--fs-100);letter-spacing:var(--tr-caps);
   text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
   margin:var(--sp-4) var(--sp-0) var(--sp-1)}
@@ -853,6 +988,26 @@ table.listing td.num{white-space:nowrap}
 /* A directory and a file read differently at a glance without an icon
    font: the directory is the weight, the file is the plain face. */
 table.listing td .dir{font-weight:var(--fw-medium)}
+/* Names are set plain, not underlined: twenty-five underlines in a
+   column is a texture, and the row's hover already says it is a link.
+   The row is given a little more height than a scanned table gets,
+   because this one is where a reader lands. */
+table.listing td{padding-top:var(--sp-3);padding-bottom:var(--sp-3)}
+table.listing td:first-child a{text-decoration:none;color:var(--ink);
+  transition:color var(--dur-2) var(--ease-out)}
+table.listing td:first-child .dir{color:var(--strong)}
+table.listing tr:hover td:first-child a{color:var(--accent-ink)}
+table.listing tr:hover td.subject{color:var(--ink)}
+/* A directory carries a mark: a small tinted tab, drawn from a bordered
+   box with a heavier top edge, which is what a folder is when it is
+   nine pixels wide. Files carry nothing; the absence is the glyph. */
+table.listing .dir::before{content:"";display:inline-block;
+  vertical-align:baseline;margin-right:var(--sp-2);
+  padding:var(--sp-1) var(--sp-2);
+  border:var(--bw-1) solid var(--accent-line);border-top-width:var(--bw-2);
+  border-radius:var(--r-xs);background:var(--accent-tint);
+  transition:background-color var(--dur-2) var(--ease-out)}
+table.listing tr:hover .dir::before{background:var(--accent-line)}
 
 /* The README: the one block on this surface holding prose the node did
    not author, so it is set as a document — one reading measure,
@@ -983,13 +1138,13 @@ table.hits code{font-size:var(--fs-300)}
    ------------------------------------------------------------------ */
 .chrome{position:sticky;top:var(--sp-3);z-index:var(--z-header);
   background:var(--surface);border:var(--border-hair);
-  border-radius:var(--r-lg);box-shadow:var(--shadow-1);
+  border-radius:var(--r-xl);box-shadow:var(--shadow-2),var(--shadow-inset);
   margin:var(--sp-0) var(--sp-0) var(--sp-10);
   padding:var(--sp-2) var(--sp-4)}
-@supports (backdrop-filter:blur(var(--blur-1))){
-  .chrome{background:color-mix(in srgb,var(--surface) 72%,transparent);
-    backdrop-filter:blur(var(--blur-1)) saturate(140%);
-    -webkit-backdrop-filter:blur(var(--blur-1)) saturate(140%)}
+@supports (backdrop-filter:blur(var(--blur-2))){
+  .chrome{background:color-mix(in srgb,var(--surface) 64%,transparent);
+    backdrop-filter:blur(var(--blur-2)) saturate(160%);
+    -webkit-backdrop-filter:blur(var(--blur-2)) saturate(160%)}
 }
 /* Wraps rather than breaking at a width. There is no media query here
    on purpose: this sheet authors no raw lengths below the marker, and a
@@ -1016,10 +1171,15 @@ form.omni{display:flex;align-items:center;flex:1 1 var(--search);
   min-width:0;gap:var(--sp-2);
   padding:var(--sp-1) var(--sp-3);
   background:var(--raise);border:var(--border-hair);
-  border-radius:var(--r-pill);
-  transition:border-color var(--dur-1) var(--ease-out),
-             background-color var(--dur-1) var(--ease-out)}
-form.omni:focus-within{border-color:var(--accent-line);background:var(--surface)}
+  border-radius:var(--r-pill);box-shadow:var(--shadow-inset);
+  transition:border-color var(--dur-2) var(--ease-out),
+             background-color var(--dur-2) var(--ease-out),
+             box-shadow var(--dur-3) var(--ease-out)}
+form.omni:hover{border-color:var(--line)}
+/* Focus is a halo in the accent wash: wide, soft, and the one glow on
+   the page, because the field is the one thing on it that is listening. */
+form.omni:focus-within{border-color:var(--accent-line);background:var(--surface);
+  box-shadow:var(--sp-0) var(--sp-0) var(--sp-0) var(--bw-4) var(--accent-tint),var(--shadow-1)}
 form.omni .scope{white-space:nowrap;font-size:var(--fs-200);
   color:var(--faint);font-family:var(--font-mono)}
 form.omni input[type="search"]{flex:1 1 var(--search);min-width:0;
@@ -1041,6 +1201,14 @@ form.omni input[type="search"]::-webkit-search-cancel-button{appearance:none}
 .chrome-nav a{color:var(--muted);text-decoration:none;
   transition:color var(--dur-1) var(--ease-out)}
 .chrome-nav a:hover{color:var(--accent-ink)}
+/* The bare links in the bar (not the palette control, which is its own
+   object) become chips under the cursor, on the same padding-and-margin
+   pair the subtitle links use. */
+.chrome-nav>a{padding:var(--sp-1) var(--sp-2);
+  margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));border-radius:var(--r-sm);
+  transition:background-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+.chrome-nav>a:hover{background:var(--accent-tint)}
 /* The one link in the bar that is an action rather than a destination. */
 .chrome-nav a.go{color:var(--accent-ink);font-weight:var(--fw-medium)}
 
@@ -1072,8 +1240,14 @@ b.tab.here .count{color:var(--muted)}
   gap:var(--gap-pane)}
 .pane{min-width:0;overflow-x:auto;display:flex;flex-direction:column;
   background-image:var(--card-wash);border:var(--border-hair);
-  border-radius:var(--r-lg);padding:var(--pad-card);
-  box-shadow:var(--shadow-1)}
+  border-radius:var(--r-xl);padding:var(--pad-card);
+  box-shadow:var(--shadow-2),var(--shadow-inset);
+  transition:border-color var(--dur-3) var(--ease-out),
+             box-shadow var(--dur-3) var(--ease-out)}
+/* A pane the cursor is over comes forward by one step of shadow and
+   one of line. No lift: it is a surface the reader is working on, not
+   a button they are about to press. */
+.pane:hover{border-color:var(--line);box-shadow:var(--shadow-3),var(--shadow-inset)}
 /* The listing leads and the rails follow. Equal weights put an empty
    "no open reviews" card on half the front page while every commit
    subject beside it truncated mid-word, which is the wrong half of the
@@ -1088,7 +1262,12 @@ b.tab.here .count{color:var(--muted)}
    repository is. One flex child holding both cards, so the listing keeps
    its width whether the rail carries two of them or one. */
 .rail{flex:2 1 var(--side);min-width:0;display:flex;flex-direction:column;
-  gap:var(--gap-pane)}
+  gap:var(--gap-pane);
+  /* Sticky, parked under the bar: the listing is long and the rail is
+     short, and a rail that scrolled away left the right-hand column
+     empty for most of the page. `align-items:flex-start` on `.panes` is
+     what lets it stick at all. */
+  position:sticky;top:calc(var(--topbar-h) + var(--sp-6))}
 .rail>.pane{flex:0 0 auto}
 
 /* The one row above a listing that says what state it is in: who wrote
@@ -1099,7 +1278,12 @@ b.tab.here .count{color:var(--muted)}
   padding:var(--sp-1) var(--sp-0) var(--sp-3);
   margin-bottom:var(--sp-2);border-bottom:var(--border-hair)}
 .commitbar .who{white-space:nowrap;color:var(--strong);
-  font-weight:var(--fw-medium)}
+  font-weight:var(--fw-medium);display:inline-flex;align-items:center;
+  gap:var(--sp-2)}
+/* The author's mark: a ring in the accent, the size of a state dot's
+   bigger sibling, standing in for the avatar this node does not have. */
+.commitbar .who::before{content:"";border-radius:var(--r-pill);
+  border:var(--bw-4) solid var(--accent-line);background:var(--accent-tint)}
 .commitbar .what{flex:1 1 var(--sp-0);min-width:0;color:var(--ink);
   text-decoration:none;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
@@ -1122,8 +1306,12 @@ ul.who li{color:var(--muted)}
 nav.doctabs{display:flex;flex-wrap:wrap;gap:var(--sp-4);
   margin:var(--sp-0) var(--sp-0) var(--sp-5);padding-bottom:var(--sp-3);
   border-bottom:var(--border-hair);font-size:var(--fs-300)}
-nav.doctabs a{color:var(--muted);text-decoration:none}
-nav.doctabs a:hover{color:var(--accent-ink);text-decoration:underline}
+nav.doctabs a{color:var(--muted);text-decoration:none;
+  padding:var(--sp-1) var(--sp-2);margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));
+  border-radius:var(--r-sm);
+  transition:background-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+nav.doctabs a:hover{background:var(--accent-tint);color:var(--accent-ink)}
 
 /* The in-flight list. One row per review: state, what it is, how far
    through its verdicts it is. */

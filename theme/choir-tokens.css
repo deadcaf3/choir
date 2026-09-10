@@ -194,6 +194,11 @@
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
   --blur-1:14px;
+  --blur-2:24px;        /* the chrome's glass, deeper than a card's */
+  /* One step between a row's entrance and the next. Multiplied in the
+     component block and never authored there: `calc(var(--stagger) * 4)`
+     is a token doing arithmetic, not a duration. */
+  --stagger:22ms;
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block
@@ -300,7 +305,7 @@
      at the top, so the first screen has a horizon and the rest of the
      page settles onto plain paper. Nothing here is legible as a colour;
      it is legible as depth. */
-  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.13),transparent 68%);
+  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.18),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(122,84,16,.09),transparent 70%);
   /* A rule that fades out rather than stopping. Used under an eyebrow
      and above the footer, where a full-strength line across the page

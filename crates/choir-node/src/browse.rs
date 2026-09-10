@@ -5135,7 +5135,18 @@ fn repo_header(
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
-    h.push_str(&esc(repo));
+    // `owner/` and `name` as two runs, so the sheet can set the owner
+    // back a step: the name is the thing and the owner is its address,
+    // and a title that weights them equally reads as one long word.
+    match repo.split_once('/') {
+        Some((owner, name)) => {
+            h.push_str("<span class=\"owner\">");
+            h.push_str(&esc(owner));
+            h.push_str("/</span>");
+            h.push_str(&esc(name));
+        }
+        None => h.push_str(&esc(repo)),
+    }
     h.push_str("</a></h1><div class=\"sub\">");
     // The repository root draws a ref picker under this header, and the
     // picker's first control is the revision's name. Printing it here as

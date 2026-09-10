@@ -177,7 +177,12 @@ fn size(bytes: u64) -> String {
 /// The command comes first because it is what almost every reader wants,
 /// and the listing is there for the reader who wants to check what they
 /// are about to run against what is actually published.
-pub(crate) fn index(dir: &std::path::Path, origin: &str, theme: Option<&str>) -> String {
+pub(crate) fn index(
+    dir: &std::path::Path,
+    origin: &str,
+    theme: Option<&str>,
+    site: Option<&str>,
+) -> String {
     let rows = entries(dir);
     let mut h = String::with_capacity(4 * 1024);
     h.push_str("<!doctype html><html lang=\"en\"");
@@ -188,6 +193,26 @@ pub(crate) fn index(dir: &std::path::Path, origin: &str, theme: Option<&str>) ->
     h.push_str(crate::ui::STYLE);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
+    // The same bar every other page wears. This page used to draw none,
+    // and a reader who arrived here from the install command had no
+    // way back to the source but the address bar. Nothing reader-
+    // specific in it: the shelf is public, so the bar takes the shape
+    // it takes for a reader the node has not identified.
+    let mut bar = crate::browse::Bar::index(crate::browse::Chrome {
+        site,
+        theme,
+        here: PREFIX,
+        origin: Some(origin),
+        ..Default::default()
+    });
+    // On a node presenting one repository, the brand is that repository
+    // and the box searches it, as on every other page; `Bar::index` is
+    // the shape for a page about no repository, which this is not quite.
+    if let Some(site) = site {
+        bar.site = true;
+        bar.scope = Some((site, "HEAD"));
+    }
+    crate::browse::chrome(&mut h, bar);
     h.push_str("<header class=\"top\"><h1>downloads</h1><div class=\"sub\"><span class=\"pill\">");
     h.push_str(&format!("{} files", rows.len()));
     h.push_str("</span></div></header><main id=\"main\"><section>");

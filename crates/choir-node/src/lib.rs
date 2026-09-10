@@ -1757,7 +1757,7 @@ impl Node {
                         respond_sitemap(request, acl.as_deref(), downloads.is_some(), scheme)
                     } else if downloads_route {
                         let shelf = downloads.as_deref().expect("the route needs a shelf");
-                        respond_download(request, &public_path, shelf, scheme)
+                        respond_download(request, &public_path, shelf, scheme, site_repo.as_deref())
                     } else {
                         respond_join(
                             request,
@@ -3749,6 +3749,7 @@ fn respond_download(
     path: &str,
     shelf: &std::path::Path,
     scheme: &'static str,
+    site: Option<&str>,
 ) -> std::io::Result<(u16, u64)> {
     let origin = header(&request, "host").map(|host| format!("{scheme}://{host}"));
     let Some(origin) = origin.filter(|origin| downloads::safe_origin(origin)) else {
@@ -3762,7 +3763,7 @@ fn respond_download(
     let name = path.strip_prefix(downloads::PREFIX).unwrap_or("");
 
     if name.is_empty() {
-        let page = downloads::index(shelf, &origin, chosen_theme(&request));
+        let page = downloads::index(shelf, &origin, chosen_theme(&request), site);
         return respond_page(request, 200, page, None);
     }
 
