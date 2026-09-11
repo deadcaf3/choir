@@ -70,6 +70,7 @@ fn serve(
     root: &Path,
     auth: &[(&str, &str)],
     acl: Option<&Path>,
+    keys: Option<&Path>,
     platform: Arc<Platform>,
 ) -> Served {
     let mut table = AuthTable::new();
@@ -79,6 +80,9 @@ fn serve(
     let mut node = Node::bind_with_auth(root, 0, Some(table)).expect("node binds a free port");
     if let Some(acl) = acl {
         node.watch_acl_file(acl.to_path_buf()).expect("acl loads");
+    }
+    if let Some(keys) = keys {
+        node.watch_keys_file(keys.to_path_buf());
     }
     node.enable_shared_platform(platform.clone());
     let port = node.port();
@@ -106,8 +110,9 @@ fn home(tag: &str) -> HomeFixture {
     let work = scratch(tag);
     let alice = ActorKey::generate();
     let seed_key = ActorKey::generate();
-    // The operator's three lines, in the shapes they already have: the
-    // seed's key registered, and two ordinary grants for its principal.
+    // The operator's setup, in shapes that already exist: the seed's key
+    // registered here and bound below, and two ordinary grants for its
+    // principal, since the log's grant does not cover git.
     let keys = work.join("keys");
     std::fs::write(
         &keys,
@@ -134,13 +139,19 @@ fn home(tag: &str) -> HomeFixture {
             registry,
             Box::new(MemLog::new()),
             ActorKey::from_secret_bytes(&node_key.secret_bytes()),
-            Some(keys),
+            Some(keys.clone()),
         )
         .expect("home platform starts"),
     );
     let root = work.join("home");
     std::fs::create_dir_all(&root).unwrap();
-    let served = serve(&root, &[("alice", "a"), (SEED, "s")], Some(&acl), platform);
+    let served = serve(
+        &root,
+        &[("alice", "a"), (SEED, "s")],
+        Some(&acl),
+        Some(&keys),
+        platform,
+    );
     // Repository creation appends nothing, so the first op below is the
     // binding.
     let (status, body) = curl(&[
@@ -241,7 +252,7 @@ fn seed(work: &Path, name: &str, home_url: &str, key: ActorKey) -> SeedFixture {
         credential,
         platform.clone(),
     ));
-    let served = serve(&root, &[("reader", "r")], None, platform);
+    let served = serve(&root, &[("reader", "r")], None, None, platform);
     SeedFixture {
         root,
         replica,
@@ -678,4 +689,130 @@ fn a_seeds_statement_endorses_the_homes_chain_and_a_forged_one_is_a_fork() {
     // The statements survive a restart: they are kept beside the log.
     let kept = std::fs::read_to_string(seed.root.join(".choir/witness.jsonl")).expect("kept");
     assert_eq!(kept.lines().count(), 2, "{kept}");
+}
+
+/// Rewrites the home's keys file and moves its mtime on explicitly, so
+/// the change is seen on the next request without waiting out a
+/// filesystem's timestamp granularity.
+fn rewrite_keys(home: &HomeFixture, lines: &str, tick: u64) {
+    let path = home.work.join("keys");
+    std::fs::write(&path, lines).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10 * tick);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+}
+
+/// An entry whose author key the home no longer lists is kept, and
+/// counted: continuity and the hash still hold and the home admitted it,
+/// and what nobody can say any more is who signed it. The realistic case
+/// is the one SYNC.md warns about, an operator deleting a key's line.
+#[test]
+fn an_entry_whose_key_the_home_no_longer_lists_is_kept_and_counted() {
+    let home = home("unverified");
+    home.push("pusher", "one\n");
+    let bob = ActorKey::generate();
+    let listed = format!(
+        "alice {}\n{SEED} {}\n",
+        hex(&home.alice.public_key_bytes()),
+        hex(&home.seed_key.public_key_bytes())
+    );
+    rewrite_keys(
+        &home,
+        &format!("{listed}bob {}\n", hex(&bob.public_key_bytes())),
+        1,
+    );
+    let (code, body) = home.served.platform.handle_api(
+        "POST",
+        "/api/submit",
+        submit_body(
+            &bob,
+            "bob",
+            &ViewOp::new(OpKind::RecordProvenance {
+                subject: "agents/demo/ws".into(),
+                kind: "note".into(),
+                body: String::new(),
+            }),
+        )
+        .as_bytes(),
+    );
+    assert_eq!(code, 200, "bob is trusted when he signs: {body}");
+    // Then his line goes, and the next request on the home sees it gone.
+    rewrite_keys(&home, &listed, 2);
+    home.view();
+
+    let seed = seed(&home.work, "seed", &home.served.url, ActorKey::generate());
+    let progress = seed
+        .replica
+        .replicate_once()
+        .expect("an unverified entry is no halt");
+    assert_eq!(
+        progress.status.unverified_entries, 1,
+        "{:?}",
+        progress.status
+    );
+    assert_eq!(seed.view()["replica"]["unverified_entries"], 1);
+    assert_eq!(
+        seed.view()["log"]["next_seq"],
+        home.view()["log"]["next_seq"]
+    );
+}
+
+/// A home that keeps no log on disk can evict what a seed needs. The seed
+/// cannot hold a chain with a hole, so it says `gap`, stops, keeps serving
+/// what it has, and signs nothing more.
+#[test]
+fn a_home_that_evicted_what_a_seed_needs_leaves_it_a_copy_with_a_gap() {
+    let work = scratch("gap");
+    let node_key = ActorKey::generate();
+    let platform = Arc::new(
+        Platform::start(
+            Registry::new(),
+            Box::new(MemLog::new()),
+            ActorKey::from_secret_bytes(&node_key.secret_bytes()),
+        )
+        .expect("home starts")
+        .with_log_window_cap(2),
+    );
+    let root = work.join("home");
+    std::fs::create_dir_all(&root).unwrap();
+    let served = serve(&root, &[(SEED, "s")], None, None, platform.clone());
+    for i in 0..4 {
+        let (code, body) = platform.handle_api(
+            "POST",
+            "/api/submit",
+            submit_body(
+                &node_key,
+                "node",
+                &ViewOp::new(OpKind::RecordProvenance {
+                    subject: format!("agents/demo/{i}"),
+                    kind: "note".into(),
+                    body: String::new(),
+                }),
+            )
+            .as_bytes(),
+        );
+        assert_eq!(code, 200, "{body}");
+    }
+
+    let seed = seed(&work, "seed", &served.url, ActorKey::generate());
+    let stopped = seed
+        .replica
+        .replicate_once()
+        .expect_err("the home cannot reach back");
+    println!("a seed of a home with a gap: {stopped}");
+    assert_eq!(stopped, ReplicaError::Gap { window_base: 2 });
+    let replica = &seed.view()["replica"];
+    assert_eq!(replica["gap"], true, "{replica}");
+    assert!(replica["halted"].is_object(), "{replica}");
+    assert_eq!(seed.view()["log"]["next_seq"], 0, "nothing past the hole");
+    let witness = witness(&seed);
+    assert_eq!(witness["gap"], true);
+    assert!(
+        witness["latest"].is_null(),
+        "a copy with a hole signs nothing"
+    );
 }
