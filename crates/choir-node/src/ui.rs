@@ -1963,7 +1963,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{theme} palette has no {name}"))
                     .clone()
             };
-            for ground in ["--ground", "--surface", "--raise", "--sunken"] {
+            for ground in ["--ground", "--surface", "--raise", "--sunken", "--head"] {
                 for ink in [
                     "--ink",
                     "--strong",

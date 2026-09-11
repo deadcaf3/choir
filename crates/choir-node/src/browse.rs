@@ -1849,8 +1849,20 @@ fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool) {
 /// reader checks before reading anything else, and the three that were
 /// previously spread between the header, the ref bar and the first row
 /// of the table.
-fn commit_bar(h: &mut String, repo: &str, oid: &str, tip: &Tip, now: i64) {
-    h.push_str("<div class=\"commitbar\"><span class=\"who\">");
+fn commit_bar(
+    h: &mut String,
+    repo: &str,
+    rev: &str,
+    oid: &str,
+    tip: &Tip,
+    commits: Option<u64>,
+    now: i64,
+) {
+    h.push_str(
+        "<div class=\"commitbar\"><span class=\"who\"><span class=\"av\" aria-hidden=\"true\">",
+    );
+    h.push_str(&esc(&initial(&tip.author)));
+    h.push_str("</span>");
     h.push_str(&esc(&tip.author));
     h.push_str("</span><a class=\"what\" href=\"/r/");
     h.push_str(&esc(repo));
@@ -1858,9 +1870,28 @@ fn commit_bar(h: &mut String, repo: &str, oid: &str, tip: &Tip, now: i64) {
     h.push_str(&esc(oid));
     h.push_str("\">");
     h.push_str(&esc(&tip.subject));
-    h.push_str("</a><span class=\"when muted\">");
+    h.push_str("</a><a class=\"oid\" href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("/commit/");
+    h.push_str(&esc(oid));
+    h.push_str("\">");
+    h.push_str(&esc(&oid[..oid.len().min(12)]));
+    h.push_str("</a><span class=\"when\">");
     h.push_str(&esc(&ago(now, tip.at)));
-    h.push_str("</span></div>");
+    h.push_str("</span>");
+    // The whole history, one click from the state it ended in.
+    if let Some(count) = commits {
+        h.push_str("<a class=\"history\" href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/commits/");
+        h.push_str(&esc(rev));
+        h.push_str("\"><b>");
+        h.push_str(&thousands(count));
+        h.push_str("</b>");
+        h.push_str(if count == 1 { " commit" } else { " commits" });
+        h.push_str("</a>");
+    }
+    h.push_str("</div>");
 }
 
 /// The repository's own one-line description, if its operator wrote one.
@@ -1953,56 +1984,63 @@ fn about_pane(
         h.push_str(&esc(about));
         h.push_str("</p>");
     }
-    h.push_str("<ul class=\"facts\">");
-    if !licences.is_empty() {
-        h.push_str("<li><span class=\"muted\">");
-        h.push_str(if licences.len() == 1 {
-            "License"
-        } else {
-            "Licenses"
-        });
-        h.push_str("</span> ");
-        for (n, (label, file)) in licences.iter().enumerate() {
-            if n > 0 {
-                h.push_str(" \u{b7} ");
+    // Each row names what it is with a glyph, so the list reads at a
+    // glance before any of it is read.
+    if !licences.is_empty() || contributing.is_some() || security.is_some() {
+        h.push_str("<ul class=\"facts\">");
+        if !licences.is_empty() {
+            h.push_str("<li class=\"f-law\"><span>");
+            for (n, (label, file)) in licences.iter().enumerate() {
+                if n > 0 {
+                    h.push_str(" \u{b7} ");
+                }
+                h.push_str("<a href=\"/r/");
+                h.push_str(&esc(repo));
+                h.push_str("/blob/");
+                h.push_str(&esc(rev));
+                h.push('/');
+                h.push_str(&esc(&url_path(file)));
+                h.push_str("\">");
+                h.push_str(&esc(label));
+                h.push_str("</a>");
             }
-            h.push_str("<a href=\"/r/");
-            h.push_str(&esc(repo));
-            h.push_str("/blob/");
-            h.push_str(&esc(rev));
-            h.push('/');
-            h.push_str(&esc(&url_path(file)));
-            h.push_str("\">");
-            h.push_str(&esc(label));
-            h.push_str("</a>");
+            h.push_str(if licences.len() == 1 {
+                " <span class=\"muted\">license</span>"
+            } else {
+                " <span class=\"muted\">licenses</span>"
+            });
+            h.push_str("</span></li>");
         }
-        h.push_str("</li>");
+        let mut doc = |class: &str, label: &str, file: &Option<String>| {
+            if let Some(file) = file.as_deref() {
+                h.push_str("<li class=\"");
+                h.push_str(class);
+                h.push_str("\"><a href=\"/r/");
+                h.push_str(&esc(repo));
+                h.push_str("/blob/");
+                h.push_str(&esc(rev));
+                h.push('/');
+                h.push_str(&esc(&url_path(file)));
+                h.push_str("\">");
+                h.push_str(&esc(label));
+                h.push_str("</a></li>");
+            }
+        };
+        doc("f-people", "Contributing", &contributing);
+        doc("f-shield", "Security policy", &security);
+        h.push_str("</ul>");
     }
-    let mut doc = |label: &str, file: &Option<String>| {
-        if let Some(file) = file.as_deref() {
-            h.push_str("<li><a href=\"/r/");
-            h.push_str(&esc(repo));
-            h.push_str("/blob/");
-            h.push_str(&esc(rev));
-            h.push('/');
-            h.push_str(&esc(&url_path(file)));
-            h.push_str("\">");
-            h.push_str(&esc(label));
-            h.push_str("</a></li>");
-        }
-    };
-    doc("Contributing", &contributing);
-    doc("Security policy", &security);
     if let Some(tag) = latest {
-        h.push_str("<li><span class=\"muted\">Latest tag</span> <a href=\"/r/");
+        h.push_str("<h2>Tags<span class=\"count\">");
+        h.push_str(&tags.len().to_string());
+        h.push_str("</span></h2><ul class=\"facts\"><li class=\"f-tag\"><span><a href=\"/r/");
         h.push_str(&esc(repo));
         h.push_str("/tree/");
         h.push_str(&esc(&url_path(tag)));
         h.push_str("\" class=\"mono\">");
         h.push_str(&esc(tag));
-        h.push_str("</a></li>");
+        h.push_str("</a> <span class=\"newest\">latest</span></span></li></ul>");
     }
-    h.push_str("</ul>");
     if !authors.is_empty() {
         h.push_str("<h2>Written by<span class=\"count\">");
         h.push_str(&authors.len().to_string());
@@ -2013,7 +2051,9 @@ fn about_pane(
         // Most recently active first, which is the order the walk found
         // them in, and the order a reader asking "who is here now" wants.
         for author in authors.iter().take(PANE_ROWS) {
-            h.push_str("<li>");
+            h.push_str("<li><span class=\"av\" aria-hidden=\"true\">");
+            h.push_str(&esc(&initial(author)));
+            h.push_str("</span>");
             h.push_str(&esc(author));
             h.push_str("</li>");
         }
@@ -2134,7 +2174,7 @@ fn ago(now: i64, then: i64) -> String {
 fn ref_picker(h: &mut String, repo: &str, rev: &str, branches: &[String], tags: &[String]) {
     h.push_str("<details class=\"picker\"><summary>");
     h.push_str(&esc(rev));
-    h.push_str("</summary>");
+    h.push_str("</summary><div class=\"menu\">");
     for (label, names) in [("Branches", branches), ("Tags", tags)] {
         if names.is_empty() {
             continue;
@@ -2153,7 +2193,7 @@ fn ref_picker(h: &mut String, repo: &str, rev: &str, branches: &[String], tags: 
         }
         h.push_str("</ul>");
     }
-    h.push_str("</details>");
+    h.push_str("</div></details>");
 }
 
 /// The repository's README at this revision: its filename and its text.
@@ -2299,28 +2339,30 @@ fn tree(
     } else {
         (None, Vec::new(), false, Vec::new(), Vec::new())
     };
-    if path.is_empty() {
-        let commits = git_text(dir, &["rev-list", "--count", &oid])
+    let commits = if path.is_empty() {
+        git_text(dir, &["rev-list", "--count", &oid])
             .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok());
+            .and_then(|text| text.trim().parse::<u64>().ok())
+    } else {
+        None
+    };
+    if path.is_empty() {
         h.push_str("<div class=\"repobar\">");
         ref_picker(&mut h, repo, rev, &branches, &tags);
-        h.push_str("<span class=\"counts\">");
-        if let Some(count) = commits {
-            h.push_str("<a href=\"/r/");
-            h.push_str(&esc(repo));
-            h.push_str("/commits/");
-            h.push_str(&esc(rev));
-            h.push_str("\">");
-            h.push_str(&thousands(count));
-            h.push_str(if count == 1 { " commit" } else { " commits" });
-            h.push_str("</a>");
+        for (n, one, many, class) in [
+            (branches.len(), "branch", "branches", "rstat s-branch"),
+            (tags.len(), "tag", "tags", "rstat s-tag"),
+        ] {
+            h.push_str("<span class=\"");
+            h.push_str(class);
+            h.push_str("\"><b>");
+            h.push_str(&thousands(n as u64));
+            h.push_str("</b> ");
+            h.push_str(if n == 1 { one } else { many });
+            h.push_str("</span>");
         }
-        h.push_str("<span class=\"muted\">");
-        h.push_str(&plural(branches.len(), "branch", "branches"));
-        h.push_str("</span><span class=\"muted\">");
-        h.push_str(&plural(tags.len(), "tag", "tags"));
-        h.push_str("</span></span></div>");
+        clone_field(&mut h, repo, origin);
+        h.push_str("</div>");
     }
     // The repository root is the listing, a rail beside it, and the
     // README under both. The listing leads: it is what a reader came for
@@ -2332,14 +2374,15 @@ fn tree(
     let file_count = rows.len();
     if path.is_empty() {
         h.push_str("<div class=\"panes\">");
-        h.push_str("<section class=\"pane pane-files\"><h2>Files<span class=\"count\">");
-        h.push_str(&file_count.to_string());
-        h.push_str("</span></h2>");
-        if let Some(tip) = tip.as_ref() {
-            commit_bar(&mut h, repo, &oid, tip, now_secs());
-        }
-    } else {
-        h.push_str("<section>");
+    }
+    // One box at every level: a directory's listing is the same object
+    // as the root's, so it wears the same frame. The heading is for a
+    // screen reader; the box says what it is to everyone else.
+    h.push_str("<section class=\"pane pane-files\"><h2 class=\"vh\">Files<span class=\"count\">");
+    h.push_str(&file_count.to_string());
+    h.push_str("</span></h2>");
+    if let Some(tip) = tip.as_ref() {
+        commit_bar(&mut h, repo, rev, &oid, tip, commits, now_secs());
     }
     if rows.is_empty() {
         // Reached two ways that need different fixes: a path that names
@@ -2452,16 +2495,18 @@ fn tree(
     // At the root it is the third pane rather than a section under the
     // listing, so it sits beside the files instead of below them.
     {
-        if path.is_empty() {
+        let readme = readme_of(dir, &oid, &listing);
+        if readme.is_some() || path.is_empty() {
             h.push_str("<section class=\"pane pane-content\">");
         }
-        if let Some((name, body)) = readme_of(dir, &oid, &listing) {
-            h.push_str("<section class=\"readme\"><h2>");
+        if let Some((name, body)) = readme {
+            h.push_str("<section class=\"readme\"><div class=\"head\"><h2>");
             h.push_str(&esc(&name));
             h.push_str("</h2>");
             if path.is_empty() {
                 readme_tabs(&mut h, repo, rev, &root_names);
             }
+            h.push_str("</div><div class=\"md\">");
             h.push_str(&crate::readme::render(
                 &body,
                 crate::readme::Base {
@@ -2470,14 +2515,14 @@ fn tree(
                     dir: path,
                 },
             ));
-            h.push_str("</section>");
+            h.push_str("</div></section></section>");
         } else if path.is_empty() {
-            // An empty third pane reads as a broken layout. Saying what
-            // is missing, and what would fill it, does not.
-            h.push_str("<p class=\"muted\">No README at this revision.</p>");
+            // An empty pane reads as a broken layout. Saying what is
+            // missing, and what would fill it, does not.
+            h.push_str("<p class=\"muted\">No README at this revision.</p></section>");
         }
         if path.is_empty() {
-            h.push_str("</section></div>");
+            h.push_str("</div>");
         }
     }
     Rendered {
@@ -3384,11 +3429,10 @@ fn contribute(
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
-    h.push_str(&esc(repo));
-    h.push_str("</a></h1><div class=\"sub\"><span class=\"pill\">how to contribute</span>");
-    h.push_str("<span class=\"pill\"><a href=\"/r/");
-    h.push_str(&esc(repo));
-    h.push_str("/reviews\">reviews</a></span></div></header><main id=\"main\"><section>");
+    repo_title(&mut h, repo);
+    h.push_str("</a></h1>");
+    repo_tabs(&mut h, repo, "HEAD", "contribute");
+    h.push_str("</header><main id=\"main\"><section>");
     h.push_str(
         "<p class=\"lede\">There is no fork and no pull request. You push a branch and the \
          node opens a proposal for it, drawing your reviewers itself. Three commands, and \
@@ -3517,8 +3561,10 @@ fn reviews(
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
-    h.push_str(&esc(repo));
-    h.push_str("</a></h1><div class=\"sub\"><span class=\"pill\">");
+    repo_title(&mut h, repo);
+    h.push_str("</a></h1>");
+    repo_tabs(&mut h, repo, "HEAD", "reviews");
+    h.push_str("<div class=\"sub\"><span class=\"pill\">");
     h.push_str(&plural(rows.len(), "review", "reviews"));
     h.push_str("</span><span class=\"pill\"><a href=\"/r/\">all repositories</a></span>");
     h.push_str("</div></header><main id=\"main\"><section>");
@@ -5123,6 +5169,106 @@ fn url_query_value(path: &str) -> String {
 }
 
 /// Repository name, revision, and the breadcrumb back up the tree.
+/// A repository's sections, one row of tabs under its name.
+///
+/// The same four on every page of a repository with the current one
+/// marked, so the code, its history, its reviews and the way in are one
+/// click from anywhere. Contribute sits among them because the reader
+/// who needs it has just arrived and does not yet know this node has no
+/// pull requests.
+fn repo_tabs(h: &mut String, repo: &str, rev: &str, here: &str) {
+    let code = if rev == "HEAD" {
+        format!("/r/{repo}")
+    } else {
+        format!("/r/{repo}/tree/{}", url_path(rev))
+    };
+    let tabs = [
+        (
+            "t-code",
+            "Code",
+            code,
+            matches!(here, "tree" | "blob" | "search"),
+        ),
+        (
+            "t-history",
+            "History",
+            format!("/r/{repo}/commits/{}", url_path(rev)),
+            matches!(here, "commits" | "commit"),
+        ),
+        (
+            "t-reviews",
+            "Reviews",
+            format!("/r/{repo}/reviews"),
+            here == "reviews",
+        ),
+        (
+            "t-contribute",
+            "Contribute",
+            format!("/r/{repo}/contribute"),
+            here == "contribute",
+        ),
+    ];
+    h.push_str("<nav class=\"repotabs\" aria-label=\"Repository\">");
+    for (class, label, href, on) in tabs {
+        h.push_str("<a class=\"");
+        h.push_str(class);
+        if on {
+            h.push_str(" on\" aria-current=\"page");
+        }
+        h.push_str("\" href=\"");
+        h.push_str(&esc(&href));
+        h.push_str("\">");
+        h.push_str(label);
+        h.push_str("</a>");
+    }
+    h.push_str("</nav>");
+}
+
+/// The command that copies this repository, set to be taken whole.
+///
+/// `git clone <url>` rather than the URL alone: the field selects in one
+/// click, and what it selects is a line a terminal runs. The URL is the
+/// reader's own origin whenever the request carried a `Host`, because
+/// that is the one address known to reach this node for this reader,
+/// proxy and all; a request with none, which HTTP/1.1 forbids, keeps the
+/// relative path, which is still true. The page is `/r/<repo>` and the
+/// clone is `/<repo>.git`, and showing the second is what saves a reader
+/// from guessing it from the first.
+fn clone_field(h: &mut String, repo: &str, origin: Option<&str>) {
+    h.push_str("<span class=\"clone\"><span class=\"k\">git </span>clone ");
+    match origin {
+        Some(origin) => h.push_str(&esc(&format!("{origin}/{repo}.git"))),
+        None => h.push_str(&esc(&format!("/{repo}.git"))),
+    }
+    h.push_str("</span>");
+}
+
+/// The letter a name is drawn with where a picture would be.
+fn initial(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default()
+}
+
+/// A repository's name as its title: `owner/` and `name` as two runs,
+/// so the sheet can set the owner back a step. The name is the thing and
+/// the owner is its address, and a title that weights them equally reads
+/// as one long word. Every page of a repository draws it this way, so the
+/// title the view transition carries between them is the same shape at
+/// both ends.
+fn repo_title(h: &mut String, repo: &str) {
+    match repo.split_once('/') {
+        Some((owner, name)) => {
+            h.push_str("<span class=\"owner\">");
+            h.push_str(&esc(owner));
+            h.push_str("/</span>");
+            h.push_str(&esc(name));
+        }
+        None => h.push_str(&esc(repo)),
+    }
+}
+
 fn repo_header(
     h: &mut String,
     repo: &str,
@@ -5135,70 +5281,21 @@ fn repo_header(
     h.push_str("<header class=\"top\"><h1><a href=\"/r/");
     h.push_str(&esc(repo));
     h.push_str("\">");
-    // `owner/` and `name` as two runs, so the sheet can set the owner
-    // back a step: the name is the thing and the owner is its address,
-    // and a title that weights them equally reads as one long word.
-    match repo.split_once('/') {
-        Some((owner, name)) => {
-            h.push_str("<span class=\"owner\">");
-            h.push_str(&esc(owner));
-            h.push_str("/</span>");
-            h.push_str(&esc(name));
-        }
-        None => h.push_str(&esc(repo)),
-    }
-    h.push_str("</a></h1><div class=\"sub\">");
-    // The repository root draws a ref picker under this header, and the
-    // picker's first control is the revision's name. Printing it here as
-    // well put `main` twice on one screen, a hand's width apart, which
-    // reads as two different facts rather than one repeated.
+    repo_title(h, repo);
+    h.push_str("</a></h1>");
+    repo_tabs(h, repo, rev, here);
+    // The root names its revision in its own toolbar and its commit in
+    // the bar over the listing, so it carries no metadata row; every
+    // other page names both here, because nothing below it does.
     if !(path.is_empty() && here == "tree") {
-        h.push_str("<span class=\"pill\">");
+        h.push_str("<div class=\"sub\"><span class=\"pill\">");
         h.push_str(&esc(rev));
+        h.push_str("</span><span class=\"pill mono\">");
+        h.push_str(&esc(&oid[..oid.len().min(12)]));
         h.push_str("</span>");
+        clone_field(h, repo, origin);
+        h.push_str("</div>");
     }
-    h.push_str("<span class=\"pill mono\">");
-    h.push_str(&esc(&oid[..oid.len().min(12)]));
-    h.push_str("</span>");
-    if here != "commits" {
-        h.push_str("<span class=\"pill\"><a href=\"/r/");
-        h.push_str(&esc(repo));
-        h.push_str("/commits/");
-        h.push_str(&esc(rev));
-        h.push_str("\">history</a></span>");
-    }
-    h.push_str("<span class=\"pill\"><a href=\"/r/");
-    h.push_str(&esc(repo));
-    h.push_str("/reviews\">reviews</a></span>");
-    // Beside the clone path rather than buried in a README, because the
-    // reader who needs it is the one who has just arrived and does not
-    // yet know this node has no pull requests.
-    h.push_str("<span class=\"pill\"><a href=\"/r/");
-    h.push_str(&esc(repo));
-    h.push_str("/contribute\">how to contribute</a></span>");
-    // No "all repositories" pill: the fixed bar carries that link on
-    // every page, and two links to one list in one header is noise.
-    // The path a reader clones, which nothing on this surface showed. It
-    // is also the other half of the node's two names for one repository:
-    // this page is `/r/<repo>` and the clone is `/<repo>.git`, and a
-    // reader who only ever saw one of them had to guess the other.
-    //
-    // Written out whole whenever the request carried a `Host`, because
-    // the string a reader needs is the argument to `git clone`, and a
-    // relative path is only half of it. It is the reader's own origin
-    // rather than a configured name — the same rule, and the same
-    // reason, as the address the contribute page prints into its
-    // commands: it is the one address known to reach this node for this
-    // reader, proxy and all. A request carrying no `Host` — which
-    // HTTP/1.1 forbids, so this is the malformed case — keeps the
-    // relative path, which is still true.
-    h.push_str("<span class=\"pill mono clone\">clone ");
-    match origin {
-        Some(origin) => h.push_str(&esc(&format!("{origin}/{repo}.git"))),
-        None => h.push_str(&esc(&format!("/{repo}.git"))),
-    }
-    h.push_str("</span>");
-    h.push_str("</div>");
     if !path.is_empty() {
         h.push_str("<nav class=\"crumbs\"><a href=\"/r/");
         h.push_str(&esc(repo));

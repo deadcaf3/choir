@@ -1367,16 +1367,18 @@ fn the_file_list_carries_the_last_commit_for_every_entry() {
     let (status, _headers, page) = get(&format!("{base}/r/agents/one"), &["-u", "alice:a"]);
     assert_eq!(status, 200, "{page}");
 
-    // The orientation bar.
+    // The orientation bar. The number is set in bold apart from its noun,
+    // so the words are read with that emphasis taken off.
+    let plain = page.replace("<b>", "").replace("</b>", "");
     assert!(
-        page.contains("1 commit<") || page.contains("1 commit</a>"),
+        plain.contains("1 commit<"),
         "the commit count is missing or pluralised wrongly: {page}"
     );
     assert!(
-        page.contains("1 branch<"),
+        plain.contains("1 branch<"),
         "the branch count is missing or pluralised wrongly: {page}"
     );
-    assert!(page.contains("0 tags"), "the tag count is missing: {page}");
+    assert!(plain.contains("0 tags"), "the tag count is missing: {page}");
     assert!(
         page.contains("class=\"picker\""),
         "there is no way to switch revision: {page}"
@@ -2943,16 +2945,16 @@ fn the_repository_front_page_says_what_state_it_is_in() {
 
     // The revision, once. The ref picker below the header names it, so
     // the header does not.
-    let sub = page
-        .split_once("<div class=\"sub\">")
-        .and_then(|(_, rest)| rest.split_once("</div>"))
-        .map(|(sub, _)| sub)
-        .expect("the header carries its metadata row");
+    let header = page
+        .split_once("<header class=\"top\">")
+        .and_then(|(_, rest)| rest.split_once("</header>"))
+        .map(|(header, _)| header)
+        .expect("the page carries a header");
     // The bare word as its own pill, not the word inside `/commits/main`:
     // the links have to keep naming the revision they point at.
     assert!(
-        !sub.contains("<span class=\"pill\">main</span>"),
-        "the header names the revision the picker already names: {sub}"
+        !header.contains("<span class=\"pill\">main</span>"),
+        "the header names the revision the picker already names: {header}"
     );
 
     // An empty queue draws no card.
