@@ -1976,6 +1976,10 @@ impl journal::Journal for SharedJournal {
 }
 
 struct ChoirPolicy {
+    /// Set when this node is a seed (D80). Every submission is then
+    /// refused before anything else is asked: a seed's log is written by
+    /// its replicator alone, through [`SubmitPolicy::replicable`].
+    home: Arc<std::sync::OnceLock<crate::replica::Home>>,
     /// Where this policy reports CAS failures. The sequencer cannot:
     /// a refusal reaches it as an opaque string, so contention and
     /// nonsense look identical from there.
@@ -2785,6 +2789,10 @@ impl ChoirPolicy {
 
 impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
+        if let Some(home) = self.home.get() {
+            self.subject = (None, None);
+            return Err(crate::reject::not_home(&home.url).to_string());
+        }
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
         // Refresh before verification so removing a trusted key takes
         // effect on that key's very next request. A failed verification
@@ -3492,7 +3500,11 @@ pub struct Platform {
     /// The home this platform's log is a copy of, when it runs as a seed
     /// (D80). Set once, before the platform serves anything, and never
     /// cleared: a node does not stop being a copy of somebody's log.
-    home: std::sync::OnceLock<crate::replica::Home>,
+    ///
+    /// Shared with the policy, which refuses every submission on a seed,
+    /// so a write that reached the writer by any path, HTTP or the node's
+    /// own, is answered the same way.
+    home: Arc<std::sync::OnceLock<crate::replica::Home>>,
     /// Where replication stands, once a [`crate::replica::Replica`] is
     /// writing into this platform.
     replica: std::sync::OnceLock<Arc<crate::replica::Shared>>,
@@ -3666,9 +3678,11 @@ impl Platform {
         let hooks = Arc::new(Mutex::new(None));
         let passkeys = Arc::new(Mutex::new(None));
         let shared_journal = SharedJournal::default();
+        let home = Arc::new(std::sync::OnceLock::new());
         let sequencer = Sequencer::spawn_with_journal(
             log,
             Box::new(ChoirPolicy {
+                home: home.clone(),
                 journal: shared_journal.clone(),
                 subject: (None, None),
                 require_assignment: require_assignment.clone(),
@@ -3720,7 +3734,7 @@ impl Platform {
             review_adjudications: None,
             review_prune_lock: Mutex::new(()),
             hooks,
-            home: std::sync::OnceLock::new(),
+            home,
             replica: std::sync::OnceLock::new(),
             _sequencer: sequencer,
         };

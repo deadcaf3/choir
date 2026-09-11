@@ -2046,6 +2046,20 @@ impl Node {
                     access.finish(log, &user, &outcome);
                     return;
                 }
+                // D80. A seed writes nothing: every write, whichever
+                // route it came by, is answered with the home it belongs
+                // at. Here, after authentication and before any route
+                // that could act on it, and for a push before `git
+                // http-backend` is ever spawned. The body is text on the
+                // git surface, where git prints it to the pusher, and the
+                // rejection JSON everywhere else.
+                if let Some(home) = platform.as_deref().and_then(Platform::seed_home) {
+                    if acl::is_write(request.method().as_str(), request.url()) {
+                        let outcome = respond_not_home(request, &home.url);
+                        access.finish(log, &user, &outcome);
+                        return;
+                    }
+                }
                 // Build one op's bytes for a browser to sign (D39).
                 // Ahead of the platform API for the same reason the
                 // account routes are: it needs no sequencer.
@@ -2637,6 +2651,35 @@ fn served<R: std::io::Read>(
             .expect("static header"),
     );
     request.respond(response).map(|()| (status, bytes))
+}
+
+/// Answers a write on a seed: `421 Misdirected Request`, naming the home
+/// the write belongs at (D80).
+///
+/// Text on the git surface, because git relays a `text/plain` refusal to
+/// the pusher line by line and shows nothing of any other type; the
+/// rejection JSON on the API, where `home` is a field a client follows.
+fn respond_not_home(request: tiny_http::Request, home: &str) -> std::io::Result<(u16, u64)> {
+    let (body, content_type) = if request.url().starts_with("/api/") {
+        (reject::not_home(home).to_string(), &b"application/json"[..])
+    } else {
+        let repo = repo_from_path(request.url()).unwrap_or_default();
+        (
+            format!(
+                "not_home: this node is a seed of {home} and writes nothing of its own.\n\
+                 Push to the home instead: {home}/{repo}\n"
+            ),
+            &b"text/plain; charset=utf-8"[..],
+        )
+    };
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(421)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type)
+                .expect("static header"),
+        );
+    served(request, response, 421, bytes)
 }
 
 /// Answers a request that exhausted its per-user allowance (D33).

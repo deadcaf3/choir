@@ -432,3 +432,82 @@ fn a_seed_refuses_a_home_signing_with_another_key_than_it_pinned() {
         "names the pinned key: {refused}"
     );
 }
+
+#[test]
+fn every_write_at_a_seed_is_answered_with_its_home() {
+    let home = home("not-home");
+    home.push("pusher", "one\n");
+    let seed = seed(&home.work, "seed", &home.served.url, ActorKey::generate());
+    seed.replica.replicate_once().expect("a clean round");
+
+    // A real push to the seed fails, and git hands the pusher the home.
+    let clone = home.work.join("pusher");
+    let to_seed = format!("http://reader:r@{}/agents/demo.git", seed.served.host);
+    std::fs::write(clone.join("f.txt"), "from the wrong place\n").unwrap();
+    git(&clone, &["commit", "-qam", "wrong place"]);
+    let pushed = git(&clone, &["push", &to_seed, "HEAD:main"]);
+    let stderr = String::from_utf8_lossy(&pushed.stderr);
+    println!("git push to a seed:\n{stderr}");
+    assert!(!pushed.status.success(), "a seed took a push: {stderr}");
+    assert!(stderr.contains(&home.served.url), "{stderr}");
+    assert!(stderr.contains("not_home"), "{stderr}");
+
+    // A signed op, well-formed and admissible at home, is routed there.
+    let op = ViewOp::new(OpKind::RecordProvenance {
+        subject: "agents/demo/ws".into(),
+        kind: "note".into(),
+        body: String::new(),
+    });
+    let (status, body) = curl(&[
+        "-u",
+        "reader:r",
+        "-d",
+        &submit_body(&home.alice, "alice", &op),
+        &format!("{}/api/submit", seed.served.url),
+    ]);
+    println!("POST /api/submit to a seed: {status} {body}");
+    assert_eq!(status, 421, "{body}");
+    assert_eq!(body["code"], "not_home");
+    assert_eq!(body["home"], home.served.url.as_str());
+    assert!(body["next"]
+        .as_str()
+        .is_some_and(|next| next.contains(&home.served.url)));
+
+    // The same for every other write route, before any of them acts.
+    // `/api/git-update` is not here: without the loopback secret it is
+    // refused as an internal endpoint first, and with it, it is only ever
+    // reached by the push the seed has already refused above.
+    for path in [
+        "/api/submit-batch",
+        "/api/repo",
+        "/api/workspace",
+        "/api/accounts/invite",
+    ] {
+        let (status, body) = curl(&[
+            "-u",
+            "reader:r",
+            "-d",
+            "{}",
+            &format!("{}{path}", seed.served.url),
+        ]);
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (421, Some("not_home")),
+            "{path}: {body}"
+        );
+    }
+
+    // And the writer itself refuses, whatever path a write took to it.
+    let (_, refused) = seed.served.platform.handle_api(
+        "POST",
+        "/api/submit",
+        submit_body(&home.alice, "alice", &op).as_bytes(),
+    );
+    assert!(refused.contains("not_home"), "{refused}");
+
+    // Reads are untouched, and nothing above reached the seed's log.
+    assert_eq!(
+        seed.view()["log"]["next_seq"],
+        home.view()["log"]["next_seq"]
+    );
+}

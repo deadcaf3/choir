@@ -762,6 +762,30 @@ pub fn git_requirement(method: &str, url: &str) -> Option<(String, Level)> {
     Some((normalize_repo(&repo), level))
 }
 
+/// Whether a request is a write, in the sense a seed refuses (D80).
+///
+/// Two halves, one rule each. **git**: whatever [`git_requirement`] grades
+/// at [`Level::Propose`] or above, which is every step of a push and no
+/// step of a clone, and is decided before `git http-backend` is spawned.
+/// **The API**: every `POST` under `/api/`. That one is by method rather
+/// than by grant level on purpose, because level grades *authority* and
+/// not *mutation*: a verdict or a comment needs only `read` over the
+/// repository (see [`op_level`]) and still appends to the log. Every
+/// `/api/` read is a `GET`, and every `/api/` `POST` changes something,
+/// the log or a store beside it, so the method is the classification that
+/// cannot let a write through as a read.
+///
+/// The pre-authentication routes (signing in, asking for access) are not
+/// asked, because they never reach the point where this is.
+#[must_use]
+pub fn is_write(method: &str, url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    if path.starts_with("/api/") {
+        return method == "POST";
+    }
+    git_requirement(method, url).is_some_and(|(_, level)| level >= Level::Propose)
+}
+
 /// Repository a workspace name or provenance subject belongs to: its
 /// first two `/`-separated segments.
 ///
@@ -2009,5 +2033,33 @@ mod tests {
         );
         let other = r#"{"refs":{"owner/theirs.git:refs/heads/main":"git-2222"}}"#;
         assert_eq!(filter_response(&acl, "alice", "/api/submit", other), other);
+    }
+
+    /// The seed's write rule (D80): a push is a write from its first
+    /// request, a clone never is, and every API `POST` is one, including
+    /// the ones a reader holds only `read` for.
+    #[test]
+    fn a_write_is_a_push_step_or_an_api_post() {
+        for (method, url, write) in [
+            ("GET", "/o/r.git/info/refs?service=git-receive-pack", true),
+            ("POST", "/o/r.git/git-receive-pack", true),
+            ("GET", "/o/r.git/info/refs?service=git-upload-pack", false),
+            ("POST", "/o/r.git/git-upload-pack", false),
+            ("GET", "/o/r.git/HEAD", false),
+            ("POST", "/api/submit", true),
+            ("POST", "/api/submit-batch", true),
+            ("POST", "/api/git-update", true),
+            ("POST", "/api/repo", true),
+            ("POST", "/api/workspace", true),
+            ("POST", "/api/accounts/invite", true),
+            ("POST", "/api/appeal", true),
+            ("GET", "/api/view", false),
+            ("GET", "/api/log?from=0", false),
+            ("GET", "/api/signers", false),
+            ("GET", "/api/witness", false),
+            ("GET", "/", false),
+        ] {
+            assert_eq!(super::is_write(method, url), write, "{method} {url}");
+        }
     }
 }

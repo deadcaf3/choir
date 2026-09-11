@@ -106,6 +106,11 @@ pub enum Code {
     /// repairs are opposites: that one widens the trusted set, this one
     /// must not.
     BadSignature,
+    /// This node is a seed (D80): it holds a copy of another node's log
+    /// and writes nothing, so every write belongs at the home it names.
+    /// A routing answer rather than a failure, which is why it travels as
+    /// `421 Misdirected Request` with the home in the body.
+    NotHome,
     /// Anything that did not originate as a structured rejection.
     Unclassified,
 }
@@ -143,6 +148,7 @@ impl Code {
             Self::StaleScope => "stale_scope",
             Self::QuotaExceeded => "quota_exceeded",
             Self::BadSignature => "bad_signature",
+            Self::NotHome => "not_home",
             Self::Unclassified => "unclassified",
         }
     }
@@ -177,6 +183,7 @@ impl Code {
             Self::StaleScope,
             Self::QuotaExceeded,
             Self::BadSignature,
+            Self::NotHome,
             Self::Unclassified,
         ]
     }
@@ -288,6 +295,21 @@ impl Rejection {
     }
 }
 
+/// The `not_home` refusal a seed gives every write (D80): the rejection,
+/// with the home's base URL as its own field so a client can follow it
+/// without parsing prose.
+#[must_use]
+pub fn not_home(home: &str) -> serde_json::Value {
+    let mut body = Rejection::new(
+        Code::NotHome,
+        format!("this node is a seed of {home} and writes nothing of its own"),
+        format!("send the same request to {home}"),
+    )
+    .to_json();
+    body["home"] = serde_json::json!(home);
+    body
+}
+
 /// Maps a `ViewError` onto a rejection, unpacking the states it already
 /// carries rather than stringifying them into prose.
 #[must_use]
@@ -387,6 +409,7 @@ impl Code {
             Self::StaleScope => "The head the op was signed against is no longer in the node's recent window",
             Self::QuotaExceeded => "A per-user quota was already full, or this request was larger than one is allowed to be",
             Self::BadSignature => "The signature does not verify over these bytes, under a key this node does trust",
+            Self::NotHome => "This node is a seed: it holds a copy of another node's log and writes nothing, so the write belongs at the home in `home`",
             Self::Unclassified => "A rejection that did not originate as a structured one",
         }
     }
@@ -425,6 +448,12 @@ impl Code {
             Self::StaleScope => "Re-read `log.head` from `GET /api/view` and sign a fresh op                 against it. A signature is only admissible while the head it names is still                 in the node's window, which is what stops a captured op from being replayed                 later.",
             Self::QuotaExceeded => "Not a retry: retrying the same request gets the same                 answer. `expected` names the ceiling and `actual` what you asked for.                 For a push, send fewer objects — several smaller pushes, or a shallower                 history. For a workspace, archive one you are finished with                 (`POST /api/workspace/archive`) to free the allowance. If neither is                 possible, the ceiling is the operator's to raise.",
             Self::BadSignature => "Re-sign the exact bytes you are submitting: a signature covers                 one `(channel, payload)` pair and does not carry to another. Registering a key                 does not help here, the key this names is already trusted. If you did not send                 this, a signature of yours was replayed onto bytes you never signed, and the                 operator wants to know.",
+            Self::NotHome => "Send the same request to the node in `home`, unchanged. \
+                Nothing needs re-signing: a seed's `log.node` and `log.head` already name its \
+                home's log, so an op signed against a seed's view is one the home admits, and \
+                a compare-and-swap read from a seed that has fallen behind fails there with the \
+                ordinary `stale_head`. For a push, change the remote to the home. `choir` \
+                follows this once by itself when the home is the node it is configured for.",
             Self::Unclassified => "Read `error`. This path does not name a repair yet — that is                 a gap, and worth reporting.",
         }
     }
