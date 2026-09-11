@@ -61,4 +61,14 @@ wiki. The surface is repositories, changes, reviews, and the log.
 mirrors an upstream GitHub repository and runs the sequencer beside it.
 Upstream stays canonical; there is no dual-write.
 
+**Seeds, not peers.** A log can live on more than one machine without a
+second writer. A [seed](operating/running-a-node.md) copies its home's log
+one way, checks every page before keeping it, serves reads, and signs a
+statement about the attestation it saw, so a reader who compares that
+statement with what the home shows them can catch a home showing two
+histories. That is the opposite trade from Radicle, where every peer
+writes into its own namespace and no host is needed: here the one total
+order is the product, so there is always exactly one writer, and every
+other machine is a copy that can say so.
+
 Next: [Architecture](architecture.md) or [The CLI and HTTP API](using/cli.md).

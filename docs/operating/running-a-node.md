@@ -333,3 +333,78 @@ What the copy proves, and what it does not:
 Secrets and policy files are never in an export, by construction and then
 by inspection; `docs/runbook-restore.md` covers what a restore needs
 beside it.
+
+## Run a seed
+
+A **seed** is a live copy of another node's log, its **home** (D80). It
+reads the home's log page by page, checks every page before keeping any
+of it, fetches the git objects the log names, serves what it verified,
+and signs a statement about the attestation it saw. It writes nothing:
+every write sent to it, a `git push` included, is answered `421
+not_home` with the home's address. [SYNC.md](../../SYNC.md) is the
+contract.
+
+**On the seed's machine, first**, mint its node key where it will look
+for it, and print the line the home registers:
+
+```bash
+mkdir -p /srv/choir-seed/.choir
+choir key /srv/choir-seed/.choir/node.key seed-a     # prints: seed-a <64-hex>
+```
+
+**On the home**, nothing seed-specific, only the files it already has:
+
+1. Register the seed's key: append that `seed-a <64-hex>` line to the
+   `--keys-file`.
+2. Bind it as an operator, so the key on its statements is a name in
+   `bindings`:
+   `choir bind <home-url> <home-root>/.choir/node.key seed-a <64-hex>`
+3. Issue it a credential, `seed-a:<token>` in the `--auth-file`, and
+   grant it read: `seed-a @node auditor` (the node-wide read `/api/log`
+   needs; there is no anonymous seed) and `seed-a * read` in the
+   `--acl-file`. The log grant does not reach git, so the second line is
+   what lets it fetch; name repositories instead of `*` to seed only
+   some.
+
+**Then start it.** The credential file holds the one `seed-a:<token>`
+line, mode 0600; it reaches curl on stdin and git through its
+environment, never an argv or a URL. A serving seed takes its own
+readers' `--auth-file` and `--acl-file` like any node:
+
+```bash
+choir-node /srv/choir-seed 8418 \
+  --seed https://<home-host> \
+  --seed-credential ~/.choir/seed-credential \
+  --auth-file ~/.choir/seed-auth \
+  --acl-file ~/.choir/seed-acl
+```
+
+An **archival seed** gives no port and binds nothing. It replicates,
+stores, fetches git and signs statements into its root, and serves
+nobody: the laptop, the CI sandbox, the machine behind NAT.
+
+```bash
+choir-node /srv/choir-archive --seed https://<home-host> --seed-credential ~/.choir/seed-credential
+```
+
+A seed that serves beyond loopback is a node like any other and needs
+`--bind` with `--tls-cert` and `--tls-key`; it refuses otherwise. It
+takes no `--keys-file` (it learns every key from the home's
+`/api/signers`) and no `--create`. On first contact it pins the home's
+node key at `.choir/home.fingerprint` and refuses a home that later
+signs with another one.
+
+Where it stands is `replica` in its `GET /api/view`, and one line in its
+page header: `seed of <home>, N behind`. An entry that fails a check, or
+that its build cannot fold, **halts** replication there; the seed keeps
+serving what it verified and says `halted` with the seq and the reason.
+`--seed-strict` exits nonzero instead, for a supervisor to notice.
+
+**Seeds upgrade before homes.** A seed whose binary cannot fold an op the
+home admitted halts rather than skipping it, because a copy that drops
+what it does not understand is a fork. Upgrading the seeds first means a
+new op kind never reaches a seed that cannot read it.
+
+Readers point `choir` at seeds with `seeds = <url>[, <url>]` beside
+`node =` in `.choir/config`; `choir doctor` then compares each seed's
+statement with what the home shows them, and fails on a fork.
