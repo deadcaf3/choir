@@ -188,6 +188,17 @@ class Env:
 
     # -- lifecycle --
     def reset(self):
+        # One take at a time: they share .run/, and a second one wiping it
+        # mid-beat shows up as a cascade of missing files on the first.
+        take = self.run / "take.pid"
+        if take.exists():
+            try:
+                os.kill(int(take.read_text()), 0)
+                sys.exit(f"another take is running (pid {take.read_text()}); press q there first")
+            except (ValueError, ProcessLookupError):
+                pass
+            except PermissionError:
+                sys.exit(f"another take is running (pid {take.read_text()}); press q there first")
         pidfile = self.run / "node.pid"
         if pidfile.exists():
             try:
@@ -200,6 +211,7 @@ class Env:
         shutil.rmtree(self.run, ignore_errors=True)
         for d in (self.run / "root", self.run / "queue", self.run / "ci", self.left / "ci", self.right):
             d.mkdir(parents=True)
+        take.write_text(str(os.getpid()))
 
     def start_node(self):
         keys = self.run / "trusted-keys"
@@ -490,11 +502,22 @@ def round_lines(env, r, names):
 
 
 def parallel(fns):
-    threads = [threading.Thread(target=f, daemon=True) for f in fns]
+    """Run both panes' work at once; the first failure stops the take."""
+    errors = []
+
+    def guarded(f):
+        try:
+            f()
+        except BaseException as e:  # re-raised in the caller, once
+            errors.append(e)
+
+    threads = [threading.Thread(target=guarded, args=(f,), daemon=True) for f in fns]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    if errors:
+        raise errors[0]
 
 
 # ---- beats -------------------------------------------------------------------
@@ -777,6 +800,8 @@ def main():
     ui = UI(env, dump=args.dump, auto=args.auto)
     try:
         ui.run(play)
+    except Exception as e:  # text mode: one line, then stop; the screen shows its own
+        sys.exit(f"demo error: {e}\nnode log: {env.run / 'node.log'}")
     finally:
         env.stop_node()
 

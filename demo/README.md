@@ -36,7 +36,11 @@ autoplay, `q` quits. The screen needs 90 by 24 or more; 120 by 40 is
 comfortable. One Ghostty tab is enough; there is no tmux.
 
 Idempotent: each run kills the node the previous take left behind,
-wipes `demo/.run/`, mints fresh keys, starts a fresh node. Hermetic:
+wipes `demo/.run/`, mints fresh keys, starts a fresh node. One take at
+a time: a second one refuses to start while the first is playing,
+because they would share `demo/.run/` and wipe each other mid-beat.
+A failure in any beat stops the take with one line and the node log
+path; it does not play on. Hermetic:
 loopback only, no TLS, no network. Needs `cargo`, `git`, `curl`,
 `python3` (standard library only; the screen is `curses`).
 
