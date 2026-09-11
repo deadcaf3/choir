@@ -1,0 +1,6 @@
+# Everything a take leaves behind: the node's root and key, the clones,
+# the queue's worktrees, the CI runner. run.sh recreates all of it.
+.run/
+# The demo's own cargo target dir, so a shared one cannot hand a take a
+# node built from another checkout.
+.target/
