@@ -348,7 +348,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "join",
         args: "<link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>] [--no-clone]",
-        summary: "redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, the node URL in ~/.choir/config, and a clone of each repository the invite names in the current directory (--no-clone skips it); --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory",
+        summary: "redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, the node URL in ~/.choir/config, and a clone of each repository the invite names in the current directory (--no-clone skips it); the same link run again on this machine clones only what is missing; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory",
         agent_facing: true,
         group: "getting started",
     },

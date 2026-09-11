@@ -363,6 +363,51 @@ fn a_second_join_refuses_rather_than_replacing_the_key() {
     std::fs::remove_dir_all(&s.work).ok();
 }
 
+/// The same link a second time is a join that already happened, which is
+/// what somebody runs who is not sure the first one worked, or who ran it
+/// in the wrong folder: nothing is redeemed or rewritten, a copy already
+/// here is pointed at, and one that is missing is made.
+#[test]
+fn the_same_link_again_finishes_the_join_instead_of_refusing() {
+    let s = served("same-link");
+    let machine = Machine {
+        home: s.work.join("home"),
+        gitconfig: s.work.join("home").join("gitconfig"),
+    };
+    std::fs::create_dir_all(&machine.home).unwrap();
+    let invite = link(&s, Some("ivy"));
+
+    let first = machine.choir(&s.work, &["join", &invite]);
+    assert!(first.status.success(), "{}", shown(&first));
+    let auth = machine.home.join(".choir").join("auth");
+    let token = std::fs::read(&auth).unwrap();
+
+    let again = machine.choir(&s.work, &["join", &invite]);
+    assert!(again.status.success(), "{}", shown(&again));
+    let report = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(report.contains("Already joined"), "{report}");
+    assert!(report.contains("cd demo"), "{report}");
+    assert_eq!(
+        std::fs::read(&auth).unwrap(),
+        token,
+        "the token was rewritten"
+    );
+
+    let elsewhere = s.work.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let there = machine.choir(&elsewhere, &["join", &invite]);
+    assert!(there.status.success(), "{}", shown(&there));
+    let origin = machine.git(&elsewhere.join("demo"), &["remote", "get-url", "origin"]);
+    assert_eq!(
+        String::from_utf8_lossy(&origin.stdout).trim(),
+        format!("{}/agents/demo.git", s.api),
+        "no copy was made where there was none: {}",
+        shown(&there)
+    );
+
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
 /// A folder by the repository's name is somebody's work, so the clone
 /// steps around it rather than into it, and says so.
 #[test]
@@ -416,7 +461,7 @@ fn no_clone_joins_without_making_a_copy() {
 /// The account exists and the token is stored before any clone starts,
 /// so a clone that fails is not a failed join: the report says what did
 /// not happen and the exact line that finishes it, and exits 0, because
-/// running `choir join` again would only say this machine already joined.
+/// the account exists either way.
 #[test]
 fn a_clone_that_fails_leaves_the_join_standing_and_names_the_retry() {
     let s = served("clone-fails");
