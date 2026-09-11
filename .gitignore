@@ -9,6 +9,10 @@ CLAUDE.md
 # There is deliberately no allowlist here — an exception is how the last
 # five of these ended up tracked.
 internal/
+# And a worktree's `internal`, which is a symlink to the main checkout's
+# directory: `internal/` matches only a directory, and the link it misses
+# would publish a local path naming the machine's owner.
+/internal
 
 # Python bytecode. `templates/python/choir.py` is a shipped artifact and
 # its tests import it, so running them leaves a __pycache__ beside it;
