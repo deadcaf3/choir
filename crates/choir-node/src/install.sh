@@ -74,6 +74,18 @@ else
 	exit 1
 fi
 
+# Whether the record $1 names the archive digest $2, and every binary it
+# lists is still in $dest as it was installed. All of it matching is the
+# one case where fetching again would change nothing; a new build on the
+# shelf, or a binary somebody deleted or replaced, is fetched as before.
+current() {
+	[ -f "$1" ] || return 1
+	[ "$(sed -n 1p "$1")" = "$2" ] || return 1
+	sed 1d "$1" | while read -r sum name; do
+		[ "$(digest "$dest/$name" 2>/dev/null | cut -d' ' -f1)" = "$sum" ] || exit 1
+	done
+}
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
@@ -83,11 +95,19 @@ mkdir -p "$dest"
 installed=""
 for app in $APPS; do
 	archive="$app-$target.tar.xz"
+	curl -fsSL "$BASE/$archive.sha256" -o "$tmp/$archive.sha256"
+	want=$(cut -d' ' -f1 <"$tmp/$archive.sha256")
+
+	# Kept beside the binaries it describes, so a different CARGO_HOME
+	# is a different record rather than a wrong one.
+	record="$dest/.$app.sha256"
+	if current "$record" "$want"; then
+		echo "install.sh: $app is already current"
+		continue
+	fi
+
 	echo "install.sh: fetching $archive"
 	curl -fsSL "$BASE/$archive" -o "$tmp/$archive"
-	curl -fsSL "$BASE/$archive.sha256" -o "$tmp/$archive.sha256"
-
-	want=$(cut -d' ' -f1 <"$tmp/$archive.sha256")
 	got=$(digest "$tmp/$archive" | cut -d' ' -f1)
 	if [ "$want" != "$got" ]; then
 		echo "install.sh: checksum mismatch on $archive" >&2
@@ -103,15 +123,21 @@ for app in $APPS; do
 		echo "install.sh: could not unpack $archive; is xz installed?" >&2
 		exit 1
 	fi
+	echo "$want" >"$tmp/record"
 	for bin in $(find "$tmp/$app-$target" -type f -perm -u+x); do
 		name=$(basename "$bin")
 		cp "$bin" "$dest/$name"
 		chmod +x "$dest/$name"
 		installed="$installed $name"
+		echo "$(digest "$dest/$name" | cut -d' ' -f1) $name" >>"$tmp/record"
 	done
+	# Last, so an install cut short leaves no record claiming it finished.
+	mv "$tmp/record" "$record"
 done
 
-echo "install.sh: installed$installed in $dest"
+if [ -n "$installed" ]; then
+	echo "install.sh: installed$installed in $dest"
+fi
 
 # Installed is not the same as found. On a machine with no Rust on it,
 # $dest is on nobody's PATH, and the reader's very next command would be

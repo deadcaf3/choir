@@ -240,11 +240,13 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     let target = target();
     let shelf = work.join("shelf");
     std::fs::create_dir_all(&shelf).expect("shelf");
-    for (package, binary) in [("choir-cli", "choir"), ("choir-node", "choir-node")] {
+    // One archive onto the shelf, whose binary prints `says`: called
+    // again later to put a new build where the old one was.
+    let shelve = |package: &str, binary: &str, says: &str| {
         let stage = work.join(format!("{package}-{target}"));
         std::fs::create_dir_all(&stage).expect("stage");
         let fake = stage.join(binary);
-        std::fs::write(&fake, format!("#!/bin/sh\necho i-am-{binary}\n")).expect("fake binary");
+        std::fs::write(&fake, format!("#!/bin/sh\necho {says}\n")).expect("fake binary");
         std::process::Command::new("chmod")
             .args(["+x"])
             .arg(&fake)
@@ -278,6 +280,9 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
             format!("{hex} *{archive}\n"),
         )
         .expect("digest file");
+    };
+    for (package, binary) in [("choir-cli", "choir"), ("choir-node", "choir-node")] {
+        shelve(package, binary, &format!("i-am-{binary}"));
     }
 
     let mut table = AuthTable::new();
@@ -285,7 +290,7 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     let mut node =
         Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds a free port");
     let port = node.port();
-    node.publish_downloads(shelf).expect("shelf serves");
+    node.publish_downloads(shelf.clone()).expect("shelf serves");
     std::thread::spawn(move || node.serve_forever());
     let base = format!("http://127.0.0.1:{port}");
 
@@ -344,6 +349,14 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     );
     let again = install();
     assert!(again.status.success());
+    // Nothing on the shelf changed, so the second run fetches no archive
+    // and says why rather than reinstalling the same bytes in silence.
+    let said = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(
+        !said.contains(".tar.xz"),
+        "a second install fetched again: {said}"
+    );
+    assert!(said.contains("already current"), "{said}");
     assert_eq!(
         std::fs::read_to_string(&zshrc)
             .unwrap_or_default()
@@ -372,6 +385,29 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     assert!(
         !home.join("bin/LICENSE-MIT").exists(),
         "the installer copied a licence in beside the binaries"
+    );
+
+    // A new build on the shelf is fetched, and only that one.
+    shelve("choir-cli", "choir", "i-am-choir-2");
+    let newer = install();
+    let said = String::from_utf8_lossy(&newer.stdout).to_string();
+    assert!(newer.status.success(), "{said}");
+    assert!(said.contains("fetching choir-cli-"), "{said}");
+    assert!(!said.contains("fetching choir-node-"), "{said}");
+    let ran = std::process::Command::new(home.join("bin").join("choir"))
+        .output()
+        .expect("the updated binary runs");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "i-am-choir-2");
+
+    // A binary that was deleted is put back though the shelf is the same:
+    // running the installer again is what somebody missing one does.
+    std::fs::remove_file(home.join("bin").join("choir-node")).expect("delete one");
+    let restored = install();
+    assert!(restored.status.success());
+    assert!(
+        home.join("bin").join("choir-node").is_file(),
+        "a missing binary was not put back: {}",
+        String::from_utf8_lossy(&restored.stdout)
     );
 
     std::fs::remove_dir_all(&work).ok();
