@@ -827,6 +827,8 @@ table.listing .file::before{-webkit-mask-image:var(--i-file);mask-image:var(--i-
 .f-law::before{-webkit-mask-image:var(--i-law);mask-image:var(--i-law)}
 .f-people::before{-webkit-mask-image:var(--i-people);mask-image:var(--i-people)}
 .f-shield::before{-webkit-mask-image:var(--i-shield);mask-image:var(--i-shield)}
+.f-branch::before{-webkit-mask-image:var(--i-branch);mask-image:var(--i-branch)}
+.f-commit::before{-webkit-mask-image:var(--i-history);mask-image:var(--i-history)}
 section.readme .head h2::before{-webkit-mask-image:var(--i-book);mask-image:var(--i-book)}
 
 /* Visually hidden and still read: a heading a screen reader needs where
@@ -1394,6 +1396,15 @@ b.tab.here .count{color:var(--muted)}
 /* The files and the README carry a header strip, so their padding is
    the strip's and the rows' rather than the box's. */
 .pane-files,.pane-content{padding:var(--sp-0);overflow:hidden}
+/* The root is two columns: the files with the README under them, and
+   the rail. One flex child holding the two boxes, so the rail runs
+   beside both and the right-hand column is never empty under a rail
+   shorter than the listing. */
+.panes>.col{flex:7 1 var(--measure);min-width:0;display:flex;
+  flex-direction:column;gap:var(--sp-6)}
+/* Inside the column a pane's basis would be a height, and the width
+   basis below would cut the listing off at thirty-six rems. */
+.panes>.col>.pane{flex:0 0 auto}
 .pane-files>:not(table,h2,.commitbar){margin:var(--sp-4)}
 .pane-content>p{margin:var(--sp-5)}
 main>.pane+.pane{margin-top:var(--sp-6)}
@@ -1411,12 +1422,7 @@ main>.pane+.pane{margin-top:var(--sp-6)}
    repository is. One flex child holding both cards, so the listing keeps
    its width whether the rail carries two of them or one. */
 .rail{flex:2 1 var(--side);min-width:0;display:flex;flex-direction:column;
-  gap:var(--gap-pane);
-  /* Sticky, parked under the bar: the listing is long and the rail is
-     short, and a rail that scrolled away left the right-hand column
-     empty for most of the page. `align-items:flex-start` on `.panes` is
-     what lets it stick at all. */
-  position:sticky;top:calc(var(--topbar-h) + var(--sp-6))}
+  gap:var(--gap-pane)}
 .rail>.pane{flex:0 0 auto}
 
 /* The header strip of the listing's box: who wrote last, what they
@@ -1469,6 +1475,16 @@ ul.facts li,ul.who li{display:flex;align-items:center;gap:var(--sp-2);color:var(
 ul.facts li::before{background-color:var(--faint)}
 ul.facts a{color:var(--ink);text-decoration:none}
 ul.facts a:hover{color:var(--accent-ink);text-decoration:underline}
+/* The newest commits: subject over hash and age, the glyph aligned to
+   the first line. */
+ul.recent li{align-items:flex-start}
+ul.recent li::before{margin-top:var(--sp-1)}
+ul.recent li>a{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0}
+ul.recent .what{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ul.recent .meta{font-size:var(--fs-200);color:var(--faint)}
+ul.recent .meta code{font-size:var(--fs-200)}
+ul.recent li.more::before{content:none}
+ul.recent li.more a{color:var(--accent-ink);font-size:var(--fs-300)}
 
 /* The other documents, beside the README's name in its header strip.
    Links and not tabs that switch in place: this surface runs no script. */

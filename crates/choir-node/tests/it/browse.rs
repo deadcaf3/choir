@@ -2537,11 +2537,13 @@ fn the_repository_root_leads_with_the_listing_and_rails_the_rest() {
 
     // The review is *in* the rail, not merely on the page. A pane that
     // draws nothing when the queue is empty must still draw the queue.
+    // The rail follows the column holding the listing and the README,
+    // so it runs from its own open tag to the end of the panes.
     let rail = after_files
         .split_once("<div class=\"rail\">")
-        .and_then(|(_, rest)| rest.split_once("<section class=\"pane pane-content\">"))
+        .and_then(|(_, rest)| rest.split_once("</div></div>"))
         .map(|(rail, _)| rail)
-        .expect("the rail sits between the listing and the README");
+        .expect("the rail follows the listing and the README");
     assert!(
         rail.contains("<aside class=\"pane pane-reviews\">"),
         "the work in flight is not in the rail: {rail}"

@@ -1798,6 +1798,13 @@ struct Tip {
     at: i64,
 }
 
+/// One of the newest commits, for the rail's activity list.
+struct Recent {
+    oid: String,
+    subject: String,
+    at: i64,
+}
+
 /// The tip commit and everyone who has written here, in one walk.
 ///
 /// Two answers from one subprocess because they come from the same
@@ -1810,26 +1817,39 @@ struct Tip {
 /// The `bool` is whether the walk hit [`AUTHOR_WALK`], so a caller can
 /// say "at least this many" rather than state a count it did not finish
 /// counting.
-fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool) {
+fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool, Vec<Recent>) {
     let depth = format!("-{AUTHOR_WALK}");
-    let Ok(text) = git_text(dir, &["log", &depth, "--format=%an%x00%at%x00%s", oid]) else {
-        return (None, Vec::new(), false);
+    let Ok(text) = git_text(
+        dir,
+        &["log", &depth, "--format=%H%x00%an%x00%at%x00%s", oid],
+    ) else {
+        return (None, Vec::new(), false, Vec::new());
     };
     let mut tip: Option<Tip> = None;
     let mut authors: Vec<String> = Vec::new();
+    let mut recent: Vec<Recent> = Vec::new();
     let mut walked = 0usize;
     for line in text.lines() {
-        let mut fields = line.splitn(3, '\0');
-        let (Some(author), Some(at), Some(subject)) = (fields.next(), fields.next(), fields.next())
+        let mut fields = line.splitn(4, '\0');
+        let (Some(hash), Some(author), Some(at), Some(subject)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
         walked += 1;
+        let at: i64 = at.trim().parse().unwrap_or_default();
         if tip.is_none() {
             tip = Some(Tip {
                 author: author.to_string(),
                 subject: subject.to_string(),
-                at: at.trim().parse().unwrap_or_default(),
+                at,
+            });
+        }
+        if recent.len() < PANE_ROWS {
+            recent.push(Recent {
+                oid: hash.to_string(),
+                subject: subject.to_string(),
+                at,
             });
         }
         // Linear rather than a set: the list this builds is rendered in
@@ -1840,7 +1860,7 @@ fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool) {
             authors.push(author.to_string());
         }
     }
-    (tip, authors, walked >= AUTHOR_WALK)
+    (tip, authors, walked >= AUTHOR_WALK, recent)
 }
 
 /// The one row above a listing that says what state it is in.
@@ -1958,7 +1978,9 @@ fn about_pane(
     repo: &str,
     rev: &str,
     names: &[String],
+    branches: &[String],
     tags: &[String],
+    recent: &[Recent],
     authors: &[String],
     more_authors: bool,
 ) {
@@ -1975,6 +1997,8 @@ fn about_pane(
         && security.is_none()
         && latest.is_none()
         && authors.is_empty()
+        && branches.is_empty()
+        && recent.is_empty()
     {
         return;
     }
@@ -2040,6 +2064,48 @@ fn about_pane(
         h.push_str("\" class=\"mono\">");
         h.push_str(&esc(tag));
         h.push_str("</a> <span class=\"newest\">latest</span></span></li></ul>");
+    }
+    // The branches, the current one first, and the newest commits: the
+    // two lists a reader scans to ask what is moving here. Capped, and
+    // the caps say where the rest is.
+    if !branches.is_empty() {
+        h.push_str("<h2>Branches<span class=\"count\">");
+        h.push_str(&branches.len().to_string());
+        h.push_str("</span></h2><ul class=\"facts\">");
+        let mut ordered: Vec<&String> = branches.iter().filter(|b| *b == rev).collect();
+        ordered.extend(branches.iter().filter(|b| *b != rev));
+        for branch in ordered.into_iter().take(PANE_ROWS) {
+            h.push_str("<li class=\"f-branch\"><a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/tree/");
+            h.push_str(&esc(&url_path(branch)));
+            h.push_str("\" class=\"mono\">");
+            h.push_str(&esc(branch));
+            h.push_str("</a></li>");
+        }
+        h.push_str("</ul>");
+    }
+    if !recent.is_empty() {
+        let now = now_secs();
+        h.push_str("<h2>Activity</h2><ul class=\"facts recent\">");
+        for one in recent {
+            h.push_str("<li class=\"f-commit\"><a href=\"/r/");
+            h.push_str(&esc(repo));
+            h.push_str("/commit/");
+            h.push_str(&esc(&one.oid));
+            h.push_str("\"><span class=\"what\">");
+            h.push_str(&esc(&one.subject));
+            h.push_str("</span><span class=\"meta\"><code>");
+            h.push_str(&esc(&one.oid[..one.oid.len().min(7)]));
+            h.push_str("</code> \u{b7} ");
+            h.push_str(&esc(&ago(now, one.at)));
+            h.push_str("</span></a></li>");
+        }
+        h.push_str("<li class=\"more\"><a href=\"/r/");
+        h.push_str(&esc(repo));
+        h.push_str("/commits/");
+        h.push_str(&esc(rev));
+        h.push_str("\">All history</a></li></ul>");
     }
     if !authors.is_empty() {
         h.push_str("<h2>Written by<span class=\"count\">");
@@ -2327,17 +2393,18 @@ fn tree(
     // names the newest, the commit bar and the rail split one author
     // walk. Hoisted out of the ref-bar block below because that block is
     // where they used to be read and the rail is drawn after it.
-    let (tip, authors, more_authors, tags, root_names) = if path.is_empty() {
-        let (tip, authors, more) = tip_and_authors(dir, &oid);
+    let (tip, authors, more_authors, recent, tags, root_names) = if path.is_empty() {
+        let (tip, authors, more, recent) = tip_and_authors(dir, &oid);
         (
             tip,
             authors,
             more,
+            recent,
             tag_names(dir),
             rows.iter().map(|(_, name, _)| name.clone()).collect(),
         )
     } else {
-        (None, Vec::new(), false, Vec::new(), Vec::new())
+        (None, Vec::new(), false, Vec::new(), Vec::new(), Vec::new())
     };
     let commits = if path.is_empty() {
         git_text(dir, &["rev-list", "--count", &oid])
@@ -2373,7 +2440,7 @@ fn tree(
     // listing and the README alone.
     let file_count = rows.len();
     if path.is_empty() {
-        h.push_str("<div class=\"panes\">");
+        h.push_str("<div class=\"panes\"><div class=\"col\">");
     }
     // One box at every level: a directory's listing is the same object
     // as the root's, so it wears the same frame. The heading is for a
@@ -2462,30 +2529,6 @@ fn tree(
         h.push_str("</tbody></table>");
     }
     h.push_str("</section>");
-    // The rail: what is in flight, and what this repository is. One
-    // column rather than two panes, so the listing keeps the width and
-    // these stack beside it the way a sidebar does. Either half draws
-    // nothing when it has nothing, and a rail with neither is a rail
-    // that never opens.
-    if path.is_empty() {
-        let mut rail = String::new();
-        reviews_pane(&mut rail, dir, repo, platform);
-        about_pane(
-            &mut rail,
-            dir,
-            repo,
-            rev,
-            &root_names,
-            &tags,
-            &authors,
-            more_authors,
-        );
-        if !rail.is_empty() {
-            h.push_str("<div class=\"rail\">");
-            h.push_str(&rail);
-            h.push_str("</div>");
-        }
-    }
     // The README, under the listing, the way every code host has put it
     // since the convention started. At every level, not just the root: a
     // README beside a directory's files is documentation for exactly the
@@ -2521,7 +2564,30 @@ fn tree(
             // missing, and what would fill it, does not.
             h.push_str("<p class=\"muted\">No README at this revision.</p></section>");
         }
+        // The rail beside the column: what is in flight, and what this
+        // repository is. Either half draws nothing when it has nothing,
+        // and a rail with neither is a rail that never opens.
         if path.is_empty() {
+            h.push_str("</div>");
+            let mut rail = String::new();
+            reviews_pane(&mut rail, dir, repo, platform);
+            about_pane(
+                &mut rail,
+                dir,
+                repo,
+                rev,
+                &root_names,
+                &branches,
+                &tags,
+                &recent,
+                &authors,
+                more_authors,
+            );
+            if !rail.is_empty() {
+                h.push_str("<div class=\"rail\">");
+                h.push_str(&rail);
+                h.push_str("</div>");
+            }
             h.push_str("</div>");
         }
     }
@@ -4294,28 +4360,36 @@ fn state_tag(h: &mut String, review: &serde_json::Value) {
 }
 
 /// The page for a review request on a node with no platform enabled.
+///
+/// The repository's own frame, not the bare refusal: the reader clicked
+/// a tab, and a tab that swaps the whole page for a different one reads
+/// as a crash. The title, the bar and the tabs stay where they were and
+/// the section under them says what is off.
 fn unavailable(repo: &str, chrome: Chrome<'_>) -> Rendered {
+    let mut h = shell(&format!("{repo}: reviews"), Bar::repo(repo, "HEAD", chrome));
+    h.push_str("<header class=\"top\"><h1><a href=\"/r/");
+    h.push_str(&esc(repo));
+    h.push_str("\">");
+    repo_title(&mut h, repo);
+    h.push_str("</a></h1>");
+    repo_tabs(&mut h, repo, "HEAD", "reviews");
+    h.push_str("<div class=\"sub\"><span class=\"pill\">503</span><span class=\"pill\">platform_disabled</span></div>");
+    h.push_str("</header><main id=\"main\"><section>");
+    h.push_str(
+        "<p class=\"lede\">Reviews are switched off on this node. It serves git, but its \
+         platform API is off, so it holds no reviews to show you. Nothing is broken and \
+         nothing was lost.</p>",
+    );
+    crate::ui::next_action(
+        &mut h,
+        "Browse the code and its history from the tabs above. Reviews appear here once the \
+         operator restarts this node with the platform API on.",
+    );
+    h.push_str("</section></main>");
     Rendered {
         status: 503,
         etag: None,
-        html: crate::ui::refusal(
-            "Reviews are not enabled here",
-            503,
-            &crate::ui::Refusal {
-                code: "platform_disabled",
-                error: "This node serves git, but its platform API is switched off, so it holds \
-                        no reviews to show you. Nothing is broken and nothing was lost.",
-                expected: Some("a node started with the platform API enabled"),
-                actual: Some("a git-only node"),
-                next: "Browse the code instead — the link above works. Reviews appear here only \
-                       once the operator restarts this node with the platform API on.",
-            },
-            &[
-                (&format!("/r/{repo}"), "this repository"),
-                ("/r/", "all repositories"),
-            ],
-            chrome,
-        ),
+        html: close(h, chrome.signed_in),
     }
 }
 
