@@ -1,17 +1,17 @@
 # demo: the same twenty agents, against git alone and against choir
 
-A two-pane terminal demo for one skeptic in particular: the engineer who
+A two-column terminal demo for one skeptic in particular: the engineer who
 says "worktrees and branches give agents isolation, then you merge, what
-does choir add?" Isolation is free and the left pane concedes it. The
+does choir add?" Isolation is free and the left column concedes it. The
 demo is about what happens when twenty isolated branches have to become
 one `main`: at the conflict, at the infrastructure failure, and in what
 you can prove afterwards.
 
-- **Left pane, his workflow done well.** A bare repo with
+- **Left column, his workflow done well.** A bare repo with
   `receive.denyNonFastForwards`, twenty worktrees on twenty branches, and
   a careful maintainer that merges in order and runs the tests after
   every merge, skipping a branch that conflicts and paging its author.
-- **Right pane, choir.** The same twenty branches proposed to a node as
+- **Right column, choir.** The same twenty branches proposed to a node as
   `refs/for/main/<agent>/<topic>`, landed by one queue round.
 
 Nothing is mocked or emulated. Every line on either side is the output
@@ -22,29 +22,37 @@ itself on the left and the properties a forge cannot add on the right.
 ## Run it
 
 ```bash
-demo/run.sh                  # build into demo/.target, then play in one go
-demo/run.sh --pause 5        # 5 s between beats instead of 2
-demo/run.sh --step           # stop after each beat and wait for Enter
+demo/run.sh                  # build into demo/.target, then play, both columns at once
 demo/run.sh --no-build       # skip cargo; use the binaries as built
-demo/run.sh --dump           # no screen: play everything and print both panes
+demo/run.sh --plain          # no colour, no live rows: for a pipe or a file
 demo/run.sh --port N         # default 8447, or the next free port
 demo/run.sh --agents N       # default 20, at least 12
 demo/run.sh --ci-seconds S   # how long test.sh takes, default 3
 ```
 
-The take runs in one go, a 2 s breath between beats, and stays on the
-last screen until `q`. Keys while playing: Enter or Space skips the
-breath, `a` toggles stepping, `q` quits. The screen needs 90 by 24 or more; 120 by 40 is
-comfortable. One Ghostty tab is enough; there is no tmux.
+Nothing waits for a key. Both columns run their whole script from the
+first second, each at its own pace, and every row goes straight into
+the terminal's own scrollback as it happens, stamped with the seconds
+since the take began. Scroll up afterwards and the two columns read as
+one timeline: what the right side was doing at 20 s while the left was
+still merging. The last line of the screen is live while a side works,
+a spinner, its counters and a clock, and it never enters the
+scrollback. Ctrl-C stops the take and the node. One Ghostty tab is
+enough; there is no tmux and no curses. Any width from 90 columns
+works; wider is nicer, the columns split the width in half.
+
+The transcript of the last take is `demo/.run/take.log`: every row of
+both columns with its time, the status lines, and the terminal width.
+That file is what to send when a take looked wrong.
 
 Idempotent: each run kills the node the previous take left behind,
 wipes `demo/.run/`, mints fresh keys, starts a fresh node. One take at
 a time: a second one refuses to start while the first is playing,
-because they would share `demo/.run/` and wipe each other mid-beat.
-A failure in any beat stops the take with one line and the node log
-path; it does not play on. Hermetic:
-loopback only, no TLS, no network. Needs `cargo`, `git`, `curl`,
-`python3` (standard library only; the screen is `curses`).
+because they would share `demo/.run/` and wipe each other mid-beat. A
+failure on one side is shown in that column and the other side plays
+on; the take then exits nonzero with the transcript and node log paths.
+Hermetic: loopback only, no TLS, no network. Needs `cargo`, `git`,
+`curl`, `python3` (standard library only).
 
 The first run builds `choir-node` and `choir` into `demo/.target/`, a
 target dir of the demo's own, which takes a minute or two. Every later
@@ -55,9 +63,10 @@ happened while writing this.
 
 ## The beats
 
-Each beat plays both panes at once. Machine time for the whole take is
-about 80 s with the default 3 s test, a minute of it beat 2's left pane
-grinding; the recording is that plus your pauses.
+Each column plays its six beats in order, with its own headers and its
+own clock; the two are not kept in step, and that is the comparison.
+With the default 3 s test the right column is finished in about 22 s
+and the left in about 70 s, most of it beat 2.
 
 | beat | what happens | what to say |
 |------|--------------|-------------|
@@ -68,10 +77,11 @@ grinding; the recording is that plus your pauses.
 | 4 | left: `git log`, and what it proves: parent pointers, no signatures, no test verdicts. right: the op log by kind, the last landings decoded, and `choir log --verify` over all of it | the commit graph is honest and good. The chain is what a forge does not give you: every landing and every check verdict, verified offline with one key |
 | 5 | two more branches: 05 breaks the test, 09 adds a note. Both CI runners lose their exec bit. left: both merges go red (exit 126), both authors paged. right: `Errored`, nothing evicted. Runners back: left reverts 05 and merges 09; right evicts 05 as `CiFailure` and lands 09 | a red runner is not a red change. Only the change at fault pays |
 
-The closing lines are the concession and the claim, one per pane: for
-disjoint work at a low conflict rate, branches and a merge queue are
-fine; the claim is what happens at the conflict, at the infra failure,
-and in what you can prove after.
+When both sides are done, each column prints its start-to-finish time,
+then the concession and the claim, one per column: for disjoint work at
+a low conflict rate, branches and a merge queue are fine; the claim is
+what happens at the conflict, at the infra failure, and in what you can
+prove after.
 
 ## Numbers you will see, and what they mean
 
@@ -99,7 +109,7 @@ and in what you can prove after.
 
   With an instant test the round is the slower side and the take argues
   against itself, which is what the first version of this demo did. A
-  real suite takes minutes; at 60 s per run the left pane would take
+  real suite takes minutes; at 60 s per run the left column would take
   twenty minutes and the right about seventy seconds.
 - **`choir log --verify`: about 125 entries, chain holds, all signatures
   verified**, with the node's public key as the only input.
@@ -142,10 +152,10 @@ Both are real fixes, both tested in `crates/choir-node/tests/it/node_queue.rs`.
 ## Files
 
 - `run.sh`: builds into `demo/.target`, then starts `tui.py`.
-- `tui.py`: the presenter and every beat; standard library only.
+- `tui.py`: the two-column presenter and both scripts; standard library only.
 - `show.py`: compact renderings of the node's JSON and HTML, shared
   with `tui.py`; nothing computed.
-- `.run/take.log`: a transcript of the last take, every line either
-  pane showed with its time, the screen size and each key pressed.
-  Read it when a take looked wrong.
+- `.run/take.log`: a transcript of the last take, every row either
+  column showed with its time, the status lines and the terminal
+  width. Read it, or send it, when a take looked wrong.
 - `.run/`, `.target/`: everything a take leaves behind; ignored.

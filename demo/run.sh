@@ -4,7 +4,7 @@
 #   demo/run.sh [--no-build] [tui options...]
 #
 # --no-build   use the binaries as built; skips cargo.
-# Everything else goes to tui.py: --pause SECS, --step, --dump, --port N, --agents N, --ci-seconds S.
+# Everything else goes to tui.py: --plain, --port N, --agents N, --ci-seconds S.
 #
 # Builds into demo/.target, a target dir of the demo's own: a target dir
 # shared across checkouts hands whoever builds last the debug/choir-node

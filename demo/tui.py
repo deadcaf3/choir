@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-"""Two panes, one terminal: the same twenty agents against git alone and
-against a choir node.
+"""Two columns, one terminal: the same twenty agents against git alone and
+against a choir node, both sides running their whole script at once.
 
     python3 demo/tui.py --bin <dir-with-choir-node-and-choir> [options]
 
-    --pause SECS    breath between beats; the take runs in one go (default 2)
-    --step          stop after each beat and wait for Enter instead
-    --dump          no screen: play every beat and print both panes as text
+    --plain         no colour, no live rows: for a pipe or a file
     --port N        the node's loopback port (default 8447, or the next free one)
-    --agents N      how many agents (default 20)
+    --agents N      how many agents (default 20, at least 12)
     --ci-seconds S  how long the repo's test.sh takes (default 3): the cost
                     model of beat 2 is the maintainer paying it once per
                     merge in series, and the round paying it once
 
-Keys while playing: Enter or Space skips the pause, a toggles stepping, q quit.
+Nothing waits for a key. Every row goes to the terminal's own scrollback
+as it happens, stamped with the seconds since the take began, so the two
+columns read as one timeline: scroll up to see what the right side was
+doing while the left was still merging. The bottom line of each column
+is live while its side is working. Ctrl-C stops the take and the node.
 
-Left pane: worktrees, branches, a careful maintainer merging in order
-and running the tests after each merge. Right pane: the same branches
+Left column: worktrees, branches, a careful maintainer merging in order
+and running the tests after each merge. Right column: the same branches
 proposed to a choir node and landed by one queue round. Nothing on
-either side is mocked; every line is the output of git, curl, or the
-node. demo/run.sh builds the binaries and starts this.
+either side is mocked; every row is the output of git, curl, or the
+node. demo/run.sh builds the binaries and starts this. The transcript
+of the last take is demo/.run/take.log.
 """
 
 import argparse
@@ -27,11 +30,11 @@ import contextlib
 import io
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import urllib.error
@@ -44,11 +47,17 @@ import show  # noqa: E402  (the same trimming the linear script uses)
 
 REPO = "acme/app.git"
 # No single git, curl or CI step may hang a take: past this it is an error
-# on screen, with the command named, rather than a frozen pane.
+# in the column, with the command named, rather than a frozen side.
 STEP_TIMEOUT = 300
 
 # ---- styles ------------------------------------------------------------------
-NORMAL, PROMPT, SAY, NOTE, OK, BAD, HEAD, KEY = range(8)
+NORMAL, PROMPT, SAY, NOTE, OK, BAD, HEAD, KEY, STAMP = range(9)
+ANSI = {
+    NORMAL: "", PROMPT: "\x1b[1m", SAY: "\x1b[33m", NOTE: "\x1b[2m", OK: "\x1b[32m",
+    BAD: "\x1b[1;31m", HEAD: "\x1b[1;36m", KEY: "\x1b[7m", STAMP: "\x1b[2;37m",
+}
+RESET = "\x1b[0m"
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def typed(argv, root=None):
@@ -63,22 +72,18 @@ def typed(argv, root=None):
     return " ".join(out)
 
 
-# ---- the two panes ---------------------------------------------------------
+# ---- the two columns ---------------------------------------------------------
 class Pane:
-    def __init__(self, ui, side, title):
+    def __init__(self, ui, side, title, narrations):
         self.ui, self.side, self.title = ui, side, title
-        self.lines = []  # (text, style)
-        self.status = ""  # one live line shown under the text (counters, a clock)
+        self.narrations = narrations
+        self.status = ""  # one live line under the column while its side works
         self.status_since = None
+        self.started = time.monotonic()
+        self.done = None
 
     def put(self, text="", style=NORMAL):
-        with self.ui.lock:
-            for line in str(text).split("\n"):
-                self.lines.append((line, style))
-            self.ui.dirty = True
-        self.ui.transcript(f"{self.side}│ {text}")
-        if self.ui.dump:
-            print(f"{self.side}│ {text}", flush=True)
+        self.ui.emit(self, str(text), style)
 
     def say(self, text):
         self.put(f"# {text}", SAY)
@@ -92,17 +97,28 @@ class Pane:
     def bad(self, text):
         self.put(text, BAD)
 
-    def set_status(self, text, timed=False):
-        """One live line under the pane's text; `timed` appends a running clock."""
+    def beat(self, no, title):
+        """A beat header in this column; the other column has its own clock."""
+        self.put("", NORMAL)
+        self.put(f"━━ beat {no} · {title}", HEAD)
+        self.put(f"# {self.narrations[no]}", SAY)
+        self.ui.transcript(f"== {self.side} beat {no}: {title}")
+
+    def set_status(self, text, timed=False, keep_clock=False):
+        """The live line; `timed` starts a running clock, `keep_clock` keeps it."""
         with self.ui.lock:
             self.status = text
-            self.status_since = time.monotonic() if timed else None
-            self.ui.dirty = True
+            if not keep_clock:
+                self.status_since = time.monotonic() if timed else None
+        if text:
+            self.ui.transcript(f"{self.side}~ {text}")
+        self.ui.redraw_live()
 
-    def status_line(self):
-        if self.status and self.status_since is not None:
-            return f"{self.status}   {time.monotonic() - self.status_since:4.1f} s"
-        return self.status
+    def status_text(self, frame):
+        if not self.status:
+            return ""
+        clock = f"  {time.monotonic() - self.status_since:4.1f} s" if self.status_since is not None else ""
+        return f"{SPINNER[frame % len(SPINNER)]} {self.status.strip()}{clock}"
 
     def cmd(self, argv, cwd=None, shown=True, quiet=False, env=None, label=None):
         """Print the command as typed, run it, stream its output. Returns (rc, output)."""
@@ -215,11 +231,11 @@ class Env:
         if take.exists():
             try:
                 os.kill(int(take.read_text()), 0)
-                sys.exit(f"another take is running (pid {take.read_text()}); press q there first")
+                sys.exit(f"another take is running (pid {take.read_text()}); let it finish or Ctrl-C it")
             except (ValueError, ProcessLookupError):
                 pass
             except PermissionError:
-                sys.exit(f"another take is running (pid {take.read_text()}); press q there first")
+                sys.exit(f"another take is running (pid {take.read_text()}); let it finish or Ctrl-C it")
         pidfile = self.run / "node.pid"
         if pidfile.exists():
             try:
@@ -278,191 +294,147 @@ class Env:
                 getattr(show, what)(payload)
         return buf.getvalue().replace(str(self.run) + "/", "").rstrip("\n").split("\n")
 
-    def next_seq(self):
-        return self.get("/api/view")["log"]["next_seq"]
-
     def queue_run(self):
         return self.post("/api/queue/run", {"repo": REPO, "branch": "main"})
 
 
-# ---- the screen ------------------------------------------------------------
+# ---- the terminal ------------------------------------------------------------
 class UI:
-    def __init__(self, env, dump=False, auto=None, pause=2.0):
+    """Two columns streamed into the terminal's own scrollback.
+
+    Rows are printed as they happen, each in its column with a time stamp,
+    the other column blank. The last line of the screen is the live row:
+    both sides' status with a spinner and a clock, redrawn in place and
+    cleared before every new row, so it never enters the scrollback.
+    """
+
+    GAP = " │ "
+    STAMP_W = 7  # "  45.2 "
+
+    def __init__(self, env, plain=False):
         self.env = env
-        self.dump = dump
-        self.auto = auto  # seconds between beats, or None to wait for Enter
-        self.pause = pause
+        self.plain = plain or not sys.stdout.isatty() or os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb"
         self.lock = threading.Lock()
-        self.dirty = True
-        self.left = Pane(self, "L", "git: worktrees, branches, a careful maintainer")
-        self.right = Pane(self, "R", "choir: the same branches, one round")
-        self.beat_no, self.beat_total, self.beat_title = 0, 0, ""
-        self.narration = ""
-        self.hint = ""
-        self.advance = threading.Event()
-        self.quit = False
-        self.done = False
-        self.beat_started = time.monotonic()
         self.started = time.monotonic()
-        # Every line either pane shows, with its time, so a take that looked
-        # wrong can be read afterwards: .run/take.log.
+        self.width = shutil.get_terminal_size((160, 40)).columns
+        self.live_shown = False
+        self.frame = 0
+        self.left = Pane(self, "L", "git: worktrees, branches, a careful maintainer", LEFT_NARRATION)
+        self.right = Pane(self, "R", "choir: the same branches, one round", RIGHT_NARRATION)
+        # Every row either column shows, with its time, so a take can be
+        # read afterwards and sent to someone: .run/take.log.
         self.log = open(env.run / "take.log", "a")
         self.log_lock = threading.Lock()
-        self.transcript(f"take: pid {os.getpid()}, {'dump' if dump else 'screen'}, auto {auto}")
+        self.transcript(f"take: pid {os.getpid()}, {'plain' if self.plain else 'terminal'}, "
+                        f"{self.width} columns, TERM {os.environ.get('TERM', '?')}")
+        if hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH, lambda *_: self._resized())
+
+    def _resized(self):
+        self.width = shutil.get_terminal_size((160, 40)).columns
+        self.transcript(f"screen: resized to {self.width} columns")
 
     def transcript(self, line):
         with self.log_lock:
             self.log.write(f"{time.monotonic() - self.started:7.2f}  {line}\n")
             self.log.flush()
 
-    def beat(self, no, title, narration):
+    # -- geometry --
+    def cell_width(self):
+        return max(30, (self.width - len(self.GAP) - 1) // 2)  # never the full width: no pending wrap under the live row
+
+    def paint(self, text, style):
+        if self.plain or not ANSI.get(style):
+            return text
+        return f"{ANSI[style]}{text}{RESET}"
+
+    def row(self, left, right, lstyle=NORMAL, rstyle=NORMAL, stamp=""):
+        """One terminal line: two cells padded to the column width."""
+        cw = self.cell_width()
+        body = cw - self.STAMP_W
+
+        def cell(text, style, stamped):
+            text = text[:body]
+            pad = " " * (body - len(text))
+            st = f"{stamp:>6} " if stamped and text else " " * self.STAMP_W
+            return self.paint(st, STAMP) + self.paint(text, style) + pad
+
+        return cell(left, lstyle, True) + self.paint(self.GAP, NOTE) + cell(right, rstyle, True)
+
+    def wrapped(self, text):
+        body = self.cell_width() - self.STAMP_W
+        if not text.strip():
+            return [""]
+        lead = len(text) - len(text.lstrip(" "))
+        return textwrap.wrap(text, body, subsequent_indent=" " * (lead + 4),
+                             break_long_words=True, break_on_hyphens=False, drop_whitespace=False) or [""]
+
+    # -- output --
+    def emit(self, pane, text, style):
+        stamp = f"{time.monotonic() - self.started:.1f}"
+        self.transcript(f"{pane.side}│ {text}")
+        lines = self.wrapped(text)
         with self.lock:
-            self.beat_no, self.beat_title, self.narration = no, title, narration
-            self.beat_started = time.monotonic()
-            self.dirty = True
-        self.transcript(f"== beat {no}: {title} == {narration}")
+            self._clear_live()
+            for i, line in enumerate(lines):
+                st = stamp if i == 0 else ""
+                if pane.side == "L":
+                    out = self.row(line, "", style, NORMAL, st)
+                else:
+                    out = self.row("", line, NORMAL, style, st)
+                sys.stdout.write(out.rstrip() + "\n")
+            self._draw_live()
+            sys.stdout.flush()
+
+    def _clear_live(self):
+        if self.live_shown:
+            sys.stdout.write("\r\x1b[2K")
+            self.live_shown = False
+
+    def _draw_live(self):
+        if self.plain:
+            return
+        l, r = self.left.status_text(self.frame), self.right.status_text(self.frame)
+        if not l and not r:
+            return
+        sys.stdout.write("\r" + self.row(l, r, KEY, KEY).rstrip())
+        self.live_shown = True
+
+    def redraw_live(self):
+        with self.lock:
+            self._clear_live()
+            self._draw_live()
+            sys.stdout.flush()
+
+    def tick(self):
+        """The spinners and clocks, ten times a second, while anything is live."""
+        while not getattr(self, "finished", False):
+            time.sleep(0.1)
+            self.frame += 1
+            if self.left.status or self.right.status:
+                self.redraw_live()
+
+    def banner(self):
+        cw = self.cell_width()
+        rule = "─" * cw + "─┼─" + "─" * cw
+        title = f" choir · the same {self.env.agents} agents, twice "
+        sys.stdout.write(self.paint(title.center(len(rule), "═"), HEAD) + "\n")
+        sys.stdout.write(self.row(self.left.title, self.right.title, HEAD, HEAD).rstrip() + "\n")
+        sys.stdout.write(self.paint(rule, NOTE) + "\n")
+        sys.stdout.flush()
+
+    def closing(self):
+        cw = self.cell_width()
+        with self.lock:
+            self._clear_live()
+        sys.stdout.write(self.paint("─" * cw + "─┴─" + "─" * cw, NOTE) + "\n")
         for pane in (self.left, self.right):
-            with self.lock:  # each beat starts on a clean pane, whatever the screen height
-                pane.lines.clear()
-            pane.put(f"── beat {no}: {title}", HEAD)
-        if self.dump:
-            print(f"\n== beat {no}: {title} ==\n#  {narration}", flush=True)
-
-    def wait(self):
-        """Between beats: wait for Enter, or for the autoplay delay."""
-        if self.dump:
-            return
-        self.advance.clear()
-        if self.auto is not None:
-            with self.lock:
-                self.hint = f"next beat in {self.auto:.0f}s   Enter now   a step   q quit"
-                self.dirty = True
-            self.advance.wait(self.auto)
-        else:
-            with self.lock:
-                self.hint = "[Enter] next beat   a run on   q quit"
-                self.dirty = True
-            self.advance.wait()
-        with self.lock:
-            self.hint = ""
-            self.dirty = True
-        if self.quit:
-            raise SystemExit
-
-    # -- curses --
-    def run(self, play):
-        if self.dump:
-            play(self)
-            return
-        import curses
-
-        curses.wrapper(self._main, play)
-
-    def _main(self, stdscr, play):
-        import curses
-
-        curses.curs_set(0)
-        stdscr.nodelay(True)
-        stdscr.keypad(True)
-        curses.use_default_colors()
-        palette = {
-            NORMAL: (-1, -1, 0), PROMPT: (-1, -1, curses.A_BOLD), SAY: (3, -1, 0),
-            NOTE: (-1, -1, curses.A_DIM), OK: (2, -1, 0), BAD: (1, -1, curses.A_BOLD),
-            HEAD: (6, -1, curses.A_BOLD), KEY: (-1, -1, curses.A_REVERSE),
-        }
-        self.attrs = {}
-        for i, (style, (fg, bg, extra)) in enumerate(palette.items(), start=1):
-            curses.init_pair(i, fg, bg)
-            self.attrs[style] = curses.color_pair(i) | extra
-
-        h, w = stdscr.getmaxyx()
-        self.transcript(f"screen: {w}x{h}, TERM {os.environ.get('TERM', '?')}, colors {curses.COLORS}")
-        worker = threading.Thread(target=self._play, args=(play,), daemon=True)
-        worker.start()
-        last_draw = 0.0
-        while True:
-            key = stdscr.getch()
-            if key != -1:
-                self.transcript(f"key: {key} in beat {self.beat_no}")
-            if key in (ord("q"), ord("Q")):
-                self.quit = True
-                self.advance.set()
-                break
-            if key in (10, 13, ord(" "), curses.KEY_ENTER):
-                self.advance.set()
-            if key in (ord("a"), ord("A")):
-                self.auto = None if self.auto is not None else self.pause
-                self.advance.set()
-            if key == curses.KEY_RESIZE:
-                h, w = stdscr.getmaxyx()
-                self.transcript(f"screen: resized to {w}x{h}")
-                self.dirty = True
-            if self.dirty or time.monotonic() - last_draw > 0.2:  # the clocks tick
-                self._draw(stdscr)
-                last_draw = time.monotonic()
-            time.sleep(0.04)
-
-    def _play(self, play):
-        try:
-            play(self)
-        except SystemExit:
-            pass
-        except Exception as e:  # show it on screen rather than dying silently
-            self.left.bad(f"demo error: {e!r}")
-        with self.lock:
-            self.done = True
-            self.hint = "done   q quit"
-            self.dirty = True
-
-    def _draw(self, stdscr):
-        import curses
-
-        with self.lock:
-            self.dirty = False
-            h, w = stdscr.getmaxyx()
-            stdscr.erase()
-            if h < 24 or w < 90:
-                stdscr.addstr(0, 0, f"need at least 90x24; this terminal is {w}x{h}")
-                stdscr.refresh()
-                return
-            A = self.attrs
-
-            def text(y, x, s, attr=0, width=None):
-                width = width if width is not None else w - x
-                if width <= 0 or y >= h:
-                    return
-                s = s[: width - 1] + "…" if len(s) > width else s
-                try:
-                    stdscr.addstr(y, x, s, attr)
-                except curses.error:
-                    pass
-
-            # title bar
-            title = f" choir · demo   beat {self.beat_no}/{self.beat_total}: {self.beat_title}"
-            elapsed = time.monotonic() - self.beat_started
-            right = f"{elapsed:5.1f}s " if not self.done else " done "
-            bar = title + " " * max(0, w - len(title) - len(right)) + right
-            text(0, 0, bar[:w], A[KEY], w)
-            # narration
-            text(1, 1, self.narration, A[SAY])
-            # panes
-            split = w // 2
-            lw, rw = split - 1, w - split - 1
-            top, bottom = 3, h - 2
-            text(2, 1, self.left.title, A[HEAD], lw - 1)
-            text(2, split + 1, self.right.title, A[HEAD], rw - 1)
-            for y in range(2, bottom):
-                text(y, split, "│", A[NOTE], 1)
-            for pane, x, pw in ((self.left, 1, lw - 1), (self.right, split + 1, rw - 1)):
-                rows = bottom - top - (1 if pane.status else 0)
-                shown = pane.lines[-rows:]
-                for i, (line, style) in enumerate(shown):
-                    text(top + i, x, line, A[style], pw)
-                if pane.status:  # right under the last line, where the eye is
-                    text(top + len(shown), x, pane.status_line(), A[KEY], pw)
-            # footer
-            text(h - 1, 1, self.hint, A[NOTE])
-            stdscr.refresh()
+            took = f"{pane.done - pane.started:.1f} s" if pane.done else "did not finish"
+            self.emit(pane, f"  this side, start to finish: {took}", NOTE)
+        self.left.note("  the honest summary: for disjoint work at a low conflict rate, branches and a merge queue are fine.")
+        self.right.note("  the claim is what happens at the conflict, at the infra failure, and in what you can prove after.")
+        sys.stdout.write(self.paint(f"transcript: {self.env.run / 'take.log'}   node log: {self.env.run / 'node.log'}", NOTE) + "\n")
+        sys.stdout.flush()
 
 
 # ---- helpers the beats share -------------------------------------------------
@@ -564,8 +536,8 @@ def round_lines(env, r, names):
     yield f"  main tip : {r['tip'][:7]}"
 
 
-def parallel(fns):
-    """Run both panes' work at once; the first failure stops the take."""
+def parallel(fns, on_error=None):
+    """Run functions at once; every failure is reported, the first re-raised."""
     errors = []
 
     def guarded(f):
@@ -573,256 +545,222 @@ def parallel(fns):
             f()
         except BaseException as e:  # re-raised in the caller, once
             errors.append(e)
+            if on_error:
+                on_error(e)
 
     threads = [threading.Thread(target=guarded, args=(f,), daemon=True) for f in fns]
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        while t.is_alive():  # a join with a timeout stays interruptible
+            t.join(0.2)
     if errors:
         raise errors[0]
 
 
-# ---- beats -------------------------------------------------------------------
-def beat0(ui):
-    env, L, R = ui.env, ui.left, ui.right
-    ui.beat(0, "two remotes, one base", "left: a bare repo, fast-forward only. right: a choir node. Same seed, same test.sh, same twenty agents.")
+# ---- narration, one voice per column ----------------------------------------
+LEFT_NARRATION = {
+    0: "a bare repo, fast-forward only. The same seed, test.sh and agents as the other column.",
+    1: "each agent enables its service on its own branch; 03 and 07 also change the greeting line. Nobody rejects a push: isolation is free.",
+    2: "the maintainer merges in order and runs the tests after each merge. Watch agent-07.",
+    3: "agent-12 needs agent-07's change, and can only get it by taking on 07's conflict.",
+    4: "what this side can prove afterwards: a commit graph, which is honest and good.",
+    5: "two more branches: 05 breaks the test, 09 adds a note. Then the CI runner loses its exec bit. Who gets blamed, and what happens once it is back.",
+}
+RIGHT_NARRATION = {
+    0: "a choir node. The same seed, test.sh and agents as the other column.",
+    1: "each agent enables its service on its own branch, proposed as refs/for/main/<agent>/enable. Nobody rejects a push here either.",
+    2: "one queue round. Watch agent-07, and what happens to 08 to 20 behind it.",
+    3: "07 lands the conflict on main as-is, the node reads it three-sided, 12 builds on top, 07 resolves later.",
+    4: "what this side can prove afterwards: every landing, check verdict and ref move as one signed hash chain, verified offline with the node's public key.",
+    5: "the same two branches and the same broken runner. Errored is a statement about the runner; Failed is a statement about the change.",
+}
+
+
+# ---- the left column: git alone ----------------------------------------------
+def left_script(ui):
+    env, L = ui.env, ui.left
+
+    # beat 0
+    L.beat(0, "one remote, one base")
     L.cmd(["git", "init", "-q", "--bare", "origin.git"], cwd=env.left, label="left ")
     L.cmd(["git", "-C", "origin.git", "config", "receive.denyNonFastForwards", "true"], cwd=env.left, label="left ")
     L.note("  every push is a compare-and-swap; nobody can overwrite anybody")
-    R.note(f"  choir-node on {env.api}, one repo {REPO}, queue runs the repo's test.sh")
-    R.cmd(["curl", "-s", "-o", "/dev/null", "-w", "healthz %{http_code}\\n", f"{env.api}/healthz"], label="right ")
+    seed_side(ui, L, env.left, str(env.left / "origin.git"))
 
-    def seed(pane, side, url):
-        seed_dir = side / "seed"
-        env.git(side, "clone", "-q", url, "seed")
-        seed_tree(seed_dir, env.names(), env.ci_seconds)
-        env.git(seed_dir, "add", ".")
-        env.git(seed_dir, "commit", "-q", "-m", "base: greeting, test.sh, twenty services")
-        env.git(seed_dir, "push", "-q", "origin", "HEAD:main")
-        pane.put(f"seed $ git push origin HEAD:main", PROMPT)
-        pane.note(f"  base: config.toml, test.sh ({env.ci_seconds:g} s per run), svc/agent-01..{env.agents:02d}.toml")
-
-    parallel([lambda: seed(L, env.left, str(env.left / "origin.git")), lambda: seed(R, env.right, env.url)])
-    ui.wait()
-
-
-def beat1(ui):
-    env, L, R = ui.env, ui.left, ui.right
-    ui.beat(1, "twenty agents, twenty worktrees, twenty branches", "each agent enables its service on its own branch. Two of them (03, 07) also change the greeting line. Watch: neither side rejects a push; isolation is free.")
+    # beat 1
+    L.beat(1, f"{env.agents} agents, {env.agents} worktrees, {env.agents} branches")
     L.put("each $ git worktree add wt/<agent> -b <agent> main && edit && git commit && git push origin <agent>", PROMPT)
-    R.put("each $ git worktree add wt/<agent> -b <agent> main && edit && git commit && git push origin HEAD:refs/for/main/<agent>/enable", PROMPT)
-    counters = {"L": [0, 0], "R": [0, 0]}  # pushed, rejected
+    push_all(ui, L, env.left, lambda n: n)
 
-    def work(pane, key, side, refspec):
-        seed = side / "seed"
-        t0 = time.monotonic()
-        # `git worktree add` scans .git/worktrees/* while a sibling is still
-        # writing its own entry, so creation is serialised per repo; the
-        # edits, commits and pushes below stay concurrent.
-        adding = threading.Lock()
+    # beat 2
+    L.beat(2, f"integration: {env.agents} branches become one main")
+    m = env.left / "maintainer"
+    env.git(env.left, "clone", "-q", str(env.left / "origin.git"), "maintainer")
+    L.put(f"maintainer $ for b in agent-01..{env.agents:02d}: git merge --no-ff origin/$b && ci/run-tests || skip", PROMPT)
+    t0 = time.monotonic()
+    merged, blocked, ci = [], [], 0
+    env.git(m, "fetch", "-q", "origin")
+    for name in env.names():
+        t1 = time.monotonic()
+        L.set_status(f"merged {len(merged)}  blocked {len(blocked)}  ci runs {ci}  now: {name}", timed=True, keep_clock=bool(name != env.names()[0]))
+        p = env.git(m, "merge", "-q", "--no-ff", "-m", f"merge {name}", f"origin/{name}", check=False)
+        if p.returncode != 0:
+            conflict = [l.split(" in ", 1)[-1] for l in p.stdout.splitlines() if l.startswith("CONFLICT")]
+            env.git(m, "merge", "--abort")
+            blocked.append(name)
+            L.bad(f"  merge {name}  CONFLICT {', '.join(conflict)}  → skipped; author paged, branch waits")
+            continue
+        ci += 1
+        rc = run_ci(env.left / "ci" / "run-tests", m, env)
+        if rc == 0:
+            merged.append(name)
+            L.put(f"  merge {name}  ✓ tests ✓  {ms(t1)}", OK)
+        else:
+            env.git(m, "reset", "-q", "--hard", "HEAD~1")
+            blocked.append(name)
+            L.bad(f"  merge {name}  tests ✗ (exit {rc})  → reverted; author paged")
+    env.git(m, "push", "-q", "origin", "main")
+    L.set_status("")
+    L.put(f"  {len(merged)} merged, {len(blocked)} blocked, {ci} CI runs one after another, {ms(t0)}", NOTE)
+    L.note(f"  the cost: {ci} merges x {env.ci_seconds:g} s of tests, in series, plus a merge each")
+    L.note("  agent-07's work is on a branch nobody else can see on main until its author comes back")
 
-        def one(name):
-            wt = side / "wt" / name
-            with adding:
-                env.git(seed, "worktree", "add", "-q", str(wt), "-b", name, "main")
-            files = agent_change(wt, name)
-            env.git(wt, "add", ".")
-            env.git(wt, "commit", "-q", "-m", f"{name}: enable")
-            p = env.git(wt, "push", "-q", "origin", refspec(name), check=False)
-            with ui.lock:
-                counters[key][0 if p.returncode == 0 else 1] += 1
-            pane.put(f"  {name}  {'pushed' if p.returncode == 0 else 'REJECTED'}  ({files})", OK if p.returncode == 0 else BAD)
-            pane.set_status(f" pushed {counters[key][0]}  rejected {counters[key][1]}  {ms(t0)}")
+    # beat 3
+    L.beat(3, "the conflict: a branch that waits")
+    wt = env.left / "wt" / "agent-12"
+    env.git(wt, "fetch", "-q", "origin")
+    env.git(wt, "merge", "-q", "origin/main", check=False)
+    rc, _ = L.cmd(["git", "merge", "origin/agent-07"], cwd=wt, quiet=True)
+    L.bad("  CONFLICT (content): Merge conflict in config.toml" if rc else "  merged")
+    L.cmd(["git", "merge", "--abort"], cwd=wt)
+    L.note("  agent-12 waits for agent-07, or resolves somebody else's conflict in its own worktree")
+    L.note("  main does not know a conflict exists; a forge would show 07's PR as 'has conflicts'")
 
-        parallel([lambda n=n: one(n) for n in env.names()])
-        pane.set_status("")
-        pane.put(f"  {counters[key][0]} pushed, {counters[key][1]} rejected, {ms(t0)}", NOTE)
+    # beat 4
+    L.beat(4, "what this side can prove")
+    L.cmd(["git", "log", "--oneline", "-3", "main"], cwd=m)
+    L.note("  proof of order: parent pointers. signatures on merges: none configured. CI verdicts: not recorded.")
+    L.note("  who merged what, in what order, and what the tests said lives in the maintainer's terminal history")
 
-    parallel([
-        lambda: work(L, "L", env.left, lambda n: n),
-        lambda: work(R, "R", env.right, lambda n: f"HEAD:refs/for/main/{n}/enable"),
-    ])
-    ui.wait()
+    # beat 5
+    L.beat(5, "a broken test runner is not a failing test")
+    second_branches(ui, env.left, lambda n: f"HEAD:{n}-2")
+    runner = env.left / "ci" / "run-tests"
 
-
-def beat2(ui):
-    env, L, R = ui.env, ui.left, ui.right
-    ui.beat(2, "integration: twenty branches become one main", "left: the maintainer merges in order and runs the tests after each merge. right: one queue round. Watch what happens at agent-07, and what happens to 08 to 20.")
-    stats = {}
-
-    def left():
-        m = env.left / "maintainer"
-        env.git(env.left, "clone", "-q", str(env.left / "origin.git"), "maintainer")
-        L.put("maintainer $ for b in agent-01..20: git merge --no-ff origin/$b && ci/run-tests || skip", PROMPT)
-        t0 = time.monotonic()
-        merged, blocked, ci = [], [], 0
-        env.git(m, "fetch", "-q", "origin")
-        for name in env.names():
-            t1 = time.monotonic()
-            p = env.git(m, "merge", "-q", "--no-ff", "-m", f"merge {name}", f"origin/{name}", check=False)
-            if p.returncode != 0:
-                conflict = [l.split(" in ", 1)[-1] for l in p.stdout.splitlines() if l.startswith("CONFLICT")]
-                env.git(m, "merge", "--abort")
-                blocked.append(name)
-                L.bad(f"  merge {name}  CONFLICT {', '.join(conflict)}  → skipped; author paged, branch waits")
-                continue
-            ci += 1
-            rc = run_ci(env.left / "ci" / "run-tests", m, env)
-            if rc == 0:
-                merged.append(name)
-                L.put(f"  merge {name}  ✓ tests ✓  {ms(t1)}", OK)
-            else:
-                env.git(m, "reset", "-q", "--hard", "HEAD~1")
-                blocked.append(name)
-                L.bad(f"  merge {name}  tests ✗ (exit {rc})  → reverted; author paged")
-            L.set_status(f" merged {len(merged)}  blocked {len(blocked)}  ci runs {ci}  {ms(t0)}")
-        env.git(m, "push", "-q", "origin", "main")
-        L.set_status("")
-        stats["L"] = (len(merged), len(blocked), ci, ms(t0))
-        L.put(f"  {len(merged)} merged, {len(blocked)} blocked, {ci} CI runs one after another, {stats['L'][3]}", NOTE)
-        L.note(f"  the cost: {ci} merges x {env.ci_seconds:g} s of tests, in series, plus a merge each")
-        L.note("  agent-07's work is on a branch nobody else can see on main until its author comes back")
-
-    def right():
-        t0 = time.monotonic()
-        R.put("$ curl -X POST /api/queue/run  {repo, branch: main}", PROMPT)
-        R.set_status(f" one round: {env.agents} speculative merges, then {env.agents} test runs at once", timed=True)
-        names = round_names(env)
-        r = env.queue_run()
-        R.set_status("")
-        for line in round_lines(env, r, names):
-            R.put(line, BAD if "Conflict" in line else NORMAL)
-        stats["R"] = (len(r["merged"]), len(r["rejected"]), env.agents, ms(t0))
-        R.put(f"  {len(r['merged'])} landed, {len(r['rejected'])} evicted, {env.agents} CI runs in one train, {stats['R'][3]}", NOTE)
-        R.note(f"  the cost: {env.ci_seconds:g} s of tests once, all {env.agents} at the same time, plus one merge per candidate")
-        R.note("  agent-07 was a verdict in the round, not a stop: evicted first-class, 08 to 20 landed behind it")
-
-    parallel([left, right])
-    ui.wait()
-
-
-def beat3(ui):
-    env, L, R = ui.env, ui.left, ui.right
-    ui.beat(3, "the conflict: a branch that waits, or a value on main", "left: agent-12 needs agent-07's change and can only get it by taking on 07's conflict. right: 07 lands the conflict on main as-is, the node reads it three-sided, 12 builds on top, 07 resolves later.")
-
-    def left():
-        wt = env.left / "wt" / "agent-12"
-        L.say("agent-12 needs what agent-07 did. On a branch, that means merging agent-07's branch, conflict included.")
-        env.git(wt, "fetch", "-q", "origin")
-        env.git(wt, "merge", "-q", "origin/main", check=False)
-        rc, _ = L.cmd(["git", "merge", "origin/agent-07"], cwd=wt, quiet=True)
-        L.bad("  CONFLICT (content): Merge conflict in config.toml" if rc else "  merged")
-        L.cmd(["git", "merge", "--abort"], cwd=wt)
-        L.note("  agent-12 waits for agent-07, or resolves somebody else's conflict in its own worktree")
-        L.note("  main does not know a conflict exists; a forge would show 07's PR as 'has conflicts'")
-
-    def right():
-        wt07, wt12 = env.right / "wt" / "agent-07", env.right / "wt" / "agent-12"
-        R.say("agent-07 pulls main, gets CONFLICT as anywhere, commits it as-is, and pushes it. Accepted.")
-        rc, out = R.cmd(["git", "pull", "--no-rebase", "-q", "origin", "main"], cwd=wt07, quiet=True)
-        for line in out.splitlines():
-            if line.startswith("CONFLICT"):
-                R.bad("  " + line)
-        R.cmd(["git", "add", "config.toml"], cwd=wt07)
-        R.cmd(["git", "commit", "-q", "-m", "merge main: conflict kept as a value"], cwd=wt07)
-        rc, out = R.cmd(["git", "push", "origin", "HEAD:main"], cwd=wt07, quiet=True)
-        for line in out.splitlines():
-            if "->" in line or "rejected" in line:
-                R.put("  " + line.strip(), OK if rc == 0 else BAD)
-        env.git(wt07, "push", "-q", "origin", ":refs/for/main/agent-07/enable")
-        R.say("the node reads that commit as what it is:")
-        html = env.get_text(f"/r/{REPO[:-4]}/blob/main/config.toml")
-        for line in env.shown("conflict", html):
-            R.put(line, OK)
-        R.say("agent-12 pulls main, gets the conflict commit, does its own work on top, lands.")
-        env.git(wt12, "pull", "--no-rebase", "-q", "origin", "main")
-        (wt12 / "svc" / "agent-12.toml").write_text("enabled = true\nreplicas = 2\n")
-        R.cmd(["git", "commit", "-q", "-am", "agent-12: replicas (on top of the unresolved conflict)"], cwd=wt12)
-        rc, out = R.cmd(["git", "push", "origin", "HEAD:main"], cwd=wt12, quiet=True)
-        for line in out.splitlines():
-            if "->" in line or "rejected" in line:
-                R.put("  " + line.strip(), OK if rc == 0 else BAD)
-        R.say("agent-07 comes back and resolves. One more commit; the history keeps the conflict.")
-        env.git(wt07, "pull", "--no-rebase", "-q", "origin", "main")
-        (wt07 / "config.toml").write_text('greeting = "hola"\n')
-        R.cmd(["git", "commit", "-q", "-am", "resolve: greeting is Spanish"], cwd=wt07)
-        env.git(wt07, "push", "-q", "origin", "HEAD:main")
-        R.cmd(["git", "log", "--oneline", "-4", "origin/main"], cwd=wt07)
-
-    parallel([left, right])
-    ui.wait()
-
-
-def beat4(ui):
-    env, L, R = ui.env, ui.left, ui.right
-    ui.beat(4, "what each side can prove afterwards", "left: a commit graph, which is honest and good. right: every landing, check verdict and ref move as one signed hash chain, verified offline with the node's public key.")
-
-    def left():
-        m = env.left / "maintainer"
-        L.cmd(["git", "log", "--oneline", "-3", "main"], cwd=m)
-        L.note("  proof of order: parent pointers. signatures on merges: none configured. CI verdicts: not recorded.")
-        L.note("  who merged what, in what order, and what the tests said lives in the maintainer's terminal history")
-
-    def right():
-        entries = env.get(f"/api/log?from=0")["entries"]
-        kinds = {}
-        for e in entries:
-            k = next(iter(json.loads(bytes.fromhex(e["payload_hex"]))["kind"]))
-            kinds[k] = kinds.get(k, 0) + 1
-        R.put(f"$ choir log {env.api}   ({len(entries)} entries: " + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())) + ")", PROMPT)
-        for line in env.shown("log", {"entries": entries[-12:]})[-8:]:
-            R.put(line)
-        R.put(f"$ choir log {env.api} --verify --keys node.pub", PROMPT)
-        p = env.choir("log", env.api, "--verify", "--keys", str(env.run / "node.pub"))
-        R.put("  " + p.stderr.strip().splitlines()[-1], OK)
-        R.note("  continuity, every hash recomputed, every signature checked, with nothing but the wire format and one key")
-
-    parallel([left, right])
-    ui.wait()
-
-
-def beat5(ui):
-    env, L, R = ui.env, ui.left, ui.right
-    ui.beat(5, "a broken test runner is not a failing test", "two more branches: agent-05 breaks the test, agent-09 adds a note. Then the CI runner on each side loses its exec bit. Watch who gets blamed, and what happens once the runner is back.")
-
-    def prepare(side, refspec):
-        seed = side / "seed"
-        env.git(seed, "fetch", "-q", "origin")
-        for name, edit in (("agent-05", lambda wt: (wt / "config.toml").write_text("greeting = hi\n")),
-                           ("agent-09", lambda wt: (wt / "NOTES.md").write_text("Run ./test.sh before you push.\n"))):
-            wt = side / "wt" / name
-            env.git(wt, "checkout", "-q", "--detach", "origin/main")
-            env.git(wt, "checkout", "-q", "-b", f"{name}-2")
-            edit(wt)
-            env.git(wt, "add", ".")
-            env.git(wt, "commit", "-q", "-m", f"{name}: {'unquoted greeting (breaks test.sh)' if name.endswith('05') else 'notes'}")
-            env.git(wt, "push", "-q", "origin", refspec(name))
-
-    parallel([lambda: prepare(env.left, lambda n: f"HEAD:{n}-2"),
-              lambda: prepare(env.right, lambda n: f"HEAD:refs/for/main/{n}/second")])
-    for pane, runner in ((L, env.left / "ci" / "run-tests"), (R, env.run / "ci" / "run-tests")):
-        pane.put(f"$ chmod -x {typed([runner], env.run)}", PROMPT)
-        runner.chmod(0o644)
-
-    def left(broken):
-        m = env.left / "maintainer"
+    def merge_two(broken):
         env.git(m, "fetch", "-q", "origin")
         for name in ("agent-05", "agent-09"):
+            L.set_status(f"merge {name}, then ci/run-tests", timed=True)
             env.git(m, "merge", "-q", "--no-ff", "-m", f"merge {name}", f"origin/{name}-2", check=False)
-            rc = run_ci(env.left / "ci" / "run-tests", m, env)
+            rc = run_ci(runner, m, env)
             if rc == 0:
                 L.put(f"  merge {name}  ✓ tests ✓", OK)
             else:
                 env.git(m, "reset", "-q", "--hard", "HEAD~1")
                 L.bad(f"  merge {name}  tests ✗ (exit {rc})  → reverted; author paged")
+        L.set_status("")
         if broken:
             L.note("  exit 126 is 'could not run', but red is red to a script: both authors paged for a runner they do not own")
 
-    def right(broken):
+    L.put(f"$ chmod -x {typed([runner], env.run)}", PROMPT)
+    runner.chmod(0o644)
+    merge_two(True)
+    L.put(f"$ chmod +x {typed([runner], env.run)}   # the runner is back", PROMPT)
+    runner.chmod(0o755)
+    merge_two(False)
+    L.done = time.monotonic()
+
+
+# ---- the right column: choir -------------------------------------------------
+def right_script(ui):
+    env, R = ui.env, ui.right
+
+    # beat 0
+    R.beat(0, "one node, one base")
+    R.note(f"  choir-node on {env.api}, one repo {REPO}, the queue runs the repo's test.sh")
+    R.cmd(["curl", "-s", "-o", "/dev/null", "-w", "healthz %{http_code}\\n", f"{env.api}/healthz"], label="right ")
+    seed_side(ui, R, env.right, env.url)
+
+    # beat 1
+    R.beat(1, f"{env.agents} agents, {env.agents} worktrees, {env.agents} proposals")
+    R.put("each $ git worktree add wt/<agent> -b <agent> main && edit && git commit && git push origin HEAD:refs/for/main/<agent>/enable", PROMPT)
+    push_all(ui, R, env.right, lambda n: f"HEAD:refs/for/main/{n}/enable")
+
+    # beat 2
+    R.beat(2, f"integration: {env.agents} proposals, one round")
+    t0 = time.monotonic()
+    R.put("$ curl -X POST /api/queue/run  {repo, branch: main}", PROMPT)
+    R.set_status(f"one round: {env.agents} speculative merges, then {env.agents} test runs at once", timed=True)
+    names = round_names(env)
+    r = env.queue_run()
+    R.set_status("")
+    for line in round_lines(env, r, names):
+        R.put(line, BAD if "Conflict" in line else NORMAL)
+    R.put(f"  {len(r['merged'])} landed, {len(r['rejected'])} evicted, {env.agents} CI runs in one train, {ms(t0)}", NOTE)
+    R.note(f"  the cost: {env.ci_seconds:g} s of tests once, all {env.agents} at the same time, plus one merge per candidate")
+    R.note("  agent-07 was a verdict in the round, not a stop: evicted first-class, 08 to 20 landed behind it")
+
+    # beat 3
+    R.beat(3, "the conflict: a value on main")
+    wt07, wt12 = env.right / "wt" / "agent-07", env.right / "wt" / "agent-12"
+    R.say("agent-07 pulls main, gets CONFLICT as anywhere, commits it as-is, and pushes it. Accepted.")
+    rc, out = R.cmd(["git", "pull", "--no-rebase", "-q", "origin", "main"], cwd=wt07, quiet=True)
+    for line in out.splitlines():
+        if line.startswith("CONFLICT"):
+            R.bad("  " + line)
+    R.cmd(["git", "add", "config.toml"], cwd=wt07)
+    R.cmd(["git", "commit", "-q", "-m", "merge main: conflict kept as a value"], cwd=wt07)
+    rc, out = R.cmd(["git", "push", "origin", "HEAD:main"], cwd=wt07, quiet=True)
+    for line in out.splitlines():
+        if "->" in line or "rejected" in line:
+            R.put("  " + line.strip(), OK if rc == 0 else BAD)
+    env.git(wt07, "push", "-q", "origin", ":refs/for/main/agent-07/enable")
+    R.say("the node reads that commit as what it is:")
+    html = env.get_text(f"/r/{REPO[:-4]}/blob/main/config.toml")
+    for line in env.shown("conflict", html):
+        R.put(line, OK)
+    R.say("agent-12 pulls main, gets the conflict commit, does its own work on top, lands.")
+    env.git(wt12, "pull", "--no-rebase", "-q", "origin", "main")
+    (wt12 / "svc" / "agent-12.toml").write_text("enabled = true\nreplicas = 2\n")
+    R.cmd(["git", "commit", "-q", "-am", "agent-12: replicas (on top of the unresolved conflict)"], cwd=wt12)
+    rc, out = R.cmd(["git", "push", "origin", "HEAD:main"], cwd=wt12, quiet=True)
+    for line in out.splitlines():
+        if "->" in line or "rejected" in line:
+            R.put("  " + line.strip(), OK if rc == 0 else BAD)
+    R.say("agent-07 comes back and resolves. One more commit; the history keeps the conflict.")
+    env.git(wt07, "pull", "--no-rebase", "-q", "origin", "main")
+    (wt07 / "config.toml").write_text('greeting = "hola"\n')
+    R.cmd(["git", "commit", "-q", "-am", "resolve: greeting is Spanish"], cwd=wt07)
+    env.git(wt07, "push", "-q", "origin", "HEAD:main")
+    R.cmd(["git", "log", "--oneline", "-4", "origin/main"], cwd=wt07)
+
+    # beat 4
+    R.beat(4, "what this side can prove")
+    entries = env.get("/api/log?from=0")["entries"]
+    kinds = {}
+    for e in entries:
+        k = next(iter(json.loads(bytes.fromhex(e["payload_hex"]))["kind"]))
+        kinds[k] = kinds.get(k, 0) + 1
+    R.put(f"$ choir log {env.api}   ({len(entries)} entries: " + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())) + ")", PROMPT)
+    for line in env.shown("log", {"entries": entries[-12:]})[-8:]:
+        R.put(line)
+    R.put(f"$ choir log {env.api} --verify --keys node.pub", PROMPT)
+    p = env.choir("log", env.api, "--verify", "--keys", str(env.run / "node.pub"))
+    R.put("  " + p.stderr.strip().splitlines()[-1], OK)
+    R.note("  continuity, every hash recomputed, every signature checked, with nothing but the wire format and one key")
+
+    # beat 5
+    R.beat(5, "a broken test runner is not a failing test")
+    second_branches(ui, env.right, lambda n: f"HEAD:refs/for/main/{n}/second")
+    runner = env.run / "ci" / "run-tests"
+
+    def round_two(broken):
         R.put("$ curl -X POST /api/queue/run", PROMPT)
+        R.set_status("one round over the two new proposals", timed=True)
         names = round_names(env)
         r = env.queue_run()
+        R.set_status("")
         for line in round_lines(env, r, names):
             R.put(line, BAD if ("Conflict" in line or "CiFailure" in line or "could not" in line) else NORMAL)
         if broken:
@@ -830,34 +768,109 @@ def beat5(ui):
         else:
             R.note("  Failed is a statement about the change: only agent-05 pays; agent-09 landed in the same round")
 
-    parallel([lambda: left(True), lambda: right(True)])
-    for pane, runner in ((L, env.left / "ci" / "run-tests"), (R, env.run / "ci" / "run-tests")):
-        pane.put(f"$ chmod +x {typed([runner], env.run)}   # the runner is back", PROMPT)
-        runner.chmod(0o755)
-    parallel([lambda: left(False), lambda: right(False)])
-    L.note("  the honest summary: for disjoint work at a low conflict rate, branches and a merge queue are fine.")
-    R.note("  the claim is what happens at the conflict, at the infra failure, and in what you can prove after.")
-    ui.wait()
+    R.put(f"$ chmod -x {typed([runner], env.run)}", PROMPT)
+    runner.chmod(0o644)
+    round_two(True)
+    R.put(f"$ chmod +x {typed([runner], env.run)}   # the runner is back", PROMPT)
+    runner.chmod(0o755)
+    round_two(False)
+    R.done = time.monotonic()
 
 
-BEATS = [beat0, beat1, beat2, beat3, beat4, beat5]
+# ---- steps both columns share, each on its own tree --------------------------
+def seed_side(ui, pane, side, url):
+    env = ui.env
+    seed_dir = side / "seed"
+    env.git(side, "clone", "-q", url, "seed")
+    seed_tree(seed_dir, env.names(), env.ci_seconds)
+    env.git(seed_dir, "add", ".")
+    env.git(seed_dir, "commit", "-q", "-m", "base: greeting, test.sh, the services")
+    env.git(seed_dir, "push", "-q", "origin", "HEAD:main")
+    pane.put("seed $ git push origin HEAD:main", PROMPT)
+    pane.note(f"  base: config.toml, test.sh ({env.ci_seconds:g} s per run), svc/agent-01..{env.agents:02d}.toml")
 
 
+def push_all(ui, pane, side, refspec):
+    """Every agent: a worktree, a branch, an edit, a commit, a push; all at once."""
+    env = ui.env
+    seed = side / "seed"
+    t0 = time.monotonic()
+    counters = [0, 0]  # pushed, rejected
+    # `git worktree add` scans .git/worktrees/* while a sibling is still
+    # writing its own entry, so creation is serialised per repo; the
+    # edits, commits and pushes below stay concurrent.
+    adding = threading.Lock()
+
+    def one(name):
+        wt = side / "wt" / name
+        with adding:
+            env.git(seed, "worktree", "add", "-q", str(wt), "-b", name, "main")
+        files = agent_change(wt, name)
+        env.git(wt, "add", ".")
+        env.git(wt, "commit", "-q", "-m", f"{name}: enable")
+        p = env.git(wt, "push", "-q", "origin", refspec(name), check=False)
+        with ui.lock:
+            counters[0 if p.returncode == 0 else 1] += 1
+        pane.put(f"  {name}  {'pushed' if p.returncode == 0 else 'REJECTED'}  ({files})", OK if p.returncode == 0 else BAD)
+        pane.set_status(f"pushed {counters[0]}  rejected {counters[1]}", keep_clock=True)
+
+    pane.set_status(f"{env.agents} agents at work", timed=True)
+    parallel([lambda n=n: one(n) for n in env.names()])
+    pane.set_status("")
+    pane.put(f"  {counters[0]} pushed, {counters[1]} rejected, {ms(t0)}", NOTE)
+
+
+def second_branches(ui, side, refspec):
+    """Beat 5's two branches: 05 breaks the test, 09 adds a note."""
+    env = ui.env
+    env.git(side / "seed", "fetch", "-q", "origin")
+    for name, edit in (("agent-05", lambda wt: (wt / "config.toml").write_text("greeting = hi\n")),
+                       ("agent-09", lambda wt: (wt / "NOTES.md").write_text("Run ./test.sh before you push.\n"))):
+        wt = side / "wt" / name
+        env.git(wt, "checkout", "-q", "--detach", "origin/main")
+        env.git(wt, "checkout", "-q", "-b", f"{name}-2")
+        edit(wt)
+        env.git(wt, "add", ".")
+        env.git(wt, "commit", "-q", "-m", f"{name}: {'unquoted greeting (breaks test.sh)' if name.endswith('05') else 'notes'}")
+        env.git(wt, "push", "-q", "origin", refspec(name))
+
+
+# ---- main --------------------------------------------------------------------
 def play(ui):
-    ui.beat_total = len(BEATS) - 1
-    for beat in BEATS:
-        if ui.quit:
-            break
-        beat(ui)
+    ui.banner()
+    ticker = threading.Thread(target=ui.tick, daemon=True)
+    ticker.start()
+
+    def report(e):
+        side = ui.left if threading.current_thread().name == "left" else ui.right
+        side.set_status("")
+        side.bad(f"demo error: {e!r}")
+
+    try:
+        parallel([left_script_named(ui), right_script_named(ui)], on_error=report)
+    finally:
+        ui.finished = True
+        ui.closing()
+
+
+def left_script_named(ui):
+    def run():
+        threading.current_thread().name = "left"
+        left_script(ui)
+    return run
+
+
+def right_script_named(ui):
+    def run():
+        threading.current_thread().name = "right"
+        right_script(ui)
+    return run
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bin", required=True, help="directory holding choir-node and choir")
-    ap.add_argument("--pause", type=float, default=2.0, help="seconds between beats (default 2)")
-    ap.add_argument("--step", action="store_true", help="wait for Enter after each beat")
-    ap.add_argument("--auto", nargs="?", const=2.0, type=float, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--dump", action="store_true")
+    ap.add_argument("--plain", "--dump", action="store_true", help="no colour, no live rows")
     ap.add_argument("--port", type=int, default=None, help="default 8447, or the next free port")
     ap.add_argument("--agents", type=int, default=20)
     ap.add_argument("--ci-seconds", type=float, default=3.0, help="how long test.sh takes (default 3)")
@@ -877,12 +890,14 @@ def main():
         signal.signal(sig, lambda *_: sys.exit(1))
     env.reset()
     env.start_node()
-    pause = args.auto if args.auto is not None else args.pause
-    ui = UI(env, dump=args.dump, auto=None if args.step else pause, pause=pause)
+    ui = UI(env, plain=args.plain)
     try:
-        ui.run(play)
-    except Exception as e:  # text mode: one line, then stop; the screen shows its own
-        sys.exit(f"demo error: {e}\nnode log: {env.run / 'node.log'}")
+        play(ui)
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        sys.exit(f"stopped; transcript so far: {env.run / 'take.log'}")
+    except Exception as e:
+        sys.exit(f"demo error: {e}\ntranscript: {env.run / 'take.log'}   node log: {env.run / 'node.log'}")
     finally:
         env.stop_node()
 
