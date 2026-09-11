@@ -554,10 +554,15 @@ def beat1(ui):
     def work(pane, key, side, refspec):
         seed = side / "seed"
         t0 = time.monotonic()
+        # `git worktree add` scans .git/worktrees/* while a sibling is still
+        # writing its own entry, so creation is serialised per repo; the
+        # edits, commits and pushes below stay concurrent.
+        adding = threading.Lock()
 
         def one(name):
             wt = side / "wt" / name
-            env.git(seed, "worktree", "add", "-q", str(wt), "-b", name, "main")
+            with adding:
+                env.git(seed, "worktree", "add", "-q", str(wt), "-b", name, "main")
             files = agent_change(wt, name)
             env.git(wt, "add", ".")
             env.git(wt, "commit", "-q", "-m", f"{name}: enable")
