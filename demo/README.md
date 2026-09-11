@@ -22,9 +22,9 @@ itself on the left and the properties a forge cannot add on the right.
 ## Run it
 
 ```bash
-demo/run.sh                  # build into demo/.target, then play; Enter advances
-demo/run.sh --auto           # advance by itself, 6 s per beat
-demo/run.sh --auto 10        # 10 s per beat
+demo/run.sh                  # build into demo/.target, then play in one go
+demo/run.sh --pause 5        # 5 s between beats instead of 2
+demo/run.sh --step           # stop after each beat and wait for Enter
 demo/run.sh --no-build       # skip cargo; use the binaries as built
 demo/run.sh --dump           # no screen: play everything and print both panes
 demo/run.sh --port N         # default 8447, or the next free port
@@ -32,8 +32,9 @@ demo/run.sh --agents N       # default 20, at least 12
 demo/run.sh --ci-seconds S   # how long test.sh takes, default 3
 ```
 
-Keys while playing: Enter or Space for the next beat, `a` toggles
-autoplay, `q` quits. The screen needs 90 by 24 or more; 120 by 40 is
+The take runs in one go, a 2 s breath between beats, and stays on the
+last screen until `q`. Keys while playing: Enter or Space skips the
+breath, `a` toggles stepping, `q` quits. The screen needs 90 by 24 or more; 120 by 40 is
 comfortable. One Ghostty tab is enough; there is no tmux.
 
 Idempotent: each run kills the node the previous take left behind,

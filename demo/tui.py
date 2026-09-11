@@ -4,7 +4,8 @@ against a choir node.
 
     python3 demo/tui.py --bin <dir-with-choir-node-and-choir> [options]
 
-    --auto [SECS]   advance beats by itself, SECS apart (default 6)
+    --pause SECS    breath between beats; the take runs in one go (default 2)
+    --step          stop after each beat and wait for Enter instead
     --dump          no screen: play every beat and print both panes as text
     --port N        the node's loopback port (default 8447, or the next free one)
     --agents N      how many agents (default 20)
@@ -12,7 +13,7 @@ against a choir node.
                     model of beat 2 is the maintainer paying it once per
                     merge in series, and the round paying it once
 
-Keys while playing: Enter or Space next beat, a toggle autoplay, q quit.
+Keys while playing: Enter or Space skips the pause, a toggles stepping, q quit.
 
 Left pane: worktrees, branches, a careful maintainer merging in order
 and running the tests after each merge. Right pane: the same branches
@@ -286,10 +287,11 @@ class Env:
 
 # ---- the screen ------------------------------------------------------------
 class UI:
-    def __init__(self, env, dump=False, auto=None):
+    def __init__(self, env, dump=False, auto=None, pause=2.0):
         self.env = env
         self.dump = dump
-        self.auto = auto
+        self.auto = auto  # seconds between beats, or None to wait for Enter
+        self.pause = pause
         self.lock = threading.Lock()
         self.dirty = True
         self.left = Pane(self, "L", "git: worktrees, branches, a careful maintainer")
@@ -333,12 +335,12 @@ class UI:
         self.advance.clear()
         if self.auto is not None:
             with self.lock:
-                self.hint = f"autoplay: next beat in {self.auto:.0f}s   a stop   q quit"
+                self.hint = f"next beat in {self.auto:.0f}s   Enter now   a step   q quit"
                 self.dirty = True
             self.advance.wait(self.auto)
         else:
             with self.lock:
-                self.hint = "[Enter] next beat   a autoplay   q quit"
+                self.hint = "[Enter] next beat   a run on   q quit"
                 self.dirty = True
             self.advance.wait()
         with self.lock:
@@ -389,7 +391,7 @@ class UI:
             if key in (10, 13, ord(" "), curses.KEY_ENTER):
                 self.advance.set()
             if key in (ord("a"), ord("A")):
-                self.auto = None if self.auto is not None else 6.0
+                self.auto = None if self.auto is not None else self.pause
                 self.advance.set()
             if key == curses.KEY_RESIZE:
                 h, w = stdscr.getmaxyx()
@@ -852,7 +854,9 @@ def play(ui):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bin", required=True, help="directory holding choir-node and choir")
-    ap.add_argument("--auto", nargs="?", const=6.0, type=float, default=None)
+    ap.add_argument("--pause", type=float, default=2.0, help="seconds between beats (default 2)")
+    ap.add_argument("--step", action="store_true", help="wait for Enter after each beat")
+    ap.add_argument("--auto", nargs="?", const=2.0, type=float, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--dump", action="store_true")
     ap.add_argument("--port", type=int, default=None, help="default 8447, or the next free port")
     ap.add_argument("--agents", type=int, default=20)
@@ -873,7 +877,8 @@ def main():
         signal.signal(sig, lambda *_: sys.exit(1))
     env.reset()
     env.start_node()
-    ui = UI(env, dump=args.dump, auto=args.auto)
+    pause = args.auto if args.auto is not None else args.pause
+    ui = UI(env, dump=args.dump, auto=None if args.step else pause, pause=pause)
     try:
         ui.run(play)
     except Exception as e:  # text mode: one line, then stop; the screen shows its own
