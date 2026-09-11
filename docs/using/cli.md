@@ -61,8 +61,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   mint a key and print the line the operator registers; pass your channel name to print the bound form
 - `choir git-credential <auth-file> [--auth-user <name>] get|store|erase`  
   git credential helper: hands git your token on stdin so it never lives in a remote URL; configure with `git config credential.helper '!choir git-credential <auth-file>'`
-- `choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]`  
-  redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, and the node URL in ~/.choir/config; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory
+- `choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>] [--no-clone]`  
+  redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, the node URL in ~/.choir/config, and a clone of each repository the invite names in the current directory (--no-clone skips it); --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory
 - `choir docs [--open]`  
   build the book from `docs/` with the API documentation inside it at `book/api/`; needs a checkout and `mdbook`, and names the install command if it is missing
 - `choir skill install [--into <dir>]`  

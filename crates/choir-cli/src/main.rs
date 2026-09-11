@@ -1317,8 +1317,9 @@ fn redeem_next(body: &str) -> String {
 ///
 /// Admission in one command: mint an actor key, redeem the operator's
 /// invite, store the token where the rest of the CLI reads it, and — for
-/// the link form — leave git and `~/.choir/config` set up so that the
-/// next thing the reader types is `git clone` and the thing after it is
+/// the link form — leave git and `~/.choir/config` set up and a clone of
+/// each granted repository in the current directory, so that the next
+/// thing the reader types is `cd` and the thing after it is
 /// `choir propose`.
 ///
 /// **The link is the whole input.** It carries the node and the invite,
@@ -1340,8 +1341,16 @@ fn redeem_next(body: &str) -> String {
 fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) -> ! {
     let (mut channel, mut ssh_key, mut token_file, mut chosen_user) = (None, None, None, None);
     let mut key_flag = None;
+    let mut no_clone = false;
     let mut index = 0;
     while index < rest.len() {
+        // The one flag that takes no value: the copy goes somewhere else,
+        // or nowhere yet.
+        if rest[index] == "--no-clone" && !no_clone {
+            no_clone = true;
+            index += 1;
+            continue;
+        }
         let Some(value) = rest.get(index + 1).copied() else {
             usage();
         };
@@ -1642,12 +1651,29 @@ fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) ->
             )),
         ),
     }
+    let copies = if no_clone {
+        Vec::new()
+    } else {
+        clone_granted(api, &account, style)
+    };
     if bound {
-        println!(
-            "\n  {}\n  {}\n",
-            style.dim("Clone anything you were granted, commit on a branch, then:"),
-            style.cyan("choir propose")
-        );
+        match copies.first() {
+            Some(folder) => println!(
+                "\n  {}\n  {}\n  {}\n",
+                style.dim(if copies.len() == 1 {
+                    "Go into your copy, commit on a branch as you always would, then propose it:"
+                } else {
+                    "Go into a copy, commit on a branch as you always would, then propose it:"
+                }),
+                style.cyan(&format!("cd {folder}")),
+                style.cyan("choir propose")
+            ),
+            None => println!(
+                "\n  {}\n  {}\n",
+                style.dim("Clone anything you were granted, commit on a branch, then:"),
+                style.cyan("choir propose")
+            ),
+        }
     } else {
         println!(
             "\n  {}\n  {}\n",
@@ -1658,6 +1684,72 @@ fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) ->
         );
     }
     std::process::exit(0);
+}
+
+/// Clones each repository the redeemed account's grants name into the
+/// current directory, one report row per repository, and returns the
+/// folders it made.
+///
+/// Runs after the token and the credential helper are written, so the
+/// clone authenticates the way every later `git pull` and `git push` in
+/// that folder will: through the helper, from a URL that carries no
+/// credential. A folder already there is somebody's work and is left as
+/// it was. A clone that fails is reported with the line that finishes
+/// it rather than failing the join, because the account already exists
+/// and running `choir join` again would only say this machine joined.
+fn clone_granted(
+    api: &str,
+    account: &serde_json::Value,
+    style: choir_cli::style::Style,
+) -> Vec<String> {
+    let grants: Vec<&str> = account["grants"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    let label = style.dim("copy    ");
+    let mut made = Vec::new();
+    for (repo, folder) in choir_cli::join::repositories(&grants) {
+        let url = format!("{}/{repo}.git", api.trim_end_matches('/'));
+        if std::path::Path::new(folder).exists() {
+            println!(
+                "  {label}  ./{folder} {}",
+                style.dim("is already here, so it was left as it was")
+            );
+            continue;
+        }
+        // Never a prompt: the helper answers, and a question for a
+        // password would ask the reader for something they were never
+        // shown. `--` because the folder is the node's word, not ours.
+        let cloned = std::process::Command::new("git")
+            .args(["clone", "-q", "--", &url, folder])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .output();
+        match cloned {
+            Ok(out) if out.status.success() => {
+                println!("  {label}  ./{folder} {}", style.dim(&format!("({repo})")));
+                made.push(folder.to_string());
+            }
+            outcome => {
+                let why = match &outcome {
+                    Ok(out) => String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .rfind(|line| !line.trim().is_empty())
+                        .unwrap_or("git gave no reason")
+                        .trim()
+                        .to_string(),
+                    Err(error) => format!("git did not run: {error}"),
+                };
+                println!("  {label}  {repo} was not cloned: {why}");
+                println!(
+                    "  {:8}  {}",
+                    "",
+                    style.cyan(&format!("to try again: git clone {url}"))
+                );
+            }
+        }
+    }
+    made
 }
 
 /// Points git at the token for one node, and returns the file it wrote.

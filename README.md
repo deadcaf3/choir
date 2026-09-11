@@ -107,7 +107,7 @@ choir node status               # health, the commit serving, sequencer position
 unit. A non-loopback bind requires TLS.
 
 `choir invite` prints one link; `choir join '<link>'` mints the key, stores
-the token and points git at it.
+the token, points git at it and clones each repository the invite names.
 
 > [!IMPORTANT]
 > Pass `--acl-file` before issuing a second credential; until then every
