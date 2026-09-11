@@ -88,6 +88,32 @@ pub trait SubmitPolicy: Send {
     fn subject(&self) -> (Option<String>, Option<String>) {
         (None, None)
     }
+
+    /// Whether an entry another writer already sequenced can be folded
+    /// here, asked by [`SequencerHandle::replicate`] before it appends
+    /// one. Default: yes.
+    ///
+    /// **This is not admission, and must not become it.** The writer that
+    /// sequenced the entry decided whether it was admissible; a replica
+    /// that re-decided would be a second writer with its own opinion of
+    /// the order, which is the thing a replica exists not to be. So no
+    /// signature, grant or quota is consulted here, and
+    /// [`SubmitPolicy::check`] is never called on a replicated entry.
+    ///
+    /// What is asked is narrower and has to be asked before the append:
+    /// can this replica's projection take the entry at all. A replica
+    /// built from an older release may not know an op kind the writer
+    /// admitted, and appending what [`SubmitPolicy::accepted`] then cannot
+    /// fold would leave a log that no longer replays. Refusing here halts
+    /// replication at that entry, which is the only honest outcome: a
+    /// replica that skipped what it did not understand would be a fork.
+    ///
+    /// # Errors
+    ///
+    /// Why the entry cannot be folded, returned to the replicator.
+    fn replicable(&mut self, _entry: &OpEntry) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The default policy: everything is admitted (localhost/dev shape).
@@ -109,6 +135,55 @@ pub struct Accepted {
     /// Time from dequeue to append; the merge-decision latency the Phase-0
     /// gate measures (<100 ms target, CI excluded).
     pub decision_latency: Duration,
+}
+
+/// An entry another writer already sequenced, and the hash the page that
+/// carried it claimed for it.
+///
+/// The claim travels beside the entry rather than being recomputed and
+/// trusted: [`SequencerHandle::replicate`] refuses an entry whose content
+/// does not hash to what its source said, which is SYNC.md's second check
+/// made again at the one place that appends.
+#[derive(Debug, Clone)]
+pub struct Sequenced {
+    /// The entry, exactly as its writer sequenced it: `seq`, `parent`,
+    /// payload and signature untouched.
+    pub entry: OpEntry,
+    /// The content hash its source claimed for it.
+    pub hash: ContentHash,
+}
+
+/// What a [`SequencerHandle::replicate`] call appended.
+#[derive(Debug)]
+pub struct Replicated {
+    /// Entries appended and folded, all of the batch.
+    pub appended: u64,
+    /// Content hash of the last one appended, the log's new head; `None`
+    /// for an empty batch.
+    pub head: Option<ContentHash>,
+}
+
+/// Why a [`SequencerHandle::replicate`] call stopped.
+///
+/// Everything before [`ReplicateError::seq`] in the batch was appended,
+/// folded and made durable; nothing at or after it was. A replica keeps
+/// what it verified and stops there, rather than skipping on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicateError {
+    /// The sequence number of the entry that was refused.
+    pub seq: u64,
+    /// Why: a position or parent that does not continue this log, a hash
+    /// that is not the entry's, a projection that cannot fold it, or a
+    /// storage failure.
+    pub reason: String,
+    /// How many entries of the batch were appended before it.
+    pub appended: u64,
+}
+
+impl std::fmt::Display for ReplicateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "seq {}: {}", self.seq, self.reason)
+    }
 }
 
 /// Most ops admitted before the writer stops draining and syncs.
@@ -234,7 +309,86 @@ enum Command {
     /// The op, the interned actor bucket holding its quota slot (see
     /// [`fairness`]), and where to answer.
     Submit(Submission, Arc<str>, mpsc::Sender<Result<Accepted, String>>),
+    /// Entries another writer already sequenced, to append as they are.
+    Replicate(
+        Vec<Sequenced>,
+        mpsc::Sender<Result<Replicated, ReplicateError>>,
+    ),
     Shutdown,
+}
+
+/// Appends a replicated batch, in order, stopping at the first entry that
+/// does not continue this log. Runs on the writer thread and nowhere else.
+///
+/// Three checks before each append, none of them admission: the entry's
+/// `seq` is this log's next position, its `parent` is this log's head, and
+/// its content hashes to what its source claimed. Then the policy is asked
+/// whether its projection can fold it, and only then is it appended and
+/// handed to [`SubmitPolicy::accepted`], exactly as an admitted op is.
+fn replicate_batch(
+    log: &mut dyn OpLog,
+    policy: &mut dyn SubmitPolicy,
+    batch: Vec<Sequenced>,
+    durability_failed: &mut bool,
+    writer_flag: &AtomicBool,
+) -> Result<Replicated, ReplicateError> {
+    let mut appended = 0u64;
+    let mut head = None;
+    for Sequenced { entry, hash } in batch {
+        let seq = entry.seq;
+        let refuse = |reason: String| ReplicateError {
+            seq,
+            reason,
+            appended,
+        };
+        if *durability_failed {
+            return Err(refuse(
+                "log is not durable: writer stopped accepting".to_string(),
+            ));
+        }
+        if seq != log.len() {
+            return Err(refuse(format!(
+                "entry is at seq {seq}, and this log's next position is {}",
+                log.len()
+            )));
+        }
+        if entry.parent != log.head() {
+            return Err(refuse(
+                "entry's parent is not this log's head, so it continues another chain".to_string(),
+            ));
+        }
+        let computed = entry.content_hash();
+        if computed != hash {
+            return Err(refuse(format!(
+                "entry hashes to {}, and its source claimed {}",
+                computed.to_hex(),
+                hash.to_hex()
+            )));
+        }
+        policy.replicable(&entry).map_err(refuse)?;
+        match log.append(entry) {
+            Ok(stored) => {
+                // Storage first, projections second, as on the admit
+                // path: the policy folds the entry the backend holds.
+                let last = log
+                    .last()
+                    .expect("a successful append exposes its newest entry");
+                policy.accepted(last, &stored);
+                appended += 1;
+                head = Some(stored);
+            }
+            Err(error) => {
+                *durability_failed = true;
+                writer_flag.store(true, Ordering::Relaxed);
+                return Err(ReplicateError {
+                    seq,
+                    reason: format!("log append failed: {error:?}"),
+                    appended,
+                });
+            }
+        }
+    }
+    Ok(Replicated { appended, head })
 }
 
 /// One drained command awaiting its turn in the writer's round-robin.
@@ -309,6 +463,38 @@ impl SequencerHandle {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
             .send(Command::Submit(sub, actor, reply_tx))
+            .expect("sequencer thread alive");
+        reply_rx.recv().expect("sequencer replies before dropping")
+    }
+
+    /// Appends entries another writer already sequenced, in order, through
+    /// this writer thread, and folds each one.
+    ///
+    /// This is how a replica takes a log without becoming a second writer
+    /// (invariant 5): the entries keep the `seq` and `parent` their own
+    /// writer gave them, and this thread is still the only thing that
+    /// appends. Each must continue this log exactly (next position, this
+    /// head as parent, content hashing to the claimed hash) and the
+    /// policy's [`SubmitPolicy::replicable`] must say it can fold it.
+    /// [`SubmitPolicy::check`] is never run: admission was the source
+    /// writer's decision.
+    ///
+    /// The whole batch shares one durability barrier and is answered after
+    /// it. Replicated entries are not admission decisions, so they are not
+    /// journalled, counted against a quota, or measured by the lag meter.
+    ///
+    /// # Errors
+    ///
+    /// The first entry that failed, with how many before it were appended.
+    /// Nothing after it is attempted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sequencer thread has already shut down.
+    pub fn replicate(&self, entries: Vec<Sequenced>) -> Result<Replicated, ReplicateError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.tx
+            .send(Command::Replicate(entries, reply_tx))
             .expect("sequencer thread alive");
         reply_rx.recv().expect("sequencer replies before dropping")
     }
@@ -448,6 +634,10 @@ impl Sequencer {
             while let Ok(first) = rx.recv() {
                 let mut cmd = Some(first);
                 queued.clear();
+                // A replicated batch ends the drain: the submissions
+                // already queued are decided first, then the batch, so
+                // arrival order between the two is kept.
+                let mut replicating = None;
                 // Admit the woken command, then drain whatever else is
                 // already queued behind it. Nothing is waited for: an idle
                 // sequencer still batches exactly one op, so a lone
@@ -460,6 +650,10 @@ impl Sequencer {
                         }
                         Command::Submit(sub, actor, reply) => {
                             queued.push(Some((sub, actor, reply)));
+                        }
+                        Command::Replicate(batch, reply) => {
+                            replicating = Some((batch, reply));
+                            break;
                         }
                     }
                     if queued.len() >= MAX_BATCH {
@@ -605,6 +799,23 @@ impl Sequencer {
                 if drained > 1 && journal.enabled() {
                     journal.record(journal::Event::QueueDepth { depth: drained });
                 }
+                let replicated = replicating.map(|(batch, reply)| {
+                    let outcome = replicate_batch(
+                        log.as_mut(),
+                        policy.as_mut(),
+                        batch,
+                        &mut durability_failed,
+                        &writer_flag,
+                    );
+                    (reply, outcome)
+                });
+                let replicated_any =
+                    replicated
+                        .as_ref()
+                        .is_some_and(|(_, outcome)| match outcome {
+                            Ok(done) => done.appended > 0,
+                            Err(stopped) => stopped.appended > 0,
+                        });
 
                 // The durability barrier. Submitters are told `Accepted`
                 // only after this returns, so an acknowledged op has
@@ -612,7 +823,7 @@ impl Sequencer {
                 // hook submits a ref op before git applies the ref, so
                 // acknowledging early is what would let git hold a ref
                 // whose authorising op does not exist.
-                let durable = if acks.is_empty() {
+                let durable = if acks.is_empty() && !replicated_any {
                     // Nothing was appended, so there is nothing to make
                     // durable. Skipping the barrier keeps a batch of pure
                     // rejections off the disk entirely.
@@ -657,6 +868,24 @@ impl Sequencer {
                         Err(e) => Err(format!("ordered but not durable: {e:?}")),
                     };
                     // Send failure just means the client gave up waiting.
+                    let _ = reply.send(answer);
+                }
+                if let Some((reply, outcome)) = replicated {
+                    // Appended but not durable is not replicated, for the
+                    // reason it is not accepted above.
+                    let answer = match (&durable, outcome) {
+                        (Err(e), Ok(done)) => Err(ReplicateError {
+                            seq: log.len().saturating_sub(done.appended),
+                            reason: format!("appended but not durable: {e:?}"),
+                            appended: 0,
+                        }),
+                        (Err(e), Err(stopped)) => Err(ReplicateError {
+                            seq: log.len().saturating_sub(stopped.appended),
+                            reason: format!("appended but not durable: {e:?}"),
+                            appended: 0,
+                        }),
+                        (Ok(()), outcome) => outcome,
+                    };
                     let _ = reply.send(answer);
                 }
                 if stopping {
