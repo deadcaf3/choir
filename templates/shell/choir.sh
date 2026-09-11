@@ -286,7 +286,7 @@ choir_view() {
 }
 
 # choir doctor [<api>] [--state <dir>]
-#   check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers
+#   check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers; with `seeds =` in .choir/config, a fork check per seed
 choir_doctor() {
 	choir_run doctor "$@"
 }

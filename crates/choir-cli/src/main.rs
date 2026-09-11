@@ -107,7 +107,64 @@ fn may_hold_credential(api: &str) -> bool {
     if matches!(name, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
         return true;
     }
-    configured("node").is_some_and(|node| node.trim_end_matches('/') == api.trim_end_matches('/'))
+    let same = |url: &str| url.trim_end_matches('/') == api.trim_end_matches('/');
+    // A seed named in `seeds =` (D80) was named by the reader in the same
+    // file as the node, which is the same assertion about where the
+    // credential may go.
+    configured("node").is_some_and(|node| same(&node))
+        || configured_seeds().iter().any(|seed| same(seed))
+}
+
+/// The seeds `.choir/config` names, as `seeds = <url>[, <url>]` beside
+/// `node =` (D80). Empty when there is no such line.
+fn configured_seeds() -> Vec<String> {
+    configured("seeds")
+        .map(|line| {
+            line.split(',')
+                .map(|url| url.trim().trim_end_matches('/').to_string())
+                .filter(|url| !url.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The home a `421 not_home` answer names, when `(status, body)` is one
+/// (D80).
+fn not_home(status: u16, body: &str) -> Option<String> {
+    if status != 421 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value["code"] != "not_home" {
+        return None;
+    }
+    value["home"]
+        .as_str()
+        .map(|home| home.trim_end_matches('/').to_string())
+}
+
+/// Whether to resend a request a seed at `api` refused to its `home`, and
+/// if not, says why on stderr.
+///
+/// Once, and only to a home this command may hand a credential to: the
+/// loopback, or the node `.choir/config` names. A seed chooses the address
+/// in its answer, so following any address it names would let a seed send
+/// this command's credential wherever it liked.
+fn follow_home(api: &str, home: &str) -> bool {
+    if home == api.trim_end_matches('/') {
+        return false;
+    }
+    if may_hold_credential(home) {
+        eprintln!("choir: {api} is a seed of {home}; sent this to the home instead");
+        true
+    } else {
+        eprintln!(
+            "choir: {api} is a seed of {home}, and writes go there. Not following it: \
+             {home} is not the node .choir/config names, and this command's credential \
+             would go with it. Rerun against {home}."
+        );
+        false
+    }
 }
 
 impl<'a> AuthOptions<'a> {
@@ -439,6 +496,22 @@ fn http(
     tool: &str,
     arguments: serde_json::Value,
 ) -> (u16, String) {
+    let (status, body) = http_once(api, auth, tool, &arguments);
+    // D80. A seed answers every write with its home; the same request,
+    // unchanged, is admissible there, because a seed's view already names
+    // the home's log.
+    match not_home(status, &body) {
+        Some(home) if follow_home(api, &home) => http_once(&home, auth, tool, &arguments),
+        _ => (status, body),
+    }
+}
+
+fn http_once(
+    api: &str,
+    auth: AuthOptions<'_>,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> (u16, String) {
     let client = match choir_cli::mcp::HttpClient::new(
         api,
         auth.file_for(api).map(std::path::Path::new),
@@ -451,7 +524,7 @@ fn http(
         }
     };
     let endpoint = choir_cli::surface::mcp_endpoint(tool).expect("CLI endpoint is in the table");
-    match client.request(endpoint, &arguments) {
+    match client.request(endpoint, arguments) {
         Ok(response) => response,
         Err(error) => {
             eprintln!("choir: {error}");
@@ -502,23 +575,30 @@ fn operator_call(
 ) -> serde_json::Value {
     let endpoint = choir_cli::surface::endpoint(method, path)
         .unwrap_or_else(|| panic!("{path} is in the endpoint table"));
-    let client = match choir_cli::mcp::HttpClient::new(
-        api,
-        auth.file_for(api).map(std::path::Path::new),
-        auth.user,
-    ) {
-        Ok(client) => client,
-        Err(error) => {
-            eprintln!("choir: {error}");
-            std::process::exit(2);
+    let send = |api: &str| {
+        let client = match choir_cli::mcp::HttpClient::new(
+            api,
+            auth.file_for(api).map(std::path::Path::new),
+            auth.user,
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("choir: {error}");
+                std::process::exit(2);
+            }
+        };
+        match client.request(endpoint, body) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("choir: {error}");
+                std::process::exit(1);
+            }
         }
     };
-    let (status, text) = match client.request(endpoint, body) {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("choir: {error}");
-            std::process::exit(1);
-        }
+    let (status, text) = send(api);
+    let (status, text) = match not_home(status, &text) {
+        Some(home) if follow_home(api, &home) => send(&home),
+        _ => (status, text),
     };
     let parsed = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
     if !(200..300).contains(&status) {
@@ -4016,6 +4096,17 @@ fn main() {
             let effective = api.as_deref().and_then(|api| auth.file_for(api));
             let credential = effective.or(auth.file);
             let mut checks = choir_cli::doctor::run(api.as_deref(), credential);
+            // D80: a fork check per seed `.choir/config` names, against
+            // the node it names.
+            let seeds = configured_seeds();
+            if !seeds.is_empty() {
+                checks.extend(choir_cli::doctor::seeds(
+                    api.as_deref(),
+                    &seeds,
+                    &|url: &str| auth.file_for(url).map(str::to_string),
+                    auth.user,
+                ));
+            }
             // The six host facts, and only on a machine that has a node:
             // "linger is off" told to a laptop that only ever clones is
             // six rows of noise on a report whose whole value is that

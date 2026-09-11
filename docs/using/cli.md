@@ -182,7 +182,7 @@ The signed-operation API is the primary agent path: it carries actor identity an
 - `choir node status [<api>]`  
   health, the commit serving, the sequencer's position and its p99 against the 100 ms gate, and how much this credential can see
 - `choir doctor [<api>] [--state <dir>]`  
-  check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers
+  check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers; with `seeds =` in .choir/config, a fork check per seed
 - `choir backup verify <backup-dir>`  
   whether a backup can be restored from: the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, refusing a backup that carries a key or credential; every check local
 - `choir backup restore <backup-dir> <target-root>`  

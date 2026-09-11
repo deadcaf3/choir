@@ -329,7 +329,7 @@
       "agent_facing": true,
       "args": "[<api>] [--state <dir>]",
       "name": "doctor",
-      "summary": "check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers"
+      "summary": "check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers; with `seeds =` in .choir/config, a fork check per seed"
     },
     {
       "agent_facing": false,

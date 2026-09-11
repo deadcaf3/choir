@@ -372,6 +372,234 @@ pub fn run(api: Option<&str>, auth: Option<&str>) -> Vec<Check> {
     checks
 }
 
+/// How many attestations a seed's statement may trail the home's current
+/// one before the fork check says so (D80).
+///
+/// A seed polls every few seconds and a home attests after every ref it
+/// moves, so a handful behind is a seed between rounds; more than this
+/// is a seed that has stopped, which is worth a warning and is not a
+/// fork.
+pub const FAR_BEHIND: u64 = 8;
+
+/// What the fork check is called in the report.
+const FORK_CHECK: &str = "fork check";
+
+/// The fork rule applied to one seed's statement (D80), with nothing
+/// fetched: the statement, the node id and current attestation the home
+/// showed this reader, and the chain read from the home's own log.
+///
+/// Pure so the one judgement that can call a home a liar is testable
+/// against a forged statement without a node that would forge one.
+#[must_use]
+pub fn fork_check(
+    seed: &str,
+    statement: &choir_node::replica::SignedStatement,
+    home_node: &str,
+    current: &str,
+    chain: &choir_node::replica::SnapshotChain,
+) -> Check {
+    use choir_node::replica::Relation;
+    if let Err(why) = statement.verify() {
+        return Check::fail(
+            FORK_CHECK,
+            format!("{seed}: its statement does not verify: {why}"),
+        );
+    }
+    let said = &statement.statement;
+    if said.home_node_id != home_node {
+        return Check::fail(
+            FORK_CHECK,
+            format!(
+                "{seed}: witnesses the home {}, and this node is {home_node}",
+                said.home_node_id
+            ),
+        )
+        .with_fix("name in `seeds =` only seeds of the node `node =` names");
+    }
+    match chain.relate(&said.snapshot, current) {
+        Relation::Same => Check::pass(
+            FORK_CHECK,
+            format!(
+                "{seed}: agrees; it witnessed the home's current attestation (seq {})",
+                said.at_seq
+            ),
+        ),
+        Relation::Behind(steps) if steps > FAR_BEHIND => Check::warn(
+            FORK_CHECK,
+            format!(
+                "{seed}: agrees, {steps} attestations behind the home's current one \
+                 (it last witnessed seq {})",
+                said.at_seq
+            ),
+        )
+        .with_fix("read `replica` in the seed's GET /api/view: it says where replication stopped"),
+        Relation::Behind(steps) => Check::pass(
+            FORK_CHECK,
+            format!(
+                "{seed}: agrees; its statement is {steps} attestation(s) behind the home's \
+                 current one"
+            ),
+        ),
+        Relation::Ahead(steps) => Check::warn(
+            FORK_CHECK,
+            format!(
+                "{seed}: agrees, but it has witnessed {steps} attestation(s) past the one the \
+                 home is showing you, so the home may be serving you an older view"
+            ),
+        ),
+        Relation::Fork => Check::fail(
+            FORK_CHECK,
+            format!(
+                "{seed}: fork: the seed witnessed {} at seq {}, which is not on the \
+                 attestation chain the home shows you (current {current}); the home has \
+                 shown two histories",
+                said.snapshot, said.at_seq
+            ),
+        )
+        .with_fix(
+            "stop acting on this home's answers; an export from the home and one from the \
+             seed (choir-node --export) show which history each holds",
+        ),
+    }
+}
+
+/// `GET` through the crate's one credential path.
+fn get(
+    url: &str,
+    auth: Option<&str>,
+    user: Option<&str>,
+    path: &str,
+) -> Result<(u16, serde_json::Value), String> {
+    let client = crate::mcp::HttpClient::new(url, auth.map(std::path::Path::new), user)?;
+    let (status, body) = client.get(path)?;
+    let value = serde_json::from_str(&body)
+        .map_err(|_| format!("{url}{path} answered {status} with a body that is not JSON"))?;
+    Ok((status, value))
+}
+
+/// One seed's rows: a gap if it has one, and its fork check.
+///
+/// The seed is read **before** the home. An honest home's current
+/// attestation is then never older than the one the seed folded, so a
+/// statement the home's chain cannot reach is two histories rather than
+/// a race between two reads.
+fn seed_checks(
+    home: &str,
+    seed: &str,
+    auth_for: &dyn Fn(&str) -> Option<String>,
+    user: Option<&str>,
+) -> Vec<Check> {
+    let warn = |detail: String| vec![Check::warn(FORK_CHECK, format!("{seed}: {detail}"))];
+    let seed_auth = auth_for(seed);
+    let witness = match get(seed, seed_auth.as_deref(), user, "/api/witness") {
+        Ok((200, witness)) => witness,
+        Ok((status, body)) => {
+            return warn(format!(
+                "answered {status} on /api/witness, so its statement cannot be checked: {}",
+                body["error"].as_str().unwrap_or("")
+            ))
+        }
+        Err(why) => return warn(format!("cannot be read: {why}")),
+    };
+    let mut rows = Vec::new();
+    if witness["gap"] == true {
+        rows.push(
+            Check::warn(
+                "seed gap",
+                format!("{seed}: its copy has a hole, so it is a copy and not a witness"),
+            )
+            .with_fix("re-seed it from an export of the home (choir-node --import)"),
+        );
+    }
+    let Some(statement) = choir_node::replica::SignedStatement::from_json(&witness["latest"])
+    else {
+        rows.extend(warn(
+            "has signed no statement yet: it has folded no attestation".to_string(),
+        ));
+        return rows;
+    };
+    let home_auth = auth_for(home);
+    let view = match get(home, home_auth.as_deref(), user, "/api/view") {
+        Ok((200, view)) => view,
+        Ok((status, _)) => {
+            rows.extend(warn(format!("the home answered {status} on /api/view")));
+            return rows;
+        }
+        Err(why) => {
+            rows.extend(warn(format!("the home cannot be read: {why}")));
+            return rows;
+        }
+    };
+    let home_node = view["log"]["node"].as_str().unwrap_or_default().to_string();
+    let (Some(current), Some(current_at)) = (
+        view["snapshot"]["id"].as_str().map(str::to_string),
+        view["snapshot"]["at_seq"].as_u64(),
+    ) else {
+        rows.extend(warn(
+            "the home has made no attestation to compare".to_string(),
+        ));
+        return rows;
+    };
+    // The chain from the lower of the two positions to the head, which is
+    // everything the walk between them can pass through.
+    let mut chain = choir_node::replica::SnapshotChain::default();
+    let mut from = statement.statement.at_seq.min(current_at);
+    loop {
+        match get(
+            home,
+            home_auth.as_deref(),
+            user,
+            &format!("/api/log?from={from}"),
+        ) {
+            Ok((200, page)) => {
+                let entries = page["entries"].as_array().cloned().unwrap_or_default();
+                let Some(last) = entries.last().and_then(|e| e["seq"].as_u64()) else {
+                    break;
+                };
+                chain.read_page(&entries);
+                from = last + 1;
+            }
+            Ok((status, _)) => {
+                rows.extend(warn(format!(
+                    "the home answered {status} on /api/log; walking its attestation chain \
+                     needs the node-wide read grant (`@node auditor`)"
+                )));
+                return rows;
+            }
+            Err(why) => {
+                rows.extend(warn(format!("the home's log cannot be read: {why}")));
+                return rows;
+            }
+        }
+    }
+    rows.push(fork_check(seed, &statement, &home_node, &current, &chain));
+    rows
+}
+
+/// The fork check for every seed `.choir/config` names (D80), against the
+/// node `home` is.
+///
+/// `auth_for` is the caller's own credential rule, so a seed is handed a
+/// credential exactly when every other command would hand it one.
+pub fn seeds(
+    home: Option<&str>,
+    seeds: &[String],
+    auth_for: &dyn Fn(&str) -> Option<String>,
+    user: Option<&str>,
+) -> Vec<Check> {
+    let Some(home) = home else {
+        return vec![Check::warn(
+            FORK_CHECK,
+            "seeds are configured and no node is, so there is no home to compare them with",
+        )
+        .with_fix("write `node = <url>` beside `seeds =` in .choir/config")];
+    };
+    seeds
+        .iter()
+        .flat_map(|seed| seed_checks(home, seed, auth_for, user))
+        .collect()
+}
+
 /// What this `choir` is: its version, the commit it was built from, and
 /// the file it is running as.
 ///
@@ -682,4 +910,55 @@ pub fn report(checks: &[Check], style: Style) -> String {
         Status::Pass => format!("  {}\n", style.green("everything checks out")),
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// The one judgement here that can call a home a liar: a statement,
+    /// well signed, over an attestation the home's chain does not reach.
+    #[test]
+    fn a_statement_off_the_homes_chain_is_a_fork() {
+        use choir_node::replica::{SignedStatement, SnapshotChain, WitnessStatement};
+        let key = choir_identity::ActorKey::generate();
+        let statement = |snapshot: &str| {
+            SignedStatement::sign(
+                &key,
+                WitnessStatement {
+                    format_version: 1,
+                    witness: key.actor_id().to_hex(),
+                    home_node_id: "1e-home".into(),
+                    snapshot: snapshot.into(),
+                    at_seq: 2,
+                    seen_at_seq: 2,
+                },
+            )
+        };
+        let mut chain = SnapshotChain::default();
+        chain.insert("s1".into(), None);
+        chain.insert("s2".into(), Some("s1".into()));
+
+        let same = super::fork_check("seed", &statement("s2"), "1e-home", "s2", &chain);
+        assert_eq!(same.status, super::Status::Pass, "{}", same.detail);
+        let behind = super::fork_check("seed", &statement("s1"), "1e-home", "s2", &chain);
+        assert_eq!(behind.status, super::Status::Pass, "{}", behind.detail);
+        let forged = super::fork_check("seed", &statement("elsewhere"), "1e-home", "s2", &chain);
+        assert_eq!(forged.status, super::Status::Fail);
+        assert!(forged.detail.contains("fork"), "{}", forged.detail);
+        let other = super::fork_check("seed", &statement("s2"), "1e-other", "s2", &chain);
+        assert_eq!(other.status, super::Status::Fail);
+
+        let mut far = SnapshotChain::default();
+        far.insert("a0".into(), None);
+        for i in 1..=super::FAR_BEHIND + 1 {
+            far.insert(format!("a{i}"), Some(format!("a{}", i - 1)));
+        }
+        let current = format!("a{}", super::FAR_BEHIND + 1);
+        let stale = super::fork_check("seed", &statement("a0"), "1e-home", &current, &far);
+        assert_eq!(stale.status, super::Status::Warn);
+        assert!(
+            stale.detail.contains("attestations behind"),
+            "{}",
+            stale.detail
+        );
+    }
 }

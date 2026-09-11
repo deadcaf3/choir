@@ -705,7 +705,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "doctor",
         args: "[<api>] [--state <dir>]",
-        summary: "check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers",
+        summary: "check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers; with `seeds =` in .choir/config, a fork check per seed",
         // The one command worth reaching for when nothing else works,
         // so it is not gated on being an agent's habit.
         agent_facing: true,
