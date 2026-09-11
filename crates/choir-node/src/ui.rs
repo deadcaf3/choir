@@ -1340,6 +1340,15 @@ mod tests {
     /// ceremony pages fetch exactly one thing, [`WEBAUTHN_JS`], from
     /// this origin; `the_client_half_is_one_same_origin_file` below is
     /// the rule for that, and this stays the rule for the read surface.
+    /// The dark theme's grain is an SVG in a data URI, and an SVG
+    /// document names its namespace by URL. Nothing is fetched from it:
+    /// it is an identifier the parser compares, not an address it
+    /// visits, so the probes below look past exactly that string and
+    /// nothing else.
+    fn without_the_svg_namespace(page: &str) -> String {
+        page.replace("xmlns='http://www.w3.org/2000/svg'", "")
+    }
+
     #[test]
     fn the_page_references_no_external_resource() {
         let page = render(
@@ -1348,6 +1357,7 @@ mod tests {
             &Roster::new(),
             crate::browse::Chrome::default(),
         );
+        let page = without_the_svg_namespace(&page);
         for probe in ["http://", "https://", "//cdn", "@import"] {
             assert!(!page.contains(probe), "page reaches out via {probe}");
         }
@@ -1606,6 +1616,7 @@ mod tests {
             &[("/r/", "repositories")],
             crate::browse::Chrome::default(),
         );
+        let page = without_the_svg_namespace(&page);
         for probe in ["http://", "https://", "//cdn", "<script", "@import"] {
             assert!(!page.contains(probe), "a refusal reaches out via {probe}");
         }

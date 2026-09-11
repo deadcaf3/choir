@@ -307,6 +307,12 @@
      it is legible as depth. */
   --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.18),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(122,84,16,.09),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(59,74,148,.07),transparent 70%);
+  /* Tooth. A tile of monochrome noise the browser draws once from the
+     SVG in the dark theme's value and repeats; the last row of the
+     colour matrix is its whole opacity. Off on paper, where a texture
+     on white reads as dirt rather than depth. */
+  --grain:none;
   /* A rule that fades out rather than stopping. Used under an eyebrow
      and above the footer, where a full-strength line across the page
      would be the loudest thing on it. */
@@ -390,6 +396,8 @@
 
     --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
     --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+    --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
+    --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
     --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
     --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
@@ -461,6 +469,8 @@
 
   --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
   --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into

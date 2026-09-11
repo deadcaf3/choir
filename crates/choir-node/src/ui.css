@@ -296,6 +296,12 @@
      it is legible as depth. */
   --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.18),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(122,84,16,.09),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(59,74,148,.07),transparent 70%);
+  /* Tooth. A tile of monochrome noise the browser draws once from the
+     SVG in the dark theme's value and repeats; the last row of the
+     colour matrix is its whole opacity. Off on paper, where a texture
+     on white reads as dirt rather than depth. */
+  --grain:none;
   /* A rule that fades out rather than stopping. Used under an eyebrow
      and above the footer, where a full-strength line across the page
      would be the loudest thing on it. */
@@ -379,6 +385,8 @@
 
     --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
     --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+    --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
+    --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
     --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
     --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
@@ -450,6 +458,8 @@
 
   --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
   --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
@@ -526,6 +536,7 @@ img,svg,canvas{max-width:100%}
   :root{--dur-1:0ms;--dur-2:0ms;--dur-3:0ms;--dur-4:0ms;--dur-5:0ms;--dur-6:0ms;
     --rise:0;--lift:0;--stagger:0ms}
   html{scroll-behavior:auto}
+  body::after{display:none}
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;animation-timeline:auto !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
 }
 
@@ -582,11 +593,33 @@ header.top h1{view-transition-name:title}
 body{background:var(--ground);color:var(--ink);margin:0 auto;
   padding:var(--pad-y) var(--pad-x) var(--sp-20);max-width:var(--page-max);
   position:relative}
-/* The light behind the page: two very weak washes at the top, fixed so
-   they belong to the viewport rather than to the scroll. Behind
-   everything, and inert to the cursor. */
+/* The light behind the page: grain over three very weak washes, two at
+   the top and one at the foot, fixed so they belong to the viewport
+   rather than to the scroll. Behind everything, and inert to the
+   cursor. */
 body::before{content:"";position:fixed;inset:0;z-index:var(--z-under);
-  pointer-events:none;background-image:var(--glow-1),var(--glow-2)}
+  pointer-events:none;
+  background-image:var(--grain),var(--glow-1),var(--glow-2),var(--glow-3)}
+/* Two answers to the scroll itself, where the browser can tie an
+   animation to it. A hairline at the top of the viewport grows with the
+   distance read, so a long page says how long it is; and the chrome
+   settles as the page moves under it, its shadow deepening and its edge
+   firming, so the bar reads as resting on the page rather than painted
+   over it. Neither touches layout: the line is a transform, the settle
+   is paint. A page too short to scroll has no timeline and shows
+   neither. */
+@supports (animation-timeline:scroll()){
+  body::after{content:"";position:fixed;top:var(--sp-0);left:var(--sp-0);
+    right:var(--sp-0);height:var(--bw-2);z-index:var(--z-palette);
+    pointer-events:none;background:var(--accent);
+    transform-origin:left;transform:scaleX(0);
+    animation:grow linear both;animation-timeline:scroll(root)}
+  .chrome{animation:settle linear both;animation-timeline:scroll(root);
+    animation-range:var(--sp-0) calc(var(--topbar-h) * 3)}
+}
+@keyframes grow{from{transform:scaleX(0)}to{transform:none}}
+@keyframes settle{to{border-color:var(--line);
+  box-shadow:var(--shadow-3),var(--shadow-inset)}}
 
 /* The pages that are one column of prose and one control rather than a
    tool's readout: the front door, signing in, asking, and redeeming an
@@ -621,8 +654,9 @@ main>section,.panes>.pane,.rail>.pane{
   .panes>.pane-content{animation-timeline:view();
     animation-range:entry 0% entry 35%;animation-delay:var(--sp-0)}
 }
-/* Rows, one after another for a screen's worth and then all at once:
-   past the fold, a stagger is a delay nobody is watching. */
+/* Rows, one after another for a screen's worth; past the fold, a
+   stagger is a delay nobody is watching, so the rest arrive all at
+   once, or with the scroll where the browser can tie them to it. */
 tbody tr{animation:fade var(--dur-4) var(--ease-out) both;
   animation-delay:calc(var(--delay-3) + var(--stagger) * 25)}
 tbody tr:nth-child(1){animation-delay:calc(var(--delay-3) + var(--stagger) * 1)}
@@ -649,6 +683,10 @@ tbody tr:nth-child(21){animation-delay:calc(var(--delay-3) + var(--stagger) * 21
 tbody tr:nth-child(22){animation-delay:calc(var(--delay-3) + var(--stagger) * 22)}
 tbody tr:nth-child(23){animation-delay:calc(var(--delay-3) + var(--stagger) * 23)}
 tbody tr:nth-child(24){animation-delay:calc(var(--delay-3) + var(--stagger) * 24)}
+@supports (animation-timeline:view()){
+  tbody tr:nth-child(n+25){animation-timeline:view();
+    animation-range:entry 0% cover 12%;animation-delay:var(--sp-0)}
+}
 
 /* skip link */
 .skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
@@ -1031,6 +1069,18 @@ section.readme h2:not(:first-child){font-size:var(--fs-600);
   font-weight:var(--fw-bold);margin-top:var(--sp-8);display:block}
 section.readme h2:not(:first-child)::after{content:none}
 section.readme h3{font-size:var(--fs-500)}
+/* Below the fold the prose arrives with the scroll: each block fades in
+   as it enters, and a rule draws itself from the left. Blocks only,
+   never a code sample or a table, whose height would hold the fade open
+   for a screen. */
+@supports (animation-timeline:view()){
+  section.readme>:is(h2,h3,h4,p,ul,ol,blockquote){
+    animation:fade linear both;animation-timeline:view();
+    animation-range:entry 0% cover 15%}
+  section.readme>hr{animation:draw linear both;animation-timeline:view();
+    animation-range:entry 0% cover 18%;transform-origin:left}
+}
+@keyframes draw{from{transform:scaleX(0)}to{transform:none}}
 section.readme p,section.readme li{max-width:var(--measure);
   line-height:var(--lh-copy)}
 section.readme pre{background-image:var(--sunken-wash);padding:var(--sp-4);
@@ -1183,7 +1233,17 @@ form.omni:hover{border-color:var(--line)}
 form.omni:focus-within{border-color:var(--accent-line);background:var(--surface);
   box-shadow:var(--sp-0) var(--sp-0) var(--sp-0) var(--bw-4) var(--accent-tint),var(--shadow-1)}
 form.omni .scope{white-space:nowrap;font-size:var(--fs-200);
-  color:var(--faint);font-family:var(--font-mono)}
+  color:var(--accent-ink);font-family:var(--font-mono);
+  padding:var(--sp-0) var(--sp-2);border-radius:var(--r-sm);
+  background:var(--accent-tint)}
+/* The one key the field answers to, shown while it is listening. */
+form.omni::after{content:"enter";flex:none;font-size:var(--fs-100);
+  font-family:var(--font-mono);letter-spacing:var(--tr-caps);
+  text-transform:uppercase;color:var(--faint);
+  padding:var(--sp-0) var(--sp-2);border:var(--border-hair);
+  border-radius:var(--r-sm);opacity:0;
+  transition:opacity var(--dur-2) var(--ease-out)}
+form.omni:focus-within::after{opacity:1}
 form.omni input[type="search"]{flex:1 1 var(--search);min-width:0;
   font:inherit;font-size:var(--fs-300);color:var(--ink);
   background:transparent;border:0;padding:var(--sp-1) var(--sp-0);
