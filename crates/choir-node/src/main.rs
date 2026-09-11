@@ -118,6 +118,17 @@
 //! hand edits are lost — using the `choir-ssh` beside this binary unless
 //! `--ssh-shim` names another.
 //!
+//! `--seed <home-url> --seed-credential <file>` (D80) makes this node a
+//! seed of another node's log instead of a home: it replicates the home's
+//! log through its own writer, verifying every page first, fetches the git
+//! objects the log names, and serves what it verified under its own
+//! `--auth-file` and `--acl-file`. The credential file is the one
+//! `user:token` line the home issued to the seed's principal. A seed takes
+//! no `--keys-file` (it learns keys from the home) and no `--create`.
+//! Without a port it binds nothing: an archival seed, which replicates and
+//! stores and serves nobody. `--seed-strict` exits nonzero when
+//! replication halts, rather than serving what was verified before it.
+//!
 //! Two invocations do not serve anything. `--verify-log <op-log>`
 //! refuses an unsupported format version, a broken chain or a torn
 //! tail. `--export <repo-root> <dir>` writes a portable copy of a
@@ -143,6 +154,170 @@ fn describe(report: &choir_node::portable::Report) -> String {
             n => format!(", {n} ahead of the log"),
         }
     )
+}
+
+/// One writer per state dir, process-enforced: a second daemon on the
+/// same root would append to the same ops.jsonl and fork the chain.
+fn lock_state(state_dir: &std::path::Path) -> std::io::Result<choir_fs::WorkdirLock> {
+    choir_fs::WorkdirLock::acquire(state_dir).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            match e {
+                choir_fs::LockError::Locked => format!(
+                    "{} is in use by another running choir-node; two writers \
+                     on one op log would fork the chain",
+                    state_dir.display()
+                ),
+                choir_fs::LockError::Io(e) => format!("locking {}: {e}", state_dir.display()),
+            },
+        )
+    })
+}
+
+/// The node's own key, loaded or minted, and pinned beside its log.
+fn node_identity(state_dir: &std::path::Path) -> std::io::Result<choir_identity::ActorKey> {
+    // Node key: persisted so git-derived ops keep one author across
+    // restarts. 32 secret bytes, file readable by the daemon user only.
+    let key_path = state_dir.join("node.key");
+    let node_key = if key_path.exists() {
+        let bytes = std::fs::read(&key_path)?;
+        let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "node.key must be 32 bytes")
+        })?;
+        choir_identity::ActorKey::from_secret_bytes(&bytes)
+    } else {
+        let key = choir_identity::ActorKey::generate();
+        // Atomic and 0600 from creation: no window where the secret
+        // is world-readable or half-written.
+        choir_fs::write_atomic_private(&key_path, key.secret_bytes())?;
+        key
+    };
+    // The node's identity is pinned to the log it writes into. The
+    // branch above mints a fresh key whenever the key file is absent,
+    // which is correct on a first start and catastrophic on a
+    // migration: copy `ops.jsonl` without the key and the daemon comes
+    // up happily, signing every subsequent git-derived op as a
+    // different actor than the entries already in the log. Nothing
+    // downstream notices, because both identities are individually
+    // valid — the log simply changes author mid-stream.
+    //
+    // So the fingerprint (the actor id, a hash of the public key —
+    // public, never the secret) is recorded beside the log on first
+    // start and compared on every start after. A mismatch is refused
+    // rather than warned about: a node that has already lost its
+    // identity should not be allowed to append under a new one.
+    // The same reasoning appears in other peer-to-peer node
+    // implementations that pin an identity beside their state.
+    let fingerprint_path = state_dir.join("node.fingerprint");
+    let fingerprint = node_key.actor_id().to_hex();
+    match std::fs::read_to_string(&fingerprint_path) {
+        Ok(pinned) if pinned.trim() != fingerprint => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "node identity changed: {} pins {}, but the loaded key is {}. \
+                     The op log was almost certainly moved without its key. \
+                     Restore the original key, or if the change is intended, \
+                     delete {} and accept that the log changes author here.",
+                    fingerprint_path.display(),
+                    pinned.trim(),
+                    fingerprint,
+                    fingerprint_path.display(),
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Atomic: a torn pin would refuse every later start.
+            choir_fs::write_atomic(&fingerprint_path, format!("{fingerprint}\n"))?;
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(node_key)
+}
+
+/// A seed's platform and replicator over `root`, and the lock that makes
+/// it the only writer of that root's log (D80).
+///
+/// The seed's own key is a node key like any other, minted and pinned the
+/// same way; its home's key is pinned beside it on first contact.
+fn start_seed(
+    root: &std::path::Path,
+    home: &str,
+    credential: &str,
+) -> std::io::Result<(
+    std::sync::Arc<Platform>,
+    std::sync::Arc<choir_node::replica::Replica>,
+    choir_fs::WorkdirLock,
+)> {
+    let credential = choir_node::replica::Credential::read(std::path::Path::new(credential))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let state_dir = root.join(".choir");
+    std::fs::create_dir_all(&state_dir)?;
+    let lock = lock_state(&state_dir)?;
+    let node_key = node_identity(&state_dir)?;
+    let home = choir_node::replica::contact(root, home, &credential)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let log_path = state_dir.join("ops.jsonl");
+    let log = choir_oplog::FileLog::open(&log_path)
+        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+    let platform = std::sync::Arc::new(
+        Platform::start(choir_identity::Registry::new(), Box::new(log), node_key)
+            .map_err(std::io::Error::other)?
+            .with_log_path(log_path)
+            .as_seed_of(home.clone()),
+    );
+    let replica = std::sync::Arc::new(choir_node::replica::Replica::new(
+        root.to_path_buf(),
+        home,
+        credential,
+        platform.clone(),
+    ));
+    Ok((platform, replica, lock))
+}
+
+/// An archival seed: replicates and stores, and binds nothing (D80).
+///
+/// The only flags it takes are the seed's own. Anything that configures a
+/// listener is refused rather than ignored, because a flag that silently
+/// does nothing reads as a node that is serving.
+fn archival_seed(root: &std::path::Path, rest: &[String]) -> std::io::Result<()> {
+    let mut home = None;
+    let mut credential = None;
+    let mut strict = false;
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--seed" => home = it.next().cloned(),
+            "--seed-credential" => credential = it.next().cloned(),
+            "--seed-strict" => strict = true,
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "{other}: an archival seed serves nothing and takes only --seed, \
+                         --seed-credential and --seed-strict; give a port to serve"
+                    ),
+                ))
+            }
+        }
+    }
+    let (Some(home), Some(credential)) = (home, credential) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: choir-node <repo-root> [port] --seed <home-url> --seed-credential <file> \
+             [--seed-strict]",
+        ));
+    };
+    let (_platform, replica, lock) = start_seed(root, &home, &credential)?;
+    eprintln!("choir-node {}", choir_node::build_line());
+    eprintln!(
+        "choir-node seeding {} into {}, serving nothing (archival)",
+        replica.home().url,
+        root.display()
+    );
+    let _held = lock;
+    choir_node::replica::run(&replica, strict)
 }
 
 /// Renders a refusal as a sentence and leaves with a nonzero status.
@@ -265,6 +440,19 @@ fn run() -> std::io::Result<()> {
         .first()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("./repos"));
+    // D80. A seed with no port is archival and never reaches the bind
+    // below; its flags start where the port would have been.
+    if args.iter().any(|arg| arg == "--seed")
+        && args.get(1).and_then(|p| p.parse::<u16>().ok()).is_none()
+    {
+        if args.first().is_none_or(|first| first.starts_with("--")) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: choir-node <repo-root> [port] --seed <home-url> --seed-credential <file>",
+            ));
+        }
+        return archival_seed(&root, &args[1..]);
+    }
     let port: u16 = args.get(1).and_then(|p| p.parse().ok()).unwrap_or(8417);
 
     let rest = &args[2.min(args.len())..];
@@ -329,6 +517,8 @@ fn run() -> std::io::Result<()> {
         "--downloads-dir",
         "--ci-command",
         "--queue-tree",
+        "--seed",
+        "--seed-credential",
     ] {
         if rest.iter().any(|arg| arg == flag) && flag_value(flag).is_none() {
             return Err(std::io::Error::new(
@@ -503,7 +693,45 @@ fn run() -> std::io::Result<()> {
     // Held until after serve_forever; a stale lock from a dead process
     // is reaped automatically.
     let mut state_lock = None;
-    if let Some(i) = rest.iter().position(|a| a == "--keys-file") {
+    // D80. A serving seed: the platform is the seed's, and its log is
+    // written by the replicator and nothing else.
+    let seeding = flag_value("--seed").cloned();
+    if let Some(home) = &seeding {
+        let Some(credential) = flag_value("--seed-credential") else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--seed needs --seed-credential: a seed is a named reader of its home",
+            ));
+        };
+        if rest.iter().any(|a| a == "--keys-file") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a seed takes no --keys-file: it learns every key from its home's /api/signers",
+            ));
+        }
+        if rest.iter().any(|a| a == "--create") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a seed takes no --create: creating a repository is a write, and a seed's \
+                 repositories come from its home",
+            ));
+        }
+        let (platform, replica, lock) = start_seed(&root, home, credential)?;
+        state_lock = Some(lock);
+        node.enable_shared_platform(platform);
+        let strict = rest.iter().any(|a| a == "--seed-strict");
+        eprintln!(
+            "seed: replicating {} every {}s{}",
+            replica.home().url,
+            choir_node::replica::INTERVAL_SECS,
+            if strict {
+                "; a halt exits (--seed-strict)"
+            } else {
+                "; a halt stops replication and keeps serving what was verified"
+            }
+        );
+        std::thread::spawn(move || choir_node::replica::run(&replica, strict));
+    } else if let Some(i) = rest.iter().position(|a| a == "--keys-file") {
         let path = rest.get(i + 1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "--keys-file needs a path")
         })?;
@@ -517,79 +745,11 @@ fn run() -> std::io::Result<()> {
         }
         let state_dir = root.join(".choir");
         std::fs::create_dir_all(&state_dir)?;
-        state_lock = Some(choir_fs::WorkdirLock::acquire(&state_dir).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
-                match e {
-                    choir_fs::LockError::Locked => format!(
-                        "{} is in use by another running choir-node; two writers \
-                         on one op log would fork the chain",
-                        state_dir.display()
-                    ),
-                    choir_fs::LockError::Io(e) => format!("locking {}: {e}", state_dir.display()),
-                },
-            )
-        })?);
+        state_lock = Some(lock_state(&state_dir)?);
         // Same keys, OpenSSH form: what push-certificate verification
         // (git push --signed) checks signers against.
         choir_node::write_allowed_signers(&root, &signers)?;
-        // Node key: persisted so git-derived ops keep one author across
-        // restarts. 32 secret bytes, file readable by the daemon user only.
-        let key_path = state_dir.join("node.key");
-        let node_key = if key_path.exists() {
-            let bytes = std::fs::read(&key_path)?;
-            let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "node.key must be 32 bytes")
-            })?;
-            choir_identity::ActorKey::from_secret_bytes(&bytes)
-        } else {
-            let key = choir_identity::ActorKey::generate();
-            // Atomic and 0600 from creation: no window where the secret
-            // is world-readable or half-written.
-            choir_fs::write_atomic_private(&key_path, key.secret_bytes())?;
-            key
-        };
-        // The node's identity is pinned to the log it writes into. The
-        // branch above mints a fresh key whenever the key file is absent,
-        // which is correct on a first start and catastrophic on a
-        // migration: copy `ops.jsonl` without the key and the daemon comes
-        // up happily, signing every subsequent git-derived op as a
-        // different actor than the entries already in the log. Nothing
-        // downstream notices, because both identities are individually
-        // valid — the log simply changes author mid-stream.
-        //
-        // So the fingerprint (the actor id, a hash of the public key —
-        // public, never the secret) is recorded beside the log on first
-        // start and compared on every start after. A mismatch is refused
-        // rather than warned about: a node that has already lost its
-        // identity should not be allowed to append under a new one.
-        // The same reasoning appears in other peer-to-peer node
-        // implementations that pin an identity beside their state.
-        let fingerprint_path = state_dir.join("node.fingerprint");
-        let fingerprint = node_key.actor_id().to_hex();
-        match std::fs::read_to_string(&fingerprint_path) {
-            Ok(pinned) if pinned.trim() != fingerprint => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "node identity changed: {} pins {}, but the loaded key is {}. \
-                         The op log was almost certainly moved without its key. \
-                         Restore the original key, or if the change is intended, \
-                         delete {} and accept that the log changes author here.",
-                        fingerprint_path.display(),
-                        pinned.trim(),
-                        fingerprint,
-                        fingerprint_path.display(),
-                    ),
-                ));
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Atomic: a torn pin would refuse every later start.
-                choir_fs::write_atomic(&fingerprint_path, format!("{fingerprint}\n"))?;
-            }
-            Err(e) => return Err(e),
-        }
+        let node_key = node_identity(&state_dir)?;
 
         let log_path = state_dir.join("ops.jsonl");
         let log = choir_oplog::FileLog::open(&log_path)
@@ -1054,7 +1214,14 @@ fn run() -> std::io::Result<()> {
     eprintln!("choir-node {}", choir_node::build_line());
     // Before the first request, so nothing races the repair. Silent when
     // the log and the repos already agree, which is every ordinary start.
-    let repair = node.reconcile_refs();
+    // Not on a seed: the repair can append compensating ops, and a seed's
+    // log is written by its replicator alone. Its refs are checked against
+    // the view every round instead, and reported rather than repaired.
+    let repair = if seeding.is_some() {
+        choir_node::platform::RefReconciliation::default()
+    } else {
+        node.reconcile_refs()
+    };
     for name in &repair.applied {
         eprintln!("choir: reconciled {name} — git was behind the log and has been moved to it");
     }

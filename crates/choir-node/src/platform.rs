@@ -3316,6 +3316,21 @@ impl SubmitPolicy for ChoirPolicy {
         self.subject.clone()
     }
 
+    /// A replicated entry is folded, never admitted: no signature, grant,
+    /// scope or quota is asked about, because the home already decided.
+    /// What is asked is whether this build's view can take it at all,
+    /// which is exactly the question `accepted` would otherwise answer
+    /// with a panic.
+    fn replicable(&mut self, entry: &OpEntry) -> Result<(), String> {
+        let op = ViewOp::from_payload(&entry.payload)
+            .map_err(|e| format!("payload does not decode as an op this build knows: {e:?}"))?;
+        self.view
+            .lock()
+            .expect("view lock")
+            .validate(&op)
+            .map_err(|e| format!("the view cannot fold it: {e:?}"))
+    }
+
     fn accepted(&mut self, entry: &OpEntry, hash: &ContentHash) {
         let op = ViewOp::from_payload(&entry.payload).expect("checked in check()");
         {
@@ -3474,6 +3489,13 @@ pub struct Platform {
     /// a check that cannot fail. The count does not reset on a later
     /// success, so a transient failure is still visible afterwards.
     lag_log_error: Mutex<(Option<String>, u64)>,
+    /// The home this platform's log is a copy of, when it runs as a seed
+    /// (D80). Set once, before the platform serves anything, and never
+    /// cleared: a node does not stop being a copy of somebody's log.
+    home: std::sync::OnceLock<crate::replica::Home>,
+    /// Where replication stands, once a [`crate::replica::Replica`] is
+    /// writing into this platform.
+    replica: std::sync::OnceLock<Arc<crate::replica::Shared>>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -3698,6 +3720,8 @@ impl Platform {
             review_adjudications: None,
             review_prune_lock: Mutex::new(()),
             hooks,
+            home: std::sync::OnceLock::new(),
+            replica: std::sync::OnceLock::new(),
             _sequencer: sequencer,
         };
         // Enabling a bound applies it at startup, not only after some
@@ -3968,7 +3992,64 @@ impl Platform {
     #[must_use]
     pub fn scope_now(&self) -> (ContentHash, Option<ContentHash>) {
         let head = self.entries.lock().expect("entries lock").head_hash();
-        (self.node_key.actor_id(), head)
+        // On a seed the log is the home's, entry for entry, so the node a
+        // scope must name is the home and the head is a head of the
+        // home's log. A client that signs against a seed's view therefore
+        // signs something the home will admit, which is what lets a
+        // refused write be resent there unchanged.
+        match self.home.get() {
+            Some(home) => (home.node_id.clone(), head),
+            None => (self.node_key.actor_id(), head),
+        }
+    }
+
+    /// Makes this platform a seed of `home` (D80): its log becomes a copy
+    /// of the home's, taken through [`Platform::replicate`] and nothing
+    /// else.
+    ///
+    /// Call before the platform serves anything.
+    #[must_use]
+    pub fn as_seed_of(self, home: crate::replica::Home) -> Self {
+        // A second call would change whose copy this is mid-life; the
+        // first one stands, and the daemon never makes a second.
+        let _ = self.home.set(home);
+        self
+    }
+
+    /// The home this platform is a seed of, or `None` on a home.
+    #[must_use]
+    pub fn seed_home(&self) -> Option<&crate::replica::Home> {
+        self.home.get()
+    }
+
+    /// Records the replicator writing into this platform, and the home it
+    /// copies. The first call stands.
+    pub(crate) fn attach_replica(
+        &self,
+        home: crate::replica::Home,
+        shared: Arc<crate::replica::Shared>,
+    ) {
+        let _ = self.home.set(home);
+        let _ = self.replica.set(shared);
+    }
+
+    /// Appends entries the home already sequenced, through this platform's
+    /// own writer thread, and folds them into its view. See
+    /// [`SequencerHandle::replicate`] for the checks each one passes.
+    ///
+    /// # Errors
+    ///
+    /// The first entry that could not be taken; everything before it was.
+    pub fn replicate(
+        &self,
+        entries: Vec<choir_sequencer::Sequenced>,
+    ) -> Result<choir_sequencer::Replicated, choir_sequencer::ReplicateError> {
+        self.handle.replicate(entries)
+    }
+
+    /// Runs `read` against the view as it stands, under its lock.
+    pub(crate) fn with_view<R>(&self, read: impl FnOnce(&View) -> R) -> R {
+        read(&self.view.lock().expect("view lock"))
     }
 
     /// The round of proposals aimed at `branch` of `repo` (D68).
@@ -6347,7 +6428,7 @@ impl RefReconciliation {
 
 /// Every ref in the bare repo at `path`, or `None` if it cannot be read
 /// (no such repo, or not a repo).
-fn read_git_refs(path: &std::path::Path) -> Option<BTreeMap<String, String>> {
+pub(crate) fn read_git_refs(path: &std::path::Path) -> Option<BTreeMap<String, String>> {
     let out = std::process::Command::new("git")
         .args(["for-each-ref", "--format=%(refname) %(objectname)"])
         .current_dir(path)

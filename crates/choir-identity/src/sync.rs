@@ -97,6 +97,12 @@ pub struct Report {
     pub integrity_only: usize,
     /// Entries whose authorship could not be established either way.
     pub unverified: usize,
+    /// The seq of the first entry any check failed on, if one did.
+    ///
+    /// A reader that only reports can use [`Report::failures`] alone; a
+    /// replica that appends needs to know where to stop, because every
+    /// entry before this one passed all three checks and is safe to keep.
+    pub first_failure: Option<u64>,
 }
 
 /// Actor id (hex, as `author_key` carries it) → the log position its
@@ -123,6 +129,7 @@ pub fn page(entries: &[serde_json::Value], registry: &Registry, revoked: &Revoca
     for entry in entries {
         let seq = entry["seq"].as_u64().unwrap_or_default();
         let claimed = entry["hash"].as_str().unwrap_or_default().to_string();
+        let failed_before = report.failures.len();
 
         if let Some((last_seq, last_hash)) = &previous {
             if seq != last_seq + 1 {
@@ -229,6 +236,9 @@ pub fn page(entries: &[serde_json::Value], registry: &Registry, revoked: &Revoca
                 }
             },
             (Some(_), None) => report.unverified += 1,
+        }
+        if report.first_failure.is_none() && report.failures.len() > failed_before {
+            report.first_failure = Some(seq);
         }
         previous = Some((seq, claimed));
     }
@@ -426,6 +436,19 @@ mod tests {
                 .any(|f| f.contains("does not hash to")),
             "a forged hash passed: {report:?}"
         );
+    }
+
+    /// Where a replica must stop: the first entry any check failed on,
+    /// and nothing at all on a good page.
+    #[test]
+    fn the_first_failure_names_the_seq_a_replica_stops_at() {
+        let key = ActorKey::generate();
+        let good = super::page(&page(&key, 3), &registry_for(&key), &Revocations::new());
+        assert_eq!(good.first_failure, None);
+        let mut entries = page(&key, 4);
+        entries[2]["hash"] = entries[1]["hash"].clone();
+        let report = super::page(&entries, &registry_for(&key), &Revocations::new());
+        assert_eq!(report.first_failure, Some(2), "{:?}", report.failures);
     }
 
     /// A page with an entry dropped out of the middle: the parent link

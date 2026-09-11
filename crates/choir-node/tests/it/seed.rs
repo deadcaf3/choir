@@ -1,0 +1,434 @@
+//! Seeds, not peers (D80): a home and a seed in one process, the home
+//! driven by real `git push` and `curl`, the seed brought up to date by
+//! calling `replicate_once` directly.
+//!
+//! Nothing sleeps and nothing binds a fixed port. Every temp directory is
+//! named for its test, since the harness runs modules on parallel threads
+//! in one process.
+
+use choir_identity::{ActorKey, Registry};
+use choir_node::platform::hex_encode;
+use choir_node::replica::{self, Credential, Replica, ReplicaError};
+use choir_node::{AuthTable, Node, Platform};
+use choir_oplog::MemLog;
+use choir_view::{OpKind, ViewOp};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::support::{curl, submit_body};
+
+/// The operator name the home binds the seed's key to, and the principal
+/// its credential authenticates as.
+const SEED: &str = "seed-a";
+
+fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.interactive=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git runs")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn scratch(tag: &str) -> PathBuf {
+    let work = std::env::temp_dir().join(format!("choir-seed-{tag}-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).expect("scratch dir");
+    work
+}
+
+/// A served node, and the platform it serves, held twice so a test can
+/// reach it without going through HTTP.
+struct Served {
+    url: String,
+    host: String,
+    platform: Arc<Platform>,
+}
+
+fn serve(
+    root: &Path,
+    auth: &[(&str, &str)],
+    acl: Option<&Path>,
+    platform: Arc<Platform>,
+) -> Served {
+    let mut table = AuthTable::new();
+    for (user, token) in auth {
+        table.insert((*user).to_string(), (*token).to_string());
+    }
+    let mut node = Node::bind_with_auth(root, 0, Some(table)).expect("node binds a free port");
+    if let Some(acl) = acl {
+        node.watch_acl_file(acl.to_path_buf()).expect("acl loads");
+    }
+    node.enable_shared_platform(platform.clone());
+    let port = node.port();
+    let node = Arc::new(node);
+    std::thread::spawn(move || node.serve_forever());
+    Served {
+        url: format!("http://127.0.0.1:{port}"),
+        host: format!("127.0.0.1:{port}"),
+        platform,
+    }
+}
+
+/// A home: one repository, alice who pushes, and the seed's principal
+/// holding the two grants a seed needs — the node-wide read that reads
+/// the log, and read on the repositories it should hold.
+struct HomeFixture {
+    work: PathBuf,
+    served: Served,
+    node_key: ActorKey,
+    alice: ActorKey,
+    seed_key: ActorKey,
+}
+
+fn home(tag: &str) -> HomeFixture {
+    let work = scratch(tag);
+    let alice = ActorKey::generate();
+    let seed_key = ActorKey::generate();
+    // The operator's three lines, in the shapes they already have: the
+    // seed's key registered, and two ordinary grants for its principal.
+    let keys = work.join("keys");
+    std::fs::write(
+        &keys,
+        format!(
+            "alice {}\n{} {}\n",
+            hex(&alice.public_key_bytes()),
+            SEED,
+            hex(&seed_key.public_key_bytes())
+        ),
+    )
+    .expect("keys file");
+    let acl = work.join("acl");
+    std::fs::write(
+        &acl,
+        format!("alice * write\nalice @node write\n{SEED} @node auditor\n{SEED} * read\n"),
+    )
+    .expect("acl file");
+
+    let node_key = ActorKey::generate();
+    let mut registry = Registry::new();
+    registry.register(&alice.public_key_bytes()).unwrap();
+    let platform = Arc::new(
+        Platform::start_reloading(
+            registry,
+            Box::new(MemLog::new()),
+            ActorKey::from_secret_bytes(&node_key.secret_bytes()),
+            Some(keys),
+        )
+        .expect("home platform starts"),
+    );
+    let root = work.join("home");
+    std::fs::create_dir_all(&root).unwrap();
+    let served = serve(&root, &[("alice", "a"), (SEED, "s")], Some(&acl), platform);
+    // Repository creation appends nothing, so the first op below is the
+    // binding.
+    let (status, body) = curl(&[
+        "-u",
+        "alice:a",
+        "-d",
+        r#"{"name":"agents/demo.git"}"#,
+        &format!("{}/api/repo", served.url),
+    ]);
+    assert!(status < 300, "repo create: {status} {body}");
+
+    let fixture = HomeFixture {
+        work,
+        served,
+        node_key,
+        alice,
+        seed_key,
+    };
+    // The third line: bind the seed's key to its operator, which only the
+    // node may author.
+    fixture.submit_as_node(&ViewOp::new(OpKind::BindKey {
+        operator: SEED.into(),
+        key: fixture.seed_key.actor_id(),
+        channel: None,
+    }));
+    fixture
+}
+
+impl HomeFixture {
+    fn submit_as_node(&self, op: &ViewOp) -> u64 {
+        let (code, body) = self.served.platform.handle_api(
+            "POST",
+            "/api/submit",
+            submit_body(&self.node_key, "node", op).as_bytes(),
+        );
+        let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(code, 200, "{value}");
+        value["seq"].as_u64().expect("seq")
+    }
+
+    /// Clones, commits `body` and pushes to main as alice. Returns the
+    /// commit id.
+    fn push(&self, clone: &str, body: &str) -> String {
+        let url = format!("http://alice:a@{}/agents/demo.git", self.served.host);
+        let dir = self.work.join(clone);
+        if !dir.exists() {
+            let cloned = git(&self.work, &["clone", "-q", &url, clone]);
+            assert!(
+                cloned.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cloned.stderr)
+            );
+        }
+        std::fs::write(dir.join("f.txt"), body).unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", body]);
+        let pushed = git(&dir, &["push", "-q", "origin", "HEAD:main"]);
+        assert!(
+            pushed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&pushed.stderr)
+        );
+        String::from_utf8_lossy(&git(&dir, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string()
+    }
+
+    fn view(&self) -> serde_json::Value {
+        let (status, body) = curl(&["-u", "alice:a", &format!("{}/api/view", self.served.url)]);
+        assert_eq!(status, 200, "{body}");
+        body
+    }
+}
+
+/// A seed of `home_url`, with its own root, key, credential file and
+/// served surface. `reader:r` is the one credential it issues.
+struct SeedFixture {
+    root: PathBuf,
+    replica: Arc<Replica>,
+    served: Served,
+}
+
+fn seed(work: &Path, name: &str, home_url: &str, key: ActorKey) -> SeedFixture {
+    let root = work.join(name);
+    std::fs::create_dir_all(&root).unwrap();
+    let credential_file = work.join(format!("{name}.credential"));
+    std::fs::write(&credential_file, format!("{SEED}:s\n")).unwrap();
+    let credential = Credential::read(&credential_file).expect("credential");
+    let home = replica::contact(&root, home_url, &credential).expect("first contact pins");
+    let platform = Arc::new(
+        Platform::start(Registry::new(), Box::new(MemLog::new()), key)
+            .expect("seed platform starts")
+            .as_seed_of(home.clone()),
+    );
+    let replica = Arc::new(Replica::new(
+        root.clone(),
+        home,
+        credential,
+        platform.clone(),
+    ));
+    let served = serve(&root, &[("reader", "r")], None, platform);
+    SeedFixture {
+        root,
+        replica,
+        served,
+    }
+}
+
+impl SeedFixture {
+    fn view(&self) -> serde_json::Value {
+        let (status, body) = curl(&["-u", "reader:r", &format!("{}/api/view", self.served.url)]);
+        assert_eq!(status, 200, "{body}");
+        body
+    }
+}
+
+#[test]
+fn a_seed_takes_the_homes_log_verified_and_serves_the_same_view_and_objects() {
+    let home = home("replicates");
+    let commit = home.push("pusher", "one\n");
+
+    // The endpoint a seed learns keys from, verbatim in the report.
+    let (status, signers) = curl(&[
+        "-u",
+        &format!("{SEED}:s"),
+        &format!("{}/api/signers", home.served.url),
+    ]);
+    assert_eq!(status, 200, "{signers}");
+    println!("GET /api/signers on the home:\n{signers}");
+    assert_eq!(signers["format_version"], 1);
+    assert_eq!(
+        signers["node"]["actor_id"],
+        home.node_key.actor_id().to_hex().as_str()
+    );
+    assert_eq!(
+        signers["node"]["public_key_hex"],
+        hex_encode(&home.node_key.public_key_bytes()).as_str()
+    );
+    let listed: Vec<&str> = signers["signers"]
+        .as_array()
+        .expect("signers")
+        .iter()
+        .map(|row| row["actor_id"].as_str().expect("actor id"))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            home.alice.actor_id().to_hex().as_str(),
+            home.seed_key.actor_id().to_hex().as_str()
+        ]
+    );
+
+    let seed = seed(&home.work, "seed", &home.served.url, ActorKey::generate());
+    let progress = seed.replica.replicate_once().expect("a clean round");
+    let home_view = home.view();
+    let seed_view = seed.view();
+
+    // The same position, the same refs, the same attestation.
+    let at = home_view["log"]["next_seq"]
+        .as_u64()
+        .expect("home position");
+    assert!(at >= 3, "binding, push and attestation: {home_view}");
+    assert_eq!(seed_view["log"]["next_seq"], at, "{seed_view}");
+    assert_eq!(seed_view["refs"], home_view["refs"]);
+    assert_eq!(seed_view["snapshot"]["id"], home_view["snapshot"]["id"]);
+    assert_eq!(seed_view["log"]["head"], home_view["log"]["head"]);
+    // A scope signed against the seed's view names the home, so it is one
+    // the home will admit.
+    assert_eq!(seed_view["log"]["node"], home_view["log"]["node"]);
+
+    let status = &progress.status;
+    assert_eq!(status.head_seq, Some(at - 1));
+    assert_eq!(status.home_head_seq, status.head_seq);
+    assert_eq!((status.refs_verified, status.refs_pending), (1, 0));
+    println!(
+        "unverified entries on a fresh home: {} of {at}",
+        status.unverified_entries
+    );
+    assert_eq!(
+        status.unverified_entries, 0,
+        "every entry on a fresh home is signed by its node key, which /api/signers lists"
+    );
+    assert!(!status.gap && status.halted.is_none(), "{status:?}");
+    // The home's key is pinned beside the seed's log.
+    let pin = std::fs::read_to_string(seed.root.join(".choir/home.fingerprint")).expect("pin");
+    assert_eq!(pin.trim(), home.node_key.actor_id().to_hex());
+
+    // And the objects: a clone from the seed yields the home's commit.
+    let url = format!("http://reader:r@{}/agents/demo.git", seed.served.host);
+    let cloned = git(&home.work, &["clone", "-q", &url, "from-seed"]);
+    assert!(
+        cloned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+    let head = git(&home.work.join("from-seed"), &["rev-parse", "HEAD"]);
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), commit);
+
+    // A second push, a second round: only the new entries move.
+    home.push("pusher", "two\n");
+    let progress = seed.replica.replicate_once().expect("a second round");
+    assert_eq!(progress.appended, 2, "one ref op and its attestation");
+    assert_eq!(seed.view()["refs"], home.view()["refs"]);
+    assert_eq!(progress.status.refs_pending, 0);
+}
+
+/// Serves the home's own answers, except that one entry of `/api/log`
+/// has a byte of its payload flipped: a home, or anything between it and
+/// the seed, lying about one entry.
+fn tampering(home: &str, flip: u64) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("a free port");
+    let port = server.server_addr().to_ip().expect("ip").port();
+    let home = home.to_string();
+    std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let url = request.url().to_string();
+            let (status, mut body) = curl(&["-u", &format!("{SEED}:s"), &format!("{home}{url}")]);
+            if url.starts_with("/api/log") {
+                for entry in body["entries"].as_array_mut().into_iter().flatten() {
+                    if entry["seq"] == flip {
+                        let payload = entry["payload_hex"].as_str().expect("payload").to_string();
+                        let first = if payload.starts_with('7') { '6' } else { '7' };
+                        entry["payload_hex"] =
+                            serde_json::json!(format!("{first}{}", &payload[1..]));
+                    }
+                }
+            }
+            let _ = request.respond(
+                tiny_http::Response::from_string(body.to_string()).with_status_code(status),
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn a_tampered_entry_halts_replication_there_and_the_prefix_is_still_served() {
+    let home = home("tamper");
+    home.push("pusher", "one\n");
+    home.push("pusher", "two\n");
+    let end = home.view()["log"]["next_seq"].as_u64().expect("position");
+    // The second push's ref op: after the binding, the first push and its
+    // attestation.
+    let flip = 3;
+    assert!(end > flip + 1, "the flipped entry is not the last: {end}");
+
+    let seed = seed(
+        &home.work,
+        "seed",
+        &tampering(&home.served.url, flip),
+        ActorKey::generate(),
+    );
+    let halted = seed.replica.replicate_once().expect_err("a tampered page");
+    let ReplicaError::Halted { seq, reason } = &halted else {
+        panic!("not a halt: {halted:?}");
+    };
+    println!("tampered page: {halted}");
+    assert_eq!(*seq, flip);
+    assert!(reason.contains("does not hash to"), "{reason}");
+
+    // The prefix is held and served, and the halt is the reader's to see.
+    let view = seed.view();
+    assert_eq!(view["log"]["next_seq"], flip, "{view}");
+    let status = seed.replica.status();
+    assert_eq!(status.head_seq, Some(flip - 1));
+    assert_eq!(status.halted.as_ref().map(|(seq, _)| *seq), Some(flip));
+
+    // And it stays halted: the next round does not skip past it.
+    let again = seed.replica.replicate_once().expect_err("still halted");
+    assert_eq!(again, halted);
+    assert_eq!(seed.view()["log"]["next_seq"], flip);
+}
+
+#[test]
+fn a_seed_refuses_a_home_signing_with_another_key_than_it_pinned() {
+    let first = home("pin-first");
+    let second = home("pin-second");
+    let root = first.work.join("seed");
+    std::fs::create_dir_all(&root).unwrap();
+    let credential = Credential::parse(&format!("{SEED}:s")).unwrap();
+
+    let met = replica::contact(&root, &first.served.url, &credential).expect("first contact");
+    assert_eq!(met.node_id, first.node_key.actor_id());
+    // The same home again is the ordinary restart.
+    replica::contact(&root, &first.served.url, &credential).expect("same home, same key");
+
+    let refused = replica::contact(&root, &second.served.url, &credential)
+        .expect_err("a home with another node key");
+    assert!(refused.contains("home identity changed"), "{refused}");
+    assert!(
+        refused.contains(&first.node_key.actor_id().to_hex()),
+        "names the pinned key: {refused}"
+    );
+}

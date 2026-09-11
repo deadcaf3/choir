@@ -57,6 +57,7 @@ pub mod queue_api;
 pub mod quota;
 mod readme;
 pub mod reject;
+pub mod replica;
 mod session;
 mod signin_page;
 pub mod ssh;
@@ -625,6 +626,13 @@ impl Node {
     /// Enables the platform API (`/api/submit`, `/api/view`) backed by
     /// `platform`. Call before [`Node::serve_forever`].
     pub fn enable_platform(&mut self, platform: Platform) {
+        self.enable_shared_platform(std::sync::Arc::new(platform));
+    }
+
+    /// [`Node::enable_platform`] for a platform something else also holds:
+    /// a seed's replicator writes into the same platform this node serves
+    /// (D80).
+    pub fn enable_shared_platform(&mut self, platform: std::sync::Arc<Platform>) {
         // One of the three halves of the join in `enable_accounts` and
         // `enable_passkeys`: whichever flag is applied last attaches the
         // store, so passkey verification does not depend on the order the
@@ -636,7 +644,7 @@ impl Node {
                 platform.attach_accounts(store.clone());
             }
         }
-        self.platform = Some(std::sync::Arc::new(platform));
+        self.platform = Some(platform);
     }
 
     /// Enables `POST /api/queue/run` (D5, D68).
@@ -5025,7 +5033,7 @@ fn handle_accounts(
 }
 
 /// Encodes bytes as standard base64 with `=` padding.
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
