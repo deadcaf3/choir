@@ -1,149 +1,130 @@
-# demo: why a skeptic's forge is not enough for many agents
+# demo: the same twenty agents, against git alone and against choir
 
-A scripted, re-runnable terminal demo against a live choir node, driven by
-plain `git` clients. Target: a screen recording under two minutes, for an
-engineer whose model is "branches, worktrees and per-branch CI on a forge
-are enough". Every beat ends on the thing a forge does not do.
+A two-pane terminal demo for one skeptic in particular: the engineer who
+says "worktrees and branches give agents isolation, then you merge, what
+does choir add?" Isolation is free and the left pane concedes it. The
+demo is about what happens when twenty isolated branches have to become
+one `main`: at the conflict, at the infrastructure failure, and in what
+you can prove afterwards.
 
-- **A. Ordering that never blocks.** A conflicting proposal is evicted from
-  the queue while the change behind it lands in the same round. The
-  conflict then lands on `main` as a committed value the node reads as
-  one, with base and both sides. Work builds on top of it without
-  waiting. The resolution is a later commit. The whole sequence is a
-  signed, hash-chained order anyone verifies offline with one public key.
-- **B. Blame only what was tested.** A CI *infrastructure* failure is
-  `Errored`, not `Failed`: the queue requeues the changes and records
-  why. A real red test is `Failed` and evicted, and the green change in
-  the same round still lands.
+- **Left pane, his workflow done well.** A bare repo with
+  `receive.denyNonFastForwards`, twenty worktrees on twenty branches, and
+  a careful maintainer that merges in order and runs the tests after
+  every merge, skipping a branch that conflicts and paging its author.
+- **Right pane, choir.** The same twenty branches proposed to a node as
+  `refs/for/main/<agent>/<topic>`, landed by one queue round.
+
+Nothing is mocked or emulated. Every line on either side is the output
+of git, curl, or the node. There is no fake forge: an emulated merge
+queue would be a strawman to this audience, so the comparison is git
+itself on the left and the properties a forge cannot add on the right.
 
 ## Run it
 
 ```bash
-demo/run.sh              # plays every beat, no waits; about 10 s of machine time
-demo/run.sh --pause      # waits for Enter after each beat: use this to record
-demo/run.sh --no-build   # skip cargo; use the binaries as built (see below)
-demo/run.sh --port N     # if 8447 is taken
+demo/run.sh                  # build into demo/.target, then play; Enter advances
+demo/run.sh --auto           # advance by itself, 6 s per beat
+demo/run.sh --auto 10        # 10 s per beat
+demo/run.sh --no-build       # skip cargo; use the binaries as built
+demo/run.sh --dump           # no screen: play everything and print both panes
+demo/run.sh --port N         # if 8447 is taken
+demo/run.sh --agents N       # default 20
 ```
 
-Idempotent: each run kills the node the previous take left behind, wipes
-`demo/.run/`, mints fresh keys, starts a fresh node. Hermetic: loopback
-only, no TLS, no network. Needs `cargo`, `git`, `curl`, `python3`.
+Keys while playing: Enter or Space for the next beat, `a` toggles
+autoplay, `q` quits. The screen needs 90 by 24 or more; 120 by 40 is
+comfortable. One Ghostty tab is enough; there is no tmux.
+
+Idempotent: each run kills the node the previous take left behind,
+wipes `demo/.run/`, mints fresh keys, starts a fresh node. Hermetic:
+loopback only, no TLS, no network. Needs `cargo`, `git`, `curl`,
+`python3` (standard library only; the screen is `curses`).
 
 The first run builds `choir-node` and `choir` into `demo/.target/`, a
-target dir of the demo's own, which takes a minute or two; the script
-says so on its first line. Every later run is seconds. The dir is private on
-purpose: a target dir shared across checkouts hands whoever builds last
-the `debug/choir-node` path, and a take then runs a node built from
-somebody else's sources (this happened while writing this). Build once,
-then record with `--no-build`. The node is left running after the last
-beat so you can poke at it (`demo/.run/node.log`,
-`http://127.0.0.1:8447/`); the next take replaces it.
+target dir of the demo's own, which takes a minute or two. Every later
+run is seconds. The dir is private on purpose: a target dir shared
+across checkouts hands whoever builds last the `debug/choir-node` path,
+and a take then runs a node built from somebody else's sources, which
+happened while writing this.
 
-Recording setup: 100 columns by 40 rows fits every beat on one screen.
-The script prints its own prompts (`agent2 $ ...`), so the shell's `PS1`
-does not matter; run `clear` and then the script. Colors follow
-`NO_COLOR`.
+## The beats
 
-Everything on screen is real output. `demo/show.py` only trims the node's
-JSON (`/api/view`, `/api/log`, `/api/queue/run`) and the web view's HTML
-to the rows a beat is about; `choir view` and `choir log` print the same
-documents in full.
+Each beat plays both panes at once. Machine time for the whole take is
+about 35 s; the recording is as long as your pauses.
 
-## Shot list
+| beat | what happens | what to say |
+|------|--------------|-------------|
+| 0 | left: bare repo, fast-forward only. right: node up. Same seed on both: `config.toml`, `test.sh`, twenty `svc/` files | one substrate, two integration models |
+| 1 | twenty worktrees, twenty branches, twenty pushes on each side; agents 03 and 07 also change the greeting line | isolation is free, and neither side rejects a push. Concede it |
+| 2 | left: the maintainer merges 01 to 20 in order with tests after each; 07 conflicts, is skipped, its author paged. right: one round; 07 evicted as `Conflict`, the other nineteen land behind it. Counters: merged, blocked, CI runs, wall time, and the sequencer's decision latency | the conflict is a verdict in the round, not a stop. Wall time is a wash at this scale and the take prints it either way |
+| 3 | left: agent-12 needs 07's change and can only get it by taking on 07's conflict in its own worktree. right: 07 pushes the conflict to `main` as-is; the node's web view reads it three-sided; 12 builds on top and lands; 07 resolves later | nobody can build on a conflict that lives on a branch. Here it is a value on `main` that anyone can pick up |
+| 4 | left: `git log`, and what it proves: parent pointers, no signatures, no test verdicts. right: the op log by kind, the last landings decoded, and `choir log --verify` over all of it | the commit graph is honest and good. The chain is what a forge does not give you: every landing and every check verdict, verified offline with one key |
+| 5 | two more branches: 05 breaks the test, 09 adds a note. Both CI runners lose their exec bit. left: both merges go red (exit 126), both authors paged. right: `Errored`, nothing evicted. Runners back: left reverts 05 and merges 09; right evicts 05 as `CiFailure` and lands 09 | a red runner is not a red change. Only the change at fault pays |
 
-Timestamps assume the suggested pauses; the machine time inside each
-beat is well under a second, so say so rather than filling it. The
-narration lines beginning `# on a forge ...` are the differentiators;
-each is a generic claim about forge merge queues and PR flows, not a
-statement about one vendor's current behaviour, so keep them that way
-on camera.
+The closing lines are the concession and the claim, one per pane: for
+disjoint work at a low conflict rate, branches and a merge queue are
+fine; the claim is what happens at the conflict, at the infra failure,
+and in what you can prove after.
 
-| beat | at   | what happens                                                                                   | what it proves                                                                                                                                                        | pause |
-|------|------|------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------|
-| 0    | 0:00 | node up on loopback, one empty repo, `healthz 200`                                             | there is a daemon with a merge queue; git is the only client                                                                                                          | 5 s   |
-| 1    | 0:05 | three clones of one base; agent1 edits the line, `git push`                                    | an ordinary push through smart-HTTP, sequenced as a node-signed `SetRef` op                                                                                           | 8 s   |
-| 2    | 0:13 | agent2 (same line) and agent3 (new file) both propose; one queue round                         | **A, the queue never blocks.** `rejected [(1, Conflict)]`, `merged [2]`: agent2 is evicted first-class, agent3 behind it lands, main moves. A forge would not queue agent2 at all | 15 s  |
-| 3    | 0:28 | agent2 pulls, gets CONFLICT, commits the markers, pushes to main; the web view reads that file | **A, conflict as a value.** The node renders base, HEAD and the other side as a conflict at line 1, not as a broken file. The push was accepted like any ref move    | 20 s  |
-| 4    | 0:48 | agent3 pulls the conflict commit, adds to NOTES, pushes; agent2 resolves; `git log --graph`   | **A, nobody waits.** A change whose parent is an unresolved conflict lands; the resolution follows as one more commit; `test.sh` is green again                        | 20 s  |
-| 5    | 1:08 | `log_tail` from the round: landing, conflict, work on top, resolution; `choir log --verify`    | **A, the order.** Each entry names the tip it replaced and the entry before it. 22 entries, chain holds, 22 signatures verified offline with the node's public key    | 15 s  |
-| 6a   | 1:23 | two new proposals; the runner loses its exec bit; one round                                    | **B, part 1.** `stalled: could not start ... Permission denied`, `merged []`, `rejected []`, both candidates `Errored`, `choir checks` exits 4                          | 15 s  |
-| 6b   | 1:38 | runner restored; same round                                                                    | **B, part 2.** Red test: `CiFailure`, evicted. Green proposal: landed, and `git pull` sees it. Only the change at fault pays                                           | 12 s  |
-|      | 1:50 | done                                                                                           |                                                                                                                                                                       |       |
+## Numbers you will see, and what they mean
 
-What to say over beat 4, because it is the whole pitch: git would let
-you commit markers anywhere. What a forge does not give you is an order
-in which the eviction, the committed conflict, the work on top of it and
-the resolution are four accepted entries that nobody had to wait for,
-verifiable in beat 5 without trusting the server.
+- **Pushes rejected: 0 on both sides.** Branch-per-agent has no push
+  contention. Do not pretend otherwise.
+- **Left integration: 19 merges, 19 CI runs, one after another, about
+  5 s.** Serial by construction.
+- **Right round: 19 landings, 20 CI runs in one speculative train,
+  about 15 s.** Slower, and the take says so. The time is git process
+  overhead: the speculator checks out and merges each candidate in a
+  worktree and the runner provisions a worktree per job, about seven
+  `git` invocations per candidate at macOS process-spawn cost. An
+  in-memory `git merge-tree --write-tree` speculator would remove most
+  of it; it is the obvious next optimisation and is not done.
+- **Sequencer decision latency, p50 about 2 ms, p99 under the 100 ms
+  gate**, read from `/api/view`'s `sequencer_lag` for this process.
+  Percentiles are power-of-two bucket upper bounds, so they
+  over-estimate by at most 2x and never under-estimate.
+- **`choir log --verify`: about 95 entries, chain holds, all signatures
+  verified**, with the node's public key as the only input.
 
-## What `cargo run -p choir-demo` already covered
+## What changed in the node for this demo
 
-`choir-demo` is an in-process walkthrough: `MemLog`, `MemStore`, three
-keys, one signed op rejected, a `TreeEntry::Conflict` commit built by
-hand and accepted as a workspace head, time travel, then one real `git
-push` through a `Node`. It shows claim A in the view model, not through
-git, and it does not run the merge queue at all, so claim B is not in
-it. Nothing here reuses it; this demo is git clients against a daemon
-binary, which is the audience's frame.
+Both are real fixes, both tested in `crates/choir-node/tests/it/node_queue.rs`.
 
-## Fixed while building this
-
-**A queue landing now moves git's own ref in the same request.** Before,
-`POST /api/queue/run` landed through the log and left git's ref where it
-was until the next startup reconcile; in between, `git ls-remote` showed
-the old tip, `GET /api/ref-agreement` said `git_behind`, and every
-`git push` to the branch lost its CAS. `queue_api::run` now writes the
-ref after the round, CAS'd on the round's base at the git level too, and
-answers `git_lag: null` (or the reason it could not). The log still
-leads; git follows sooner. `node_queue::the_endpoint_runs_a_round_and_makes_its_own_tree`
-asserts the ref moved and that a push after the round succeeds. Beats 3
-and 6b depend on it.
+1. **A queue landing moves git's own ref in the same request.** Before,
+   git's ref lagged until startup reconciliation, and every push to the
+   branch in between lost its CAS. `queue_api::run` writes the ref after
+   the round, CAS'd on the round's base, and answers `git_lag`.
+2. **Landed proposals do not re-enter later rounds.** Proposal refs
+   survive their landing by design, but the node builds a fresh queue
+   per round and forgot what had landed, so every later round re-merged
+   them as no-ops. `ProposalRound::already_integrated` reads ancestry
+   from git and the round skips those; the answer names them under
+   `already_integrated`.
 
 ## Gaps still open
 
-Candidates for the register, in the order they bit. Each is what the
-current surface does, verified on this tree, not a proposal.
-
-1. **A landed proposal is re-merged every later round.** Proposal refs
-   survive their landing by design (the test says sweeping them would
-   decide on the author's behalf), but the node builds a fresh
-   `MergeQueue` per round, so its `landed` set is empty each time and
-   the landed proposal joins the next train again as a no-op merge. The
-   script has agent3 retire its landed proposal before beat 6a so the
-   round shows only the two new ones.
-2. **`TreeEntry::Conflict` and `Commit::resolves` are not reachable from
-   git or the API.** They live in `choir-view`'s commit model and are
-   constructed only by `choir-demo` and the queue's resolution memory.
-   The git-side form of the same fact is a merge commit carrying diff3
-   markers, which the browse surface renders three-sided
-   (`browse.rs`, `Region::Conflict`); beat 3 shows that. Beat 4's
-   resolution is a plain child commit with no `resolves` link, and the
-   narration does not claim one.
-3. **The window is not observable from the node.** `QueueReport.window_trace`
-   exists but `/api/queue/run` does not return it, and the per-round
-   queue starts at 20 every round regardless of the last verdict. "Not
-   halved on `Errored`" is true in `MergeQueue::drain` and cannot be
-   shown on this surface; 6a shows its consequence instead.
-4. **`choir log` prints raw entries** (`payload_hex`), one JSON object per
-   line, wider than any screen; there is no human rendering of an op.
-   `show.py log` decodes the payload for the screen.
-5. **`choir checks <git-oid>` wants a bare 40-hex oid**, while every key in
-   the view's `checks` and `refs` sections carries the `11-` codec prefix.
-   The script strips it.
-6. **Checks are keyed by candidate, not by proposal.** The queue records
-   its verdict on the speculative merge commit it tested, so
-   `choir checks <proposal head>` answers `unreported` even after a round
-   judged that proposal.
-7. **The `<who>` segment of `refs/for/<branch>/<who>/<topic>` is unchecked
-   without an ACL.** Any anonymous client can push as `agent3`; the
-   ownership rule (`proposal_denial`) only applies to `propose`-level
-   grants. Fine for a loopback demo, worth knowing before it is shown as
-   attribution.
+1. **`TreeEntry::Conflict` and `Commit::resolves` are not reachable from
+   git or the API.** The git-side form of the same fact is a merge
+   commit with diff3 markers, which the browse surface renders
+   three-sided (`browse.rs`, `Region::Conflict`); beat 3 shows that.
+   The resolution is a plain child commit with no `resolves` link, and
+   the narration does not claim one.
+2. **The window is not observable from the node.** `window_trace` is not
+   in the endpoint's answer and the per-round queue starts at 20 each
+   round. "Not halved on `Errored`" is true in `MergeQueue::drain` and
+   cannot be shown on this surface; beat 5 shows its consequence.
+3. **`choir log` prints raw entries**; `show.py log` decodes them.
+4. **`choir checks` wants a bare 40-hex oid** while the view's keys carry
+   the `11-` codec prefix; checks are keyed by speculative candidate,
+   not by proposal head.
+5. **The `<who>` segment of `refs/for/<branch>/<who>/<topic>` is unchecked
+   without an ACL.**
+6. **Round cost is dominated by git subprocesses**, see the numbers above.
 
 ## Files
 
-- `run.sh`: the whole take, narration inline (`# ...` lines before each
-  command say what happens and what to watch).
-- `show.py`: compact renderings of the node's JSON and HTML; nothing
-  computed.
-- `.run/`: everything a take leaves behind; ignored, recreated each run.
+- `run.sh`: builds into `demo/.target`, then starts `tui.py`.
+- `tui.py`: the presenter and every beat; standard library only.
+- `show.py`: compact renderings of the node's JSON and HTML, shared
+  with `tui.py`; nothing computed.
+- `.run/`, `.target/`: everything a take leaves behind; ignored.
