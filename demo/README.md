@@ -27,8 +27,9 @@ demo/run.sh --auto           # advance by itself, 6 s per beat
 demo/run.sh --auto 10        # 10 s per beat
 demo/run.sh --no-build       # skip cargo; use the binaries as built
 demo/run.sh --dump           # no screen: play everything and print both panes
-demo/run.sh --port N         # if 8447 is taken
-demo/run.sh --agents N       # default 20
+demo/run.sh --port N         # default 8447, or the next free port
+demo/run.sh --agents N       # default 20, at least 12
+demo/run.sh --ci-seconds S   # how long test.sh takes, default 3
 ```
 
 Keys while playing: Enter or Space for the next beat, `a` toggles
@@ -54,13 +55,14 @@ happened while writing this.
 ## The beats
 
 Each beat plays both panes at once. Machine time for the whole take is
-about 35 s; the recording is as long as your pauses.
+about 80 s with the default 3 s test, a minute of it beat 2's left pane
+grinding; the recording is that plus your pauses.
 
 | beat | what happens | what to say |
 |------|--------------|-------------|
 | 0 | left: bare repo, fast-forward only. right: node up. Same seed on both: `config.toml`, `test.sh`, twenty `svc/` files | one substrate, two integration models |
 | 1 | twenty worktrees, twenty branches, twenty pushes on each side; agents 03 and 07 also change the greeting line | isolation is free, and neither side rejects a push. Concede it |
-| 2 | left: the maintainer merges 01 to 20 in order with tests after each; 07 conflicts, is skipped, its author paged. right: one round; 07 evicted as `Conflict`, the other nineteen land behind it. Counters: merged, blocked, CI runs, wall time, and the sequencer's decision latency | the conflict is a verdict in the round, not a stop. Wall time is a wash at this scale and the take prints it either way |
+| 2 | left: the maintainer merges 01 to 20 in order with tests after each; 07 conflicts, is skipped, its author paged. right: one round; 07 evicted as `Conflict`, the other nineteen land behind it. Counters: merged, blocked, CI runs, wall time, and each side's cost model in one line | the conflict is a verdict in the round, not a stop. The maintainer pays the test suite once per merge in series; the round pays it once |
 | 3 | left: agent-12 needs 07's change and can only get it by taking on 07's conflict in its own worktree. right: 07 pushes the conflict to `main` as-is; the node's web view reads it three-sided; 12 builds on top and lands; 07 resolves later | nobody can build on a conflict that lives on a branch. Here it is a value on `main` that anyone can pick up |
 | 4 | left: `git log`, and what it proves: parent pointers, no signatures, no test verdicts. right: the op log by kind, the last landings decoded, and `choir log --verify` over all of it | the commit graph is honest and good. The chain is what a forge does not give you: every landing and every check verdict, verified offline with one key |
 | 5 | two more branches: 05 breaks the test, 09 adds a note. Both CI runners lose their exec bit. left: both merges go red (exit 126), both authors paged. right: `Errored`, nothing evicted. Runners back: left reverts 05 and merges 09; right evicts 05 as `CiFailure` and lands 09 | a red runner is not a red change. Only the change at fault pays |
@@ -74,20 +76,31 @@ and in what you can prove after.
 
 - **Pushes rejected: 0 on both sides.** Branch-per-agent has no push
   contention. Do not pretend otherwise.
-- **Left integration: 19 merges, 19 CI runs, one after another, about
-  5 s.** Serial by construction.
+- **Left integration: 19 merges, 19 CI runs one after another, about
+  60 s** with the 3 s test. Serial by construction: 19 times the test
+  suite, plus a merge each.
 - **Right round: 19 landings, 20 CI runs in one speculative train,
-  about 15 s.** Slower, and the take says so. The time is git process
+  about 14 s.** Once the test suite, because the train runs all twenty
+  at the same time, plus a fixed cost of about 4 s that is git process
   overhead: the speculator checks out and merges each candidate in a
   worktree and the runner provisions a worktree per job, about seven
   `git` invocations per candidate at macOS process-spawn cost. An
   in-memory `git merge-tree --write-tree` speculator would remove most
-  of it; it is the obvious next optimisation and is not done.
-- **Sequencer decision latency, p50 about 2 ms, p99 under the 100 ms
-  gate**, read from `/api/view`'s `sequencer_lag` for this process.
-  Percentiles are power-of-two bucket upper bounds, so they
-  over-estimate by at most 2x and never under-estimate.
-- **`choir log --verify`: about 95 entries, chain holds, all signatures
+  of that fixed cost; it is the obvious next optimisation and is not
+  done.
+- **The two scale differently, which is why the test takes time.**
+  Beat 2 alone, measured on one laptop:
+
+  | test.sh takes | maintainer, 19 runs in series | choir, one round |
+  |---------------|-------------------------------|------------------|
+  | 0 s | 0.9 s | 4.4 s |
+  | 3 s | 58 s | 10.5 s |
+
+  With an instant test the round is the slower side and the take argues
+  against itself, which is what the first version of this demo did. A
+  real suite takes minutes; at 60 s per run the left pane would take
+  twenty minutes and the right about seventy seconds.
+- **`choir log --verify`: about 125 entries, chain holds, all signatures
   verified**, with the node's public key as the only input.
 
 ## What changed in the node for this demo

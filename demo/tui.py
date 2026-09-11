@@ -6,8 +6,11 @@ against a choir node.
 
     --auto [SECS]   advance beats by itself, SECS apart (default 6)
     --dump          no screen: play every beat and print both panes as text
-    --port N        the node's loopback port (default 8447)
+    --port N        the node's loopback port (default 8447, or the next free one)
     --agents N      how many agents (default 20)
+    --ci-seconds S  how long the repo's test.sh takes (default 3): the cost
+                    model of beat 2 is the maintainer paying it once per
+                    merge in series, and the round paying it once
 
 Keys while playing: Enter or Space next beat, a toggle autoplay, q quit.
 
@@ -39,6 +42,9 @@ sys.path.insert(0, str(HERE))
 import show  # noqa: E402  (the same trimming the linear script uses)
 
 REPO = "acme/app.git"
+# No single git, curl or CI step may hang a take: past this it is an error
+# on screen, with the command named, rather than a frozen pane.
+STEP_TIMEOUT = 300
 
 # ---- styles ------------------------------------------------------------------
 NORMAL, PROMPT, SAY, NOTE, OK, BAD, HEAD, KEY = range(8)
@@ -61,7 +67,8 @@ class Pane:
     def __init__(self, ui, side, title):
         self.ui, self.side, self.title = ui, side, title
         self.lines = []  # (text, style)
-        self.status = ""  # one live line shown under the title (counters)
+        self.status = ""  # one live line shown under the text (counters, a clock)
+        self.status_since = None
 
     def put(self, text="", style=NORMAL):
         with self.ui.lock:
@@ -84,10 +91,17 @@ class Pane:
     def bad(self, text):
         self.put(text, BAD)
 
-    def set_status(self, text):
+    def set_status(self, text, timed=False):
+        """One live line under the pane's text; `timed` appends a running clock."""
         with self.ui.lock:
             self.status = text
+            self.status_since = time.monotonic() if timed else None
             self.ui.dirty = True
+
+    def status_line(self):
+        if self.status and self.status_since is not None:
+            return f"{self.status}   {time.monotonic() - self.status_since:4.1f} s"
+        return self.status
 
     def cmd(self, argv, cwd=None, shown=True, quiet=False, env=None, label=None):
         """Print the command as typed, run it, stream its output. Returns (rc, output)."""
@@ -103,6 +117,7 @@ class Pane:
             stderr=subprocess.STDOUT,
             text=True,
             check=False,
+            timeout=STEP_TIMEOUT,
         )
         out = proc.stdout.replace(str(root) + "/", "")
         if not quiet:
@@ -114,9 +129,10 @@ class Pane:
 
 # ---- the environment: paths, node, git ---------------------------------------
 class Env:
-    def __init__(self, bin_dir, port, agents):
+    def __init__(self, bin_dir, port, agents, ci_seconds=3.0):
         self.bin = Path(bin_dir)
         self.port = port
+        self.ci_seconds = ci_seconds
         self.api = f"http://127.0.0.1:{port}"
         self.url = f"{self.api}/{REPO}"
         self.agents = agents
@@ -151,10 +167,13 @@ class Env:
 
     # -- process plumbing --
     def git(self, cwd, *args, check=True):
-        p = subprocess.run(
-            ["git", *args], cwd=cwd, env=self.git_env, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, check=False,
-        )
+        try:
+            p = subprocess.run(
+                ["git", *args], cwd=cwd, env=self.git_env, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, check=False, timeout=STEP_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"git {' '.join(args)} in {cwd}: no answer in {STEP_TIMEOUT} s") from None
         if check and p.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)} in {cwd}: {p.stdout}")
         return p
@@ -162,7 +181,7 @@ class Env:
     def choir(self, *args):
         return subprocess.run(
             [str(self.bin / "choir"), *args], env=self.git_env, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, check=False,
+            stderr=subprocess.PIPE, text=True, check=False, timeout=STEP_TIMEOUT,
         )
 
     def get(self, path):
@@ -223,7 +242,7 @@ class Env:
             runner.chmod(0o755)
         (self.run / "ci-command.json").write_text(json.dumps({
             "format_version": 1, "program": str(self.run / "ci" / "run-tests"),
-            "args": [], "timeout_seconds": 60,
+            "args": [], "timeout_seconds": max(60, int(self.ci_seconds * 20)),
         }))
         log = open(self.run / "node.log", "w")
         self.node = subprocess.Popen(
@@ -301,7 +320,8 @@ class UI:
             self.dirty = True
         self.transcript(f"== beat {no}: {title} == {narration}")
         for pane in (self.left, self.right):
-            pane.put("", NORMAL)
+            with self.lock:  # each beat starts on a clean pane, whatever the screen height
+                pane.lines.clear()
             pane.put(f"── beat {no}: {title}", HEAD)
         if self.dump:
             print(f"\n== beat {no}: {title} ==\n#  {narration}", flush=True)
@@ -357,6 +377,7 @@ class UI:
         self.transcript(f"screen: {w}x{h}, TERM {os.environ.get('TERM', '?')}, colors {curses.COLORS}")
         worker = threading.Thread(target=self._play, args=(play,), daemon=True)
         worker.start()
+        last_draw = 0.0
         while True:
             key = stdscr.getch()
             if key != -1:
@@ -374,8 +395,9 @@ class UI:
                 h, w = stdscr.getmaxyx()
                 self.transcript(f"screen: resized to {w}x{h}")
                 self.dirty = True
-            if self.dirty or int(time.monotonic() * 2) % 2 == 0:
+            if self.dirty or time.monotonic() - last_draw > 0.2:  # the clocks tick
                 self._draw(stdscr)
+                last_draw = time.monotonic()
             time.sleep(0.04)
 
     def _play(self, play):
@@ -431,10 +453,11 @@ class UI:
                 text(y, split, "│", A[NOTE], 1)
             for pane, x, pw in ((self.left, 1, lw - 1), (self.right, split + 1, rw - 1)):
                 rows = bottom - top - (1 if pane.status else 0)
-                for i, (line, style) in enumerate(pane.lines[-rows:]):
+                shown = pane.lines[-rows:]
+                for i, (line, style) in enumerate(shown):
                     text(top + i, x, line, A[style], pw)
-                if pane.status:
-                    text(bottom - 1, x, pane.status, A[KEY], pw)
+                if pane.status:  # right under the last line, where the eye is
+                    text(top + len(shown), x, pane.status_line(), A[KEY], pw)
             # footer
             text(h - 1, 1, self.hint, A[NOTE])
             stdscr.refresh()
@@ -445,11 +468,30 @@ def ms(t0):
     return f"{(time.monotonic() - t0) * 1000:.0f} ms"
 
 
-def seed_tree(path, agents):
+def free_port(first):
+    """`first` if nothing listens on it, else the next loopback port that is free."""
+    import socket
+
+    for port in range(first, first + 50):
+        with socket.socket() as s:
+            # The node's listener sets SO_REUSEADDR, so a port left in
+            # TIME_WAIT by the last take is free for it; probe the same way.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    sys.exit(f"no free port in {first}..{first + 49}; pass --port")
+
+
+def seed_tree(path, agents, ci_seconds=0.0):
     (path / "config.toml").write_text('greeting = "hello"\n')
     test = path / "test.sh"
     test.write_text(
-        "#!/bin/sh\n# the repo's own test: the greeting must be a quoted word\n"
+        "#!/bin/sh\n# the repo's own test: the greeting must be a quoted word.\n"
+        f"# It takes {ci_seconds:g} s, the way a real suite takes minutes.\n"
+        f"sleep {ci_seconds:g}\n"
         "grep -q '^greeting = \"[a-z]*\"$' config.toml\n"
     )
     test.chmod(0o755)
@@ -475,7 +517,7 @@ def run_ci(runner, cwd, env):
     """The maintainer's CI step: a shell runs the runner, so a runner that
     cannot start is exit 126, the way any CI script would see it."""
     return subprocess.run(["/bin/sh", "-c", f'exec "{runner}"'], cwd=cwd, env=env.git_env,
-                          capture_output=True, check=False).returncode
+                          capture_output=True, check=False, timeout=STEP_TIMEOUT).returncode
 
 
 def round_names(env):
@@ -552,12 +594,12 @@ def beat0(ui):
     def seed(pane, side, url):
         seed_dir = side / "seed"
         env.git(side, "clone", "-q", url, "seed")
-        seed_tree(seed_dir, env.names())
+        seed_tree(seed_dir, env.names(), env.ci_seconds)
         env.git(seed_dir, "add", ".")
         env.git(seed_dir, "commit", "-q", "-m", "base: greeting, test.sh, twenty services")
         env.git(seed_dir, "push", "-q", "origin", "HEAD:main")
         pane.put(f"seed $ git push origin HEAD:main", PROMPT)
-        pane.note("  base: config.toml, test.sh, svc/agent-01..20.toml")
+        pane.note(f"  base: config.toml, test.sh ({env.ci_seconds:g} s per run), svc/agent-01..{env.agents:02d}.toml")
 
     parallel([lambda: seed(L, env.left, str(env.left / "origin.git")), lambda: seed(R, env.right, env.url)])
     ui.wait()
@@ -637,21 +679,21 @@ def beat2(ui):
         L.set_status("")
         stats["L"] = (len(merged), len(blocked), ci, ms(t0))
         L.put(f"  {len(merged)} merged, {len(blocked)} blocked, {ci} CI runs one after another, {stats['L'][3]}", NOTE)
+        L.note(f"  the cost: {ci} merges x {env.ci_seconds:g} s of tests, in series, plus a merge each")
         L.note("  agent-07's work is on a branch nobody else can see on main until its author comes back")
 
     def right():
         t0 = time.monotonic()
         R.put("$ curl -X POST /api/queue/run  {repo, branch: main}", PROMPT)
-        R.set_status(" one round running: speculative train of 20, CI per candidate, in parallel")
+        R.set_status(f" one round: {env.agents} speculative merges, then {env.agents} test runs at once", timed=True)
         names = round_names(env)
         r = env.queue_run()
         R.set_status("")
         for line in round_lines(env, r, names):
             R.put(line, BAD if "Conflict" in line else NORMAL)
-        lag = env.get("/api/view")["sequencer_lag"]
         stats["R"] = (len(r["merged"]), len(r["rejected"]), env.agents, ms(t0))
         R.put(f"  {len(r['merged'])} landed, {len(r['rejected'])} evicted, {env.agents} CI runs in one train, {stats['R'][3]}", NOTE)
-        R.note(f"  sequencer decision latency since start: p50 {lag['decision']['p50_us']} us, p99 {lag['decision']['p99_us']} us over {lag['observed_ops']} ops")
+        R.note(f"  the cost: {env.ci_seconds:g} s of tests once, all {env.agents} at the same time, plus one merge per candidate")
         R.note("  agent-07 was a verdict in the round, not a stop: evicted first-class, 08 to 20 landed behind it")
 
     parallel([left, right])
@@ -812,13 +854,23 @@ def main():
     ap.add_argument("--bin", required=True, help="directory holding choir-node and choir")
     ap.add_argument("--auto", nargs="?", const=6.0, type=float, default=None)
     ap.add_argument("--dump", action="store_true")
-    ap.add_argument("--port", type=int, default=8447)
+    ap.add_argument("--port", type=int, default=None, help="default 8447, or the next free port")
     ap.add_argument("--agents", type=int, default=20)
+    ap.add_argument("--ci-seconds", type=float, default=3.0, help="how long test.sh takes (default 3)")
     args = ap.parse_args()
-    env = Env(args.bin, args.port, args.agents)
+    if args.agents < 12 or args.ci_seconds < 0:
+        sys.exit("beats 3 and 5 need agents 05, 07, 09 and 12: --agents 12 or more; --ci-seconds 0 or more")
+    env = Env(args.bin, args.port or free_port(8447), args.agents, args.ci_seconds)
     for b in ("choir-node", "choir"):
         if not (env.bin / b).exists():
             sys.exit(f"no {b} in {env.bin}; run demo/run.sh")
+    for tool in ("git", "curl"):
+        if shutil.which(tool) is None:
+            sys.exit(f"{tool} is not on PATH")
+    # A closed tab or a kill must still take the node down: turn the signal
+    # into the SystemExit that the finally below handles.
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, lambda *_: sys.exit(1))
     env.reset()
     env.start_node()
     ui = UI(env, dump=args.dump, auto=args.auto)
