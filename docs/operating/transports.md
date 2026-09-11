@@ -108,6 +108,10 @@ slashing, and a three-dot diff. Comments are signed `PostComment` operations
 
 ## Git compatibility path
 
+A person holding an invite needs none of this: `choir join '<link>'` stores
+the credential, wires the helper below and clones each repository the
+invite names. By hand:
+
 ```bash
 choir repo url owner/repo.git      # prints the URL, and the git config for the credential
 git clone http://127.0.0.1:8417/owner/repo.git

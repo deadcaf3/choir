@@ -54,6 +54,12 @@ fn header_value(headers: &str, name: &str) -> Option<String> {
 }
 
 fn served(tag: &str) -> Served {
+    served_with_shelf(tag, false)
+}
+
+/// [`served`], optionally publishing an empty release shelf (D79), which
+/// is what decides whether the node can hand a reader its own installer.
+fn served_with_shelf(tag: &str, shelf: bool) -> Served {
     let work = std::env::temp_dir().join(format!("choir-node-join-{tag}"));
     std::fs::remove_dir_all(&work).ok();
     std::fs::create_dir_all(&work).expect("temp root");
@@ -87,6 +93,11 @@ fn served(tag: &str) -> Served {
         .expect("platform starts"),
     );
     node.write_ssh_handoff(&handoff).expect("handoff");
+    if shelf {
+        let dir = work.join("shelf");
+        std::fs::create_dir_all(&dir).expect("shelf dir");
+        node.publish_downloads(dir).expect("shelf publishes");
+    }
     std::thread::spawn(move || node.serve_forever());
     Served {
         base: format!("http://127.0.0.1:{port}"),
@@ -143,11 +154,12 @@ fn a_stranger_at_the_bare_address_gets_a_page_rather_than_a_password_box() {
     // different product from the one behind it is worse than a door that
     // describes nothing.
     //
-    // `git clone` rather than `choir git-credential`: the credential
-    // helper is configured by `choir join` now, so naming it here would
-    // be teaching a step nobody has to take. The install is asserted
-    // separately below, because it is not one of the steps.
-    for command in ["choir join", "git clone", "choir propose"] {
+    // `cd REPO` rather than `git clone`, and `git clone` rather than
+    // `choir git-credential` before that: `choir join` configures the
+    // helper and clones what the invite names now, so naming either here
+    // would be teaching a step nobody has to take. The install is
+    // asserted separately below, because it is not one of the steps.
+    for command in ["choir join", "cd REPO", "choir propose"] {
         assert!(
             body.contains(command),
             "the front door does not name `{command}`: {body}"
@@ -383,6 +395,71 @@ fn redeeming_hands_over_a_working_credential_exactly_once() {
     assert!(
         !again.contains(&token),
         "the token was shown twice: {again}"
+    );
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
+/// The invite page is two doors, and the terminal one is finished: the
+/// installer from this node's own shelf, and the join line with this
+/// very link already in it, so nothing is assembled by hand.
+#[test]
+fn the_invite_page_offers_a_terminal_door_with_this_link_in_it() {
+    let s = served_with_shelf("doors", true);
+    let (id, secret) = s.invite(r#"{"user":"bea","grants":["agents/demo.git write"]}"#);
+    let (status, _, body) = get(&s.join_url(&id, &secret), &[]);
+    assert_eq!(status, 200, "{body}");
+    for door in ["Join in this browser", "Or join from a terminal"] {
+        assert!(body.contains(door), "no `{door}` door: {body}");
+    }
+    assert!(
+        body.contains(&format!("curl -fsSL {}/download/install.sh | sh", s.base)),
+        "the terminal door does not install from this node: {body}"
+    );
+    // The installer cannot change the PATH of the terminal it runs in, so
+    // on a machine with no Rust the join line pasted under it would be
+    // `command not found` without this.
+    assert!(
+        body.contains("export PATH=&quot;$HOME/.cargo/bin:$PATH&quot;"),
+        "the terminal door leaves this terminal unable to find choir: {body}"
+    );
+    assert!(
+        body.contains(&format!(
+            "choir join &#39;{}/join?i={id}&amp;k={secret}&#39;",
+            s.base
+        )),
+        "the terminal door does not carry this link: {body}"
+    );
+    // Folded shut, because those lines carry the invite's secret: a
+    // screenshot of the page as it opens must not.
+    let at = body.find("choir join &#39;").expect("the join line");
+    let before = &body[..at];
+    let opened = before
+        .rfind("<details>")
+        .unwrap_or_else(|| panic!("the join line is not folded: {body}"));
+    assert!(
+        !before[opened..].contains("</details>"),
+        "the join line sits outside its fold: {body}"
+    );
+    // Showing the page still spends nothing: the terminal door is text.
+    let (status, _, _) = post_join(&s.base, &id, &secret, "");
+    assert_eq!(status, 200, "rendering the doors consumed the invite");
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
+/// Without a shelf the node has no installer to hand out, so the
+/// terminal door says what it needs rather than naming a URL that 404s.
+#[test]
+fn a_node_with_no_shelf_offers_the_join_line_without_an_installer() {
+    let s = served("doors-no-shelf");
+    let (id, secret) = s.invite(r#"{"user":"bea","grants":["agents/demo.git write"]}"#);
+    let (_, _, body) = get(&s.join_url(&id, &secret), &[]);
+    assert!(
+        body.contains(&format!("choir join &#39;{}/join?i={id}", s.base)),
+        "{body}"
+    );
+    assert!(
+        !body.contains("/download/install.sh"),
+        "the page names an installer this node does not serve: {body}"
     );
     std::fs::remove_dir_all(&s.work).ok();
 }

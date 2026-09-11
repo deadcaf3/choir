@@ -240,11 +240,13 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     let target = target();
     let shelf = work.join("shelf");
     std::fs::create_dir_all(&shelf).expect("shelf");
-    for (package, binary) in [("choir-cli", "choir"), ("choir-node", "choir-node")] {
+    // One archive onto the shelf, whose binary prints `says`: called
+    // again later to put a new build where the old one was.
+    let shelve = |package: &str, binary: &str, says: &str| {
         let stage = work.join(format!("{package}-{target}"));
         std::fs::create_dir_all(&stage).expect("stage");
         let fake = stage.join(binary);
-        std::fs::write(&fake, format!("#!/bin/sh\necho i-am-{binary}\n")).expect("fake binary");
+        std::fs::write(&fake, format!("#!/bin/sh\necho {says}\n")).expect("fake binary");
         std::process::Command::new("chmod")
             .args(["+x"])
             .arg(&fake)
@@ -278,6 +280,9 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
             format!("{hex} *{archive}\n"),
         )
         .expect("digest file");
+    };
+    for (package, binary) in [("choir-cli", "choir"), ("choir-node", "choir-node")] {
+        shelve(package, binary, &format!("i-am-{binary}"));
     }
 
     let mut table = AuthTable::new();
@@ -285,13 +290,17 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     let mut node =
         Node::bind_with_auth(&work.join("repos"), 0, Some(table)).expect("node binds a free port");
     let port = node.port();
-    node.publish_downloads(shelf).expect("shelf serves");
+    node.publish_downloads(shelf.clone()).expect("shelf serves");
     std::thread::spawn(move || node.serve_forever());
     let base = format!("http://127.0.0.1:{port}");
 
     // Exactly the documented command, with `CARGO_HOME` pointed
-    // somewhere this test owns.
+    // somewhere this test owns, and a `HOME` too: the installer writes a
+    // startup file there, and the one it must never write is the real
+    // one belonging to whoever runs this suite.
     let home = work.join("cargo-home");
+    let user_home = work.join("home");
+    std::fs::create_dir_all(&user_home).expect("home");
     let script = std::process::Command::new("curl")
         .args(["-fsSL", &format!("{base}/download/install.sh")])
         .output()
@@ -304,16 +313,57 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     // quick start and it execs the daemon, so an installer whose default
     // leaves the daemon out hands the reader `command not found` one
     // step later. That was the first version's default.
-    let run = std::process::Command::new("sh")
-        .arg(&script_path)
-        .env("CARGO_HOME", &home)
-        .output()
-        .expect("sh runs");
+    let install = || {
+        std::process::Command::new("sh")
+            .arg(&script_path)
+            .env("CARGO_HOME", &home)
+            .env("HOME", &user_home)
+            .env("SHELL", "/bin/zsh")
+            .env_remove("ZDOTDIR")
+            .output()
+            .expect("sh runs")
+    };
+    let run = install();
     assert!(
         run.status.success(),
         "the installer failed: {}{}",
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
+    );
+
+    // `CARGO_HOME/bin` is not on this `PATH`, which is the state of a Mac
+    // with no Rust on it: the reader's next command would be `command not
+    // found`. So a new terminal is given the directory, once, and this
+    // one is told the line that finishes it.
+    let line = format!("export PATH=\"{}:$PATH\"", home.join("bin").display());
+    let zshrc = user_home.join(".zshrc");
+    let written = std::fs::read_to_string(&zshrc).unwrap_or_default();
+    assert!(
+        written.contains(&line),
+        "a new terminal would not find choir: {written:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains(&line),
+        "this terminal is not told the line: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let again = install();
+    assert!(again.status.success());
+    // Nothing on the shelf changed, so the second run fetches no archive
+    // and says why rather than reinstalling the same bytes in silence.
+    let said = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(
+        !said.contains(".tar.xz"),
+        "a second install fetched again: {said}"
+    );
+    assert!(said.contains("already current"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(&zshrc)
+            .unwrap_or_default()
+            .matches(&line)
+            .count(),
+        1,
+        "a second install added the line again"
     );
 
     for binary in ["choir", "choir-node"] {
@@ -335,6 +385,29 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     assert!(
         !home.join("bin/LICENSE-MIT").exists(),
         "the installer copied a licence in beside the binaries"
+    );
+
+    // A new build on the shelf is fetched, and only that one.
+    shelve("choir-cli", "choir", "i-am-choir-2");
+    let newer = install();
+    let said = String::from_utf8_lossy(&newer.stdout).to_string();
+    assert!(newer.status.success(), "{said}");
+    assert!(said.contains("fetching choir-cli-"), "{said}");
+    assert!(!said.contains("fetching choir-node-"), "{said}");
+    let ran = std::process::Command::new(home.join("bin").join("choir"))
+        .output()
+        .expect("the updated binary runs");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "i-am-choir-2");
+
+    // A binary that was deleted is put back though the shelf is the same:
+    // running the installer again is what somebody missing one does.
+    std::fs::remove_file(home.join("bin").join("choir-node")).expect("delete one");
+    let restored = install();
+    assert!(restored.status.success());
+    assert!(
+        home.join("bin").join("choir-node").is_file(),
+        "a missing binary was not put back: {}",
+        String::from_utf8_lossy(&restored.stdout)
     );
 
     std::fs::remove_dir_all(&work).ok();
@@ -368,6 +441,8 @@ fn a_mismatched_digest_stops_the_install() {
     let run = std::process::Command::new("sh")
         .arg(&script_path)
         .env("CARGO_HOME", &home)
+        // Never the real one: see the end-to-end test above.
+        .env("HOME", s.work.join("home"))
         .output()
         .expect("sh runs");
     assert!(!run.status.success(), "a bad digest installed anyway");

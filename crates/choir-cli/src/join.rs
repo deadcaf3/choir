@@ -121,6 +121,35 @@ impl Link {
     }
 }
 
+/// The repositories an invite's grants name, each with the folder
+/// `choir join` clones it into, in grant order.
+///
+/// A grant is the node's `<repo|*> <level> [until=…]` spelling. `*`
+/// names no repository, so it clones nothing; the same repository under
+/// both of the ACL's spellings (`owner/name` and `owner/name.git`) is one
+/// clone, not two into the same folder. The folder is the last path
+/// segment, which is where a plain `git clone` of the same URL would put
+/// it, and a segment that is not a folder name is skipped rather than
+/// handed to git as a path.
+#[must_use]
+pub fn repositories<'a>(grants: &[&'a str]) -> Vec<(&'a str, &'a str)> {
+    let mut out: Vec<(&str, &str)> = Vec::new();
+    for grant in grants {
+        let Some(target) = grant.split_whitespace().next() else {
+            continue;
+        };
+        let repo = target.strip_suffix(".git").unwrap_or(target);
+        let folder = repo.rsplit('/').next().unwrap_or(repo);
+        if repo == "*" || matches!(folder, "" | "." | "..") {
+            continue;
+        }
+        if !out.iter().any(|(seen, _)| *seen == repo) {
+            out.push((repo, folder));
+        }
+    }
+    out
+}
+
 /// What one machine is set up as, in the vocabulary the documentation
 /// uses.
 ///
@@ -237,6 +266,26 @@ mod tests {
             let error = Link::parse(bad).expect_err("refused");
             assert!(error.contains("next:"), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn an_invite_clones_each_repository_it_names_once_and_never_the_wildcard() {
+        let grants = [
+            "agents/demo write",
+            // The same repository spelled the ACL's other way is not a
+            // second clone into the same folder.
+            "agents/demo.git read",
+            // `*` names no repository, so there is nothing to clone.
+            "* write",
+            "other/notes read until=1864000",
+            // A last segment that is not a folder name is skipped rather
+            // than handed to git as a path.
+            "other/.. read",
+        ];
+        assert_eq!(
+            repositories(&grants),
+            [("agents/demo", "demo"), ("other/notes", "notes")]
+        );
     }
 
     #[test]

@@ -347,8 +347,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "join",
-        args: "<link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]",
-        summary: "redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, and the node URL in ~/.choir/config; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory",
+        args: "<link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>] [--no-clone]",
+        summary: "redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, the node URL in ~/.choir/config, and a clone of each repository the invite names in the current directory (--no-clone skips it); the same link run again on this machine clones only what is missing; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory",
         agent_facing: true,
         group: "getting started",
     },
@@ -1328,17 +1328,18 @@ pub fn contribute_html() -> String {
             "1",
             "join",
             "Paste the whole link your operator sent you, quotes included. This mints your key, \
-             stores your token, and points git at that token for this node -- so the clone \
-             below needs no credential in its URL. There is no registration, and no second \
-             message to wait for.",
+             stores your token, points git at that token for this node, and clones each \
+             repository the invite names into a folder of its own name. There is no \
+             registration, and no second message to wait for.",
             "choir join 'NODE/join?i=…&amp;k=…'",
         ),
         (
             "2",
             "git-credential",
-            "Clone normally. The token stays in the file `choir join` wrote and never enters \
-             the URL, so it cannot leak through `git remote -v` or a pasted clone line. This \
-             command is here for anybody who would rather wire that up by hand.",
+            "Anything else you can read, clone normally. The token stays in the file `choir \
+             join` wrote and never enters the URL, so it cannot leak through `git remote -v` \
+             or a pasted clone line. This command is here for anybody who would rather wire \
+             that up by hand.",
             "git clone NODE/REPO.git",
         ),
         (

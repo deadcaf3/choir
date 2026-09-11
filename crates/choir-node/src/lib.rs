@@ -1773,6 +1773,7 @@ impl Node {
                                 publishes: acl
                                     .as_ref()
                                     .is_some_and(|t| t.holds_anything(acl::ANON)),
+                                downloads: downloads.is_some(),
                             },
                             &sessions,
                             scheme,
@@ -3897,6 +3898,7 @@ fn respond_join(
         ssh,
         passkeys,
         publishes,
+        downloads,
     } = offers;
     let _ = ssh;
     let contact = operator_contact(root);
@@ -3952,6 +3954,7 @@ fn respond_join(
                     ssh,
                     passkeys,
                     publishes,
+                    downloads,
                 },
                 chrome,
                 origin.as_deref(),
@@ -3969,6 +3972,7 @@ fn respond_join(
                 asking: store.is_some(),
                 docs: docs.as_deref(),
                 publishes,
+                downloads,
             },
         )
     };
