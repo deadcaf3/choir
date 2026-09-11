@@ -201,6 +201,10 @@ pub fn run(
         may_write_cache: false,
     };
 
+    // Named in the answer so a caller can tell "nothing to do" from
+    // "nothing proposed": these were in the round and already on the
+    // branch, so the queue never saw them.
+    let already_integrated = round.already_integrated(&trees.speculation);
     let Some(report) =
         platform.run_proposal_queue(repo, branch, &trees.speculation, &mut ci, template)
     else {
@@ -238,6 +242,7 @@ pub fn run(
         // Null when git holds what the log landed; otherwise why it does
         // not yet, and startup reconciliation will bring it forward.
         "git_lag": git_lag,
+        "already_integrated": already_integrated,
     });
     (200, body.to_string())
 }

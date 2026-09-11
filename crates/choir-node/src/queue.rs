@@ -128,6 +128,31 @@ impl ProposalRound {
     pub fn target_ref(&self) -> String {
         format!("{}:refs/heads/{}", self.repo, self.branch)
     }
+
+    /// The proposals in this round whose head is already an ancestor of
+    /// the branch: landed by an earlier round, or merged some other way.
+    ///
+    /// Proposal refs survive their landing on purpose (sweeping one
+    /// would decide on the author's behalf that the change is done), and
+    /// the queue's own already-landed memory lives in a `MergeQueue`
+    /// that a node builds fresh per round. Without this, every landed
+    /// proposal re-entered every later round as a no-op merge, costing a
+    /// CI run and a landing op each time. Ancestry is read from git in
+    /// `workdir`, a worktree of the served repository.
+    #[must_use]
+    pub fn already_integrated(&self, workdir: &std::path::Path) -> Vec<u64> {
+        self.proposals
+            .iter()
+            .filter(|p| {
+                std::process::Command::new("git")
+                    .args(["merge-base", "--is-ancestor", &p.head, &self.base])
+                    .current_dir(workdir)
+                    .status()
+                    .is_ok_and(|status| status.success())
+            })
+            .map(|p| p.id)
+            .collect()
+    }
 }
 
 /// Where a landing reads the scope it signs: this node's id and a head

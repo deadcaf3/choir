@@ -460,6 +460,32 @@ fn the_endpoint_runs_a_round_and_makes_its_own_tree() {
         "a push after a landing lost its CAS: {}",
         String::from_utf8_lossy(&pushed.stderr)
     );
+
+    // The proposal refs survive their landing, so they are in the next
+    // round's reading; the queue must not merge them again. They are
+    // named as already integrated, and nothing lands.
+    let (status, body) = choir_node::queue_api::run(
+        &f.work.join("repos"),
+        platform,
+        &config,
+        &in_flight,
+        serde_json::json!({ "repo": REPO, "branch": "main" })
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(status, 200, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        again["already_integrated"],
+        serde_json::json!([1, 2]),
+        "{body}"
+    );
+    assert_eq!(again["merged"], serde_json::json!([]), "{body}");
+    assert_eq!(
+        again["tip"],
+        String::from_utf8_lossy(&git(&f.clone, &["rev-parse", "HEAD"]).stdout).trim(),
+        "a round with nothing new moved the branch: {body}"
+    );
     assert!(
         tree.exists(),
         "the node did not make its own queue tree under {}",

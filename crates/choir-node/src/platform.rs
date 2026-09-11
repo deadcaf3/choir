@@ -4068,8 +4068,13 @@ impl Platform {
         queue.set_check_reporter(
             self.check_reporter("ci/queue".to_string(), Some(round.target_ref())),
         );
+        // A proposal the branch already contains is not a candidate; see
+        // [`crate::queue::ProposalRound::already_integrated`].
+        let integrated = round.already_integrated(workdir);
         for change in round.changes() {
-            queue.submit(change);
+            if !integrated.contains(&change.id) {
+                queue.submit(change);
+            }
         }
         Some(self.drain_queue(&mut queue, ci))
     }
