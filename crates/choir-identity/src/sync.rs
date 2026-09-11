@@ -1,5 +1,12 @@
 //! `SYNC.md`'s three checks over one served page, as a function (D17).
 //!
+//! Named for the contract it implements rather than for its first caller.
+//! It lived in `choir-cli` while `choir log --verify` was the only reader
+//! of a page; a seed is a second one, and it replicates through the
+//! daemon, which must not depend on the CLI. This crate already owns
+//! [`Registry`] and sees [`OpEntry`], so moving here adds no dependency
+//! edge anywhere.
+//!
 //! Pure and node-free on purpose. The verification logic is the part
 //! worth being certain about, and a check that can only be exercised
 //! against a live node can only ever be exercised against a *correct*
@@ -27,7 +34,7 @@
 //!    A passkey entry carries its own credential key (D45) and so needs
 //!    nothing external — but for the same reason it establishes only
 //!    half of what the ed25519 path does. See
-//!    [`crate::verify::Report::integrity_only`].
+//!    [`crate::sync::Report::integrity_only`].
 //!
 //! # What still cannot be verified forever
 //!
@@ -63,9 +70,8 @@
 //! this client cannot resolve is the expected state for a deleted
 //! account, not a fault in the log.
 
+use crate::{IdentityError, Registry};
 use choir_hash::ContentHash;
-use choir_identity::{IdentityError, Registry};
-use choir_node::platform::hex_decode;
 use choir_oplog::{OpEntry, Witness};
 
 /// What one page's verification found.
@@ -161,7 +167,7 @@ pub fn page(entries: &[serde_json::Value], registry: &Registry, revoked: &Revoca
                 // there is nothing here to look up rather than a lookup
                 // that happens to miss.
                 Some(sig) if sig.scheme_id() == choir_oplog::scheme::WEBAUTHN_ES256 => {
-                    match choir_identity::verify_carried_webauthn(&e.signing_hash(), sig) {
+                    match crate::verify_carried_webauthn(&e.signing_hash(), sig) {
                         Ok(_) => {
                             report.integrity_only += 1;
                             report.notes.push(format!(
@@ -279,10 +285,26 @@ fn hash_from_hex(text: &str) -> Option<ContentHash> {
     })
 }
 
+/// Hex of either case to bytes; `None` on any bad input.
+///
+/// The same ten lines `choir_node::platform::hex_decode` holds. Copied
+/// rather than shared: that one is the daemon's wire helper, and this
+/// crate sits below the daemon, so sharing it would mean a dependency in
+/// the wrong direction or a new crate for a loop.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::Revocations;
-    use choir_identity::{ActorKey, Registry};
+    use crate::{ActorKey, Registry};
     use choir_oplog::{OpEntry, FORMAT_VERSION};
 
     /// A page of `n` chained, signed entries, in the shape `/api/log`
@@ -535,7 +557,7 @@ mod tests {
         let channel = "bob";
         let payload = b"an op bob approved".to_vec();
         let signing = choir_oplog::signing_hash(channel, &payload);
-        let challenge = base64url(&choir_identity::webauthn_challenge(&signing));
+        let challenge = base64url(&crate::webauthn_challenge(&signing));
         let client_data =
             format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"x"}}"#)
                 .into_bytes();

@@ -2546,11 +2546,11 @@ fn load_registry(path: &str) -> Registry {
 /// claims rather than more, and the alternative — treating an
 /// unanswerable question as "revoked" — would report a sound log as
 /// broken.
-fn revocations(api: &str, auth: AuthOptions<'_>) -> choir_cli::verify::Revocations {
+fn revocations(api: &str, auth: AuthOptions<'_>) -> choir_identity::sync::Revocations {
     let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
     if !(200..300).contains(&status) {
         eprintln!("choir log: cannot read bindings ({status}); revocations not checked");
-        return choir_cli::verify::Revocations::new();
+        return choir_identity::sync::Revocations::new();
     }
     let view: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     view["bindings"]
@@ -2600,7 +2600,7 @@ fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions
     // makes its own log verify, while one that invents one is caught by
     // the entry it points at.
     let revoked = revocations(api, auth);
-    let report = choir_cli::verify::page(&entries, &registry, &revoked);
+    let report = choir_identity::sync::page(&entries, &registry, &revoked);
     for note in &report.notes {
         eprintln!("choir log: {note}");
     }
