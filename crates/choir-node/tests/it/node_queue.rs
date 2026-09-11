@@ -432,6 +432,34 @@ fn the_endpoint_runs_a_round_and_makes_its_own_tree() {
     let after = platform.proposal_round(REPO, "main").unwrap().base;
     assert_ne!(after, before, "the branch did not move");
     assert_eq!(answer["tip"], after, "the answer and the log disagree");
+
+    // Git followed the log within the round, not at the next restart:
+    // the bare repo's own ref names the landing, so a fetch sees it and
+    // the next push's `old` is the value the view holds.
+    assert!(answer["git_lag"].is_null(), "{body}");
+    let bare = f.work.join("repos").join(REPO);
+    let in_git = String::from_utf8_lossy(&git(&bare, &["rev-parse", "refs/heads/main"]).stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        in_git, after,
+        "git's ref is behind the log after the round: {body}"
+    );
+    git(&f.clone, &["checkout", "-q", "main"]);
+    assert!(
+        git(&f.clone, &["pull", "-q", "--no-rebase", "origin", "main"])
+            .status
+            .success()
+    );
+    std::fs::write(f.clone.join("c.txt"), "c\n").unwrap();
+    git(&f.clone, &["add", "."]);
+    git(&f.clone, &["commit", "-q", "-m", "after the round"]);
+    let pushed = git(&f.clone, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        pushed.status.success(),
+        "a push after a landing lost its CAS: {}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
     assert!(
         tree.exists(),
         "the node did not make its own queue tree under {}",

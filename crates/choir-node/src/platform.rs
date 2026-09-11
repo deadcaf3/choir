@@ -6338,7 +6338,7 @@ fn object_exists(path: &std::path::Path, oid: &str) -> bool {
 
 /// Points `refname` at `oid`, CAS'd on `have` so a concurrent writer
 /// loses rather than gets clobbered.
-fn write_git_ref(
+pub(crate) fn write_git_ref(
     path: &std::path::Path,
     refname: &str,
     oid: &str,

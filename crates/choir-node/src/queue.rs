@@ -14,10 +14,11 @@
 //!   [`OpKind::SetRef`] carrying the value the round started from as
 //!   its compare-and-swap `prev`. A push that beat the round makes the
 //!   landing fail rather than clobber.
-//! - The node moves no git ref itself.
-//!   [`crate::Platform::reconcile_git_refs`] already treats a commit
-//!   the log names and git does not as git being behind, and writes it.
-//!   The log leads and git follows, which is the direction D21 fixed.
+//! - The landing itself moves no git ref. The log leads and git
+//!   follows, which is the direction D21 fixed: `/api/queue/run` writes
+//!   git's ref after the round, CAS'd on the round's base, and
+//!   [`crate::Platform::reconcile_git_refs`] repairs anything that
+//!   still lags at the next startup.
 
 use std::sync::Arc;
 

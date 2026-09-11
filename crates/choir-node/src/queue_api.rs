@@ -173,16 +173,16 @@ pub fn run(
     if !bare.exists() {
         return bad(404, "no such repository");
     }
-    if platform.proposal_round(repo, branch).is_none() {
+    let Some(round) = platform.proposal_round(repo, branch) else {
         return bad(404, "no such branch on that repository");
-    }
+    };
 
     let trees = config.trees(repo, branch);
     if let Err(why) = ensure_worktree(&bare, &trees.speculation, branch) {
         return bad(500, &format!("the queue has no tree to work in: {why}"));
     }
 
-    let mut ci = choir_queue::worktree::WorktreeRunner::new(bare, trees.jobs);
+    let mut ci = choir_queue::worktree::WorktreeRunner::new(bare.clone(), trees.jobs);
     let template = choir_queue::JobTemplate {
         command: {
             let mut argv = Vec::with_capacity(config.command.args.len() + 1);
@@ -206,6 +206,24 @@ pub fn run(
     else {
         return bad(404, "no such branch on that repository");
     };
+    // The log led; git follows now rather than at the next startup.
+    // Without this every landing left git's ref behind until a restart,
+    // and every push to the branch in between lost its CAS (the pusher's
+    // `old` is git's value, the view holds the landing). CAS'd on the
+    // round's base at the git level too: a push that beat the round
+    // would already have made the landing itself lose, so whichever
+    // side wins here, nothing is clobbered.
+    let git_lag = if report.merged.is_empty() {
+        None
+    } else {
+        crate::platform::write_git_ref(
+            &bare,
+            &format!("refs/heads/{branch}"),
+            &report.final_state,
+            Some(&round.base),
+        )
+        .err()
+    };
     let body = serde_json::json!({
         "format_version": 1,
         "repo": repo,
@@ -217,6 +235,9 @@ pub fn run(
         "tip": report.final_state,
         "stalled": report.provider_error,
         "unreported_checks": report.unreported_checks,
+        // Null when git holds what the log landed; otherwise why it does
+        // not yet, and startup reconciliation will bring it forward.
+        "git_lag": git_lag,
     });
     (200, body.to_string())
 }
