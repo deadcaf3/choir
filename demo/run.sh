@@ -27,4 +27,4 @@ if [ "$BUILD" = 1 ]; then
   echo "building choir-node and choir into demo/.target (a minute or two the first time)"
   cargo build -q --target-dir "$TARGET" -p choir-node -p choir-cli
 fi
-exec python3 "$HERE/tui.py" --bin "$TARGET/debug" "${ARGS[@]}"
+exec python3 "$HERE/tui.py" --bin "$TARGET/debug" ${ARGS[@]+"${ARGS[@]}"}
