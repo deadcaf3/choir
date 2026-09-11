@@ -113,7 +113,33 @@ done
 
 echo "install.sh: installed$installed in $dest"
 
+# Installed is not the same as found. On a machine with no Rust on it,
+# $dest is on nobody's PATH, and the reader's very next command would be
+# `command not found`. So new terminals are given the directory, once, in
+# the startup file of the reader's shell, and this terminal, which no
+# child process can change, is told the one line that finishes it.
 case ":$PATH:" in
 *":$dest:"*) ;;
-*) echo "install.sh: $dest is not on your PATH; add it to your shell profile" >&2 ;;
+*)
+	line="export PATH=\"$dest:\$PATH\""
+	case ${SHELL:-} in
+	*/zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
+	*/bash)
+		# A terminal on macOS starts a login shell, which reads this one.
+		if [ "$os" = apple-darwin ]; then profile="$HOME/.bash_profile"; else profile="$HOME/.bashrc"; fi
+		;;
+	*/fish) profile="" ;;
+	*) profile="$HOME/.profile" ;;
+	esac
+	if [ -z "$profile" ]; then
+		echo "install.sh: run this once and every fish terminal finds it: fish_add_path $dest" >&2
+	else
+		if grep -qsF "$line" "$profile"; then
+			:
+		elif ! printf '\n# Added by the choir installer, so a new terminal finds choir.\n%s\n' "$line" >>"$profile" 2>/dev/null; then
+			echo "install.sh: could not write $profile; add this line to it yourself: $line" >&2
+		fi
+		echo "install.sh: in this terminal, run: $line" >&2
+	fi
+	;;
 esac

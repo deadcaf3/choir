@@ -415,6 +415,13 @@ fn the_invite_page_offers_a_terminal_door_with_this_link_in_it() {
         body.contains(&format!("curl -fsSL {}/download/install.sh | sh", s.base)),
         "the terminal door does not install from this node: {body}"
     );
+    // The installer cannot change the PATH of the terminal it runs in, so
+    // on a machine with no Rust the join line pasted under it would be
+    // `command not found` without this.
+    assert!(
+        body.contains("export PATH=&quot;$HOME/.cargo/bin:$PATH&quot;"),
+        "the terminal door leaves this terminal unable to find choir: {body}"
+    );
     assert!(
         body.contains(&format!(
             "choir join &#39;{}/join?i={id}&amp;k={secret}&#39;",

@@ -76,7 +76,10 @@ curl -fsSL https://choirs.dev/download/install.sh | sh -s -- choir-cli
 
 Each archive is checked against the `SHA256` published beside it.
 [`https://choirs.dev/download/`](https://choirs.dev/download/) lists
-what is there, and the installer is plain text: read it first.
+what is there, and the installer is plain text: read it first. When
+`~/.cargo/bin` is not on your `PATH`, it adds one line to your shell's
+startup file so new terminals find `choir`, and prints the `export` for
+the terminal you ran it in.
 
 The archives are **built by CI, not by the node**, and the digests prove
 the transfer rather than the build. Releases are also on

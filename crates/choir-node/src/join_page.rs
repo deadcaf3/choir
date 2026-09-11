@@ -546,6 +546,12 @@ fn offer(
     if downloads {
         h.push_str(&esc(&format!("curl -fsSL {node}/download/install.sh | sh")));
         h.push('\n');
+        // The installer puts `choir` in `~/.cargo/bin` and tells new
+        // terminals so, but no child process can change the PATH of the
+        // terminal it runs in. Without this line the join below it is
+        // `command not found` on any machine with no Rust on it.
+        h.push_str(&esc("export PATH=\"$HOME/.cargo/bin:$PATH\""));
+        h.push('\n');
     }
     h.push_str(&esc(&format!("choir join '{node}/join?i={id}&k={secret}'")));
     h.push_str("</pre>");

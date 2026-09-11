@@ -290,8 +290,12 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     let base = format!("http://127.0.0.1:{port}");
 
     // Exactly the documented command, with `CARGO_HOME` pointed
-    // somewhere this test owns.
+    // somewhere this test owns, and a `HOME` too: the installer writes a
+    // startup file there, and the one it must never write is the real
+    // one belonging to whoever runs this suite.
     let home = work.join("cargo-home");
+    let user_home = work.join("home");
+    std::fs::create_dir_all(&user_home).expect("home");
     let script = std::process::Command::new("curl")
         .args(["-fsSL", &format!("{base}/download/install.sh")])
         .output()
@@ -304,16 +308,49 @@ fn the_served_installer_installs_from_the_node_that_served_it() {
     // quick start and it execs the daemon, so an installer whose default
     // leaves the daemon out hands the reader `command not found` one
     // step later. That was the first version's default.
-    let run = std::process::Command::new("sh")
-        .arg(&script_path)
-        .env("CARGO_HOME", &home)
-        .output()
-        .expect("sh runs");
+    let install = || {
+        std::process::Command::new("sh")
+            .arg(&script_path)
+            .env("CARGO_HOME", &home)
+            .env("HOME", &user_home)
+            .env("SHELL", "/bin/zsh")
+            .env_remove("ZDOTDIR")
+            .output()
+            .expect("sh runs")
+    };
+    let run = install();
     assert!(
         run.status.success(),
         "the installer failed: {}{}",
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
+    );
+
+    // `CARGO_HOME/bin` is not on this `PATH`, which is the state of a Mac
+    // with no Rust on it: the reader's next command would be `command not
+    // found`. So a new terminal is given the directory, once, and this
+    // one is told the line that finishes it.
+    let line = format!("export PATH=\"{}:$PATH\"", home.join("bin").display());
+    let zshrc = user_home.join(".zshrc");
+    let written = std::fs::read_to_string(&zshrc).unwrap_or_default();
+    assert!(
+        written.contains(&line),
+        "a new terminal would not find choir: {written:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains(&line),
+        "this terminal is not told the line: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let again = install();
+    assert!(again.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&zshrc)
+            .unwrap_or_default()
+            .matches(&line)
+            .count(),
+        1,
+        "a second install added the line again"
     );
 
     for binary in ["choir", "choir-node"] {
@@ -368,6 +405,8 @@ fn a_mismatched_digest_stops_the_install() {
     let run = std::process::Command::new("sh")
         .arg(&script_path)
         .env("CARGO_HOME", &home)
+        // Never the real one: see the end-to-end test above.
+        .env("HOME", s.work.join("home"))
         .output()
         .expect("sh runs");
     assert!(!run.status.success(), "a bad digest installed anyway");
