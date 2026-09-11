@@ -299,3 +299,37 @@ monitoring, rollback and go-live receipts.
 
 `scripts/flip/RUNBOOK.md` is the operator's own dogfood procedure; not the
 page to start from.
+
+## A copy is a seed
+
+A node that dies takes its repositories with it, unless a copy of them
+exists somewhere else. The cheapest copy needs no choir process at all:
+
+```bash
+choir-node --export <root> <dir>        # on the node: the log, one git bundle per repository, a manifest
+# copy <dir> anywhere: another disk, an object store, a static web host
+choir-node --verify-export <dir>        # on the copy, with the same binary
+```
+
+`--verify-export` folds the log and requires every ref the view names to
+be in that repository's bundle at the same oid (D61), so a copy that
+verifies is the node's history and the objects that history points at,
+checked on the machine that holds it. `choir-node --import <dir> <root>`
+turns it back into a node.
+
+What the copy proves, and what it does not:
+
+- **It proves integrity.** The log is a hash chain, each entry carries its
+  author's signature, and the bundles hold every commit the log names.
+- **It does not prove freshness.** A copy is the node as of the moment it
+  was taken. Nothing in it says the node has not moved on since, or that
+  the copy you are holding is the latest one taken.
+- **It does not witness.** A copy made by the node's own operator is the
+  node's own word. It cannot tell you whether a second reader was shown
+  the same history. That needs a seed run by somebody else; see
+  [SYNC.md](../../SYNC.md) for what a seed signs and how two statements
+  are compared.
+
+Secrets and policy files are never in an export, by construction and then
+by inspection; `docs/runbook-restore.md` covers what a restore needs
+beside it.
