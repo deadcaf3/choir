@@ -131,4 +131,7 @@ Both are real fixes, both tested in `crates/choir-node/tests/it/node_queue.rs`.
 - `tui.py`: the presenter and every beat; standard library only.
 - `show.py`: compact renderings of the node's JSON and HTML, shared
   with `tui.py`; nothing computed.
+- `.run/take.log`: a transcript of the last take, every line either
+  pane showed with its time, the screen size and each key pressed.
+  Read it when a take looked wrong.
 - `.run/`, `.target/`: everything a take leaves behind; ignored.

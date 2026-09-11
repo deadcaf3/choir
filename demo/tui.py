@@ -68,6 +68,7 @@ class Pane:
             for line in str(text).split("\n"):
                 self.lines.append((line, style))
             self.ui.dirty = True
+        self.ui.transcript(f"{self.side}│ {text}")
         if self.ui.dump:
             print(f"{self.side}│ {text}", flush=True)
 
@@ -281,12 +282,24 @@ class UI:
         self.quit = False
         self.done = False
         self.beat_started = time.monotonic()
+        self.started = time.monotonic()
+        # Every line either pane shows, with its time, so a take that looked
+        # wrong can be read afterwards: .run/take.log.
+        self.log = open(env.run / "take.log", "a")
+        self.log_lock = threading.Lock()
+        self.transcript(f"take: pid {os.getpid()}, {'dump' if dump else 'screen'}, auto {auto}")
+
+    def transcript(self, line):
+        with self.log_lock:
+            self.log.write(f"{time.monotonic() - self.started:7.2f}  {line}\n")
+            self.log.flush()
 
     def beat(self, no, title, narration):
         with self.lock:
             self.beat_no, self.beat_title, self.narration = no, title, narration
             self.beat_started = time.monotonic()
             self.dirty = True
+        self.transcript(f"== beat {no}: {title} == {narration}")
         for pane in (self.left, self.right):
             pane.put("", NORMAL)
             pane.put(f"── beat {no}: {title}", HEAD)
@@ -340,10 +353,14 @@ class UI:
             curses.init_pair(i, fg, bg)
             self.attrs[style] = curses.color_pair(i) | extra
 
+        h, w = stdscr.getmaxyx()
+        self.transcript(f"screen: {w}x{h}, TERM {os.environ.get('TERM', '?')}, colors {curses.COLORS}")
         worker = threading.Thread(target=self._play, args=(play,), daemon=True)
         worker.start()
         while True:
             key = stdscr.getch()
+            if key != -1:
+                self.transcript(f"key: {key} in beat {self.beat_no}")
             if key in (ord("q"), ord("Q")):
                 self.quit = True
                 self.advance.set()
@@ -354,6 +371,8 @@ class UI:
                 self.auto = None if self.auto is not None else 6.0
                 self.advance.set()
             if key == curses.KEY_RESIZE:
+                h, w = stdscr.getmaxyx()
+                self.transcript(f"screen: resized to {w}x{h}")
                 self.dirty = True
             if self.dirty or int(time.monotonic() * 2) % 2 == 0:
                 self._draw(stdscr)
