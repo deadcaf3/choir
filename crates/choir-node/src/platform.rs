@@ -4079,6 +4079,12 @@ impl Platform {
         self.handle.replicate(entries)
     }
 
+    /// This node's own key: on a seed, the key its witness statements are
+    /// signed with.
+    pub(crate) fn node_key(&self) -> &ActorKey {
+        &self.node_key
+    }
+
     /// Runs `read` against the view as it stands, under its lock.
     pub(crate) fn with_view<R>(&self, read: impl FnOnce(&View) -> R) -> R {
         read(&self.view.lock().expect("view lock"))
@@ -6182,6 +6188,19 @@ impl Platform {
                 }
             }
             ("GET", "/api/signers") => (200, self.signers_json().to_string()),
+            ("GET", "/api/witness") => match (self.home.get(), self.replica.get()) {
+                (Some(home), Some(shared)) => {
+                    (200, shared.witness_json(home, &self.node_key).to_string())
+                }
+                _ => (
+                    404,
+                    serde_json::json!({
+                        "error": "this node is not a seed, so it signs no witness statements; \
+                                  its own attestation is `snapshot` in GET /api/view"
+                    })
+                    .to_string(),
+                ),
+            },
             ("GET", path) if path.starts_with("/api/log") => {
                 let from: usize = path
                     .split_once("from=")

@@ -796,6 +796,12 @@ pub const ENDPOINTS: &[Endpoint] = &[
         mcp: None,
     },
     Endpoint {
+        method: "GET",
+        path: "/api/witness",
+        purpose: "On a seed: its signed statements that it folded the home's attestations, the latest and the last 64, versioned. Compare one with the home's `snapshot` by ancestry in the `prev_snapshot` chain (SYNC.md, Seeds); neither an ancestor of the other is a fork. 404 on a home",
+        mcp: None,
+    },
+    Endpoint {
         method: "POST",
         path: "/api/workspace",
         purpose: "Provision a CoW workspace; optional exact base/change binding makes retries idempotent",

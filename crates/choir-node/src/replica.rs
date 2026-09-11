@@ -54,7 +54,7 @@
 
 use crate::platform::Platform;
 use choir_hash::ContentHash;
-use choir_identity::{sync, Registry};
+use choir_identity::{sync, ActorKey, Registry};
 use choir_sequencer::Sequenced;
 use choir_view::{OpKind, ViewOp};
 use std::io::Write as _;
@@ -67,6 +67,17 @@ use std::sync::{Arc, Mutex};
 /// for a long-poll yet; tests call [`Replica::replicate_once`] directly and
 /// never wait on this.
 pub const INTERVAL_SECS: u64 = 5;
+
+/// Statements `GET /api/witness` serves beside the latest.
+pub const WITNESS_HISTORY: usize = 64;
+
+/// The channel a witness statement is signed on.
+///
+/// Fixed, so the bytes a seed signs are the op scheme's own
+/// `[channel, payload]` with nothing the signer chooses, and a signature
+/// over a statement can never verify as an op on any channel an actor
+/// could be bound to: `/` is refused in an operator name.
+pub const WITNESS_CHANNEL: &str = "seed/witness";
 
 /// Most log pages one round reads before it turns to git.
 ///
@@ -351,6 +362,266 @@ pub fn pinned(root: &Path) -> Option<ContentHash> {
         .and_then(|text| ContentHash::from_hex(text.trim()))
 }
 
+/// A seed's word that it folded the home's attestation `snapshot` (D80).
+///
+/// Its own object, under its own `format_version`, served and never
+/// written into anybody's log: a seed that cosigned through the home
+/// would have to win a race against every new attestation, and a
+/// statement compared by ancestry does not care how many landed since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessStatement {
+    /// Version of this object's shape; 1.
+    pub format_version: u16,
+    /// The seed's actor id: the hash of the key that signs this.
+    pub witness: String,
+    /// The home's node actor id, which signed the attestation.
+    pub home_node_id: String,
+    /// The attestation's id, [`choir_view::RefSnapshot::id`], as hex.
+    pub snapshot: String,
+    /// The log position the attestation occupies.
+    pub at_seq: u64,
+    /// The last seq the seed had folded when it signed.
+    pub seen_at_seq: u64,
+}
+
+/// A JSON string literal for `text`.
+fn quoted(text: &str) -> String {
+    serde_json::Value::String(text.to_string()).to_string()
+}
+
+impl WitnessStatement {
+    /// The bytes that are signed: compact JSON, fields in declaration
+    /// order.
+    ///
+    /// Written out rather than left to a map's iteration order, because
+    /// whether `serde_json` sorts object keys depends on a feature any
+    /// crate in a build can switch on, and a signature over bytes that
+    /// move with the build is a signature over nothing.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        format!(
+            "{{\"format_version\":{},\"witness\":{},\"home_node_id\":{},\"snapshot\":{},\"at_seq\":{},\"seen_at_seq\":{}}}",
+            self.format_version,
+            quoted(&self.witness),
+            quoted(&self.home_node_id),
+            quoted(&self.snapshot),
+            self.at_seq,
+            self.seen_at_seq
+        )
+        .into_bytes()
+    }
+
+    /// Reads one back from its JSON form.
+    #[must_use]
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let text = |key: &str| value.get(key)?.as_str().map(str::to_string);
+        Some(Self {
+            format_version: u16::try_from(value.get("format_version")?.as_u64()?).ok()?,
+            witness: text("witness")?,
+            home_node_id: text("home_node_id")?,
+            snapshot: text("snapshot")?,
+            at_seq: value.get("at_seq")?.as_u64()?,
+            seen_at_seq: value.get("seen_at_seq")?.as_u64()?,
+        })
+    }
+
+    /// Its JSON form.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::from_slice(&self.canonical_bytes()).expect("canonical bytes are JSON")
+    }
+}
+
+/// A statement, the public key that signed it, and the signature.
+///
+/// The key travels with the statement because a reader checking a seed
+/// may hold nothing else, and it costs no trust: the statement names its
+/// witness by the key's hash, so a substituted key names somebody else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedStatement {
+    /// What was said.
+    pub statement: WitnessStatement,
+    /// The seed's ed25519 public key.
+    pub public_key: [u8; 32],
+    /// Its signature, made the way an op's author signs one: over the
+    /// signing hash of `[WITNESS_CHANNEL, canonical_bytes]`.
+    pub signature: Vec<u8>,
+}
+
+impl SignedStatement {
+    /// Signs `statement` with `key`.
+    #[must_use]
+    pub fn sign(key: &ActorKey, statement: WitnessStatement) -> Self {
+        let witness = key.sign_submission(WITNESS_CHANNEL, &statement.canonical_bytes());
+        Self {
+            statement,
+            public_key: key.public_key_bytes(),
+            signature: witness.signature,
+        }
+    }
+
+    /// Checks the statement is one this build reads, is signed by the key
+    /// it carries, and that key is the witness it names.
+    ///
+    /// # Errors
+    ///
+    /// Which of the three failed.
+    pub fn verify(&self) -> Result<(), String> {
+        if self.statement.format_version != 1 {
+            return Err(format!(
+                "statement is format_version {}, and this build reads 1",
+                self.statement.format_version
+            ));
+        }
+        let id = ContentHash::blake3(&self.public_key).to_hex();
+        if id != self.statement.witness {
+            return Err(format!(
+                "the statement names witness {}, and the key it carries is {id}",
+                self.statement.witness
+            ));
+        }
+        let mut registry = Registry::new();
+        registry
+            .register(&self.public_key)
+            .map_err(|e| format!("the statement's key is not an ed25519 key: {e:?}"))?;
+        registry
+            .verify_submission(
+                WITNESS_CHANNEL,
+                &self.statement.canonical_bytes(),
+                &choir_oplog::Witness::ed25519(id, self.signature.clone()),
+            )
+            .map(|_| ())
+            .map_err(|e| format!("the statement's signature does not verify: {e:?}"))
+    }
+
+    /// Its JSON form, as `/api/witness` serves it.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "statement": self.statement.to_json(),
+            "public_key_hex": crate::platform::hex_encode(&self.public_key),
+            "signature_hex": crate::platform::hex_encode(&self.signature),
+        })
+    }
+
+    /// Reads one back from its JSON form, unchecked: see
+    /// [`SignedStatement::verify`].
+    #[must_use]
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            statement: WitnessStatement::from_json(value.get("statement")?)?,
+            public_key: value
+                .get("public_key_hex")?
+                .as_str()
+                .and_then(crate::platform::hex_decode)?
+                .try_into()
+                .ok()?,
+            signature: value
+                .get("signature_hex")?
+                .as_str()
+                .and_then(crate::platform::hex_decode)?,
+        })
+    }
+}
+
+/// The home's attestation chain, as far as a reader has read its log:
+/// each `RecordRefSnapshot`'s id and the id its `prev_snapshot` names.
+///
+/// Built from `/api/log` pages, which a reader holds, rather than from
+/// anything a seed says about itself.
+#[derive(Debug, Default, Clone)]
+pub struct SnapshotChain {
+    prev: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// How two attestations stand by the fork rule (D80).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relation {
+    /// The same attestation.
+    Same,
+    /// The first is an ancestor of the second, this many links back.
+    Behind(u64),
+    /// The second is an ancestor of the first, this many links back.
+    Ahead(u64),
+    /// Neither is an ancestor of the other: two histories.
+    Fork,
+}
+
+impl SnapshotChain {
+    /// Adds every attestation in a page of `/api/log` entries, and says
+    /// how many it found.
+    pub fn read_page(&mut self, entries: &[serde_json::Value]) -> usize {
+        let mut found = 0;
+        for entry in entries {
+            let Some(payload) = entry["payload_hex"]
+                .as_str()
+                .and_then(crate::platform::hex_decode)
+            else {
+                continue;
+            };
+            if let Ok(ViewOp {
+                kind: OpKind::RecordRefSnapshot { snapshot },
+                ..
+            }) = ViewOp::from_payload(&payload)
+            {
+                self.insert(
+                    snapshot.id().to_hex(),
+                    snapshot.prev_snapshot.as_ref().map(ContentHash::to_hex),
+                );
+                found += 1;
+            }
+        }
+        found
+    }
+
+    /// Records one link: attestation `id` follows `prev`.
+    pub fn insert(&mut self, id: String, prev: Option<String>) {
+        self.prev.insert(id, prev);
+    }
+
+    /// How many `prev_snapshot` links lead from `from` back to `to`, or
+    /// `None` when `to` is not an ancestor of `from` in what was read.
+    #[must_use]
+    pub fn steps_back(&self, from: &str, to: &str) -> Option<u64> {
+        let mut here = from;
+        let mut steps = 0u64;
+        loop {
+            if here == to {
+                return Some(steps);
+            }
+            here = self.prev.get(here)?.as_deref()?;
+            steps += 1;
+            // A cycle is impossible in a log a fold accepted, and this
+            // reads pages nobody has checked.
+            if steps > self.prev.len() as u64 {
+                return None;
+            }
+        }
+    }
+
+    /// The fork rule: `a` and `b` agree when one is the other's ancestor,
+    /// or they are equal, and are a fork when neither is.
+    ///
+    /// A statement over `S` endorses `S` and everything reachable from it
+    /// by `prev_snapshot`, so how many attestations landed between two
+    /// readers' looks does not matter, and a seed need not race the home.
+    /// For the walk to be complete, the chain must hold every attestation
+    /// from the lower of the two positions onward.
+    #[must_use]
+    pub fn relate(&self, a: &str, b: &str) -> Relation {
+        if a == b {
+            return Relation::Same;
+        }
+        if let Some(steps) = self.steps_back(b, a) {
+            return Relation::Behind(steps);
+        }
+        if let Some(steps) = self.steps_back(a, b) {
+            return Relation::Ahead(steps);
+        }
+        Relation::Fork
+    }
+}
+
 /// Where replication stands, as `/api/view` reports it on a seed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Status {
@@ -474,6 +745,48 @@ struct Page {
 #[derive(Debug, Default)]
 pub struct Shared {
     pub(crate) status: Mutex<Status>,
+    /// The statements this seed has signed, oldest first, at most
+    /// [`WITNESS_HISTORY`].
+    pub(crate) statements: Mutex<std::collections::VecDeque<SignedStatement>>,
+}
+
+impl Shared {
+    /// `GET /api/witness` on a seed.
+    pub(crate) fn witness_json(&self, home: &Home, key: &ActorKey) -> serde_json::Value {
+        let statements = self.statements.lock().expect("replica statements lock");
+        serde_json::json!({
+            "format_version": 1,
+            "witness": key.actor_id().to_hex(),
+            "public_key_hex": crate::platform::hex_encode(&key.public_key_bytes()),
+            "home": home.url,
+            "home_node_id": home.node_id.to_hex(),
+            "gap": self.status.lock().expect("replica status lock").gap,
+            "latest": statements.back().map(SignedStatement::to_json),
+            "history": statements.iter().map(SignedStatement::to_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Where a seed keeps the statements it signed: beside its log, one JSON
+/// object per line.
+fn witness_path(root: &Path) -> PathBuf {
+    root.join(".choir").join("witness.jsonl")
+}
+
+/// The last [`WITNESS_HISTORY`] statements in `root`'s file, oldest first.
+/// A line that does not read is skipped: the file is this seed's own
+/// record, and the log is the history that matters.
+fn load_statements(root: &Path) -> std::collections::VecDeque<SignedStatement> {
+    let text = std::fs::read_to_string(witness_path(root)).unwrap_or_default();
+    let mut out: std::collections::VecDeque<SignedStatement> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|value: serde_json::Value| SignedStatement::from_json(&value))
+        .collect();
+    while out.len() > WITNESS_HISTORY {
+        out.pop_front();
+    }
+    out
 }
 
 /// A running seed: the home it copies, the credential it copies with, and
@@ -503,6 +816,7 @@ impl Replica {
                 head_seq: platform.view_seq().checked_sub(1),
                 ..Status::default()
             }),
+            statements: Mutex::new(load_statements(&root)),
         });
         platform.attach_replica(home.clone(), shared.clone());
         Self {
@@ -634,6 +948,9 @@ impl Replica {
         drop(registry);
 
         let mut batch = Vec::with_capacity(keep);
+        // Which entries are attestations, so a statement is signed once
+        // one of them has actually been folded.
+        let mut attests = Vec::with_capacity(keep);
         for entry in &entries[..keep] {
             // Both passed the checks just made, which rebuilt the one and
             // compared the other, so neither can be absent here.
@@ -646,6 +963,13 @@ impl Replica {
                     reason: "an entry that verified could not be rebuilt".to_string(),
                 });
             };
+            attests.push(matches!(
+                ViewOp::from_payload(&rebuilt.payload),
+                Ok(ViewOp {
+                    kind: OpKind::RecordRefSnapshot { .. },
+                    ..
+                })
+            ));
             batch.push(Sequenced {
                 entry: rebuilt,
                 hash,
@@ -664,6 +988,9 @@ impl Replica {
         let taken = usize::try_from(appended)
             .unwrap_or(usize::MAX)
             .min(entries.len());
+        if attests[..taken.min(attests.len())].contains(&true) {
+            self.witness();
+        }
         let unverified = if taken == entries.len() {
             report.unverified
         } else {
@@ -701,6 +1028,71 @@ impl Replica {
             served: entries.len(),
             appended,
         })
+    }
+
+    /// Signs a statement over the latest attestation this seed has
+    /// folded, keeps it, and records it beside the log.
+    ///
+    /// Never after a gap: a copy with a hole in it has not seen the chain
+    /// it would be vouching for.
+    fn witness(&self) {
+        if self.shared.status.lock().expect("replica status lock").gap {
+            return;
+        }
+        let Some((snapshot, at_seq)) = self.platform.with_view(|view| {
+            view.latest_snapshot
+                .as_ref()
+                .map(|latest| (latest.id().to_hex(), latest.at_seq))
+        }) else {
+            return;
+        };
+        let key = self.platform.node_key();
+        let signed = SignedStatement::sign(
+            key,
+            WitnessStatement {
+                format_version: 1,
+                witness: key.actor_id().to_hex(),
+                home_node_id: self.home.node_id.to_hex(),
+                snapshot,
+                at_seq,
+                seen_at_seq: self.platform.view_seq().saturating_sub(1),
+            },
+        );
+        let line = format!("{}\n", signed.to_json());
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(witness_path(&self.root))
+            .and_then(|mut file| file.write_all(line.as_bytes()));
+        if let Err(e) = written {
+            // Served either way; the file is how a restart remembers.
+            self.shared
+                .status
+                .lock()
+                .expect("replica status lock")
+                .last_error = Some(format!("recording a witness statement: {e}"));
+        }
+        let mut statements = self
+            .shared
+            .statements
+            .lock()
+            .expect("replica statements lock");
+        statements.push_back(signed);
+        while statements.len() > WITNESS_HISTORY {
+            statements.pop_front();
+        }
+    }
+
+    /// The statements this seed has signed, oldest first.
+    #[must_use]
+    pub fn statements(&self) -> Vec<SignedStatement> {
+        self.shared
+            .statements
+            .lock()
+            .expect("replica statements lock")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Fetches `repo`'s objects and refs from the home into the bare
@@ -890,5 +1282,65 @@ pub fn run(replica: &Replica, strict: bool) -> ! {
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(INTERVAL_SECS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Relation, SignedStatement, SnapshotChain, WitnessStatement};
+
+    fn statement() -> WitnessStatement {
+        WitnessStatement {
+            format_version: 1,
+            witness: "1e-aa".into(),
+            home_node_id: "1e-bb".into(),
+            snapshot: "1e-cc".into(),
+            at_seq: 4,
+            seen_at_seq: 9,
+        }
+    }
+
+    /// The signed bytes are pinned: a reader in another language rebuilds
+    /// exactly these from SYNC.md, so a reordering is a format change.
+    #[test]
+    fn a_statements_signed_bytes_are_its_fields_in_order() {
+        assert_eq!(
+            String::from_utf8(statement().canonical_bytes()).unwrap(),
+            r#"{"format_version":1,"witness":"1e-aa","home_node_id":"1e-bb","snapshot":"1e-cc","at_seq":4,"seen_at_seq":9}"#
+        );
+        let back = WitnessStatement::from_json(&statement().to_json()).unwrap();
+        assert_eq!(back, statement());
+    }
+
+    /// A statement names its witness by key hash, so it verifies only
+    /// under the key it carries, and one naming anybody else does not.
+    #[test]
+    fn a_statement_verifies_only_as_the_witness_it_names() {
+        let key = choir_identity::ActorKey::generate();
+        let own = WitnessStatement {
+            witness: key.actor_id().to_hex(),
+            ..statement()
+        };
+        let signed = SignedStatement::sign(&key, own);
+        signed.verify().unwrap();
+        let round = SignedStatement::from_json(&signed.to_json()).unwrap();
+        assert_eq!(round, signed);
+        let claimed = SignedStatement::sign(&key, statement());
+        assert!(claimed.verify().unwrap_err().contains("names witness"));
+    }
+
+    /// The fork rule over a chain a, b, c, with x branching off a.
+    #[test]
+    fn two_attestations_agree_by_ancestry_and_fork_otherwise() {
+        let mut chain = SnapshotChain::default();
+        chain.insert("a".into(), None);
+        chain.insert("b".into(), Some("a".into()));
+        chain.insert("c".into(), Some("b".into()));
+        chain.insert("x".into(), Some("a".into()));
+        assert_eq!(chain.relate("c", "c"), Relation::Same);
+        assert_eq!(chain.relate("a", "c"), Relation::Behind(2));
+        assert_eq!(chain.relate("c", "b"), Relation::Ahead(1));
+        assert_eq!(chain.relate("x", "c"), Relation::Fork);
+        assert_eq!(chain.relate("nowhere", "c"), Relation::Fork);
     }
 }

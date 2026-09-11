@@ -8,7 +8,10 @@
 
 use choir_identity::{ActorKey, Registry};
 use choir_node::platform::hex_encode;
-use choir_node::replica::{self, Credential, Replica, ReplicaError};
+use choir_node::replica::{
+    self, Credential, Relation, Replica, ReplicaError, SignedStatement, SnapshotChain,
+    WitnessStatement,
+};
 use choir_node::{AuthTable, Node, Platform};
 use choir_oplog::MemLog;
 use choir_view::{OpKind, ViewOp};
@@ -551,4 +554,128 @@ fn every_write_at_a_seed_is_answered_with_its_home() {
         seed.view()["log"]["next_seq"],
         home.view()["log"]["next_seq"]
     );
+}
+
+impl HomeFixture {
+    /// The home's attestation chain, read from its own log by a reader
+    /// holding the node-wide grant, from `from` to the head.
+    fn chain(&self, from: u64) -> SnapshotChain {
+        let mut chain = SnapshotChain::default();
+        let mut cursor = from;
+        loop {
+            let (status, page) = curl(&[
+                "-u",
+                "alice:a",
+                &format!("{}/api/log?from={cursor}", self.served.url),
+            ]);
+            assert_eq!(status, 200, "{page}");
+            let entries = page["entries"].as_array().expect("entries").clone();
+            let Some(last) = entries.last() else {
+                return chain;
+            };
+            cursor = last["seq"].as_u64().expect("seq") + 1;
+            chain.read_page(&entries);
+        }
+    }
+}
+
+/// `GET /api/witness` on `seed`, as JSON.
+fn witness(seed: &SeedFixture) -> serde_json::Value {
+    let (status, body) = curl(&[
+        "-u",
+        "reader:r",
+        &format!("{}/api/witness", seed.served.url),
+    ]);
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+#[test]
+fn a_seeds_statement_endorses_the_homes_chain_and_a_forged_one_is_a_fork() {
+    let home = home("witness");
+    home.push("pusher", "one\n");
+    // One key: the key the home registered and bound as `seed-a` is the
+    // seed's node key, so the statement's witness is that operator.
+    let seed_key = ActorKey::from_secret_bytes(&home.seed_key.secret_bytes());
+    let seed = seed(&home.work, "seed", &home.served.url, seed_key);
+    seed.replica.replicate_once().expect("a clean round");
+
+    let served = witness(&seed);
+    println!("GET /api/witness on the seed: {served}");
+    assert_eq!(served["format_version"], 1);
+    assert_eq!(served["home"], home.served.url.as_str());
+    let first = SignedStatement::from_json(&served["latest"]).expect("a statement");
+    first
+        .verify()
+        .expect("the statement verifies against the key it carries");
+    assert_eq!(first.statement.witness, home.seed_key.actor_id().to_hex());
+    assert_eq!(
+        home.view()["bindings"][&first.statement.witness]["operator"],
+        SEED,
+        "the witness is the operator the home bound"
+    );
+    assert_eq!(
+        first.statement.home_node_id,
+        home.node_key.actor_id().to_hex()
+    );
+
+    // The fork rule, walked over the home's own log: the statement names
+    // the home's current attestation.
+    let current = home.view()["snapshot"]["id"]
+        .as_str()
+        .expect("an attestation")
+        .to_string();
+    let chain = home.chain(first.statement.at_seq);
+    assert_eq!(
+        chain.relate(&first.statement.snapshot, &current),
+        Relation::Same
+    );
+
+    // The home moves on. The old statement is now an ancestor, which is
+    // agreement: it endorses everything the new attestation extends.
+    home.push("pusher", "two\n");
+    let current = home.view()["snapshot"]["id"]
+        .as_str()
+        .expect("an attestation")
+        .to_string();
+    let chain = home.chain(first.statement.at_seq);
+    assert_eq!(
+        chain.relate(&first.statement.snapshot, &current),
+        Relation::Behind(1)
+    );
+    seed.replica.replicate_once().expect("a second round");
+    let served = witness(&seed);
+    assert_eq!(served["history"].as_array().map(Vec::len), Some(2));
+    let second = SignedStatement::from_json(&served["latest"]).expect("a statement");
+    assert_eq!(second.statement.snapshot, current);
+    // Two statements from one seed agree the same way.
+    assert_eq!(
+        chain.relate(&first.statement.snapshot, &second.statement.snapshot),
+        Relation::Behind(1)
+    );
+
+    // A statement over an attestation that is not on the home's chain is
+    // a fork, whoever signed it and however well: the signature is good,
+    // and the history it vouches for is not the one this reader was shown.
+    let forged = SignedStatement::sign(
+        &ActorKey::from_secret_bytes(&home.seed_key.secret_bytes()),
+        WitnessStatement {
+            snapshot: choir_hash::ContentHash::blake3(b"a history nobody else saw").to_hex(),
+            ..first.statement
+        },
+    );
+    forged.verify().expect("well signed");
+    assert_eq!(
+        chain.relate(&forged.statement.snapshot, &current),
+        Relation::Fork
+    );
+
+    // A tampered statement does not verify at all.
+    let mut tampered = second;
+    tampered.statement.at_seq += 1;
+    assert!(tampered.verify().is_err(), "a changed statement verified");
+
+    // The statements survive a restart: they are kept beside the log.
+    let kept = std::fs::read_to_string(seed.root.join(".choir/witness.jsonl")).expect("kept");
+    assert_eq!(kept.lines().count(), 2, "{kept}");
 }

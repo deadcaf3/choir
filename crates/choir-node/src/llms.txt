@@ -11,6 +11,7 @@ GET /api/view?limit=N&offset=M - The materialized view plus the latest ref-state
 POST /api/appeal - Record an appeal for a rejected newcomer attempt; requests operator adjudication and never changes privilege
 GET /api/log?from=N - Ordered log entries, the catch-up and sync primitive. Absolute `from`; evicted entries are served from the persisted log (`source` says which), and a node that cannot reach back answers 409. Each entry carries hash, parent and author signature; SYNC.md is the verification procedure
 GET /api/signers - This node's public key and every key it trusts, with the channel a key is bound to, versioned: what SYNC.md's authorship check needs, since the log names a key's id and never the key. Behind the same node-wide read grant as `/api/log`
+GET /api/witness - On a seed: its signed statements that it folded the home's attestations, the latest and the last 64, versioned. Compare one with the home's `snapshot` by ancestry in the `prev_snapshot` chain (SYNC.md, Seeds); neither an ancestor of the other is a fork. 404 on a home
 POST /api/workspace - Provision a CoW workspace; optional exact base/change binding makes retries idempotent
 POST /api/workspace/archive - Recoverably archive a change-bound workspace and remove it from the active view
 GET /api/reviews?reviewer=X - One actor's pending review queue

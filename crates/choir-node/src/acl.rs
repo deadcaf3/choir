@@ -1055,6 +1055,11 @@ pub fn api_denial(
         // is about not publishing a node's roster to strangers.
         ("GET", "/api/signers") => vec![(Scope::Node, Level::Read)],
         ("GET", "/api/ref-agreement") => vec![(Scope::Node, Level::Read)],
+        // A seed's signed statements (D80). No grant beyond being
+        // authenticated, the same as `/api/view`, whose `snapshot` already
+        // tells every authenticated reader an attestation's id and
+        // position; a statement says only that the seed folded one.
+        ("GET", "/api/witness") => Vec::new(),
         // Phase A leaves the aggregate view readable by any authenticated
         // actor: filtering it, and the page rendered from it, is phase B.
         // Until then a credential can enumerate ref names and oids of
