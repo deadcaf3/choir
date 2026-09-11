@@ -590,7 +590,13 @@ fn operator_and_template_guidance_matches_the_shipped_paths() {
 fn the_binarys_help_is_the_tables_help() {
     // A CLI whose help disagrees with the README is the drift this exists
     // to stop, so check the shipped binary rather than the function.
+    //
+    // On a machine that runs a node: one with nothing set up gets the
+    // six-line orientation instead, and a fresh CI runner is that machine.
+    let home = std::env::temp_dir().join("choir-surface-operator-home");
+    std::fs::create_dir_all(home.join(".choir/repos")).expect("operator home");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_choir"))
+        .env("HOME", &home)
         .output()
         .expect("choir runs");
     let printed = String::from_utf8_lossy(&out.stderr);

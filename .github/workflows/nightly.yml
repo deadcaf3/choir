@@ -85,5 +85,11 @@ jobs:
           command -v mdbook >/dev/null \
             || cargo install mdbook --version "$MDBOOK_VERSION" --locked
 
+      # choirctl is zsh, and a test executes its colour path because
+      # `zsh -n` passed the file that broke. The runner image ships no
+      # zsh, so without this that test cannot even start.
+      - name: Install zsh
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends zsh
+
       - name: Fast-lane gate
         run: ./gate fast

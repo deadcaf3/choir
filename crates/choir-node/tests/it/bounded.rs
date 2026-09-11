@@ -56,7 +56,11 @@ fn served(tag: &str, acl: &str, repos: &[&str]) -> (String, ActorKey) {
 /// Lands `count` refs under `repo` as one batch, named so their sorted
 /// order is stable and readable.
 fn seed_refs(base: &str, key: &ActorKey, creds: &str, repo: &str, count: usize) {
-    const MAX_BATCH: usize = choir_node::platform::DEFAULT_BATCH_OPS;
+    // Well under the node's own cap: each chunk travels as a single curl
+    // argument, and Linux refuses any one argument over 128 KiB at exec
+    // (`MAX_ARG_STRLEN`), which a full 256-op batch exceeds. macOS has no
+    // per-argument limit, so only a Linux runner ever saw it.
+    const MAX_BATCH: usize = 64;
     let ops: Vec<serde_json::Value> = (0..count)
         .map(|i| {
             let op = ViewOp::new(OpKind::SetRef {

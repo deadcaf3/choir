@@ -32,14 +32,34 @@ fn main() {
                 // Rerun when HEAD moves. `--git-path` resolves through
                 // worktrees and separate git dirs, where a hardcoded
                 // `../../.git/HEAD` would silently watch nothing.
+                //
+                // Only paths that exist. Cargo treats a missing one as
+                // always stale, so a fresh CI checkout, which has no
+                // `packed-refs`, rebuilt this crate on every invocation,
+                // and the gate's concurrent lanes rebuilt the rlib out
+                // from under each other's doctests. Skipping it loses
+                // nothing: packing refs deletes the loose ref watched
+                // below, and that deletion is the rerun.
                 for path in ["HEAD", "packed-refs"] {
                     if let Some(resolved) = git(&["rev-parse", "--git-path", path]) {
-                        println!("cargo:rerun-if-changed={resolved}");
+                        if std::path::Path::new(&resolved).exists() {
+                            println!("cargo:rerun-if-changed={resolved}");
+                        }
                     }
                 }
+                // A branch that lives only in `packed-refs` has no loose
+                // file yet, and the next commit creates one without
+                // touching `packed-refs`. Watching the nearest directory
+                // that exists sees that file appear.
                 if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
                     if let Some(resolved) = git(&["rev-parse", "--git-path", &reference]) {
-                        println!("cargo:rerun-if-changed={resolved}");
+                        let watched = std::path::Path::new(&resolved)
+                            .ancestors()
+                            .find(|p| p.exists())
+                            .map(std::path::Path::to_path_buf);
+                        if let Some(watched) = watched {
+                            println!("cargo:rerun-if-changed={}", watched.display());
+                        }
                     }
                 }
                 // Untracked files are excluded: a module can only reach the

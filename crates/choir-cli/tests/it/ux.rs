@@ -99,8 +99,19 @@ fn a_known_command_given_wrong_arguments_gets_its_own_spec() {
 #[test]
 fn a_bare_invocation_still_gets_the_index() {
     // The index is not wrong, it is an answer to one question. This is
-    // that question.
-    let (code, _, err) = run(&[]);
+    // that question, asked on a machine that runs a node: one with nothing
+    // set up gets the orientation instead, and a fresh CI runner is that
+    // machine.
+    let home = std::env::temp_dir().join("choir-ux-operator-home");
+    std::fs::create_dir_all(home.join(".choir/repos")).expect("operator home");
+    let out = std::process::Command::new(choir())
+        .env("HOME", &home)
+        .output()
+        .expect("choir runs");
+    let (code, err) = (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
     assert_eq!(code, 2);
     assert!(
         err.contains(INDEX_MARKER),
