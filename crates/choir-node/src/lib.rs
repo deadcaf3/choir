@@ -5363,6 +5363,12 @@ fn handle_ui(
         Some(url) => format!("{reader}\u{1f}{url}"),
         None => reader,
     };
+    // D80, for the same reason: a seed's header says how far behind its
+    // home it is and whether it has stopped, and neither moves the view.
+    let reader = match platform.replica_marker() {
+        Some(marker) => format!("{reader}\u{1f}{marker}"),
+        None => reader,
+    };
     let seq = platform.view_seq();
     // Read once and used for both the tag and the render, so the page a
     // reader is handed resolved names against exactly the store state

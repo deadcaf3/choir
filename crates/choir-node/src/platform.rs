@@ -4047,6 +4047,24 @@ impl Platform {
         let _ = self.replica.set(shared);
     }
 
+    /// What a cached page about this node must be re-rendered for beyond
+    /// the view's position: on a seed, how far the home has run ahead and
+    /// whether replication has stopped, neither of which moves the view.
+    pub(crate) fn replica_marker(&self) -> Option<String> {
+        let status = self
+            .replica
+            .get()?
+            .status
+            .lock()
+            .expect("replica status lock");
+        Some(format!(
+            "{:?}:{}:{}",
+            status.home_head_seq,
+            status.halted.is_some(),
+            status.gap
+        ))
+    }
+
     /// Appends entries the home already sequenced, through this platform's
     /// own writer thread, and folds them into its view. See
     /// [`SequencerHandle::replicate`] for the checks each one passes.
@@ -5878,7 +5896,7 @@ impl Platform {
                         .require_scope
                         .load(std::sync::atomic::Ordering::Relaxed),
                 });
-                let body = serde_json::json!({
+                let mut body = serde_json::json!({
                     "log": log,
                     "snapshot": snapshot,
                     "workspaces": ws,
@@ -5897,6 +5915,16 @@ impl Platform {
                     "sequencer_lag": self.lag_json(),
                     "build": crate::build_json(),
                 });
+                // D80. `null` on a home, which is nobody's copy; on a seed,
+                // whose copy it is and how far behind.
+                body["replica"] = match (self.home.get(), self.replica.get()) {
+                    (Some(home), Some(shared)) => shared
+                        .status
+                        .lock()
+                        .expect("replica status lock")
+                        .to_json(home),
+                    _ => serde_json::Value::Null,
+                };
                 (200, body.to_string())
             }
             // Pending queue for one reviewer: reviews that fanned out to

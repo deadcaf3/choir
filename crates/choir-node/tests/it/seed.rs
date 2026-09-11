@@ -321,6 +321,39 @@ fn a_seed_takes_the_homes_log_verified_and_serves_the_same_view_and_objects() {
         "every entry on a fresh home is signed by its node key, which /api/signers lists"
     );
     assert!(!status.gap && status.halted.is_none(), "{status:?}");
+    // The seed says so in its view, and only a seed does.
+    assert!(home_view["replica"].is_null(), "a home is nobody's copy");
+    let replica = &seed.view()["replica"];
+    println!("replica on the seed: {replica}");
+    assert_eq!(replica["format_version"], 1);
+    assert_eq!(replica["home"], home.served.url.as_str());
+    assert_eq!(
+        replica["home_node_id"],
+        home.node_key.actor_id().to_hex().as_str()
+    );
+    assert_eq!(replica["head_seq"], at - 1);
+    assert_eq!(replica["home_head_seq"], at - 1);
+    assert_eq!(replica["refs_verified"], 1);
+    assert_eq!(replica["refs_pending"], 0);
+    assert_eq!(replica["unverified_entries"], 0);
+    assert_eq!(replica["gap"], false);
+    assert!(replica["halted"].is_null(), "{replica}");
+    // And on its landing page, in one line.
+    let page = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-u",
+            "reader:r",
+            &format!("{}/status", seed.served.url),
+        ])
+        .output()
+        .expect("curl runs");
+    let page = String::from_utf8_lossy(&page.stdout);
+    assert!(
+        page.contains(&format!("seed of {}, 0 behind", home.served.url)),
+        "{page}"
+    );
+
     // The home's key is pinned beside the seed's log.
     let pin = std::fs::read_to_string(seed.root.join(".choir/home.fingerprint")).expect("pin");
     assert_eq!(pin.trim(), home.node_key.actor_id().to_hex());
@@ -404,6 +437,14 @@ fn a_tampered_entry_halts_replication_there_and_the_prefix_is_still_served() {
     let status = seed.replica.status();
     assert_eq!(status.head_seq, Some(flip - 1));
     assert_eq!(status.halted.as_ref().map(|(seq, _)| *seq), Some(flip));
+    println!("replica after the halt: {}", view["replica"]);
+    assert_eq!(view["replica"]["halted"]["seq"], flip);
+    assert_eq!(view["replica"]["head_seq"], flip - 1);
+    assert_eq!(
+        view["replica"]["home_head_seq"],
+        end - 1,
+        "how far the home got is still reported"
+    );
 
     // And it stays halted: the next round does not skip past it.
     let again = seed.replica.replicate_once().expect_err("still halted");

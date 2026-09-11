@@ -378,6 +378,30 @@ pub struct Status {
     pub last_error: Option<String>,
 }
 
+impl Status {
+    /// The `replica` section of `/api/view` on a seed, under its own
+    /// `format_version`.
+    #[must_use]
+    pub fn to_json(&self, home: &Home) -> serde_json::Value {
+        serde_json::json!({
+            "format_version": 1,
+            "home": home.url,
+            "home_node_id": home.node_id.to_hex(),
+            "head_seq": self.head_seq,
+            "home_head_seq": self.home_head_seq,
+            "refs_verified": self.refs_verified,
+            "refs_pending": self.refs_pending,
+            "unverified_entries": self.unverified_entries,
+            "gap": self.gap,
+            "halted": self.halted.as_ref().map(|(seq, reason)| serde_json::json!({
+                "seq": seq,
+                "reason": reason,
+            })),
+            "last_error": self.last_error,
+        })
+    }
+}
+
 /// What one successful round did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
@@ -443,8 +467,6 @@ struct Page {
     served: usize,
     /// Entries appended.
     appended: u64,
-    /// The last seq served.
-    last_seq: Option<u64>,
 }
 
 /// What a seed shares with the platform serving it, so `/api/view` can
@@ -590,6 +612,13 @@ impl Replica {
             return Ok(Page::default());
         };
         let last_seq = last["seq"].as_u64();
+        // Recorded before anything is checked: how far the home has shown
+        // this seed is a fact about the home whether or not the page
+        // verifies, and after a halt it is how far behind the copy is.
+        {
+            let mut status = self.shared.status.lock().expect("replica status lock");
+            status.home_head_seq = status.home_head_seq.max(last_seq);
+        }
 
         let registry = self.registry.lock().expect("replica registry lock");
         let revoked = self.revocations(&entries);
@@ -671,7 +700,6 @@ impl Replica {
         Ok(Page {
             served: entries.len(),
             appended,
-            last_seq,
         })
     }
 
@@ -782,10 +810,6 @@ impl Replica {
         for _ in 0..MAX_PAGES_PER_ROUND {
             let page = self.fetch_page(self.platform.view_seq())?;
             appended += page.appended;
-            if let Some(seq) = page.last_seq {
-                let mut status = self.shared.status.lock().expect("replica status lock");
-                status.home_head_seq = status.home_head_seq.max(Some(seq));
-            }
             if page.served == 0 {
                 break;
             }

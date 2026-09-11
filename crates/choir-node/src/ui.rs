@@ -360,6 +360,32 @@ fn header(h: &mut String, v: &serde_json::Value, seq: u64) {
     h.push_str("<span class=\"pill\">node ");
     h.push_str(&esc(&short(s(&log, "node"))));
     h.push_str("</span>");
+    // D80. A seed says whose copy this is, in the header, because a
+    // reader who does not know they are on a copy reads a stale page as
+    // the truth.
+    if let Some(replica) = v.get("replica").filter(|r| r.is_object()) {
+        let at = |key: &str| replica.get(key).and_then(serde_json::Value::as_u64);
+        let behind = match (at("home_head_seq"), at("head_seq")) {
+            (Some(home), Some(here)) => home.saturating_sub(here),
+            (Some(home), None) => home + 1,
+            (None, _) => 0,
+        };
+        h.push_str("<span class=\"pill\">seed of ");
+        h.push_str(&esc(s(replica, "home")));
+        h.push_str(", ");
+        h.push_str(&behind.to_string());
+        h.push_str(" behind");
+        if replica
+            .get("halted")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            h.push_str(" <b class=\"tag warn\">halted</b>");
+        }
+        if replica.get("gap").and_then(serde_json::Value::as_bool) == Some(true) {
+            h.push_str(" <b class=\"tag warn\">gap</b>");
+        }
+        h.push_str("</span>");
+    }
     // The way out. `/r/` links back here and this did not link there, so
     // a reader who opened the node's front door could see everything it
     // *knows* and never find the code — which is the thing they came for.

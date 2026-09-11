@@ -1163,9 +1163,14 @@ pub enum Disclosure {
 /// `every_section_the_view_serves_is_classified` in `tests/it/acl.rs`
 /// makes it loud, comparing this table against a view a real node
 /// served rather than against a sample written from memory.
-pub const SECTIONS: [(&str, Disclosure); 29] = [
+pub const SECTIONS: [(&str, Disclosure); 30] = [
     ("log", Disclosure::Public),
     ("build", Disclosure::Public),
+    // Where a seed stands against its home (D80): the home's address and
+    // key, positions and counts. Public for the reason `log` is: it names
+    // no repository, and a reader granted one needs to know whether the
+    // copy they are reading is current.
+    ("replica", Disclosure::Public),
     // [`crate::bound`]'s marks. Public because of *when* they are
     // computed, not because a row count is harmless: bounding runs after
     // this filter, so each count describes the reader's own narrowed
