@@ -3433,6 +3433,11 @@ pub struct Platform {
     require_scope: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the policy: actor id → bound channel name.
     key_names: Arc<Mutex<KeyBindings>>,
+    /// The trusted-keys table as last read, refreshed in the same step as
+    /// [`Platform::key_names`], for `GET /api/signers`. The log records a
+    /// key's actor id and never the key, so a reader verifying signatures
+    /// has nowhere else to learn one from.
+    signers: Mutex<Vec<crate::TrustedKey>>,
     /// D24 T3 runtime projection, replayed from the signed log at startup.
     concentration: Arc<Mutex<ConcentrationState>>,
     /// D37 per-user workspace tally, replayed from the same log in the
@@ -3622,13 +3627,15 @@ impl Platform {
         // Name bindings are read from the same file at startup; a
         // malformed file here is not fatal because `start_reloading`
         // already accepted the caller's registry.
-        let key_names = Arc::new(Mutex::new(match keys_file.as_ref() {
-            Some(path) => crate::parse_keys_file(path).map_or_else(
-                |_| KeyBindings::unavailable(true),
-                |signers| KeyBindings::from_signers(&signers),
-            ),
+        let parsed = keys_file
+            .as_ref()
+            .map(|path| crate::parse_keys_file(path).ok());
+        let key_names = Arc::new(Mutex::new(match &parsed {
+            Some(Some(signers)) => KeyBindings::from_signers(signers),
+            Some(None) => KeyBindings::unavailable(true),
             None => KeyBindings::unavailable(false),
         }));
+        let signers = Mutex::new(parsed.flatten().unwrap_or_default());
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
         let acl_file = Arc::new(Mutex::new(None));
@@ -3683,6 +3690,7 @@ impl Platform {
             require_scope,
             passkeys,
             key_names,
+            signers,
             concentration,
             workspace_tally,
             review_retention,
@@ -4119,6 +4127,39 @@ impl Platform {
     /// applies at an unpredictable future moment is not a gate.
     pub fn set_key_names(&self, signers: &[crate::TrustedKey]) {
         *self.key_names.lock().expect("key names lock") = KeyBindings::from_signers(signers);
+        *self.signers.lock().expect("signers lock") = signers.to_vec();
+    }
+
+    /// `GET /api/signers`: this node's own public key and every key in
+    /// its trusted-keys table, with the channel name a key is bound to
+    /// when its line carries one.
+    ///
+    /// Public keys are public data. It sits behind the log's own grant
+    /// anyway, because the reader it exists for is one that already
+    /// holds that grant: somebody replaying `/api/log` who wants to check
+    /// authorship, which SYNC.md's third check cannot do without a key.
+    fn signers_json(&self) -> serde_json::Value {
+        let signers: Vec<serde_json::Value> = self
+            .signers
+            .lock()
+            .expect("signers lock")
+            .iter()
+            .map(|signer| {
+                serde_json::json!({
+                    "actor_id": signer.actor_id,
+                    "public_key_hex": hex_encode(&signer.key),
+                    "name": signer.name,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "format_version": 1,
+            "node": {
+                "actor_id": self.node_key.actor_id().to_hex(),
+                "public_key_hex": hex_encode(&self.node_key.public_key_bytes()),
+            },
+            "signers": signers,
+        })
     }
 
     /// Shrinks the in-memory `/api/log` window. Exists so tests can
@@ -6017,6 +6058,7 @@ impl Platform {
                     Err(reason) => (400, Rejection::decode(&reason).body()),
                 }
             }
+            ("GET", "/api/signers") => (200, self.signers_json().to_string()),
             ("GET", path) if path.starts_with("/api/log") => {
                 let from: usize = path
                     .split_once("from=")

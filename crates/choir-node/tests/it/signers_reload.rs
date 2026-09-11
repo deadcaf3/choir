@@ -103,3 +103,66 @@ fn appending_a_key_updates_allowed_signers_without_a_restart() {
 
     node.unblock();
 }
+
+/// `GET /api/signers` serves the node's own key and the trusted-keys
+/// table it starts with, names included, under its own `format_version`.
+/// A seed learns every key it verifies authorship with from this body,
+/// so the shape is the contract and is asserted field by field.
+#[test]
+fn the_signers_endpoint_serves_the_node_key_and_the_table() {
+    let work = std::env::temp_dir().join(format!("choir-node-signers-api-{}", std::process::id()));
+    std::fs::remove_dir_all(&work).ok();
+    std::fs::create_dir_all(&work).unwrap();
+    let keys = work.join("keys");
+    let named = choir_identity::ActorKey::generate();
+    let bare = choir_identity::ActorKey::generate();
+    std::fs::write(
+        &keys,
+        format!(
+            "alice {}\n{}\n",
+            hex(&named.public_key_bytes()),
+            hex(&bare.public_key_bytes())
+        ),
+    )
+    .unwrap();
+    let node_key = choir_identity::ActorKey::generate();
+    let node_id = node_key.actor_id().to_hex();
+    let node_pub = hex(&node_key.public_key_bytes());
+    let platform = choir_node::Platform::start_reloading(
+        choir_identity::Registry::new(),
+        Box::new(choir_oplog::MemLog::new()),
+        node_key,
+        Some(keys),
+    )
+    .unwrap();
+    let mut node = Node::bind(&work.join("repos"), 0).unwrap();
+    node.enable_platform(platform);
+    let port = node.port();
+    let node = std::sync::Arc::new(node);
+    {
+        let node = node.clone();
+        std::thread::spawn(move || node.serve_forever());
+    }
+
+    let (status, body) = crate::support::curl(&[&format!("http://127.0.0.1:{port}/api/signers")]);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["format_version"], 1, "{body}");
+    assert_eq!(body["node"]["actor_id"], node_id.as_str(), "{body}");
+    assert_eq!(body["node"]["public_key_hex"], node_pub.as_str(), "{body}");
+    let signers = body["signers"].as_array().expect("a signer list");
+    assert_eq!(signers.len(), 2, "{body}");
+    assert_eq!(signers[0]["actor_id"], named.actor_id().to_hex().as_str());
+    assert_eq!(
+        signers[0]["public_key_hex"],
+        hex(&named.public_key_bytes()).as_str()
+    );
+    assert_eq!(signers[0]["name"], "alice");
+    assert_eq!(signers[1]["actor_id"], bare.actor_id().to_hex().as_str());
+    assert!(
+        signers[1]["name"].is_null(),
+        "an unnamed key names no one: {body}"
+    );
+
+    node.unblock();
+    std::fs::remove_dir_all(&work).ok();
+}

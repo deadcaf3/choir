@@ -550,6 +550,16 @@
       ]
     },
     {
+      "agent_facing": false,
+      "documented_as": "/api/signers",
+      "input_schema": null,
+      "method": "GET",
+      "name": null,
+      "path": "/api/signers",
+      "purpose": "This node's public key and every key it trusts, with the channel a key is bound to, versioned: what SYNC.md's authorship check needs, since the log names a key's id and never the key. Behind the same node-wide read grant as `/api/log`",
+      "query_parameters": []
+    },
+    {
       "agent_facing": true,
       "documented_as": "/api/workspace",
       "input_schema": {

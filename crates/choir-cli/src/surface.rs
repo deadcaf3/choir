@@ -790,6 +790,12 @@ pub const ENDPOINTS: &[Endpoint] = &[
         }),
     },
     Endpoint {
+        method: "GET",
+        path: "/api/signers",
+        purpose: "This node's public key and every key it trusts, with the channel a key is bound to, versioned: what SYNC.md's authorship check needs, since the log names a key's id and never the key. Behind the same node-wide read grant as `/api/log`",
+        mcp: None,
+    },
+    Endpoint {
         method: "POST",
         path: "/api/workspace",
         purpose: "Provision a CoW workspace; optional exact base/change binding makes retries idempotent",

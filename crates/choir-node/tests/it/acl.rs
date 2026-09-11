@@ -289,7 +289,7 @@ fn the_whole_node_reads_need_the_node_wide_grant() {
         &["agents/one.git"],
     );
 
-    for path in ["/api/log", "/api/ref-agreement"] {
+    for path in ["/api/log", "/api/signers", "/api/ref-agreement"] {
         let url = format!("{base}{path}");
         let (status, _) = curl(&["-u", "carol:c", &url]);
         assert_eq!(status, 200, "the auditor was refused {path}");

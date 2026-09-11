@@ -1024,6 +1024,12 @@ pub fn api_denial(
         // is a hash chain and the attestation covers the complete ref
         // state. Narrowing either would destroy what it is for.
         ("GET", p) if p.starts_with("/api/log") => vec![(Scope::Node, Level::Read)],
+        // The keys that verify the log's signatures, behind the log's own
+        // grant: the reader who needs them is the one replaying the log,
+        // and a second grant for the half of the same check would be a
+        // second answer to one question. Public keys are public; the gate
+        // is about not publishing a node's roster to strangers.
+        ("GET", "/api/signers") => vec![(Scope::Node, Level::Read)],
         ("GET", "/api/ref-agreement") => vec![(Scope::Node, Level::Read)],
         // Phase A leaves the aggregate view readable by any authenticated
         // actor: filtering it, and the page rendered from it, is phase B.
