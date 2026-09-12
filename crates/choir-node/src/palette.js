@@ -53,7 +53,13 @@
   head.className = "palette-head";
 
   var input = document.createElement("input");
-  input.type = "search";
+  // `text`, not `search`. A search input has browser behaviour of its
+  // own attached to `Escape` -- WebKit clears the field and consumes the
+  // key rather than letting it reach the dialog -- so `Esc` did nothing
+  // at all inside the palette there. Nothing else was being bought: the
+  // clear button is hidden by the sheet and the history dropdown is off
+  // through `autocomplete`.
+  input.type = "text";
   input.className = "palette-q";
   input.setAttribute("autocomplete", "off");
   input.setAttribute("spellcheck", "false");
@@ -287,7 +293,13 @@
   });
   input.addEventListener("input", run);
   input.addEventListener("keydown", function (event) {
-    if (event.key === "ArrowDown") {
+    if (event.key === "Escape") {
+      // Handled here as well as by the dialog's own `cancel`, because a
+      // browser that has already given `Escape` a meaning inside a field
+      // never lets the dialog see it.
+      event.preventDefault();
+      dialog.close();
+    } else if (event.key === "ArrowDown") {
       event.preventDefault();
       highlight(at + 1);
     } else if (event.key === "ArrowUp") {
@@ -309,8 +321,15 @@
       (event.target.isContentEditable ||
         /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName || ""));
     if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+      // The same key both ways. A shortcut that only opens is one you
+      // have to leave by some other route, and the hand is already on
+      // it.
       event.preventDefault();
-      open();
+      if (dialog.open) dialog.close();
+      else open();
+    } else if (event.key === "Escape" && dialog.open) {
+      event.preventDefault();
+      dialog.close();
     } else if (event.key === "/" && !typing && !event.metaKey && !event.ctrlKey) {
       event.preventDefault();
       open();

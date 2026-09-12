@@ -4860,7 +4860,7 @@ fn shell(title: &str, bar: Bar<'_>) -> String {
         }
         h.push_str("\">");
     }
-    h.push_str(crate::ui::STYLE);
+    h.push_str(crate::ui::style());
     h.push_str(crate::ui::PALETTE_SCRIPT);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");

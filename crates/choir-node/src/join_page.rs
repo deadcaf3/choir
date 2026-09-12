@@ -186,7 +186,7 @@ fn shell(title: &str, theme: Option<&str>) -> String {
     h.push_str("<title>");
     h.push_str(&esc(title));
     h.push_str("</title>");
-    h.push_str(crate::ui::STYLE);
+    h.push_str(crate::ui::style());
     h
 }
 
@@ -1323,19 +1323,27 @@ fn percent_decode(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    /// The document with its inlined stylesheet removed.
+    /// The document with its stylesheet removed, which is now nothing to
+    /// do.
     ///
-    /// Every page on this surface carries the whole of `ui.css` inline,
-    /// and that sheet contains English words in its comments. Asserting
-    /// `!html.contains("seq")` against the raw document therefore fails
-    /// on the word "consequence" in a comment about something else
-    /// entirely — a test that is not reading the page it thinks it is.
+    /// This existed because every page carried the whole of `ui.css` in
+    /// a `<style>`, and that sheet contains English words in its
+    /// comments: asserting `!html.contains("seq")` against the raw
+    /// document failed on the word "consequence" in a comment about
+    /// something else entirely. The sheet is a `<link>` to a served URL
+    /// now, so the document holds none of its prose and the callers
+    /// below are already reading the page they think they are.
+    ///
+    /// Kept as the identity rather than deleted at every call site: the
+    /// assertions it guards are about what a document may not say, and
+    /// the next thing inlined into one -- a data URI, an SVG, anything
+    /// with words in it -- wants exactly this seam back.
     fn without_style(html: &str) -> String {
-        let (before, rest) = html
-            .split_once("<style>")
-            .expect("a page carries the sheet");
-        let (_, after) = rest.split_once("</style>").expect("the sheet closes");
-        format!("{before}{after}")
+        assert!(
+            !html.contains("<style>"),
+            "a page inlined a stylesheet again; this helper has to strip it"
+        );
+        html.to_string()
     }
 
     /// Just the `<main>` region: the words a reader actually reads.

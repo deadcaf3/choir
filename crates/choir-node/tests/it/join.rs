@@ -524,14 +524,17 @@ fn the_social_preview_names_nothing_the_channel_should_not_see() {
     let (id, secret) =
         s.invite(r#"{"user":"bea","grants":["agents/demo.git write"],"expires_in_secs":86400}"#);
     let (_, _, body) = get(&s.join_url(&id, &secret), &[]);
-    // The whole stylesheet is inlined in the head, and it has English
+    // The sheet used to be inlined in this head, and it has English
     // prose in its comments — the word "beat" in one of them matches a
-    // username of "bea". A test that reads the sheet is not reading the
-    // preview card, so the sheet comes out first.
-    let head = body.split("</head>").next().expect("a head");
-    let (before, rest) = head.split_once("<style>").expect("the sheet is inlined");
-    let (_, after) = rest.split_once("</style>").expect("the sheet closes");
-    let head = format!("{before}{after}");
+    // username of "bea", so a test reading the head was reading the
+    // stylesheet rather than the preview card. It is a `<link>` to a
+    // served URL now and the head holds none of that prose, so the
+    // assertions below read what they say they read.
+    let head = body.split("</head>").next().expect("a head").to_string();
+    assert!(
+        !head.contains("<style>"),
+        "the sheet is inlined again, and this test is reading it: {head}"
+    );
     assert!(head.contains("og:title"), "no preview card at all: {head}");
     for leak in ["bea", "agents/demo", "alice"] {
         assert!(

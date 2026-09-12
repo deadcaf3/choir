@@ -1575,6 +1575,15 @@ impl Node {
                 // reads, and a script withheld until sign-in is a
                 // shortcut that works only for people who already know
                 // the node.
+                // The stylesheet, on the same terms and for the same
+                // reason: every page carries it, including the ones a
+                // stranger reads, and a sheet withheld until sign-in is
+                // an unstyled page.
+                if request.url().split('?').next() == Some("/static/ui.css") {
+                    let outcome = respond_stylesheet(request);
+                    access.finish(log, "anon", &outcome);
+                    return;
+                }
                 let script = match request.url().split('?').next() {
                     Some(ui::WEBAUTHN_JS_PATH) => Some(ui::WEBAUTHN_JS),
                     Some(ui::PALETTE_JS_PATH) => Some(ui::PALETTE_JS),
@@ -2918,7 +2927,7 @@ const REFERRER_POLICY: &[u8] = b"same-origin";
 /// this surface can submit to this origin and to no other, so no page
 /// this node renders can be turned into a way of posting a reader's
 /// input somewhere else.
-const BROWSER_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
+const BROWSER_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
 
 /// [`BROWSER_CSP`] with the two script directives taken back off, for
 /// the documents that carry no script at all.
@@ -2942,7 +2951,53 @@ const BROWSER_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src
 /// plainer reason its own module gives: the console renders forms and
 /// no script, and a policy admitting one would be permission granted to
 /// a page with no use for it.
-const UNSCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+const UNSCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+/// Serves [`ui::UI_CSS`], addressed by a digest of its own bytes.
+///
+/// `immutable`, and that is only honest because the URL carries the
+/// digest: a deploy that changes the sheet changes the address, so
+/// nothing cached under the old one is ever wrong. A year is the
+/// conventional maximum and the number itself does not matter -- what
+/// matters is that a reader moving between pages fetches this once.
+fn respond_stylesheet(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
+    let tag = format!(
+        "\"{}\"",
+        &choir_oplog::ContentHash::blake3(ui::UI_CSS.as_bytes()).to_hex()[..18]
+    );
+    if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
+        return served(request, not_modified(&tag, BROWSER_CSP), 304, 0);
+    }
+    let bytes = ui::UI_CSS.len() as u64;
+    let response = tiny_http::Response::from_string(ui::UI_CSS)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/css; charset=utf-8"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], tag.as_bytes()).expect("etag header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Cache-Control"[..],
+                &b"public, max-age=31536000, immutable"[..],
+            )
+            .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
+                .expect("static header"),
+        );
+    served(request, response, 200, bytes)
+}
 
 /// Serves one of the node's two scripts: [`ui::WEBAUTHN_JS`] or
 /// [`ui::PALETTE_JS`].

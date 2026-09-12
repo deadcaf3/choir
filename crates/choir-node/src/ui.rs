@@ -308,7 +308,7 @@ fn render(json: &str, seq: u64, roster: &Roster, chrome: crate::browse::Chrome<'
     h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir</title>");
-    h.push_str(STYLE);
+    h.push_str(style());
     h.push_str(PALETTE_SCRIPT);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
@@ -936,7 +936,7 @@ pub(crate) fn refusal(
     h.push_str("<title>choir: ");
     h.push_str(&esc(headline));
     h.push_str("</title>");
-    h.push_str(STYLE);
+    h.push_str(style());
     h.push_str(PALETTE_SCRIPT);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
@@ -1167,7 +1167,51 @@ pub(crate) fn sitemap(origin: &str, repos: &[String], downloads: bool) -> String
     out
 }
 
-pub(crate) const STYLE: &str = concat!("<style>", include_str!("ui.css"), "</style>");
+/// The stylesheet itself, served rather than inlined.
+pub(crate) const UI_CSS: &str = include_str!("ui.css");
+
+/// The path the sheet is served from, with a digest of its own bytes in
+/// the query.
+///
+/// The digest is the whole cache story. Without one the URL is stable
+/// across deploys, so the response has to be revalidated on every
+/// navigation to be correct -- one blocking round trip before first
+/// paint, on the one resource that blocks paint. With one, the URL
+/// changes exactly when the bytes do, the response is `immutable`, and
+/// a reader clicking from a directory to a file fetches no CSS at all.
+pub(crate) fn ui_css_path() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        format!(
+            "/static/ui.css?v={}",
+            &choir_oplog::ContentHash::blake3(UI_CSS.as_bytes()).to_hex()[..18]
+        )
+    })
+}
+
+/// The element every page carries in place of the sheet.
+///
+/// **It was inlined, and the sheet grew to 117 kilobytes.** Every page
+/// on this surface carried all of it in a `<style>`, which is one fewer
+/// request and, at that size, the largest thing in the document by a
+/// wide margin -- paid again on every navigation, because a `<style>`
+/// inside a `no-cache` HTML response is not a cacheable resource. The
+/// complaint it produced was that the site is slow to move around, and
+/// it was: Code to History re-sent a stylesheet the reader already had
+/// twelve times over.
+///
+/// Inlining is the right call when a sheet is small enough that the
+/// round trip costs more than the bytes. This one stopped being that
+/// long ago.
+///
+/// It also lets the policy tighten. `style-src` was `'unsafe-inline'`
+/// because the sheet was inline; nothing on this surface sets a `style`
+/// attribute, so with the sheet at a URL the directive becomes `'self'`
+/// and an injected `<style>` no longer runs.
+pub(crate) fn style() -> &'static str {
+    static TAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TAG.get_or_init(|| format!("<link rel=\"stylesheet\" href=\"{}\">", ui_css_path()))
+}
 
 /// The URL D39's client half is served from, in one place because the
 /// route, the tag and the tests all have to name the same string.

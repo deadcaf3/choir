@@ -184,7 +184,7 @@
   --col-min:15rem;
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
-  --blur-1:10px; /* the palette's backdrop: depth, not a smear */
+  --blur-1:4px;  /* the palette's backdrop: a hint of depth, no more */
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block
@@ -610,11 +610,6 @@ img,svg,canvas{max-width:100%}
    who answered, and what authorizes the landing.
    ====================================================================== */
 
-/* Cross-document transitions. One declaration, no script, ignored by
-   every browser that does not implement it: a navigation inside this
-   node cross-fades instead of blinking white. */
-@view-transition{navigation:auto}
-
 /* Arriving. Every page rises in, the tool pages included. This sheet
    used to hold the tool pages still, on the grounds that somebody
    operating an instrument did not ask for a curtain -- true of a private
@@ -640,18 +635,14 @@ img,svg,canvas{max-width:100%}
 @keyframes head-ring{
   from{box-shadow:0 0 0 0 var(--accent-line)}
   to{box-shadow:0 0 0 var(--sp-2) transparent}}
-/* Between pages. The bar and the title are named, so a navigation inside
-   this node carries them across instead of fading them out and back in:
-   the chrome stays put and the title glides to its new text. The rest
-   of the page cross-fades, and its own entrance below does the rising.
-   Ignored entirely by a browser without view transitions, which then
-   gets the entrance alone. */
-.chrome{view-transition-name:chrome}
-header.top h1{view-transition-name:title}
-::view-transition-old(root){animation:fade var(--dur-2) var(--ease-out) both reverse}
-::view-transition-new(root){animation:fade var(--dur-3) var(--ease-out) both}
-::view-transition-group(chrome),::view-transition-group(title){
-  animation-duration:var(--dur-4);animation-timing-function:var(--ease-emphatic)}
+/* There was a cross-document view transition here, and it is gone
+   because of what it costs rather than what it looked like. A browser
+   running one holds the old page on screen while it fetches and lays
+   out the new one, so every click -- Code to History, a directory into
+   a file -- paid a snapshot, a wait and a cross-fade before anything
+   moved. It reads as a slow site, and a slow site is the one complaint
+   a code host cannot design its way out of. A navigation now paints
+   when the bytes arrive. */
 
 body{background:var(--ground);color:var(--ink);margin:0 auto;
   padding:var(--pad-y) var(--pad-x) var(--sp-20);max-width:var(--page-max);
@@ -788,7 +779,7 @@ h3{font-size:var(--fs-500);color:var(--strong);letter-spacing:var(--tr-heading);
    current one underlined in the accent where the row meets its rule. */
 nav.repotabs{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-1);
   margin:var(--sp-5) var(--sp-0) var(--sp-0);padding-bottom:var(--sp-2);
-  border-bottom:var(--bw-1) solid var(--line);view-transition-name:repotabs}
+  border-bottom:var(--bw-1) solid var(--line)}
 nav.repotabs a{position:relative;display:inline-flex;align-items:center;gap:var(--sp-2);
   padding:var(--sp-1) var(--sp-3);border-radius:var(--r-sm);
   color:var(--muted);text-decoration:none;font-size:var(--fs-400);
@@ -1196,11 +1187,17 @@ section.readme h3{font-size:var(--fs-500)}
     animation-range:entry 0% cover 18%;transform-origin:left}
 }
 @keyframes draw{from{transform:scaleX(0)}to{transform:none}}
-section.readme p,section.readme li{max-width:var(--measure);
+/* A README fills the pane it is in. `--measure` is the right cap for a
+   page that is only prose -- the front door, an invite -- and the wrong
+   one here: the pane is already the narrower half of a two-column
+   layout, so capping the text inside it again wrapped a sentence at
+   roughly half the width a reader had given it. What is left holding
+   the line length is the column, which is what a reader resizes. */
+section.readme p,section.readme li{max-width:none;
   line-height:var(--lh-copy)}
 section.readme pre{background-image:var(--sunken-wash);padding:var(--sp-4);
   border:var(--border-hair);border-radius:var(--r-md);
-  overflow-x:auto;max-width:var(--article);font-size:var(--fs-300);
+  overflow-x:auto;max-width:none;font-size:var(--fs-300);
   line-height:var(--lh-code)}
 section.readme :not(pre)>code{background:var(--sunken);border:var(--border-hair);
   border-radius:var(--r-xs);padding:var(--sp-0) var(--sp-1);
@@ -1208,7 +1205,7 @@ section.readme :not(pre)>code{background:var(--sunken);border:var(--border-hair)
 /* Tables share the prose measure instead of running the full column. At
    full width they were wider than every paragraph around them, so the
    right edge of the document jumped in and out down the page. */
-section.readme table{display:block;overflow-x:auto;max-width:var(--article)}
+section.readme table{display:block;overflow-x:auto;max-width:none}
 section.readme td,section.readme th{padding:var(--sp-2) var(--sp-3)}
 section.readme blockquote{margin:var(--sp-5) var(--sp-0);
   padding-left:var(--sp-5);border-left:var(--border-accent);
@@ -1709,8 +1706,15 @@ ol.thread .body{margin:var(--sp-0);white-space:pre-wrap;
 /* The key, drawn into the box the server rendered. Added by the script,
    so it appears only where the shortcut actually works -- a legend for a
    key that does nothing is worse than no legend. */
+/* The key, drawn as a key. It was a chip, then two bare letters that
+   read as part of the placeholder; this is the middle one -- a hairline
+   cap, no fill of its own, so it sits in the field without becoming an
+   object in it. */
 .omni-key{flex:none;font-family:var(--font-mono);font-size:var(--fs-100);
-  color:var(--faint);letter-spacing:var(--tr-body)}
+  color:var(--faint);letter-spacing:var(--tr-body);
+  padding:var(--sp-0) var(--sp-1);border:var(--border-hair);
+  border-radius:var(--r-xs);line-height:var(--lh-normal)}
+form.omni:focus-within .omni-key{border-color:var(--accent-line);color:var(--muted)}
 dialog.palette{margin:auto;padding:var(--sp-0);max-width:var(--palette);
   max-height:70vh;inline-size:calc(100% - var(--sp-8));
   display:flex;flex-direction:column;overflow:hidden;

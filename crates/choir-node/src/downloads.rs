@@ -190,7 +190,7 @@ pub(crate) fn index(
     h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>downloads</title>");
-    h.push_str(crate::ui::STYLE);
+    h.push_str(crate::ui::style());
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     // The same bar every other page wears. This page used to draw none,

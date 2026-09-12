@@ -214,12 +214,22 @@ fn get(url: &str, args: &[&str]) -> (u16, String, String) {
     (status, headers, body)
 }
 
-/// Every same-origin `href` on a page, un-escaped back to the URL a
-/// browser would request. The same crude reader `browse.rs` uses, and
-/// for the same reason: these are links this crate wrote.
+/// Every same-origin `href` a reader can *follow*, un-escaped back to
+/// the URL a browser would request. The same crude reader `browse.rs`
+/// uses, and for the same reason: these are links this crate wrote.
+///
+/// The document's own `<head>` is cut off first, and that is the whole
+/// of the `<link rel="stylesheet">` question. A `<link>` carries an
+/// `href` and is not a link in the sense either caller means: nothing
+/// navigates to it, it answers with CSS rather than a page, and a
+/// crawler that queued it would be asserting that a stylesheet is
+/// reachable, renders a document, and belongs in a table of routes a
+/// reader can reach. Cutting the head rather than matching on `rel`
+/// keeps this crude, which is the property that makes it trustworthy:
+/// every remaining `href` is inside `<body>` and is an anchor.
 fn hrefs(page: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = page;
+    let mut rest = page.split_once("</head>").map_or(page, |(_, body)| body);
     while let Some(at) = rest.find("href=\"") {
         rest = &rest[at + 6..];
         let Some(end) = rest.find('"') else { break };

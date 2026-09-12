@@ -195,7 +195,7 @@
   --col-min:15rem;
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
-  --blur-1:10px; /* the palette's backdrop: depth, not a smear */
+  --blur-1:4px;  /* the palette's backdrop: a hint of depth, no more */
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block

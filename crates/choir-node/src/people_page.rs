@@ -48,7 +48,7 @@ fn shell(h: &mut String, chrome: crate::browse::Chrome<'_>) {
     h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir: people</title>");
-    h.push_str(crate::ui::STYLE);
+    h.push_str(crate::ui::style());
     // This page draws the bar below, so it takes the key with it (D81).
     // The bar and the palette ship together everywhere: a page that
     // renders the search box and not the shortcut is the one page where

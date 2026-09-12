@@ -58,7 +58,7 @@ fn open_page(h: &mut String, user: &str, console: bool, chrome: crate::browse::C
     h.push_str("><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir: your account</title>");
-    h.push_str(crate::ui::STYLE);
+    h.push_str(crate::ui::style());
     // This page draws the bar below, so it takes the key (D81). The
     // ceremony script arrives separately, further down the document and
     // only where there is a ceremony to run; this one is unconditional

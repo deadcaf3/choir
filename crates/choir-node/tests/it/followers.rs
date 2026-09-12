@@ -121,6 +121,34 @@ fn mirror_main(f: &Fixture) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Waits for a journal record naming `event`, and returns it.
+///
+/// `wait_for_mirror` is not enough on its own and this is why: the
+/// follower pushes the ref and *then* journals what it did, so there is
+/// a window where the mirror is at the new oid and the record is not
+/// written yet. A test that waits for the ref and reads the log in the
+/// next statement is inside that window whenever the machine is busy --
+/// which, in the full gate, it is. It passed alone and failed under
+/// load, three times, which is the signature of exactly this.
+fn wait_for_record(f: &Fixture, event: &str) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let records = std::fs::read_to_string(&f.log).unwrap_or_default();
+        let found = records
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|r| r["event"] == event);
+        if let Some(record) = found {
+            return record;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {event} record arrived; log:\n{records}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn wait_for_mirror(f: &Fixture, oid: &str) {
     let deadline = std::time::Instant::now() + PATIENCE;
     loop {
@@ -143,12 +171,7 @@ fn a_landing_is_pushed_to_the_repositorys_remote() {
     let oid = push_one(&f, "one");
     wait_for_mirror(&f, &oid);
 
-    let records = std::fs::read_to_string(&f.log).unwrap();
-    let pushed = records
-        .lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .find(|r| r["event"] == "pushed")
-        .expect("a pushed record");
+    let pushed = wait_for_record(&f, "pushed");
     assert_eq!(pushed["repo"], "owner/repo.git");
     assert_eq!(pushed["remote"], "mirror");
 }
