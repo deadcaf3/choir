@@ -143,3 +143,70 @@ fn a_build_directory_is_recognised_however_target_is_named() {
         "/home/example/.local/bin/choir"
     )));
 }
+
+// ------------------------------------------------------------- the timer
+
+#[test]
+fn the_backup_timer_runs_backup_take_into_the_directory_given() {
+    let dest = PathBuf::from("/srv/backups/choir");
+    for supervisor in [Supervisor::Launchd, Supervisor::Systemd] {
+        let argv = supervisor.backup_argv(&exe(), &state(), &dest);
+        assert_eq!(
+            argv,
+            vec![
+                exe().display().to_string(),
+                "backup".to_string(),
+                "take".to_string(),
+                dest.display().to_string(),
+                "--state".to_string(),
+                state().display().to_string(),
+            ]
+        );
+    }
+}
+
+#[test]
+fn the_timer_units_carry_the_interval_and_the_log() {
+    let dest = PathBuf::from("/srv/backups/choir");
+    let plist = &Supervisor::Launchd.render_backup(&exe(), &state(), &dest, 900)[0];
+    assert!(
+        plist.contains("<key>StartInterval</key><integer>900</integer>"),
+        "{plist}"
+    );
+    assert!(plist.contains("<string>com.choir.backup</string>"));
+    assert!(plist.contains("backup.log"));
+    assert!(plist.contains("<string>take</string>"));
+
+    let units = Supervisor::Systemd.render_backup(&exe(), &state(), &dest, 900);
+    assert_eq!(units.len(), 2);
+    assert!(units[0].contains("Type=oneshot"), "{}", units[0]);
+    assert!(
+        units[0].contains("backup take /srv/backups/choir"),
+        "{}",
+        units[0]
+    );
+    assert!(units[1].contains("OnUnitActiveSec=900"), "{}", units[1]);
+    assert!(units[1].contains("Unit=choir-backup.service"));
+    assert!(units[1].contains("WantedBy=timers.target"));
+}
+
+#[test]
+fn the_timer_units_land_beside_the_node_units_and_load_the_same_way() {
+    let home = PathBuf::from("/home/example");
+    assert_eq!(
+        Supervisor::Launchd.backup_units(&home),
+        vec![home.join("Library/LaunchAgents/com.choir.backup.plist")]
+    );
+    assert_eq!(
+        Supervisor::Systemd.backup_units(&home),
+        vec![
+            home.join(".config/systemd/user/choir-backup.service"),
+            home.join(".config/systemd/user/choir-backup.timer"),
+        ]
+    );
+    let install = Supervisor::Systemd.backup_commands(Action::Install, &home);
+    assert_eq!(install[1][2..], ["enable", "--now", "choir-backup.timer"]);
+    let remove = Supervisor::Launchd.backup_commands(Action::Uninstall, &home);
+    assert_eq!(remove.len(), 1);
+    assert!(remove[0][2].ends_with("/com.choir.backup"));
+}

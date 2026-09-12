@@ -284,3 +284,151 @@ fn shell_quote(word: &str) -> String {
     }
     format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+// ------------------------------------------------------------- the timer
+
+/// The label of the backup timer, and its unit stem.
+pub const BACKUP_LABEL: &str = "com.choir.backup";
+
+impl Supervisor {
+    /// The command the timer runs, as argv: `choir backup take`.
+    #[must_use]
+    pub fn backup_argv(self, exe: &Path, state: &Path, dest: &Path) -> Vec<String> {
+        vec![
+            exe.display().to_string(),
+            "backup".to_string(),
+            "take".to_string(),
+            dest.display().to_string(),
+            "--state".to_string(),
+            state.display().to_string(),
+        ]
+    }
+
+    /// The files a scheduled backup is, under `home`: one plist, or a
+    /// service and the timer that fires it.
+    #[must_use]
+    pub fn backup_units(self, home: &Path) -> Vec<PathBuf> {
+        match self {
+            Supervisor::Launchd => {
+                vec![home.join(format!("Library/LaunchAgents/{BACKUP_LABEL}.plist"))]
+            }
+            Supervisor::Systemd => vec![
+                home.join(".config/systemd/user/choir-backup.service"),
+                home.join(".config/systemd/user/choir-backup.timer"),
+            ],
+        }
+    }
+
+    /// The contents of each of [`Self::backup_units`], in the same order.
+    ///
+    /// The log is `backup.log` beside the node's own, so the record of
+    /// every run is where `choir node logs` already looks.
+    #[must_use]
+    pub fn render_backup(
+        self,
+        exe: &Path,
+        state: &Path,
+        dest: &Path,
+        every_secs: u64,
+    ) -> Vec<String> {
+        let log = state.join("backup.log");
+        let argv = self.backup_argv(exe, state, dest);
+        match self {
+            Supervisor::Launchd => {
+                let mut array = String::new();
+                for arg in &argv {
+                    array.push_str(&format!("    <string>{}</string>\n", xml_escape(arg)));
+                }
+                vec![format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                     <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+                     \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+                     <plist version=\"1.0\">\n\
+                     <dict>\n  \
+                       <key>Label</key><string>{BACKUP_LABEL}</string>\n  \
+                       <key>ProgramArguments</key>\n  <array>\n{array}  </array>\n  \
+                       <key>StartInterval</key><integer>{every_secs}</integer>\n  \
+                       <key>StandardOutPath</key><string>{log}</string>\n  \
+                       <key>StandardErrorPath</key><string>{log}</string>\n\
+                     </dict>\n\
+                     </plist>\n",
+                    log = xml_escape(&log.display().to_string()),
+                )]
+            }
+            Supervisor::Systemd => {
+                let exec: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
+                vec![
+                    format!(
+                        "[Unit]\n\
+                         Description=choir backup\n\
+                         \n\
+                         [Service]\n\
+                         Type=oneshot\n\
+                         ExecStart={exec}\n\
+                         StandardOutput=append:{log}\n\
+                         StandardError=append:{log}\n",
+                        exec = exec.join(" "),
+                        log = log.display(),
+                    ),
+                    format!(
+                        "[Unit]\n\
+                         Description=choir backup every {every_secs}s\n\
+                         \n\
+                         [Timer]\n\
+                         OnBootSec=60\n\
+                         OnUnitActiveSec={every_secs}\n\
+                         Unit=choir-backup.service\n\
+                         \n\
+                         [Install]\n\
+                         WantedBy=timers.target\n"
+                    ),
+                ]
+            }
+        }
+    }
+
+    /// The commands that load or remove the timer, in order.
+    ///
+    /// `Stop` is `Uninstall` here: a timer has no "for this boot".
+    #[must_use]
+    pub fn backup_commands(self, action: Action, home: &Path) -> Vec<Vec<String>> {
+        let uid = users_id();
+        match (self, action) {
+            (Supervisor::Launchd, Action::Install) => vec![
+                vec![
+                    "launchctl".into(),
+                    "bootout".into(),
+                    format!("gui/{uid}/{BACKUP_LABEL}"),
+                ],
+                vec![
+                    "launchctl".into(),
+                    "bootstrap".into(),
+                    format!("gui/{uid}"),
+                    self.backup_units(home)[0].display().to_string(),
+                ],
+            ],
+            (Supervisor::Launchd, Action::Stop | Action::Uninstall) => vec![vec![
+                "launchctl".into(),
+                "bootout".into(),
+                format!("gui/{uid}/{BACKUP_LABEL}"),
+            ]],
+            (Supervisor::Systemd, Action::Install) => vec![
+                vec!["systemctl".into(), "--user".into(), "daemon-reload".into()],
+                vec![
+                    "systemctl".into(),
+                    "--user".into(),
+                    "enable".into(),
+                    "--now".into(),
+                    "choir-backup.timer".into(),
+                ],
+            ],
+            (Supervisor::Systemd, Action::Stop | Action::Uninstall) => vec![vec![
+                "systemctl".into(),
+                "--user".into(),
+                "disable".into(),
+                "--now".into(),
+                "choir-backup.timer".into(),
+            ]],
+        }
+    }
+}

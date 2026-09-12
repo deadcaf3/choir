@@ -30,6 +30,7 @@ mod browse;
 mod checks;
 mod concentration;
 mod downloads;
+mod followers;
 mod git_ordering_trace;
 mod git_partial_push;
 mod git_sequenced;

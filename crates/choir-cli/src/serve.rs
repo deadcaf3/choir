@@ -63,8 +63,90 @@ pub struct Layout {
     pub acl: PathBuf,
     /// The one URL people outside this machine use, when there is one.
     pub public_url: PathBuf,
+    /// Three `key = value` lines when this node is a seed of another
+    /// node's log (D80): `home`, `credential`, `serve`. Its existence is
+    /// the switch, the same discipline as `tls.enabled`: a seed and a
+    /// home are the same layout started with different flags, and the
+    /// marker is what `choir seed` writes so that `node serve`, `node
+    /// install` and every command after them need no seed-specific
+    /// argument.
+    pub seed_marker: PathBuf,
+    /// Where `choir seed` keeps the `user:token` line the home issued,
+    /// mode 0600, so the unit never points outside the state directory.
+    pub seed_credential: PathBuf,
+    /// Present when landings are pushed to each repository's remotes
+    /// (D21). Written by `choir repo follower add`; its existence is
+    /// `--followers`.
+    pub followers_marker: PathBuf,
     /// The port to bind.
     pub port: u16,
+}
+
+/// What the seed marker says.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Seed {
+    /// The home whose log this node copies.
+    pub home: String,
+    /// The credential file the home issued to this seed's principal.
+    pub credential: PathBuf,
+    /// Whether it binds a port. An archival seed replicates, stores and
+    /// serves nobody.
+    pub serve: bool,
+}
+
+impl Seed {
+    /// The marker's text.
+    #[must_use]
+    pub fn render(&self) -> String {
+        format!(
+            "# This node is a seed of another node's log (D80). Written by\n\
+             # `choir seed`; `choir node serve` reads it. Delete it to make\n\
+             # this state directory a home again (its log would then be\n\
+             # one nobody else writes to).\n\
+             home = {}\n\
+             credential = {}\n\
+             serve = {}\n",
+            self.home,
+            self.credential.display(),
+            if self.serve { "yes" } else { "no" }
+        )
+    }
+
+    /// Reads a marker's text back.
+    ///
+    /// Anything short of a home, a credential and a `serve` answer is
+    /// `None`: a half-written marker must not become a node that starts
+    /// as a home over a log that was a copy.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Seed> {
+        let mut home = None;
+        let mut credential = None;
+        let mut serve = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (key, value) = line.split_once('=')?;
+            match key.trim() {
+                "home" => home = Some(value.trim().trim_end_matches('/').to_string()),
+                "credential" => credential = Some(PathBuf::from(value.trim())),
+                "serve" => {
+                    serve = match value.trim() {
+                        "yes" => Some(true),
+                        "no" => Some(false),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(Seed {
+            home: home?,
+            credential: credential?,
+            serve: serve?,
+        })
+    }
 }
 
 impl Layout {
@@ -81,8 +163,17 @@ impl Layout {
             accounts: state.join("accounts.jsonl"),
             acl: state.join("acl"),
             public_url: state.join("public-url"),
+            seed_marker: state.join("seed"),
+            seed_credential: state.join("seed-credential"),
+            followers_marker: state.join("followers"),
             port,
         }
+    }
+
+    /// The home this node seeds, when it is a seed.
+    #[must_use]
+    pub fn seed(&self) -> Option<Seed> {
+        Seed::parse(&std::fs::read_to_string(&self.seed_marker).ok()?)
     }
 
     /// The certificate and key this node terminates TLS with, if it does.
@@ -133,8 +224,18 @@ impl Layout {
     /// about a path it could not read. The repository root is not in
     /// this list: the daemon creates it, and an empty node is a valid
     /// one.
+    ///
+    /// A seed needs neither: it learns every key from its home's
+    /// `/api/signers`, and an archival seed has no readers to name. What
+    /// it cannot start without is the credential its marker points at.
     #[must_use]
     pub fn missing(&self) -> Vec<&Path> {
+        if self.seed_marker.exists() {
+            return match self.seed() {
+                Some(seed) if seed.credential.exists() => Vec::new(),
+                _ => vec![self.seed_credential.as_path()],
+            };
+        }
         [self.auth.as_path(), self.keys.as_path()]
             .into_iter()
             .filter(|p| !p.exists())
@@ -229,6 +330,9 @@ pub fn plan(
             names.join("\n  ")
         ));
     }
+    if let Some(seed) = layout.seed() {
+        return plan_seed(program, layout, &seed, create, extra);
+    }
     let mut args = vec![
         layout.repos.display().to_string(),
         layout.port.to_string(),
@@ -285,6 +389,80 @@ pub fn plan(
     for repo in create {
         args.push("--create".to_string());
         args.push(repo.clone());
+    }
+    if layout.followers_marker.exists() {
+        args.push("--followers".to_string());
+    }
+    args.extend_from_slice(extra);
+    Ok(Invocation { program, args })
+}
+
+/// The daemon invocation for a seed (D80).
+///
+/// The same layout, three flags different: `--seed` and
+/// `--seed-credential` instead of `--keys-file`, and no port at all for
+/// an archival seed. The daemon refuses `--keys-file` and `--create` on
+/// a seed; both are refused here first, so the sentence names the reason
+/// rather than a supervisor restarting into it.
+fn plan_seed(
+    program: PathBuf,
+    layout: &Layout,
+    seed: &Seed,
+    create: &[String],
+    extra: &[String],
+) -> Result<Invocation, String> {
+    if !create.is_empty() {
+        return Err(format!(
+            "a seed takes no --create: its repositories come from {}",
+            seed.home
+        ));
+    }
+    if extra.iter().any(|a| a == "--keys-file") {
+        return Err(
+            "a seed takes no --keys-file: it learns every key from its home's /api/signers"
+                .to_string(),
+        );
+    }
+    let mut args = vec![layout.repos.display().to_string()];
+    if seed.serve {
+        args.push(layout.port.to_string());
+    }
+    args.push("--seed".to_string());
+    args.push(seed.home.clone());
+    args.push("--seed-credential".to_string());
+    args.push(seed.credential.display().to_string());
+    if !seed.serve {
+        // An archival seed takes only its own flags; the daemon refuses
+        // the rest, and there is nothing to bind them to.
+        args.extend_from_slice(extra);
+        return Ok(Invocation { program, args });
+    }
+    if layout.auth.exists() {
+        args.push("--auth-file".to_string());
+        args.push(layout.auth.display().to_string());
+    }
+    if let Some((cert, key)) = layout.tls() {
+        for path in [&cert, &key] {
+            if std::fs::File::open(path).is_err() {
+                return Err(format!(
+                    "{} names {}, which this user cannot read\n\n  \
+                     re-issue and re-project the pair: sudo choir node tls <domain> \
+                     --user $(id -un)",
+                    layout.tls_marker.display(),
+                    path.display()
+                ));
+            }
+        }
+        args.push("--bind".to_string());
+        args.push(layout.bind().to_string());
+        args.push("--tls-cert".to_string());
+        args.push(cert.display().to_string());
+        args.push("--tls-key".to_string());
+        args.push(key.display().to_string());
+    }
+    if layout.acl.exists() {
+        args.push("--acl-file".to_string());
+        args.push(layout.acl.display().to_string());
     }
     args.extend_from_slice(extra);
     Ok(Invocation { program, args })

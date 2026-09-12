@@ -122,18 +122,20 @@ the token, points git at it and clones each repository the invite names.
 > credential reaches every repository. See
 > [Authorization](docs/operating/authorization.md).
 
-`./choirctl pull-backup` copies the log, node fingerprint, policy files
-and one git bundle per repository; `choir backup verify <dir>` checks it
-restores and `choir backup restore <dir> <root>` proves it. Neither
-carries a secret. `choir-node --export <root> <dir>` is the lighter copy
-with no policy in it, verified with `--verify-export`.
+`choir backup take <dir>` copies the log, node fingerprint, policy files
+and one git bundle per repository, and verifies the copy; `choir backup
+schedule <dir>` does it hourly; `choir backup restore <dir> <root>` proves
+it. None carries a secret. `choir node upgrade --from <node>` puts newer
+binaries in place, restarts, and reads the stamp back. `choir repo
+follower add` names a remote every landing is pushed to.
 
 A **seed** is a live copy of another node's log: it verifies every page
 before keeping it, serves reads under its own ACL, signs a statement
 about what it saw, and answers every write with `421 not_home` naming
-the home. `choir-node <root> [port] --seed <home-url> --seed-credential
-<file>` runs one; `seeds = <url>` beside `node =` in `.choir/config` makes
-`choir doctor` check each for a fork. [Run a seed](docs/operating/running-a-node.md#run-a-seed).
+the home. `choir seed <home-url>` runs one, in two runs: the first prints
+what the home registers, the second takes the credential it issued.
+`seeds = <url>` beside `node =` in `.choir/config` makes `choir doctor`
+check each for a fork. [Run a seed](docs/operating/running-a-node.md#run-a-seed).
 
 Every flag and policy file: [**Running a node**](docs/operating/running-a-node.md).
 

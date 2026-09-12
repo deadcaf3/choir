@@ -374,3 +374,359 @@ fn bundle_check(dir: &Path) -> Check {
 pub fn restorable(checks: &[Check]) -> bool {
     Status::worst(checks) != Status::Fail
 }
+
+// ---------------------------------------------------------------- taking one
+
+/// Every policy file a backup carries, required and optional.
+fn policy_names() -> Vec<&'static str> {
+    REQUIRED_POLICY
+        .iter()
+        .chain(OPTIONAL_POLICY.iter())
+        .copied()
+        .collect()
+}
+
+/// The SHA-256 of some bytes, as lowercase hex, through `openssl`'s stdin.
+fn sha256_bytes(bytes: &[u8]) -> Option<String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-r"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(bytes).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+}
+
+/// `YYYYMMDDTHHMMSSZ`, now, from the system clock and arithmetic.
+///
+/// No date crate: the manifest wants one sortable stamp, and the civil
+/// date from a day count is twenty lines that have not changed since
+/// 1582.
+#[must_use]
+pub fn utc_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}Z")
+}
+
+/// What `take` did, for the caller to print.
+#[derive(Debug, Default)]
+pub struct Taken {
+    /// Where the backup now is.
+    pub dest: PathBuf,
+    /// Entries in the log copied.
+    pub ops: usize,
+    /// The position the log will fill next.
+    pub next_seq: u64,
+    /// Bytes the log grew by since the previous backup here, if there was one.
+    pub grew: Option<(u64, u64)>,
+    /// One line per repository: kept unchanged, or bundled afresh.
+    pub bundles: Vec<String>,
+    /// Things worth a line that did not stop the backup.
+    pub warnings: Vec<String>,
+}
+
+/// Runs git against one bare repository and returns its stdout.
+fn git_in(bare: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(bare)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// Takes a backup of the node whose state directory is `layout`, into
+/// `dest`, in the shape [`verify`] reads and `choir backup restore`
+/// unpacks.
+///
+/// The same checks the flip-era pull script made, on the node's own
+/// disk: the copied log must be a prefix-extension of the one already
+/// held here, contiguous from seq 0, and pass `choir-node --verify-log`
+/// when a daemon is there to run it; the policy archive must carry no
+/// key or credential; every bundle must verify. Everything is written
+/// into a sibling directory first and moved into place last, so a run
+/// cut short leaves the previous backup as it was.
+///
+/// Live is fine: the log is append-only, and a line the daemon was
+/// still writing fails the contiguity check and is refused, which is
+/// the right answer for a copy taken a moment too early.
+///
+/// # Errors
+///
+/// Returns the sentence to print when the node's files are missing, the
+/// log shrank or diverged from the backup already here, a secret is
+/// among the policy files, or a subprocess refused.
+pub fn take(
+    layout: &crate::serve::Layout,
+    dest: &Path,
+    daemon: Option<&Path>,
+) -> Result<Taken, String> {
+    let node_state = layout.repos.join(".choir");
+    let ops_src = node_state.join("ops.jsonl");
+    let fingerprint_src = node_state.join("node.fingerprint");
+    for (what, path) in [("op log", &ops_src), ("node fingerprint", &fingerprint_src)] {
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.len() > 0 => {}
+            Ok(_) => return Err(format!("the {what} at {} is empty", path.display())),
+            Err(_) => {
+                return Err(format!(
+                    "no {what} at {}\n\n  is {} a node's state directory? choir node status",
+                    path.display(),
+                    layout.state.display()
+                ))
+            }
+        }
+    }
+
+    let stamp = utc_stamp();
+    let incoming = dest.join(format!(".incoming-{stamp}"));
+    std::fs::create_dir_all(incoming.join("repos"))
+        .map_err(|e| format!("create {}: {e}", incoming.display()))?;
+    // Removed on every exit from here, success included: on success the
+    // files have been moved out of it.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+    let _cleanup = Cleanup(incoming.clone());
+    let mut taken = Taken {
+        dest: dest.to_path_buf(),
+        ..Taken::default()
+    };
+
+    // 1. The log, and whether it extends what is held here.
+    let ops = std::fs::read(&ops_src).map_err(|e| format!("read {}: {e}", ops_src.display()))?;
+    let held = std::fs::read(dest.join("ops.jsonl")).ok();
+    if let Some(held) = &held {
+        if ops.len() < held.len() {
+            return Err(format!(
+                "the node's log is SHORTER than the copy held here: held {} bytes, node has {}\n  \
+                 the log was rewritten, not appended to; keeping the existing backup",
+                held.len(),
+                ops.len()
+            ));
+        }
+        if &ops[..held.len()] != held.as_slice() {
+            return Err(
+                "the copy held here is NOT a prefix of the node's log: the history diverged\n  \
+                 keeping the existing backup and refusing this one"
+                    .to_string(),
+            );
+        }
+        taken.grew = Some((held.len() as u64, ops.len() as u64));
+    }
+    // 2. Contiguous from 0, every line a record with a seq.
+    let mut expected = 0u64;
+    for (at, line) in ops.split(|b| *b == b'\n').enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let seq = serde_json::from_slice::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v["seq"].as_u64())
+            .ok_or_else(|| {
+                format!(
+                    "line {} of the log carries no seq; taken mid-write? try again",
+                    at + 1
+                )
+            })?;
+        if seq != expected {
+            return Err(format!(
+                "the log is not contiguous: seq {expected} expected, {seq} found"
+            ));
+        }
+        expected += 1;
+        taken.ops += 1;
+    }
+    taken.next_seq = expected;
+    let ops_copy = incoming.join("ops.jsonl");
+    std::fs::write(&ops_copy, &ops).map_err(|e| format!("write {}: {e}", ops_copy.display()))?;
+    let ops_sha = sha256(&ops_copy).ok_or("openssl could not digest the log")?;
+    // 3. The chain, from the binary that defines it.
+    match daemon {
+        Some(daemon) => {
+            let out = std::process::Command::new(daemon)
+                .args(["--verify-log", &ops_copy.display().to_string()])
+                .output()
+                .map_err(|e| format!("run {}: {e}", daemon.display()))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "choir-node --verify-log refused the log:\n  {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        }
+        None => taken
+            .warnings
+            .push("chain unverified: no choir-node beside choir to walk it with".to_string()),
+    }
+
+    // 4. Identity and attestation.
+    std::fs::copy(&fingerprint_src, incoming.join("node.fingerprint"))
+        .map_err(|e| format!("copy node.fingerprint: {e}"))?;
+    let snapshot_src = node_state.join("refs.snapshot");
+    let has_snapshot = match std::fs::metadata(&snapshot_src) {
+        Ok(meta) if meta.len() > 0 => {
+            std::fs::copy(&snapshot_src, incoming.join("refs.snapshot"))
+                .map_err(|e| format!("copy refs.snapshot: {e}"))?;
+            true
+        }
+        _ => {
+            taken.warnings.push(
+                "no attestation on the node: a restore from this backup cannot check the view it replays into".to_string(),
+            );
+            false
+        }
+    };
+
+    // 5. Policy, and nothing that is not policy.
+    let present: Vec<&str> = policy_names()
+        .into_iter()
+        .filter(|name| layout.state.join(name).exists())
+        .collect();
+    if present.is_empty() {
+        return Err(format!(
+            "no policy files in {}: nothing to ship",
+            layout.state.display()
+        ));
+    }
+    for name in policy_names() {
+        if !present.contains(&name) {
+            taken.warnings.push(format!(
+                "no {name} on the node: a restore starts without it"
+            ));
+        }
+    }
+    let leaked: Vec<&&str> = present.iter().filter(|n| is_secret(n)).collect();
+    if !leaked.is_empty() {
+        return Err(format!("refusing: a policy name is a secret: {leaked:?}"));
+    }
+    let policy_tar = incoming.join("policy.tar");
+    let ok = std::process::Command::new("tar")
+        .arg("cf")
+        .arg(&policy_tar)
+        .arg("-C")
+        .arg(&layout.state)
+        .args(&present)
+        .status()
+        .map_err(|e| format!("run tar: {e}"))?
+        .success();
+    if !ok {
+        return Err("tar could not build the policy archive".to_string());
+    }
+
+    // 6. One bundle per repository, kept when its refs have not moved.
+    let listed = std::fs::read_to_string(layout.state.join("repos.list")).unwrap_or_default();
+    let repos: Vec<&str> = listed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    for repo in &repos {
+        let bare = layout.repos.join(repo);
+        let name = Path::new(repo)
+            .file_name()
+            .map(|n| n.to_string_lossy().trim_end_matches(".git").to_string())
+            .unwrap_or_else(|| (*repo).to_string());
+        let refs = git_in(&bare, &["show-ref"]).unwrap_or_default();
+        let refs_hash = sha256_bytes(&refs).ok_or("openssl could not digest the refs")?;
+        let held_hash = std::fs::read_to_string(dest.join("repos").join(format!("{name}.refs")))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let held_bundle = dest.join("repos").join(format!("{name}.bundle"));
+        let bundle = incoming.join("repos").join(format!("{name}.bundle"));
+        if held_hash == refs_hash && held_bundle.is_file() {
+            std::fs::copy(&held_bundle, &bundle).map_err(|e| format!("keep {name}.bundle: {e}"))?;
+            taken.bundles.push(format!("{name}: unchanged, kept"));
+        } else {
+            if git_in(
+                &bare,
+                &["bundle", "create", &bundle.display().to_string(), "--all"],
+            )
+            .is_none()
+            {
+                return Err(format!("git could not bundle {repo} at {}", bare.display()));
+            }
+            let size = std::fs::metadata(&bundle).map(|m| m.len()).unwrap_or(0);
+            taken.bundles.push(format!("{name}: bundled, {size} bytes"));
+        }
+        std::fs::write(
+            incoming.join("repos").join(format!("{name}.refs")),
+            format!("{refs_hash}\n"),
+        )
+        .map_err(|e| format!("write {name}.refs: {e}"))?;
+    }
+    if repos.is_empty() {
+        taken
+            .warnings
+            .push("repos.list names no repository: no bundle taken".to_string());
+    }
+
+    // 7. The manifest, then everything into place, the log last so a
+    //    backup is never a new manifest over an old log.
+    std::fs::write(
+        incoming.join("manifest"),
+        format!(
+            "format_version 1\npulled_at {stamp}\nops_sha256 {ops_sha}\nops_bytes {}\nnext_seq {}\nrepos {}\n",
+            ops.len(),
+            taken.next_seq,
+            repos.len()
+        ),
+    )
+    .map_err(|e| format!("write manifest: {e}"))?;
+    std::fs::create_dir_all(dest.join("repos"))
+        .map_err(|e| format!("create {}: {e}", dest.display()))?;
+    for entry in
+        std::fs::read_dir(incoming.join("repos")).map_err(|e| format!("list bundles: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("list bundles: {e}"))?;
+        std::fs::rename(entry.path(), dest.join("repos").join(entry.file_name()))
+            .map_err(|e| format!("move {}: {e}", entry.path().display()))?;
+    }
+    for name in ["node.fingerprint", "policy.tar", "manifest", "ops.jsonl"] {
+        std::fs::rename(incoming.join(name), dest.join(name))
+            .map_err(|e| format!("move {name}: {e}"))?;
+    }
+    if has_snapshot {
+        std::fs::rename(incoming.join("refs.snapshot"), dest.join("refs.snapshot"))
+            .map_err(|e| format!("move refs.snapshot: {e}"))?;
+    } else {
+        std::fs::remove_file(dest.join("refs.snapshot")).ok();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o700)).ok();
+    }
+    Ok(taken)
+}

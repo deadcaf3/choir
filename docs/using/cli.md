@@ -165,6 +165,14 @@ The signed-operation API is the primary agent path: it carries actor identity an
   the repositories on a node this credential can read, one per line; an ACL narrows the list rather than refusing it
 - `choir repo url <api> <owner/repo.git>`  
   the clone URL for a repository, and the one line of git configuration that makes pushing work; the credential is never put in the URL
+- `choir seed <home-url> [--credential <file>] [--name <principal>] [--port <n> | --archival] [--state <dir>] [--foreground] [-- <daemon flags>]`  
+  take this machine from nothing to a running seed of another node's log (D80): mints the seed's node key and prints the three lines the home registers, then, run again with the credential the home issued, starts and supervises the seed; --archival replicates and stores without serving
+- `choir repo follower add <owner/repo.git> <name> <url> [--state <dir>]`  
+  on the node host, add a remote the repository's landings are pushed to (D21): `git remote add` on the bare repository, plus the marker that makes `node serve` pass --followers; restart the node once and every landing follows
+- `choir repo follower list [--state <dir>]`  
+  every repository this node holds with the remotes it pushes to; a repository with none is named, since its objects have no second copy yet
+- `choir repo follower push [<owner/repo.git>] [--state <dir>]`  
+  push every branch and tag to each remote now, no force and no prune; what the daemon does after each landing, for when it was not running with --followers
 - `choir node serve [--state <dir>] [--port <n>] [--create <owner/repo.git>] [-- <daemon flags>]`  
   run the node in this terminal, deriving root, credential and trusted keys from what `choir init` wrote; execs the daemon so signals and the exit code reach the real process
 - `choir node install [--state <dir>] [--port <n>] [-- <daemon flags>]`  
@@ -175,6 +183,8 @@ The signed-operation API is the primary agent path: it carries actor identity an
   stop the supervised node for this boot, leaving the unit in place; `node uninstall` is the one that ends it
 - `choir node restart `  
   reload the unit and start it again, which is how a rebuilt binary reaches the running node
+- `choir node upgrade --from <node-url> | --source <checkout> [--into <dir>] [--state <dir>] [--dry-run]`  
+  newer binaries into the directory this `choir` runs from (or --into), a restart of the supervised node, and the build stamp read back from the running daemon; --from runs a node's own installer, --source builds a checkout with cargo
 - `choir node uninstall `  
   stop the node and remove its unit; the state directory, with the keys, repositories and op log, is kept
 - `choir node logs [<lines>] [--state <dir>]`  
@@ -185,6 +195,12 @@ The signed-operation API is the primary agent path: it carries actor identity an
   check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers; with `seeds =` in .choir/config, a fork check per seed
 - `choir backup verify <backup-dir>`  
   whether a backup can be restored from: the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, refusing a backup that carries a key or credential; every check local
+- `choir backup take <backup-dir> [--state <dir>]`  
+  take a backup of this machine's node into a directory, in the shape `backup verify` reads: the log, checked to extend the copy already there and to verify as a chain, the node fingerprint, the attestation, the policy files as one archive with no secret in it, and one git bundle per repository, kept when its refs have not moved; then verifies what it wrote
+- `choir backup schedule <backup-dir> [--every <seconds>] [--state <dir>]`  
+  run `backup take` into that directory on a timer, launchd or systemd, every hour unless told otherwise; `backup unschedule` removes it
+- `choir backup unschedule `  
+  remove the backup timer; the backups already taken are kept
 - `choir backup restore <backup-dir> <target-root>`  
   turn a backup back into a node and prove it by accepting a real push: reads and refuses before writing, unbundles git objects before the first boot, rehearses on a port it picks; exit 3 means a secret only you can supply is missing
 - `choir repair <log-file> --verify | --truncate-tail`  

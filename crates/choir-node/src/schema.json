@@ -279,6 +279,30 @@
     },
     {
       "agent_facing": false,
+      "args": "<home-url> [--credential <file>] [--name <principal>] [--port <n> | --archival] [--state <dir>] [--foreground] [-- <daemon flags>]",
+      "name": "seed",
+      "summary": "take this machine from nothing to a running seed of another node's log (D80): mints the seed's node key and prints the three lines the home registers, then, run again with the credential the home issued, starts and supervises the seed; --archival replicates and stores without serving"
+    },
+    {
+      "agent_facing": false,
+      "args": "<owner/repo.git> <name> <url> [--state <dir>]",
+      "name": "repo follower add",
+      "summary": "on the node host, add a remote the repository's landings are pushed to (D21): `git remote add` on the bare repository, plus the marker that makes `node serve` pass --followers; restart the node once and every landing follows"
+    },
+    {
+      "agent_facing": false,
+      "args": "[--state <dir>]",
+      "name": "repo follower list",
+      "summary": "every repository this node holds with the remotes it pushes to; a repository with none is named, since its objects have no second copy yet"
+    },
+    {
+      "agent_facing": false,
+      "args": "[<owner/repo.git>] [--state <dir>]",
+      "name": "repo follower push",
+      "summary": "push every branch and tag to each remote now, no force and no prune; what the daemon does after each landing, for when it was not running with --followers"
+    },
+    {
+      "agent_facing": false,
       "args": "[--state <dir>] [--port <n>] [--create <owner/repo.git>] [-- <daemon flags>]",
       "name": "node serve",
       "summary": "run the node in this terminal, deriving root, credential and trusted keys from what `choir init` wrote; execs the daemon so signals and the exit code reach the real process"
@@ -309,6 +333,12 @@
     },
     {
       "agent_facing": false,
+      "args": "--from <node-url> | --source <checkout> [--into <dir>] [--state <dir>] [--dry-run]",
+      "name": "node upgrade",
+      "summary": "newer binaries into the directory this `choir` runs from (or --into), a restart of the supervised node, and the build stamp read back from the running daemon; --from runs a node's own installer, --source builds a checkout with cargo"
+    },
+    {
+      "agent_facing": false,
       "args": "",
       "name": "node uninstall",
       "summary": "stop the node and remove its unit; the state directory, with the keys, repositories and op log, is kept"
@@ -336,6 +366,24 @@
       "args": "<backup-dir>",
       "name": "backup verify",
       "summary": "whether a backup can be restored from: the four files, the manifest checksum, the hash chain, the policy archive and every git bundle, refusing a backup that carries a key or credential; every check local"
+    },
+    {
+      "agent_facing": false,
+      "args": "<backup-dir> [--state <dir>]",
+      "name": "backup take",
+      "summary": "take a backup of this machine's node into a directory, in the shape `backup verify` reads: the log, checked to extend the copy already there and to verify as a chain, the node fingerprint, the attestation, the policy files as one archive with no secret in it, and one git bundle per repository, kept when its refs have not moved; then verifies what it wrote"
+    },
+    {
+      "agent_facing": false,
+      "args": "<backup-dir> [--every <seconds>] [--state <dir>]",
+      "name": "backup schedule",
+      "summary": "run `backup take` into that directory on a timer, launchd or systemd, every hour unless told otherwise; `backup unschedule` removes it"
+    },
+    {
+      "agent_facing": false,
+      "args": "",
+      "name": "backup unschedule",
+      "summary": "remove the backup timer; the backups already taken are kept"
     },
     {
       "agent_facing": false,

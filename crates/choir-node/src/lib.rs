@@ -33,6 +33,7 @@ mod bound;
 mod browse;
 mod card;
 mod downloads;
+pub mod followers;
 pub mod hooks;
 mod join_page;
 pub mod limits;

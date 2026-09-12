@@ -161,6 +161,7 @@ job if the host moved.
 Pull a backup from the restored node before trusting it:
 
 ```bash
-./choirctl pull-backup          # still shell: it ssh's to the node host
+choir backup take <dir>         # on the node host; verifies what it wrote
+./choirctl pull-backup          # or from the laptop: still shell, it ssh's to the node host
 choir backup verify ~/choir-backup
 ```

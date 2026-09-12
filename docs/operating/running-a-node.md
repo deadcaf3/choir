@@ -172,6 +172,23 @@ expiry, linger, unit loaded and running, and whether the public URL
 answers (asked from the box, so it proves name and certificate, not the
 firewall).
 
+### Upgrading
+
+```bash
+choir node upgrade --from https://<node>      # that node's shelf, its installer run here
+choir node upgrade --source ~/choir-build     # a checkout: cargo build --release there
+```
+
+Either way: the newer binaries are placed over the ones in the directory
+this `choir` runs from (`--into <dir>` names another), by rename, so a
+build that fails leaves the old ones untouched; the supervised node is
+restarted; and the build stamp is read back from the running daemon's
+`/api/view` and compared with what was installed. A node that reports a
+different commit than the binary just placed exits 1 with both. `--from`
+wants a directory called `bin`, since that is where an installer writes;
+`--dry-run` prints the plan. The command runs on the node host and never
+runs `ssh`; the hop that types it is yours.
+
 ### Uninstalling
 
 ```bash
@@ -289,6 +306,50 @@ Names are one path segment of `[A-Za-z0-9._-]`, dotfiles are refused and
 symlinks are not followed, so the shelf can only hand out a regular file
 an operator put directly in it.
 
+## Backups
+
+On the node host:
+
+```bash
+choir backup take /srv/backups/choir          # now, then verified
+choir backup schedule /srv/backups/choir      # every hour; --every <seconds> for another interval
+choir backup unschedule
+```
+
+A backup is the log, the node fingerprint, the attestation, the policy
+files as one archive and one git bundle per repository, in the shape
+`choir backup verify` reads and `choir backup restore` unpacks, never a
+key or a credential. Each take checks that the node's log extends the
+copy already in the directory, is contiguous from seq 0 and verifies as
+a chain, keeps a bundle whose refs have not moved, and writes everything
+into a sibling directory before moving it into place, so a run cut short
+leaves the previous backup as it was. The directory must not be inside
+the state directory. The timer is a launchd job or a systemd timer
+running the same command; its runs are logged to `backup.log` beside the
+node's own. Copying the directory off the machine is still the operator's
+job, and `docs/runbook-restore.md` is what to do with it.
+
+## Followers
+
+A follower is a remote on a bare repository under the root that every
+landing is pushed to (D21): a mirror on a forge, a second node's seed
+input, a bare repository on another disk. On the node host:
+
+```bash
+choir repo follower add me/thing.git mirror git@forge.example:me/thing.git
+choir node restart                            # once; the marker makes `node serve` pass --followers
+choir repo follower list
+choir repo follower push                      # by hand, every repository, every remote
+```
+
+Branches and tags are pushed, never forced and never pruned, so a
+follower that diverged from the node is a push that refuses and a line
+in `<root>/.choir/followers.jsonl`, not a rewrite. Nothing is fetched:
+the node is canonical and a follower copies it. The daemon pushes only
+when started with `--followers`, which `choir node serve` derives from
+the marker `add` writes; without it a remote is inert, which is what a
+`choir-bridge` mirror with an upstream `origin` relies on.
+
 ## Behind a TLS proxy
 
 For the private beta, bind `127.0.0.1` and terminate TLS at a hardened
@@ -347,32 +408,51 @@ every write sent to it, a `git push` included, is answered `421
 not_home` with the home's address. [SYNC.md](../../SYNC.md) is the
 contract.
 
-**On the seed's machine, first**, mint its node key where it will look
-for it, and print the line the home registers:
+One command, run twice, the same shape as `choir host`:
 
 ```bash
-mkdir -p /srv/choir-seed/.choir
-choir key /srv/choir-seed/.choir/node.key seed-a     # prints: seed-a <64-hex>
+choir seed https://<home-host> --name seed-a
+```
+
+**The first run** mints the seed's node key where the daemon will look
+for it and stops, exit 3, printing what the home's operator pastes:
+
+```text
+  keys file:   seed-a <64-hex>
+  binding:     choir bind https://<home-host> <home-root>/.choir/node.key seed-a <64-hex>
+  auth file:   seed-a:<a token minted there>
+  acl file:    seed-a @node auditor
+               seed-a * read
 ```
 
 **On the home**, nothing seed-specific, only the files it already has:
+the keys line registers the key; the binding makes the key on its
+statements a name; the credential and the two grants admit it. `@node
+auditor` is the node-wide read `/api/log` needs, and there is no
+anonymous seed. The log grant does not reach git, so `* read` is what
+lets it fetch; name repositories instead of `*` to seed only some.
 
-1. Register the seed's key: append that `seed-a <64-hex>` line to the
-   `--keys-file`.
-2. Bind it as an operator, so the key on its statements is a name in
-   `bindings`:
-   `choir bind <home-url> <home-root>/.choir/node.key seed-a <64-hex>`
-3. Issue it a credential, `seed-a:<token>` in the `--auth-file`, and
-   grant it read: `seed-a @node auditor` (the node-wide read `/api/log`
-   needs; there is no anonymous seed) and `seed-a * read` in the
-   `--acl-file`. The log grant does not reach git, so the second line is
-   what lets it fetch; name repositories instead of `*` to seed only
-   some.
+**The second run**, with the credential the home issued as a 0600 file:
 
-**Then start it.** The credential file holds the one `seed-a:<token>`
-line, mode 0600; it reaches curl on stdin and git through its
-environment, never an argv or a URL. A serving seed takes its own
-readers' `--auth-file` and `--acl-file` like any node:
+```bash
+choir seed https://<home-host> --name seed-a --credential ./seed-a.auth
+```
+
+It copies the credential into the state directory, mints a credential
+and an ACL for the seed's own readers, writes the marker `choir node
+serve` reads, installs the unit under launchd or systemd, waits for the
+seed to answer, and prints its URL. `--port <n>` picks the port,
+`--foreground` execs the daemon instead of installing a unit,
+`--archival` makes a seed that binds nothing: it replicates, stores,
+fetches git and signs statements into its root, and serves nobody. The
+laptop, the CI sandbox, the machine behind NAT. After that `choir node
+status|logs|restart|stop|uninstall` and `choir doctor` treat it as the
+node it is.
+
+**By hand**, the daemon lines the command composes. The credential file
+holds the one `seed-a:<token>` line, mode 0600; it reaches curl on stdin
+and git through its environment, never an argv or a URL. A serving seed
+takes its own readers' `--auth-file` and `--acl-file` like any node:
 
 ```bash
 choir-node /srv/choir-seed 8418 \
@@ -380,14 +460,7 @@ choir-node /srv/choir-seed 8418 \
   --seed-credential ~/.choir/seed-credential \
   --auth-file ~/.choir/seed-auth \
   --acl-file ~/.choir/seed-acl
-```
-
-An **archival seed** gives no port and binds nothing. It replicates,
-stores, fetches git and signs statements into its root, and serves
-nobody: the laptop, the CI sandbox, the machine behind NAT.
-
-```bash
-choir-node /srv/choir-archive --seed https://<home-host> --seed-credential ~/.choir/seed-credential
+choir-node /srv/choir-archive --seed https://<home-host> --seed-credential ~/.choir/seed-credential   # archival
 ```
 
 A seed that serves beyond loopback is a node like any other and needs

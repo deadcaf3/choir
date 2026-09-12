@@ -9,7 +9,7 @@
 //! [--review-retention count] [--review-lapse-after-secs seconds]
 //! [--newcomer-audit path --newcomer-adjudications path]
 //! [--review-adjudications path]
-//! [--hooks-file path] [--journal path]
+//! [--hooks-file path] [--followers] [--journal path]
 //! [--ci-command path --queue-tree dir]
 //! [--request-log path [--request-log-max-bytes n]]
 //! [--rate-limit-api per-minute] [--rate-limit-git per-minute]
@@ -822,6 +822,13 @@ fn run() -> std::io::Result<()> {
         if let Some(path) = flag_value("--hooks-file") {
             platform = platform
                 .with_hooks(path.into(), state_dir.join("hooks.jsonl"))
+                .map_err(std::io::Error::other)?;
+        }
+        // D21. Consent is the flag: a remote on a bare repository is
+        // inert until the operator says landings should follow it.
+        if rest.iter().any(|a| a == "--followers") {
+            platform = platform
+                .with_followers(root.clone(), state_dir.join("followers.jsonl"))
                 .map_err(std::io::Error::other)?;
         }
         if rest.iter().any(|a| a == "--require-scope") {

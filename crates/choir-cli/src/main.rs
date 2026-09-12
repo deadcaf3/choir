@@ -949,6 +949,798 @@ fn host(rest: &[&str]) -> ! {
     std::process::exit(0)
 }
 
+/// `choir seed` — a fresh machine to a running seed of another node's
+/// log (D80). Same shape as `choir host`: numbered steps, a handover with
+/// exit 3 where something only the home's operator can supply is missing,
+/// and the marker `choir node serve` reads so every later command needs
+/// no seed-specific argument.
+fn seed(rest: &[&str]) -> ! {
+    let style = choir_cli::style::Style::for_stderr();
+    let options = match choir_cli::seed::parse(rest, state_dir()) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("{} {error}", style.red("choir seed:"));
+            std::process::exit(2);
+        }
+    };
+    let layout = choir_cli::serve::Layout::new(&options.state, options.port);
+    let mut done: Vec<String> = Vec::new();
+    let retry = {
+        let mut line = "choir seed".to_string();
+        for argument in rest {
+            line.push(' ');
+            line.push_str(argument);
+        }
+        line
+    };
+    eprintln!();
+
+    // 1. The identity, minted where the daemon will look for it. Kept
+    //    when it is already there: the second run of this command is the
+    //    one that finishes, and a second key would be a second principal
+    //    the home never registered.
+    let key_path = choir_cli::seed::key_path(&layout.repos);
+    let existed = key_path.exists();
+    let key = match choir_cli::seed::identity(&key_path) {
+        Ok(key) => key,
+        Err(error) => host_failed(&done, "identity", &error, &retry),
+    };
+    let hex = choir_cli::seed::public_hex(&key);
+    step(
+        "identity",
+        &format!(
+            "{} {}{}",
+            options.name,
+            &hex[..16],
+            if existed {
+                "… (already here, kept)"
+            } else {
+                "…"
+            }
+        ),
+    );
+    done.push("identity".to_string());
+
+    // 2. The credential the home issued, or the lines that get one.
+    let Some(from) = &options.credential else {
+        let paste = choir_cli::seed::registration(&options.name, &hex, &options.home);
+        handover(
+            &done,
+            &format!(
+                "the home has to admit this seed before it can read a page. On {},
+                   its operator adds these to files the node already has (nothing
+                   seed-specific), then hands you the auth line as a 0600 file:",
+                options.home
+            ),
+            &paste,
+            &format!("{retry} --credential <that file>"),
+        );
+    };
+    let user = match choir_cli::seed::place_credential(from, &layout.seed_credential) {
+        Ok(user) => user,
+        Err(error) => host_failed(&done, "credential", &error, &retry),
+    };
+    step(
+        "credential",
+        &format!("{user} at {}", layout.seed_credential.display()),
+    );
+    done.push("credential".to_string());
+
+    // 3. The seed's own readers. A serving seed names them exactly as a
+    //    home does: a credential and a table. Both are kept when present,
+    //    and neither exists for an archival seed, which serves nobody.
+    if !options.archival {
+        if !layout.auth.exists() {
+            let token = match choir_cli::init::mint_token() {
+                Ok(token) => token,
+                Err(error) => host_failed(&done, "readers", &error, &retry),
+            };
+            if let Err(error) = choir_fs::write_atomic_private(
+                &layout.auth,
+                format!(
+                    "choir:{token}
+"
+                ),
+            ) {
+                host_failed(
+                    &done,
+                    "readers",
+                    &format!("{}: {error}", layout.auth.display()),
+                    &retry,
+                );
+            }
+        }
+        if !layout.acl.exists() {
+            let acl = "# Who may read what on this seed (D29). Every write is answered
+                       # 421 not_home whatever this says; `own` here is the operator's
+                       # read of everything the seed holds.
+                       choir * own
+                       choir @node auditor
+";
+            if let Err(error) = choir_fs::write_atomic_private(&layout.acl, acl) {
+                host_failed(
+                    &done,
+                    "readers",
+                    &format!("{}: {error}", layout.acl.display()),
+                    &retry,
+                );
+            }
+        }
+        step(
+            "readers",
+            &format!("{} (0600), {}", layout.auth.display(), layout.acl.display()),
+        );
+    }
+
+    // 4. The marker. From here on `choir node serve` is a seed.
+    let marker = choir_cli::serve::Seed {
+        home: options.home.clone(),
+        credential: layout.seed_credential.clone(),
+        serve: !options.archival,
+    };
+    if let Err(error) = choir_fs::write_atomic(&layout.seed_marker, marker.render()) {
+        host_failed(
+            &done,
+            "marker",
+            &format!("{}: {error}", layout.seed_marker.display()),
+            &retry,
+        );
+    }
+    step("seed of", &options.home);
+    done.push("marker".to_string());
+
+    // 5. The address, and the config that makes this machine's `choir`
+    //    talk to the home while `doctor` watches the seed. Written only
+    //    when nothing is there: a checkout that names another node keeps
+    //    naming it.
+    let url = format!("http://127.0.0.1:{}", options.port);
+    if !options.archival {
+        if let Err(error) = choir_fs::write_atomic(
+            &layout.public_url,
+            format!(
+                "{url}
+"
+            ),
+        ) {
+            host_failed(
+                &done,
+                "address",
+                &format!("{}: {error}", layout.public_url.display()),
+                &retry,
+            );
+        }
+        let config = std::path::Path::new(".choir/config");
+        if !config.exists() {
+            if let Err(error) = choir_fs::write_atomic(
+                config,
+                format!(
+                    "# Written by `choir seed`: writes go to the home, and `choir doctor`
+                     # compares this seed's statement with what the home shows.
+                     node = {}
+                     seeds = {url}
+",
+                    options.home
+                ),
+            ) {
+                eprintln!("  {} .choir/config: {error}", style.cyan("!!"));
+            }
+        }
+        step("address", &url);
+    }
+
+    // 6. Supervision, or becoming the daemon.
+    if options.foreground {
+        step(
+            "foreground",
+            "becoming the daemon; the runtime supervises it",
+        );
+        eprintln!();
+        let program = match choir_cli::serve::find_daemon() {
+            Ok(program) => program,
+            Err(error) => host_failed(&done, "foreground", &error, &retry),
+        };
+        match choir_cli::serve::plan(program, &layout, &[], &options.extra) {
+            Ok(invocation) => {
+                let error = choir_cli::serve::exec(&invocation);
+                host_failed(&done, "foreground", &error, &retry);
+            }
+            Err(error) => host_failed(&done, "foreground", &error, &retry),
+        }
+    }
+    match install_unit(&options.state, options.port, &options.extra) {
+        Ok((unit, _)) => step("supervised", &unit.display().to_string()),
+        Err(error) => host_failed(&done, "supervised", &error, &retry),
+    }
+    done.push("supervised".to_string());
+
+    // 7. Readiness. An archival seed has no port to ask, so its log is
+    //    the only receipt.
+    if options.archival {
+        eprintln!();
+        eprintln!(
+            "  {} choir node logs --state {}
+",
+            style.dim("watch it:"),
+            options.state.display()
+        );
+        std::process::exit(0);
+    }
+    let client = match choir_cli::mcp::HttpClient::new(&url, Some(&layout.auth), None) {
+        Ok(client) => client,
+        Err(error) => host_failed(&done, "healthy", &error, &retry),
+    };
+    match choir_cli::host::wait_healthy(&client, 30) {
+        Ok(()) => step("healthy", &format!("{url}/healthz")),
+        Err(error) => host_failed(
+            &done,
+            "healthy",
+            &format!(
+                "{error}
+           it says why in {}",
+                layout.log.display()
+            ),
+            &format!("choir node logs --state {}", options.state.display()),
+        ),
+    }
+    eprintln!();
+    eprintln!(
+        "  {} choir doctor
+",
+        style.dim("check it:")
+    );
+    println!("{url}");
+    std::process::exit(0)
+}
+
+/// `choir node upgrade` — newer binaries, a restart, and the daemon's
+/// own word that it took.
+fn node_upgrade(rest: &[&str]) -> ! {
+    let style = choir_cli::style::Style::for_stderr();
+    let command = "choir node upgrade";
+    let options = match choir_cli::upgrade::parse(rest, state_dir()) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("{} {error}", style.red(&format!("{command}:")));
+            std::process::exit(2);
+        }
+    };
+    let fail = |what: &str, why: &str| -> ! {
+        eprintln!(
+            "
+  {} {what}: {why}
+",
+            style.red("failed")
+        );
+        std::process::exit(1)
+    };
+    eprintln!();
+
+    // 1. Where the binaries go: where this one runs from, unless told.
+    let into = match &options.into {
+        Some(into) => into.clone(),
+        None => {
+            let exe = std::env::current_exe().unwrap_or_default();
+            if choir_cli::supervise::in_build_directory(&exe) {
+                fail(
+                    "into",
+                    &format!(
+                        "this `choir` lives in a build directory:
+    {}
+                           name the directory the node runs from: {command} ... --into <dir>",
+                        exe.display()
+                    ),
+                );
+            }
+            exe.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+        }
+    };
+    let before = choir_cli::upgrade::version_of(&into.join("choir"))
+        .map(|(line, _)| line)
+        .unwrap_or_else(|| "nothing installed".to_string());
+    step("into", &format!("{}  ({before})", into.display()));
+
+    // 2. The node this machine runs, and its address, so the receipt can
+    //    be read from it afterwards.
+    let layout = choir_cli::serve::Layout::new(&options.state, 8417);
+    let api = layout
+        .public()
+        .or_else(configured_node)
+        .unwrap_or_else(|| "http://127.0.0.1:8417".to_string());
+    let running_before = choir_cli::node::status(&api, Some(&layout.auth))
+        .ok()
+        .and_then(|(_, view)| view["build"]["commit"].as_str().map(str::to_string));
+    step(
+        "running",
+        &format!(
+            "{api}  {}",
+            running_before
+                .as_deref()
+                .map(|c| c.chars().take(12).collect::<String>())
+                .unwrap_or_else(|| "not answering".to_string())
+        ),
+    );
+
+    if options.dry_run {
+        let plan = match &options.source {
+            choir_cli::upgrade::Source::Shelf(node) => {
+                format!(
+                    "sh <({node}/download/install.sh) choir-cli choir-node, into {}",
+                    into.display()
+                )
+            }
+            choir_cli::upgrade::Source::Checkout(dir) => format!(
+                "cargo build --release in {}, then {} placed into {}",
+                dir.display(),
+                choir_cli::upgrade::BINARIES.join(", "),
+                into.display()
+            ),
+        };
+        step("would", &plan);
+        step(
+            "then",
+            "choir node restart, and the stamp read back from the daemon",
+        );
+        eprintln!();
+        std::process::exit(0);
+    }
+
+    // 3. The binaries.
+    match &options.source {
+        choir_cli::upgrade::Source::Shelf(node) => {
+            let cargo_home = match choir_cli::upgrade::cargo_home_for(&into) {
+                Ok(home) => home,
+                Err(error) => fail("from", &error),
+            };
+            match choir_cli::upgrade::install_from_shelf(node, &cargo_home) {
+                Ok(said) => {
+                    for line in said.lines() {
+                        eprintln!("      {}", style.dim(line));
+                    }
+                    step("fetched", &format!("{node}/download/"));
+                }
+                Err(error) => fail("from", &error),
+            }
+        }
+        choir_cli::upgrade::Source::Checkout(dir) => {
+            eprintln!(
+                "  {}  {:14}  cargo build --release in {}",
+                style.dim(".."),
+                style.dim("building"),
+                dir.display()
+            );
+            let (built, head) = match choir_cli::upgrade::build(dir) {
+                Ok(built) => built,
+                Err(error) => fail("build", &error),
+            };
+            step("built", &head.chars().take(12).collect::<String>());
+            match choir_cli::upgrade::place(&built, &into) {
+                Ok(placed) => step("placed", &placed.join(", ")),
+                Err(error) => fail("place", &error),
+            }
+        }
+    }
+    let (after, wanted) = choir_cli::upgrade::version_of(&into.join("choir"))
+        .unwrap_or_else(|| ("unreadable".to_string(), None));
+    step("installed", &after);
+
+    // 4. The restart, when there is a unit to restart.
+    let Some(supervisor) = choir_cli::supervise::Supervisor::detect() else {
+        eprintln!(
+            "
+  {} no service manager here; restart the node yourself
+",
+            style.cyan("note:")
+        );
+        std::process::exit(0);
+    };
+    let home = home_dir();
+    if !supervisor.unit_path(&home).exists() {
+        eprintln!(
+            "
+  {} no unit installed here; restart the node yourself, then: choir node status
+",
+            style.cyan("note:")
+        );
+        std::process::exit(0);
+    }
+    let steps = supervisor.commands(choir_cli::supervise::Action::Install, &home);
+    let last = steps.len().saturating_sub(1);
+    for (at, cmd) in steps.iter().enumerate() {
+        if !run_step(cmd, at != last) {
+            fail("restart", "the service manager refused");
+        }
+    }
+    step(
+        "restarted",
+        &supervisor.unit_path(&home).display().to_string(),
+    );
+
+    // 5. The receipt: what the daemon says it is, not what was asked.
+    let client = match choir_cli::mcp::HttpClient::new(&api, Some(&layout.auth), None) {
+        Ok(client) => client,
+        Err(error) => fail("healthy", &error),
+    };
+    if let Err(error) = choir_cli::host::wait_healthy(&client, 30) {
+        fail(
+            "healthy",
+            &format!(
+                "{error}
+           it says why in {}",
+                layout.log.display()
+            ),
+        );
+    }
+    let running = choir_cli::node::status(&api, Some(&layout.auth))
+        .ok()
+        .and_then(|(_, view)| view["build"]["commit"].as_str().map(str::to_string));
+    match (running, wanted) {
+        (Some(running), Some(wanted))
+            if running.starts_with(&wanted) || wanted.starts_with(&running) =>
+        {
+            step("serving", &running.chars().take(12).collect::<String>());
+            eprintln!();
+            println!("{}", running.chars().take(12).collect::<String>());
+            std::process::exit(0)
+        }
+        (Some(running), Some(wanted)) => fail(
+            "serving",
+            &format!(
+                "the node reports {} but the installed choir is {wanted}
+                            is the unit pointing at {}? choir node status",
+                running.chars().take(12).collect::<String>(),
+                into.display()
+            ),
+        ),
+        (Some(running), None) => {
+            step(
+                "serving",
+                &format!(
+                    "{} (the installed binary carries no stamp to compare)",
+                    running.chars().take(12).collect::<String>()
+                ),
+            );
+            std::process::exit(0)
+        }
+        (None, _) => fail(
+            "serving",
+            "the node answers, but its view does not name a build",
+        ),
+    }
+}
+
+/// `choir repo follower add|list|push` — the remotes a node pushes to (D21).
+fn repo_follower(rest: &[&str]) -> ! {
+    let style = choir_cli::style::Style::for_stdout();
+    let command = "choir repo follower";
+    let mut state: Option<String> = None;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--state" => {
+                let Some(value) = rest.get(i + 1) else {
+                    eprintln!("{command}: --state needs a value");
+                    std::process::exit(2);
+                };
+                state = Some((*value).to_string());
+                i += 2;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("{command}: unknown option {other:?}");
+                std::process::exit(2);
+            }
+            arg => {
+                positional.push(arg);
+                i += 1;
+            }
+        }
+    }
+    let state = state
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(state_dir);
+    let layout = choir_cli::serve::Layout::new(&state, 0);
+    match positional.as_slice() {
+        ["add", repo, name, url] => match choir_cli::follower::add(&layout, repo, name, url) {
+            Ok(first) => {
+                note(
+                    "follower added",
+                    &[
+                        ("repository", choir_cli::follower::repository_name(repo)),
+                        ("remote", format!("{name} -> {url}")),
+                    ],
+                );
+                if first {
+                    eprintln!(
+                        "  {} the node pushes after every landing once restarted:
+                                 choir node restart
+",
+                        style.cyan("next:")
+                    );
+                }
+                eprintln!(
+                    "  {} choir repo follower push {}
+",
+                    style.dim("push now:"),
+                    choir_cli::follower::repository_name(repo)
+                );
+                std::process::exit(0)
+            }
+            Err(error) => {
+                eprintln!("{} {error}", style.red(&format!("{command} add:")));
+                std::process::exit(1);
+            }
+        },
+        ["list"] => {
+            let listed = choir_cli::follower::list(&layout);
+            if listed.is_empty() {
+                eprintln!(
+                    "no repositories listed in {}",
+                    layout.state.join("repos.list").display()
+                );
+                std::process::exit(1);
+            }
+            for (repo, remotes) in &listed {
+                if remotes.is_empty() {
+                    println!("{repo}  {}", style.cyan("no remote: no second copy yet"));
+                }
+                for (name, url) in remotes {
+                    println!("{repo}  {name} -> {url}");
+                }
+            }
+            eprintln!(
+                "
+  {} {}
+",
+                style.dim("after each landing:"),
+                if choir_cli::follower::following(&layout) {
+                    "pushed (--followers)"
+                } else {
+                    "not pushed; `choir repo follower add` turns it on"
+                }
+            );
+            std::process::exit(0)
+        }
+        ["push"] | ["push", _] => {
+            let only = positional.get(1).copied();
+            let outcomes = choir_cli::follower::push(&layout, only);
+            if outcomes.is_empty() {
+                eprintln!("nothing to push: no repository listed");
+                std::process::exit(1);
+            }
+            let mut failed = false;
+            for outcome in &outcomes {
+                let line = match outcome.event {
+                    "pushed" => format!(
+                        "{} {} -> {}",
+                        style.green("pushed"),
+                        outcome.repo,
+                        outcome.remote
+                    ),
+                    "no_remote" => format!(
+                        "{} {}: {}",
+                        style.cyan("skipped"),
+                        outcome.repo,
+                        outcome.detail
+                    ),
+                    _ => {
+                        failed = true;
+                        format!(
+                            "{} {} -> {}: {}",
+                            style.red("FAILED"),
+                            outcome.repo,
+                            outcome.remote,
+                            outcome.detail
+                        )
+                    }
+                };
+                println!("{line}");
+            }
+            std::process::exit(i32::from(failed))
+        }
+        _ => {
+            eprintln!(
+                "{command}: add <owner/repo.git> <name> <url> | list | push [<owner/repo.git>]"
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `<backup-dir> [--state <dir>]`, shared by `backup take` and `backup schedule`.
+fn backup_options(command: &str, rest: &[&str]) -> (std::path::PathBuf, std::path::PathBuf, u64) {
+    let mut dest: Option<String> = None;
+    let mut state: Option<String> = None;
+    let mut every: u64 = 3600;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--state" | "--every" => {
+                let Some(value) = rest.get(i + 1) else {
+                    eprintln!("{command}: {} needs a value", rest[i]);
+                    std::process::exit(2);
+                };
+                if rest[i] == "--state" {
+                    state = Some((*value).to_string());
+                } else {
+                    every = match value.parse::<u64>() {
+                        Ok(n) if n >= 60 => n,
+                        _ => {
+                            eprintln!("{command}: --every is a number of seconds, at least 60, not {value:?}");
+                            std::process::exit(2);
+                        }
+                    };
+                }
+                i += 2;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("{command}: unknown option {other:?}");
+                std::process::exit(2);
+            }
+            positional => {
+                if dest.is_some() {
+                    eprintln!("{command}: one backup directory, not two");
+                    std::process::exit(2);
+                }
+                dest = Some(positional.to_string());
+                i += 1;
+            }
+        }
+    }
+    let Some(dest) = dest else {
+        eprintln!(
+            "{command}: where should the backup go?
+
+    {command} <backup-dir>"
+        );
+        std::process::exit(2);
+    };
+    let dest = std::path::PathBuf::from(dest);
+    let dest = std::path::absolute(&dest).unwrap_or(dest);
+    let state = state
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(state_dir);
+    let state = std::path::absolute(&state).unwrap_or(state);
+    (dest, state, every)
+}
+
+/// `choir backup take` — a backup of this machine's node, verified.
+fn backup_take(rest: &[&str]) -> ! {
+    let style = choir_cli::style::Style::for_stdout();
+    let command = "choir backup take";
+    let (dest, state, _) = backup_options(command, rest);
+    // The backup must not sit on the disk it is meant to survive. Refused
+    // only for the one case that is certainly wrong; a separate mount on
+    // the same machine is the operator's call.
+    if dest.starts_with(&state) {
+        eprintln!(
+            "{} {} is inside the state directory it would back up
+
+               a backup on the disk it is meant to survive is not one; give another path",
+            style.red(&format!("{command}:")),
+            dest.display()
+        );
+        std::process::exit(2);
+    }
+    let layout = choir_cli::serve::Layout::new(&state, 0);
+    let daemon = choir_cli::serve::find_daemon().ok();
+    let taken = match choir_cli::backup::take(&layout, &dest, daemon.as_deref()) {
+        Ok(taken) => taken,
+        Err(error) => {
+            eprintln!("{} {error}", style.red(&format!("{command}:")));
+            std::process::exit(1);
+        }
+    };
+    let mut rows: Vec<(&str, String)> = vec![
+        ("into", taken.dest.display().to_string()),
+        (
+            "log",
+            format!("{} ops, next seq {}", taken.ops, taken.next_seq),
+        ),
+    ];
+    if let Some((was, now)) = taken.grew {
+        rows.push(("grew", format!("{was} -> {now} bytes")));
+    }
+    for line in &taken.bundles {
+        rows.push(("bundle", line.clone()));
+    }
+    note("taken", &rows);
+    for warning in &taken.warnings {
+        eprintln!("  {} {warning}", style.cyan("!!"));
+    }
+    if !taken.warnings.is_empty() {
+        eprintln!();
+    }
+    let checks = choir_cli::backup::verify(&dest, daemon.as_deref());
+    print!("{}", choir_cli::doctor::report(&checks, style));
+    std::process::exit(i32::from(!choir_cli::backup::restorable(&checks)))
+}
+
+/// `choir backup schedule` — `backup take` on a timer.
+fn backup_schedule(rest: &[&str]) -> ! {
+    let style = choir_cli::style::Style::for_stdout();
+    let command = "choir backup schedule";
+    let (dest, state, every) = backup_options(command, rest);
+    let supervisor = supervisor(command);
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(_) => {
+            eprintln!(
+                "{} cannot find my own path",
+                style.red(&format!("{command}:"))
+            );
+            std::process::exit(1);
+        }
+    };
+    if choir_cli::supervise::in_build_directory(&exe) {
+        eprintln!(
+            "{} this `choir` lives in a build directory:
+    {}
+
+               a timer pointing there stops working at the next `cargo clean`. install it first.",
+            style.red(&format!("{command}:")),
+            exe.display()
+        );
+        std::process::exit(1);
+    }
+    let home = home_dir();
+    let units = supervisor.backup_units(&home);
+    let bodies = supervisor.render_backup(&exe, &state, &dest, every);
+    for (unit, body) in units.iter().zip(bodies) {
+        if let Some(parent) = unit.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "{} create {}: {error}",
+                    style.red(&format!("{command}:")),
+                    parent.display()
+                );
+                std::process::exit(1);
+            }
+        }
+        if let Err(error) = choir_fs::write_atomic(unit, body) {
+            eprintln!(
+                "{} write {}: {error}",
+                style.red(&format!("{command}:")),
+                unit.display()
+            );
+            std::process::exit(1);
+        }
+    }
+    let steps = supervisor.backup_commands(choir_cli::supervise::Action::Install, &home);
+    let last = steps.len().saturating_sub(1);
+    for (at, step) in steps.iter().enumerate() {
+        if !run_step(step, at != last) {
+            eprintln!(
+                "{} the service manager refused",
+                style.red(&format!("{command}:"))
+            );
+            std::process::exit(1);
+        }
+    }
+    let rows: Vec<(&str, String)> = vec![
+        ("every", format!("{every}s")),
+        ("into", dest.display().to_string()),
+        (
+            "unit",
+            units
+                .iter()
+                .map(|u| u.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        ("log", state.join("backup.log").display().to_string()),
+    ];
+    note("scheduled", &rows);
+    eprintln!(
+        "  {} choir backup verify {}
+",
+        style.dim("check one"),
+        dest.display()
+    );
+    std::process::exit(0)
+}
+
 /// The `sudo` line `choir host` asks for, spelled out.
 fn tls_line(domain: &str, user: &str, port: u16, dry_run: bool) -> String {
     let mut line = format!("sudo choir node tls {domain} --user {user} --port {port}");
@@ -3902,10 +4694,12 @@ fn main() {
         // reason: `choir node …` is the family for a node that exists,
         // and this is the command you run when there is not one yet.
         ["host", rest @ ..] if auth.is_empty() => host(rest),
+        ["seed", rest @ ..] if auth.is_empty() => seed(rest),
         // The privileged step, with a name, so that it appears in
         // `--help`, in the shell history and in sudo's log as itself
         // rather than as an argument to something friendlier.
         ["node", "tls", rest @ ..] => node_tls(rest),
+        ["node", "upgrade", rest @ ..] => node_upgrade(rest),
         // The one command whose whole point is that the node is
         // already running: everything else about a repository assumes
         // it exists, and until this there was no way to make one
@@ -4379,6 +5173,37 @@ fn main() {
         }
         // A backup you can only verify by asking the thing it is a
         // backup of is not a backup, so nothing here opens a connection.
+        ["repo", "follower", rest @ ..] => repo_follower(rest),
+        ["backup", "take", rest @ ..] => backup_take(rest),
+        ["backup", "schedule", rest @ ..] => backup_schedule(rest),
+        ["backup", "unschedule"] => {
+            let style = choir_cli::style::Style::for_stdout();
+            let supervisor = supervisor("choir backup unschedule");
+            let home = home_dir();
+            for step in supervisor.backup_commands(choir_cli::supervise::Action::Uninstall, &home) {
+                run_step(&step, true);
+            }
+            let mut removed = 0;
+            for unit in supervisor.backup_units(&home) {
+                match std::fs::remove_file(&unit) {
+                    Ok(()) => removed += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        eprintln!(
+                            "{} remove {}: {error}",
+                            style.red("choir backup unschedule:"),
+                            unit.display()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if removed == 0 {
+                eprintln!("no backup timer was scheduled");
+            } else {
+                eprintln!("unscheduled; the backups already taken are kept");
+            }
+        }
         ["backup", "verify", dir] => {
             let style = choir_cli::style::Style::for_stdout();
             let dir = std::path::Path::new(dir);

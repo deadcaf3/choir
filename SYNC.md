@@ -198,7 +198,11 @@ home's operator:
 
 The seed runs `choir-node <root> [port] --seed <home-url>
 --seed-credential <file>`, where the file holds the one `user:token`
-line the home issued. With no port it binds nothing.
+line the home issued. With no port it binds nothing. `choir seed
+<home-url>` composes all of that: it mints the key, prints the three
+lines above for the home's operator, and, run again with the credential,
+starts and supervises the seed; `docs/operating/running-a-node.md` has
+the walk-through.
 
 ### `GET /api/signers`
 

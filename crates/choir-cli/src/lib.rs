@@ -43,6 +43,7 @@ pub mod docs;
 // Same reason as `docs` above: this module's own header carries an
 // intra-doc link, and a `///` here would resolve it in the wrong scope.
 pub mod doctor;
+pub mod follower;
 // Same reason as `docs`: intra-doc links in the module's own header.
 pub mod init;
 // Same reason as `docs`: the module's own header carries intra-doc links.
@@ -65,6 +66,7 @@ pub mod runner;
 pub mod restore;
 
 // Same reason as `docs`: the module's own header carries intra-doc links.
+pub mod seed;
 pub mod serve;
 
 // Same reason as `docs`: the module's own header carries intra-doc links.
@@ -76,3 +78,4 @@ pub mod surface;
 // Same reason as `docs`: the module's own header carries intra-doc links.
 pub mod tls;
 pub mod triage;
+pub mod upgrade;

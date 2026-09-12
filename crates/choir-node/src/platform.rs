@@ -2047,6 +2047,9 @@ struct ChoirPolicy {
     /// is already running. Offering an event to it never blocks: see
     /// [`crate::hooks`] for why invariant 5 forbids anything else here.
     hooks: Arc<Mutex<Option<crate::hooks::Hooks>>>,
+    /// Follower pushes (D21), shared the same way; `None` without
+    /// `--followers`.
+    followers: Arc<Mutex<Option<crate::followers::Followers>>>,
     /// Which channel holds which workspace (D37). Folded here for the
     /// reason `concentration` is: it needs the entry's channel as well as
     /// the typed payload, and it must advance in the same single-writer
@@ -3387,16 +3390,20 @@ impl ChoirPolicy {
     /// to somebody else, so a receiver that stops answering would
     /// otherwise stall op admission for everyone.
     fn offer_hook(&self, entry: &OpEntry, hash: &ContentHash, op: &ViewOp) {
-        let guard = self.hooks.lock().expect("hooks lock");
-        let Some(hooks) = guard.as_ref() else {
-            return;
-        };
         let (name, old, new) = match &op.kind {
             OpKind::SetRef { name, commit, prev } => {
                 (name, prev.as_ref().map(oid_text), Some(oid_text(commit)))
             }
             OpKind::DeleteRef { name, prev } => (name, prev.as_ref().map(oid_text), None),
             _ => return,
+        };
+        // Same discipline, same reason: a `try_send`, never a wait.
+        if let Some(followers) = self.followers.lock().expect("followers lock").as_ref() {
+            followers.offer(name);
+        }
+        let guard = self.hooks.lock().expect("hooks lock");
+        let Some(hooks) = guard.as_ref() else {
+            return;
         };
         hooks.offer(crate::hooks::RefEvent {
             key: name.clone(),
@@ -3483,6 +3490,9 @@ pub struct Platform {
     /// Shared with the policy: the webhook delivery handle (D32), or
     /// `None` when the operator passed no `--hooks-file`.
     hooks: Arc<Mutex<Option<crate::hooks::Hooks>>>,
+    /// Follower pushes (D21), shared the same way; `None` without
+    /// `--followers`.
+    followers: Arc<Mutex<Option<crate::followers::Followers>>>,
     /// The writer's own latency record for the traffic this node is
     /// serving, so the Phase-0 decision-latency gate is checked in
     /// production and not only by the test suite.
@@ -3676,6 +3686,7 @@ impl Platform {
         let require_review = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let require_scope = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hooks = Arc::new(Mutex::new(None));
+        let followers = Arc::new(Mutex::new(None));
         let passkeys = Arc::new(Mutex::new(None));
         let shared_journal = SharedJournal::default();
         let home = Arc::new(std::sync::OnceLock::new());
@@ -3701,6 +3712,7 @@ impl Platform {
                 concentration: concentration.clone(),
                 review_retention: review_retention.clone(),
                 hooks: hooks.clone(),
+                followers: followers.clone(),
                 workspace_tally: workspace_tally.clone(),
                 passkeys: passkeys.clone(),
             }),
@@ -3734,6 +3746,7 @@ impl Platform {
             review_adjudications: None,
             review_prune_lock: Mutex::new(()),
             hooks,
+            followers,
             home,
             replica: std::sync::OnceLock::new(),
             _sequencer: sequencer,
@@ -5509,6 +5522,36 @@ impl Platform {
         let hooks = crate::hooks::Hooks::start(config, log)?;
         *self.hooks.lock().expect("hooks lock") = Some(hooks);
         Ok(self)
+    }
+
+    /// Pushes every landing to the remotes of its repository (D21).
+    ///
+    /// Attached the way `with_hooks` is, and for the same reason: the
+    /// push thread runs `git` against a host somebody else operates, so
+    /// the writer only ever offers to it. See [`crate::followers`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the push thread cannot be started.
+    pub fn with_followers(
+        self,
+        root: std::path::PathBuf,
+        log: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        let followers = crate::followers::Followers::start(root, log)?;
+        *self.followers.lock().expect("followers lock") = Some(followers);
+        Ok(self)
+    }
+
+    /// Follower offers dropped because the queue was full. Zero without
+    /// `--followers`.
+    #[must_use]
+    pub fn follower_drops(&self) -> u64 {
+        self.followers
+            .lock()
+            .expect("followers lock")
+            .as_ref()
+            .map_or(0, crate::followers::Followers::dropped)
     }
 
     /// Events the webhook queue dropped because it was full. Zero when
