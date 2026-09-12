@@ -265,26 +265,26 @@ pub fn verify(dir: &Path) -> Result<Report, String> {
                 "{repo}: the manifest names a bundle that is not here"
             ));
         }
-        let held = bundle_heads(&path)?;
-        for (name, oid) in wanted {
-            match held.get(name) {
-                Some(found) if found == oid => matched += 1,
-                Some(found) => {
-                    return Err(format!(
-                        "{repo}: the log has {name} at {oid}, the bundle has it at {found}"
-                    ))
-                }
-                None => {
-                    return Err(format!(
-                        "{repo}: the log names {name} at {oid}, the bundle does not carry it"
-                    ))
-                }
+        let check = check_refs(wanted, &bundle_heads(&path)?);
+        match check.disagreements.first() {
+            Some(RefDisagreement::Moved {
+                name,
+                wanted,
+                found,
+            }) => {
+                return Err(format!(
+                    "{repo}: the log has {name} at {wanted}, the bundle has it at {found}"
+                ))
             }
+            Some(RefDisagreement::Missing { name, wanted }) => {
+                return Err(format!(
+                    "{repo}: the log names {name} at {wanted}, the bundle does not carry it"
+                ))
+            }
+            None => {}
         }
-        ahead += held
-            .keys()
-            .filter(|name| !wanted.contains_key(*name))
-            .count();
+        matched += check.matched;
+        ahead += check.ahead;
     }
 
     for found in walk(dir)? {
@@ -443,19 +443,117 @@ fn chain_report(log: &Path) -> Result<(u64, Option<String>), String> {
 fn log_refs(log: &Path) -> Result<BTreeMap<String, BTreeMap<String, String>>, String> {
     let backend = choir_oplog::FileLog::open(log).map_err(|e| format!("open log: {e:?}"))?;
     let view = choir_view::View::materialize(&backend).map_err(|e| format!("fold log: {e:?}"))?;
-    let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let refs = view_refs(&view);
+    match refs.unbacked.into_iter().next() {
+        Some(first) => Err(first),
+        None => Ok(refs.by_repo),
+    }
+}
+
+/// A view's refs, grouped by repository as git oids, and the ones no
+/// repository could hold.
+#[derive(Debug, Default)]
+pub struct ViewRefs {
+    /// `repo -> refname -> oid`, for every ref named `<repo>:<refname>`
+    /// whose value is a git oid.
+    pub by_repo: BTreeMap<String, BTreeMap<String, String>>,
+    /// One sentence per ref that names no repository or whose value is
+    /// not a git oid. The API can write either, and no bundle or bare
+    /// repository can back one, so a check that wants every ref backed
+    /// has to be told about them rather than find them absent.
+    pub unbacked: Vec<String>,
+}
+
+/// Groups `view`'s refs by the repository each names.
+///
+/// Shared by [`verify`], which checks them against an export's bundles,
+/// and by a seed, which checks them against the bare repositories it
+/// fetched. One function, so "the refs the view names" means one thing
+/// whichever copy is being checked.
+#[must_use]
+pub fn view_refs(view: &choir_view::View) -> ViewRefs {
+    let mut out = ViewRefs::default();
     for (key, hash) in &view.refs {
-        let (repo, name) = key
-            .split_once(':')
-            .ok_or_else(|| format!("view ref key `{key}` names no repository"))?;
-        let oid = hash
-            .git_oid()
-            .ok_or_else(|| format!("view ref `{key}` does not hold a git oid"))?;
-        out.entry(repo.to_string())
+        let Some((repo, name)) = key.split_once(':') else {
+            out.unbacked
+                .push(format!("view ref key `{key}` names no repository"));
+            continue;
+        };
+        let Some(oid) = hash.git_oid() else {
+            out.unbacked
+                .push(format!("view ref `{key}` does not hold a git oid"));
+            continue;
+        };
+        out.by_repo
+            .entry(repo.to_string())
             .or_default()
             .insert(name.to_string(), oid);
     }
-    Ok(out)
+    out
+}
+
+/// One ref the view names that a copy does not hold where the view says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefDisagreement {
+    /// The copy holds the ref, at another oid.
+    Moved {
+        /// The full refname.
+        name: String,
+        /// The oid the view names.
+        wanted: String,
+        /// The oid the copy holds.
+        found: String,
+    },
+    /// The copy does not hold the ref at all.
+    Missing {
+        /// The full refname.
+        name: String,
+        /// The oid the view names.
+        wanted: String,
+    },
+}
+
+/// How one repository's refs compare with the refs a view names for it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RefCheck {
+    /// Refs the view names that the copy holds at the same oid.
+    pub matched: usize,
+    /// Refs the copy holds that the view does not name. Benign by itself;
+    /// see the module docs on why the check runs in one direction.
+    pub ahead: usize,
+    /// Refs the view names that the copy does not hold at that oid, in
+    /// refname order.
+    pub disagreements: Vec<RefDisagreement>,
+}
+
+/// Compares the refs a view names for one repository (`wanted`) with the
+/// refs a copy of it holds (`held`), both `refname -> oid`.
+///
+/// One direction, on purpose: every wanted ref must be held at its oid,
+/// and a held ref nobody wanted is counted in [`RefCheck::ahead`] rather
+/// than refused.
+#[must_use]
+pub fn check_refs(wanted: &BTreeMap<String, String>, held: &BTreeMap<String, String>) -> RefCheck {
+    let mut check = RefCheck::default();
+    for (name, oid) in wanted {
+        match held.get(name) {
+            Some(found) if found == oid => check.matched += 1,
+            Some(found) => check.disagreements.push(RefDisagreement::Moved {
+                name: name.clone(),
+                wanted: oid.clone(),
+                found: found.clone(),
+            }),
+            None => check.disagreements.push(RefDisagreement::Missing {
+                name: name.clone(),
+                wanted: oid.clone(),
+            }),
+        }
+    }
+    check.ahead = held
+        .keys()
+        .filter(|name| !wanted.contains_key(*name))
+        .count();
+    check
 }
 
 /// Bare repositories under `root`, as `owner/name.git` paths.

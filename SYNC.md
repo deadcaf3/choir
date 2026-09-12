@@ -174,3 +174,136 @@ one must re-read and re-sign. The node cannot cosign its own attestation,
 but nothing here proves two operator names are two people. Until you have
 independent witnesses, treat a single node's ordering as
 trusted-by-configuration.
+
+## Seeds (D80)
+
+A **seed** is a node that holds a copy of another node's log: its
+**home**. It replicates the home's log one way with the cursor above,
+checks every page with the three checks above before it keeps any of
+it, appends what passed through its own single writer, fetches the git
+objects the log names, and serves what it verified. It writes nothing
+of its own. There is one writer per log, and a seed is not a second
+one: it is a reader that keeps what it read and says so.
+
+### Setting one up
+
+A seed is a named reader of its home, never an anonymous one. The
+home's operator:
+
+1. registers the seed's node public key in the home's keys file;
+2. binds that key to an operator name, `<seed-name>`;
+3. grants `<seed-name> @node auditor` (the node-wide read `/api/log`
+   needs) and `<seed-name> * read` (or `read` on the repositories it
+   should hold, since the log grant does not cover git).
+
+The seed runs `choir-node <root> [port] --seed <home-url>
+--seed-credential <file>`, where the file holds the one `user:token`
+line the home issued. With no port it binds nothing.
+
+### `GET /api/signers`
+
+The log records an author's key id, a hash of the key, and never the
+key, so the third check needs key material from elsewhere. Every node
+serves it, behind the same node-wide read grant as `/api/log`:
+
+```json
+{
+  "format_version": 1,
+  "node": { "actor_id": "1e-...", "public_key_hex": "..." },
+  "signers": [ { "actor_id": "1e-...", "public_key_hex": "...", "name": "alice" } ]
+}
+```
+
+Check that each `actor_id` is `"1e-" + hex(blake3(public key))` before
+using it. A seed pins the home's `node.actor_id` beside its own log on
+first contact and refuses a home that later signs with another key.
+
+An entry whose author key is not in this table is **unverified**: its
+continuity and hash still checked, and the home admitted it, but nobody
+here can say who signed it. A seed keeps it and counts it in
+`replica.unverified_entries`. An entry that fails a check, or that the
+seed's build cannot fold, **halts** replication at that seq: the prefix
+before it is kept and served, and nothing after it is skipped past.
+
+### `not_home`
+
+A seed answers every write, API or git, with `421 Misdirected Request`:
+
+```json
+{"code":"not_home","error":"this node is a seed of <home> and writes nothing of its own","home":"<home>","next":"send the same request to <home>"}
+```
+
+On a push, git prints the refusal to the pusher as `remote:` lines
+naming the home. Nothing needs re-signing to follow it: a seed's
+`log.node` names its home and its `log.head` is a head of the home's
+log, so an op signed against a seed's view is one the home admits, and
+a compare-and-swap read from a seed that fell behind fails at the home
+with the ordinary `stale_head`.
+
+### `replica` in `/api/view`
+
+`null` on a home. On a seed:
+
+| Field | Meaning |
+|---|---|
+| `home`, `home_node_id` | Whose copy this is, and the key it pinned |
+| `head_seq` | The last seq this seed holds |
+| `home_head_seq` | The highest seq the home has served it; a fact about the last contact, not about now |
+| `refs_verified`, `refs_pending` | Refs the view names that the bare repositories here hold at that oid, and that they do not yet |
+| `unverified_entries` | Entries kept with no key to check their author |
+| `gap` | The home evicted what this seed needed; the copy cannot continue the chain and signs no more statements |
+| `halted` | `{seq, reason}` once replication has stopped |
+
+### The witness statement
+
+After any page that contained an attestation it folded, a seed signs a
+statement over the latest attestation it holds and serves it at
+`GET /api/witness`, with the last 64:
+
+```json
+{"statement":{"format_version":1,"witness":"1e-<seed key id>","home_node_id":"1e-...","snapshot":"1e-<attestation id>","at_seq":41,"seen_at_seq":57},
+ "public_key_hex":"...","signature_hex":"..."}
+```
+
+The signed bytes are the statement exactly as shown, compact, fields in
+that order, signed the way an op's author signs: over the signing hash
+of `["seed/witness", <statement bytes>]`. `witness` must equal
+`"1e-" + hex(blake3(public key))`, which is what lets the key travel
+with the statement. It is the same key the home bound as the seed's
+operator, so `bindings` on the home names who said it.
+
+A seed never submits `CountersignSnapshot` to its home. Only the latest
+attestation can be cosigned there, so a seed would have to win a race
+against every push; the rule below makes the race irrelevant.
+
+### The fork rule
+
+A statement over attestation `S` endorses `S` and every attestation
+reachable from `S` by `prev_snapshot`. Two attestations, whether two
+statements or a statement and the home's current `snapshot.id`:
+
+- **agree** when they are equal, or one is an ancestor of the other;
+- are a **fork** when neither is an ancestor of the other.
+
+Ancestry is walked over the `RecordRefSnapshot` payloads in the home's
+own log, which a reader holds: fetch `/api/log` from the lower of the
+two `at_seq` positions to the head, map each attestation's id to its
+`prev_snapshot`, and follow the links. Read the seed's statement
+**before** the home's view: then an honest home's current attestation
+is never older than the one the seed folded, and a statement the walk
+cannot reach from it is two histories, one shown to the seed and one
+shown to you.
+
+The body around the statement carries `gap` and `halted` from `replica`,
+so a reader of `/api/witness` alone sees why a statement stopped moving.
+
+`choir doctor` runs this for every seed named by `seeds =` in
+`.choir/config`: a fork is an error, a seed with `gap` or `halted` is a
+warning naming the seq and reason, and a statement far behind the home's
+current attestation is a warning that says how far.
+
+### What this still does not catch
+
+A home that shows the same lie to every seed and every reader. The rule
+detects two histories; it cannot tell you which one is true, and one
+consistent history is consistent however it was made.

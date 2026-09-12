@@ -762,6 +762,30 @@ pub fn git_requirement(method: &str, url: &str) -> Option<(String, Level)> {
     Some((normalize_repo(&repo), level))
 }
 
+/// Whether a request is a write, in the sense a seed refuses (D80).
+///
+/// Two halves, one rule each. **git**: whatever [`git_requirement`] grades
+/// at [`Level::Propose`] or above, which is every step of a push and no
+/// step of a clone, and is decided before `git http-backend` is spawned.
+/// **The API**: every `POST` under `/api/`. That one is by method rather
+/// than by grant level on purpose, because level grades *authority* and
+/// not *mutation*: a verdict or a comment needs only `read` over the
+/// repository (see [`op_level`]) and still appends to the log. Every
+/// `/api/` read is a `GET`, and every `/api/` `POST` changes something,
+/// the log or a store beside it, so the method is the classification that
+/// cannot let a write through as a read.
+///
+/// The pre-authentication routes (signing in, asking for access) are not
+/// asked, because they never reach the point where this is.
+#[must_use]
+pub fn is_write(method: &str, url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    if path.starts_with("/api/") {
+        return method == "POST";
+    }
+    git_requirement(method, url).is_some_and(|(_, level)| level >= Level::Propose)
+}
+
 /// Repository a workspace name or provenance subject belongs to: its
 /// first two `/`-separated segments.
 ///
@@ -1024,7 +1048,18 @@ pub fn api_denial(
         // is a hash chain and the attestation covers the complete ref
         // state. Narrowing either would destroy what it is for.
         ("GET", p) if p.starts_with("/api/log") => vec![(Scope::Node, Level::Read)],
+        // The keys that verify the log's signatures, behind the log's own
+        // grant: the reader who needs them is the one replaying the log,
+        // and a second grant for the half of the same check would be a
+        // second answer to one question. Public keys are public; the gate
+        // is about not publishing a node's roster to strangers.
+        ("GET", "/api/signers") => vec![(Scope::Node, Level::Read)],
         ("GET", "/api/ref-agreement") => vec![(Scope::Node, Level::Read)],
+        // A seed's signed statements (D80). No grant beyond being
+        // authenticated, the same as `/api/view`, whose `snapshot` already
+        // tells every authenticated reader an attestation's id and
+        // position; a statement says only that the seed folded one.
+        ("GET", "/api/witness") => Vec::new(),
         // Phase A leaves the aggregate view readable by any authenticated
         // actor: filtering it, and the page rendered from it, is phase B.
         // Until then a credential can enumerate ref names and oids of
@@ -1133,9 +1168,14 @@ pub enum Disclosure {
 /// `every_section_the_view_serves_is_classified` in `tests/it/acl.rs`
 /// makes it loud, comparing this table against a view a real node
 /// served rather than against a sample written from memory.
-pub const SECTIONS: [(&str, Disclosure); 29] = [
+pub const SECTIONS: [(&str, Disclosure); 30] = [
     ("log", Disclosure::Public),
     ("build", Disclosure::Public),
+    // Where a seed stands against its home (D80): the home's address and
+    // key, positions and counts. Public for the reason `log` is: it names
+    // no repository, and a reader granted one needs to know whether the
+    // copy they are reading is current.
+    ("replica", Disclosure::Public),
     // [`crate::bound`]'s marks. Public because of *when* they are
     // computed, not because a row count is harmless: bounding runs after
     // this filter, so each count describes the reader's own narrowed
@@ -2003,5 +2043,33 @@ mod tests {
         );
         let other = r#"{"refs":{"owner/theirs.git:refs/heads/main":"git-2222"}}"#;
         assert_eq!(filter_response(&acl, "alice", "/api/submit", other), other);
+    }
+
+    /// The seed's write rule (D80): a push is a write from its first
+    /// request, a clone never is, and every API `POST` is one, including
+    /// the ones a reader holds only `read` for.
+    #[test]
+    fn a_write_is_a_push_step_or_an_api_post() {
+        for (method, url, write) in [
+            ("GET", "/o/r.git/info/refs?service=git-receive-pack", true),
+            ("POST", "/o/r.git/git-receive-pack", true),
+            ("GET", "/o/r.git/info/refs?service=git-upload-pack", false),
+            ("POST", "/o/r.git/git-upload-pack", false),
+            ("GET", "/o/r.git/HEAD", false),
+            ("POST", "/api/submit", true),
+            ("POST", "/api/submit-batch", true),
+            ("POST", "/api/git-update", true),
+            ("POST", "/api/repo", true),
+            ("POST", "/api/workspace", true),
+            ("POST", "/api/accounts/invite", true),
+            ("POST", "/api/appeal", true),
+            ("GET", "/api/view", false),
+            ("GET", "/api/log?from=0", false),
+            ("GET", "/api/signers", false),
+            ("GET", "/api/witness", false),
+            ("GET", "/", false),
+        ] {
+            assert_eq!(super::is_write(method, url), write, "{method} {url}");
+        }
     }
 }

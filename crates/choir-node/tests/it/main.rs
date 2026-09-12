@@ -73,6 +73,7 @@ mod reviewer_conflict_config;
 mod routes;
 mod schema;
 mod search_api;
+mod seed;
 mod signers_reload;
 mod smart_http;
 mod smoke_script;

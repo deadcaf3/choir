@@ -1976,6 +1976,10 @@ impl journal::Journal for SharedJournal {
 }
 
 struct ChoirPolicy {
+    /// Set when this node is a seed (D80). Every submission is then
+    /// refused before anything else is asked: a seed's log is written by
+    /// its replicator alone, through [`SubmitPolicy::replicable`].
+    home: Arc<std::sync::OnceLock<crate::replica::Home>>,
     /// Where this policy reports CAS failures. The sequencer cannot:
     /// a refusal reaches it as an opaque string, so contention and
     /// nonsense look identical from there.
@@ -2785,6 +2789,10 @@ impl ChoirPolicy {
 
 impl SubmitPolicy for ChoirPolicy {
     fn check(&mut self, sub: &Submission) -> Result<(), String> {
+        if let Some(home) = self.home.get() {
+            self.subject = (None, None);
+            return Err(crate::reject::not_home(&home.url).to_string());
+        }
         let sig = sub.author_sig.as_ref().ok_or("unsigned submission")?;
         // Refresh before verification so removing a trusted key takes
         // effect on that key's very next request. A failed verification
@@ -3316,6 +3324,21 @@ impl SubmitPolicy for ChoirPolicy {
         self.subject.clone()
     }
 
+    /// A replicated entry is folded, never admitted: no signature, grant,
+    /// scope or quota is asked about, because the home already decided.
+    /// What is asked is whether this build's view can take it at all,
+    /// which is exactly the question `accepted` would otherwise answer
+    /// with a panic.
+    fn replicable(&mut self, entry: &OpEntry) -> Result<(), String> {
+        let op = ViewOp::from_payload(&entry.payload)
+            .map_err(|e| format!("payload does not decode as an op this build knows: {e:?}"))?;
+        self.view
+            .lock()
+            .expect("view lock")
+            .validate(&op)
+            .map_err(|e| format!("the view cannot fold it: {e:?}"))
+    }
+
     fn accepted(&mut self, entry: &OpEntry, hash: &ContentHash) {
         let op = ViewOp::from_payload(&entry.payload).expect("checked in check()");
         {
@@ -3433,6 +3456,11 @@ pub struct Platform {
     require_scope: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the policy: actor id → bound channel name.
     key_names: Arc<Mutex<KeyBindings>>,
+    /// The trusted-keys table as last read, refreshed in the same step as
+    /// [`Platform::key_names`], for `GET /api/signers`. The log records a
+    /// key's actor id and never the key, so a reader verifying signatures
+    /// has nowhere else to learn one from.
+    signers: Mutex<Vec<crate::TrustedKey>>,
     /// D24 T3 runtime projection, replayed from the signed log at startup.
     concentration: Arc<Mutex<ConcentrationState>>,
     /// D37 per-user workspace tally, replayed from the same log in the
@@ -3469,6 +3497,17 @@ pub struct Platform {
     /// a check that cannot fail. The count does not reset on a later
     /// success, so a transient failure is still visible afterwards.
     lag_log_error: Mutex<(Option<String>, u64)>,
+    /// The home this platform's log is a copy of, when it runs as a seed
+    /// (D80). Set once, before the platform serves anything, and never
+    /// cleared: a node does not stop being a copy of somebody's log.
+    ///
+    /// Shared with the policy, which refuses every submission on a seed,
+    /// so a write that reached the writer by any path, HTTP or the node's
+    /// own, is answered the same way.
+    home: Arc<std::sync::OnceLock<crate::replica::Home>>,
+    /// Where replication stands, once a [`crate::replica::Replica`] is
+    /// writing into this platform.
+    replica: std::sync::OnceLock<Arc<crate::replica::Shared>>,
     // Kept alive for the daemon's lifetime; the writer thread exits with
     // the process.
     _sequencer: Sequencer,
@@ -3622,13 +3661,15 @@ impl Platform {
         // Name bindings are read from the same file at startup; a
         // malformed file here is not fatal because `start_reloading`
         // already accepted the caller's registry.
-        let key_names = Arc::new(Mutex::new(match keys_file.as_ref() {
-            Some(path) => crate::parse_keys_file(path).map_or_else(
-                |_| KeyBindings::unavailable(true),
-                |signers| KeyBindings::from_signers(&signers),
-            ),
+        let parsed = keys_file
+            .as_ref()
+            .map(|path| crate::parse_keys_file(path).ok());
+        let key_names = Arc::new(Mutex::new(match &parsed {
+            Some(Some(signers)) => KeyBindings::from_signers(signers),
+            Some(None) => KeyBindings::unavailable(true),
             None => KeyBindings::unavailable(false),
         }));
+        let signers = Mutex::new(parsed.flatten().unwrap_or_default());
         let require_assignment = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let protected_refs = Arc::new(Mutex::new(None));
         let acl_file = Arc::new(Mutex::new(None));
@@ -3637,9 +3678,11 @@ impl Platform {
         let hooks = Arc::new(Mutex::new(None));
         let passkeys = Arc::new(Mutex::new(None));
         let shared_journal = SharedJournal::default();
+        let home = Arc::new(std::sync::OnceLock::new());
         let sequencer = Sequencer::spawn_with_journal(
             log,
             Box::new(ChoirPolicy {
+                home: home.clone(),
                 journal: shared_journal.clone(),
                 subject: (None, None),
                 require_assignment: require_assignment.clone(),
@@ -3683,6 +3726,7 @@ impl Platform {
             require_scope,
             passkeys,
             key_names,
+            signers,
             concentration,
             workspace_tally,
             review_retention,
@@ -3690,6 +3734,8 @@ impl Platform {
             review_adjudications: None,
             review_prune_lock: Mutex::new(()),
             hooks,
+            home,
+            replica: std::sync::OnceLock::new(),
             _sequencer: sequencer,
         };
         // Enabling a bound applies it at startup, not only after some
@@ -3960,7 +4006,88 @@ impl Platform {
     #[must_use]
     pub fn scope_now(&self) -> (ContentHash, Option<ContentHash>) {
         let head = self.entries.lock().expect("entries lock").head_hash();
-        (self.node_key.actor_id(), head)
+        // On a seed the log is the home's, entry for entry, so the node a
+        // scope must name is the home and the head is a head of the
+        // home's log. A client that signs against a seed's view therefore
+        // signs something the home will admit, which is what lets a
+        // refused write be resent there unchanged.
+        match self.home.get() {
+            Some(home) => (home.node_id.clone(), head),
+            None => (self.node_key.actor_id(), head),
+        }
+    }
+
+    /// Makes this platform a seed of `home` (D80): its log becomes a copy
+    /// of the home's, taken through [`Platform::replicate`] and nothing
+    /// else.
+    ///
+    /// Call before the platform serves anything.
+    #[must_use]
+    pub fn as_seed_of(self, home: crate::replica::Home) -> Self {
+        // A second call would change whose copy this is mid-life; the
+        // first one stands, and the daemon never makes a second.
+        let _ = self.home.set(home);
+        self
+    }
+
+    /// The home this platform is a seed of, or `None` on a home.
+    #[must_use]
+    pub fn seed_home(&self) -> Option<&crate::replica::Home> {
+        self.home.get()
+    }
+
+    /// Records the replicator writing into this platform, and the home it
+    /// copies. The first call stands.
+    pub(crate) fn attach_replica(
+        &self,
+        home: crate::replica::Home,
+        shared: Arc<crate::replica::Shared>,
+    ) {
+        let _ = self.home.set(home);
+        let _ = self.replica.set(shared);
+    }
+
+    /// What a cached page about this node must be re-rendered for beyond
+    /// the view's position: on a seed, how far the home has run ahead and
+    /// whether replication has stopped, neither of which moves the view.
+    pub(crate) fn replica_marker(&self) -> Option<String> {
+        let status = self
+            .replica
+            .get()?
+            .status
+            .lock()
+            .expect("replica status lock");
+        Some(format!(
+            "{:?}:{}:{}",
+            status.home_head_seq,
+            status.halted.is_some(),
+            status.gap
+        ))
+    }
+
+    /// Appends entries the home already sequenced, through this platform's
+    /// own writer thread, and folds them into its view. See
+    /// [`SequencerHandle::replicate`] for the checks each one passes.
+    ///
+    /// # Errors
+    ///
+    /// The first entry that could not be taken; everything before it was.
+    pub fn replicate(
+        &self,
+        entries: Vec<choir_sequencer::Sequenced>,
+    ) -> Result<choir_sequencer::Replicated, choir_sequencer::ReplicateError> {
+        self.handle.replicate(entries)
+    }
+
+    /// This node's own key: on a seed, the key its witness statements are
+    /// signed with.
+    pub(crate) fn node_key(&self) -> &ActorKey {
+        &self.node_key
+    }
+
+    /// Runs `read` against the view as it stands, under its lock.
+    pub(crate) fn with_view<R>(&self, read: impl FnOnce(&View) -> R) -> R {
+        read(&self.view.lock().expect("view lock"))
     }
 
     /// The round of proposals aimed at `branch` of `repo` (D68).
@@ -4119,6 +4246,39 @@ impl Platform {
     /// applies at an unpredictable future moment is not a gate.
     pub fn set_key_names(&self, signers: &[crate::TrustedKey]) {
         *self.key_names.lock().expect("key names lock") = KeyBindings::from_signers(signers);
+        *self.signers.lock().expect("signers lock") = signers.to_vec();
+    }
+
+    /// `GET /api/signers`: this node's own public key and every key in
+    /// its trusted-keys table, with the channel name a key is bound to
+    /// when its line carries one.
+    ///
+    /// Public keys are public data. It sits behind the log's own grant
+    /// anyway, because the reader it exists for is one that already
+    /// holds that grant: somebody replaying `/api/log` who wants to check
+    /// authorship, which SYNC.md's third check cannot do without a key.
+    fn signers_json(&self) -> serde_json::Value {
+        let signers: Vec<serde_json::Value> = self
+            .signers
+            .lock()
+            .expect("signers lock")
+            .iter()
+            .map(|signer| {
+                serde_json::json!({
+                    "actor_id": signer.actor_id,
+                    "public_key_hex": hex_encode(&signer.key),
+                    "name": signer.name,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "format_version": 1,
+            "node": {
+                "actor_id": self.node_key.actor_id().to_hex(),
+                "public_key_hex": hex_encode(&self.node_key.public_key_bytes()),
+            },
+            "signers": signers,
+        })
     }
 
     /// Shrinks the in-memory `/api/log` window. Exists so tests can
@@ -5742,7 +5902,7 @@ impl Platform {
                         .require_scope
                         .load(std::sync::atomic::Ordering::Relaxed),
                 });
-                let body = serde_json::json!({
+                let mut body = serde_json::json!({
                     "log": log,
                     "snapshot": snapshot,
                     "workspaces": ws,
@@ -5761,6 +5921,16 @@ impl Platform {
                     "sequencer_lag": self.lag_json(),
                     "build": crate::build_json(),
                 });
+                // D80. `null` on a home, which is nobody's copy; on a seed,
+                // whose copy it is and how far behind.
+                body["replica"] = match (self.home.get(), self.replica.get()) {
+                    (Some(home), Some(shared)) => shared
+                        .status
+                        .lock()
+                        .expect("replica status lock")
+                        .to_json(home),
+                    _ => serde_json::Value::Null,
+                };
                 (200, body.to_string())
             }
             // Pending queue for one reviewer: reviews that fanned out to
@@ -6017,6 +6187,20 @@ impl Platform {
                     Err(reason) => (400, Rejection::decode(&reason).body()),
                 }
             }
+            ("GET", "/api/signers") => (200, self.signers_json().to_string()),
+            ("GET", "/api/witness") => match (self.home.get(), self.replica.get()) {
+                (Some(home), Some(shared)) => {
+                    (200, shared.witness_json(home, &self.node_key).to_string())
+                }
+                _ => (
+                    404,
+                    serde_json::json!({
+                        "error": "this node is not a seed, so it signs no witness statements; \
+                                  its own attestation is `snapshot` in GET /api/view"
+                    })
+                    .to_string(),
+                ),
+            },
             ("GET", path) if path.starts_with("/api/log") => {
                 let from: usize = path
                     .split_once("from=")
@@ -6305,7 +6489,7 @@ impl RefReconciliation {
 
 /// Every ref in the bare repo at `path`, or `None` if it cannot be read
 /// (no such repo, or not a repo).
-fn read_git_refs(path: &std::path::Path) -> Option<BTreeMap<String, String>> {
+pub(crate) fn read_git_refs(path: &std::path::Path) -> Option<BTreeMap<String, String>> {
     let out = std::process::Command::new("git")
         .args(["for-each-ref", "--format=%(refname) %(objectname)"])
         .current_dir(path)
