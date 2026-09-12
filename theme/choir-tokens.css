@@ -174,12 +174,13 @@
   /* How far something travels on the way in, and how far a control
      lifts under the cursor. Both deliberately small enough to read as
      weight rather than as animation. */
-  --rise:0.75rem;
+  --rise:0.375rem;
   --lift:-1px;
 
   /* ---- layout ------------------------------------------------------ */
   --measure:36rem; /* a book's measure: ~66 characters at 16px */
-  --search:20rem;  /* the one search box: a field, not a banner */
+  --search:20rem;  /* a form field's cap, wherever one is set */
+  --omni:24rem;    /* the bar's search box: a field, not a banner */
   --article:42rem; /* prose that carries code, slightly wider */
   --side:17rem;    /* a narrow pane */
   --palette:38rem; /* the command palette, a shade wider than a measure */
@@ -195,11 +196,7 @@
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
   --blur-1:14px;
-  --blur-2:24px; /* the chrome's glass, deeper than a card's */
-  /* One step between a row's entrance and the next. Multiplied in the
-     component block and never authored there: `calc(var(--stagger) * 4)`
-     is a token doing arithmetic, not a duration. */
-  --stagger:22ms;
+  --blur-2:24px; /* the palette's backdrop, deeper than a card's */
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block

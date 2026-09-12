@@ -163,12 +163,13 @@
   /* How far something travels on the way in, and how far a control
      lifts under the cursor. Both deliberately small enough to read as
      weight rather than as animation. */
-  --rise:0.75rem;
+  --rise:0.375rem;
   --lift:-1px;
 
   /* ---- layout ------------------------------------------------------ */
   --measure:36rem; /* a book's measure: ~66 characters at 16px */
-  --search:20rem;  /* the one search box: a field, not a banner */
+  --search:20rem;  /* a form field's cap, wherever one is set */
+  --omni:24rem;    /* the bar's search box: a field, not a banner */
   --article:42rem; /* prose that carries code, slightly wider */
   --side:17rem;    /* a narrow pane */
   --palette:38rem; /* the command palette, a shade wider than a measure */
@@ -184,11 +185,7 @@
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
   --blur-1:14px;
-  --blur-2:24px; /* the chrome's glass, deeper than a card's */
-  /* One step between a row's entrance and the next. Multiplied in the
-     component block and never authored there: `calc(var(--stagger) * 4)`
-     is a token doing arithmetic, not a duration. */
-  --stagger:22ms;
+  --blur-2:24px; /* the palette's backdrop, deeper than a card's */
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block
@@ -589,9 +586,8 @@ img,svg,canvas{max-width:100%}
    state, so cancelling them shows the page rather than an empty one. */
 @media (prefers-reduced-motion:reduce){
   :root{--dur-1:0ms;--dur-2:0ms;--dur-3:0ms;--dur-4:0ms;--dur-5:0ms;--dur-6:0ms;
-    --rise:0;--lift:0;--stagger:0ms}
+    --rise:0;--lift:0}
   html{scroll-behavior:auto}
-  body::after{display:none}
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;animation-timeline:auto !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
 }
 
@@ -663,26 +659,16 @@ body{background:var(--ground);color:var(--ink);margin:0 auto;
 body::before{content:"";position:fixed;inset:0;z-index:var(--z-under);
   pointer-events:none;
   background-image:var(--grain),var(--glow-1),var(--glow-2),var(--glow-3)}
-/* Two answers to the scroll itself, where the browser can tie an
-   animation to it. A hairline at the top of the viewport grows with the
-   distance read, so a long page says how long it is; and the chrome
-   settles as the page moves under it, its shadow deepening and its edge
-   firming, so the bar reads as resting on the page rather than painted
-   over it. Neither touches layout: the line is a transform, the settle
-   is paint. A page too short to scroll has no timeline and shows
-   neither. */
-@supports (animation-timeline:scroll()){
-  body::after{content:"";position:fixed;top:var(--sp-0);left:var(--sp-0);
-    right:var(--sp-0);height:var(--bw-2);z-index:var(--z-palette);
-    pointer-events:none;background:var(--accent);
-    transform-origin:left;transform:scaleX(0);
-    animation:grow linear both;animation-timeline:scroll(root)}
-  .chrome{animation:settle linear both;animation-timeline:scroll(root);
-    animation-range:var(--sp-0) calc(var(--topbar-h) * 3)}
-}
-@keyframes grow{from{transform:scaleX(0)}to{transform:none}}
-@keyframes settle{to{border-color:var(--line);
-  box-shadow:var(--shadow-3),var(--shadow-inset)}}
+/* There were two answers to the scroll here and both are gone with the
+   sticky bar that motivated them: an accent hairline across the top of
+   the viewport that grew with the distance read, and a settle that
+   deepened the bar's shadow as the page moved under it. A progress
+   rule is a thing that moves in the corner of the eye on every page,
+   and this surface is a code host rather than an essay -- a reader
+   scrolling a file is looking for a line, not pacing themselves. The
+   settle described a relationship to the scroll that the bar no longer
+   has. What is left tied to the scroll is the two that describe
+   content: the README's entrance and the chain drawing itself. */
 
 /* The pages that are one column of prose and one control rather than a
    tool's readout: the front door, signing in, asking, and redeeming an
@@ -717,39 +703,14 @@ main>section,.panes>.pane,.rail>.pane{
   .panes>.pane-content{animation-timeline:view();
     animation-range:entry 0% entry 35%;animation-delay:var(--sp-0)}
 }
-/* Rows, one after another for a screen's worth; past the fold, a
-   stagger is a delay nobody is watching, so the rest arrive all at
-   once, or with the scroll where the browser can tie them to it. */
+/* Rows arrive with the table that holds them, not one after another.
+   What was here was twenty-four hand-written delays and a scroll
+   timeline for everything past them, so a twenty-five-row listing spent
+   half a second assembling itself while a reader waited to read it, and
+   the rows below the fold kept arriving as they were scrolled to. A
+   table is one object and it is the object the page is for. */
 tbody tr{animation:fade var(--dur-4) var(--ease-out) both;
-  animation-delay:calc(var(--delay-3) + var(--stagger) * 25)}
-tbody tr:nth-child(1){animation-delay:calc(var(--delay-3) + var(--stagger) * 1)}
-tbody tr:nth-child(2){animation-delay:calc(var(--delay-3) + var(--stagger) * 2)}
-tbody tr:nth-child(3){animation-delay:calc(var(--delay-3) + var(--stagger) * 3)}
-tbody tr:nth-child(4){animation-delay:calc(var(--delay-3) + var(--stagger) * 4)}
-tbody tr:nth-child(5){animation-delay:calc(var(--delay-3) + var(--stagger) * 5)}
-tbody tr:nth-child(6){animation-delay:calc(var(--delay-3) + var(--stagger) * 6)}
-tbody tr:nth-child(7){animation-delay:calc(var(--delay-3) + var(--stagger) * 7)}
-tbody tr:nth-child(8){animation-delay:calc(var(--delay-3) + var(--stagger) * 8)}
-tbody tr:nth-child(9){animation-delay:calc(var(--delay-3) + var(--stagger) * 9)}
-tbody tr:nth-child(10){animation-delay:calc(var(--delay-3) + var(--stagger) * 10)}
-tbody tr:nth-child(11){animation-delay:calc(var(--delay-3) + var(--stagger) * 11)}
-tbody tr:nth-child(12){animation-delay:calc(var(--delay-3) + var(--stagger) * 12)}
-tbody tr:nth-child(13){animation-delay:calc(var(--delay-3) + var(--stagger) * 13)}
-tbody tr:nth-child(14){animation-delay:calc(var(--delay-3) + var(--stagger) * 14)}
-tbody tr:nth-child(15){animation-delay:calc(var(--delay-3) + var(--stagger) * 15)}
-tbody tr:nth-child(16){animation-delay:calc(var(--delay-3) + var(--stagger) * 16)}
-tbody tr:nth-child(17){animation-delay:calc(var(--delay-3) + var(--stagger) * 17)}
-tbody tr:nth-child(18){animation-delay:calc(var(--delay-3) + var(--stagger) * 18)}
-tbody tr:nth-child(19){animation-delay:calc(var(--delay-3) + var(--stagger) * 19)}
-tbody tr:nth-child(20){animation-delay:calc(var(--delay-3) + var(--stagger) * 20)}
-tbody tr:nth-child(21){animation-delay:calc(var(--delay-3) + var(--stagger) * 21)}
-tbody tr:nth-child(22){animation-delay:calc(var(--delay-3) + var(--stagger) * 22)}
-tbody tr:nth-child(23){animation-delay:calc(var(--delay-3) + var(--stagger) * 23)}
-tbody tr:nth-child(24){animation-delay:calc(var(--delay-3) + var(--stagger) * 24)}
-@supports (animation-timeline:view()){
-  tbody tr:nth-child(n+25){animation-timeline:view();
-    animation-range:entry 0% cover 12%;animation-delay:var(--sp-0)}
-}
+  animation-delay:var(--delay-3)}
 
 /* skip link */
 .skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
@@ -915,12 +876,12 @@ tr>td:last-child,tr>th:last-child{padding-right:var(--sp-0)}
 thead th{font-size:var(--fs-100);text-transform:uppercase;
   letter-spacing:var(--tr-caps);color:var(--faint);font-weight:var(--fw-medium);
   border-bottom:var(--border)}
-/* A long list keeps its column heads in view, parked under the bar. Only
-   the tables set straight on the page: inside a card the ground colour
-   would be the wrong one. */
-main>section>table>thead th{position:sticky;
-  top:calc(var(--topbar-h) + var(--sp-5));background:var(--ground);
-  z-index:var(--z-base)}
+/* A long list keeps its column heads in view. They park at the top of
+   the viewport rather than under the bar, which no longer stays there.
+   Only the tables set straight on the page: inside a card the ground
+   colour would be the wrong one. */
+main>section>table>thead th{position:sticky;top:var(--sp-0);
+  background:var(--ground);z-index:var(--z-base)}
 tbody tr:last-child>td{border-bottom:var(--bw-0) solid transparent}
 tbody tr>td{transition:background-color var(--dur-2) var(--ease-out),
              box-shadow var(--dur-2) var(--ease-out),
@@ -1192,8 +1153,9 @@ table.listing tbody tr:hover>td{border-radius:var(--sp-0)}
    headings that step down from the page's own, nothing drawn around
    it. */
 section.readme{margin-top:var(--sp-0)}
-/* A `#fragment` target stops clear of the sticky top bar, not under it. */
-section.readme [id]{scroll-margin-top:calc(var(--topbar-h) + var(--sp-5))}
+/* A `#fragment` target stops with a little air over it rather than
+   flush against the top of the viewport. */
+section.readme [id]{scroll-margin-top:var(--sp-5)}
 /* The README's box: a header strip naming the file, with the other
    documents beside it, over the prose. */
 section.readme .head{display:flex;flex-wrap:wrap;align-items:center;
@@ -1332,26 +1294,29 @@ table.hits code{font-size:var(--fs-300)}
 
 /* ------------------------------------------------------------------
    THE NAV
-   One line of text links, full-bleed, sticky, on a translucent version
-   of the page's own ground: what scrolls under it is present without
-   being legible. Blur where it is supported and an opaque fill where it
-   is not, which is the same bar either way.
+   One line of text links on the page's own ground, ruled off from what
+   is under it, and scrolling away with everything else.
+
+   It was a floating capsule: sticky, rounded to `--r-xl`, translucent
+   over a blur, carrying two shadows and settling into a third as the
+   page moved under it. Every one of those is a thing a reader's eye
+   tracks, and it tracked them for the whole length of a long file. A
+   bar that stays put has to earn the attention it keeps taking, and
+   the search box behind it is reachable from any page by a key now
+   (D81), which is the affordance the stickiness was standing in for.
+   So it is a header: it is at the top, and when you scroll past it,
+   it is gone.
    ------------------------------------------------------------------ */
-.chrome{position:sticky;top:var(--sp-3);z-index:var(--z-header);
-  background:var(--surface);border:var(--border-hair);
-  border-radius:var(--r-xl);box-shadow:var(--shadow-2),var(--shadow-inset);
-  margin:var(--sp-0) var(--sp-0) var(--sp-10);
-  padding:var(--sp-2) var(--sp-4)}
-@supports (backdrop-filter:blur(var(--blur-2))){
-  .chrome{background:color-mix(in srgb,var(--surface) 64%,transparent);
-    backdrop-filter:blur(var(--blur-2)) saturate(160%);
-    -webkit-backdrop-filter:blur(var(--blur-2)) saturate(160%)}
-}
+.chrome{position:relative;z-index:var(--z-header);
+  border-bottom:var(--border-hair);
+  margin:var(--sp-0) var(--sp-0) var(--sp-8);
+  padding:var(--sp-0) var(--sp-0) var(--sp-4)}
 /* Wraps rather than breaking at a width. There is no media query here
    on purpose: this sheet authors no raw lengths below the marker, and a
    breakpoint is a raw length by definition. The flex basis does the same
    work. */
 .chrome-in{display:flex;flex-wrap:wrap;align-items:center;
+  min-height:var(--topbar-h);
   gap:var(--sp-3) var(--sp-5);max-width:var(--page-max);margin:var(--sp-0) auto}
 .brand{font-weight:var(--fw-bold);letter-spacing:var(--tr-heading);
   color:var(--strong);text-decoration:none;white-space:nowrap;
@@ -1367,33 +1332,32 @@ table.hits code{font-size:var(--fs-300)}
   background-repeat:no-repeat}
 .brand:hover{color:var(--accent-ink)}
 
-/* The search box: a field, not a banner. */
-form.omni{display:flex;align-items:center;flex:1 1 var(--search);
+/* The search box: a field, not a banner, and the comment said so while
+   the rule did the opposite. `flex:1 1` let it take every pixel the bar
+   was not using, so on a wide screen it was the largest object on the
+   page -- a pill half the width of the window, filled a shade lighter
+   than the bar, carrying an inset highlight, a tinted chip and a second
+   badge that faded in on focus. `0 1` caps it at `--search` and lets it
+   shrink; the radius comes down to the one every other control here
+   uses; the fill and the rule do the rest. */
+form.omni{display:flex;align-items:center;flex:0 1 var(--omni);
   min-width:0;gap:var(--sp-2);
-  padding:var(--sp-1) var(--sp-3);
-  background:var(--raise);border:var(--border-hair);
-  border-radius:var(--r-pill);box-shadow:var(--shadow-inset);
+  padding:var(--sp-1) var(--sp-2);
+  background:var(--raise);border:var(--border);
+  border-radius:var(--r-sm);
   transition:border-color var(--dur-2) var(--ease-out),
-             background-color var(--dur-2) var(--ease-out),
-             box-shadow var(--dur-3) var(--ease-out)}
-form.omni:hover{border-color:var(--line)}
-/* Focus is a halo in the accent wash: wide, soft, and the one glow on
-   the page, because the field is the one thing on it that is listening. */
-form.omni:focus-within{border-color:var(--accent-line);background:var(--surface);
-  box-shadow:var(--sp-0) var(--sp-0) var(--sp-0) var(--bw-4) var(--accent-tint),var(--shadow-1)}
+             background-color var(--dur-2) var(--ease-out)}
+form.omni:hover{border-color:var(--line-strong)}
+/* Focus firms the rule and lifts the fill. It was a four-pixel halo in
+   the accent wash, which is a glow on the one element that is already
+   the most interactive thing in the bar. */
+form.omni:focus-within{border-color:var(--accent-line);background:var(--surface)}
+/* The scope reads as a prefix to the placeholder rather than as a chip
+   in it: same information, no object. */
 form.omni .scope{white-space:nowrap;font-size:var(--fs-200);
-  color:var(--accent-ink);font-family:var(--font-mono);
-  padding:var(--sp-0) var(--sp-2);border-radius:var(--r-sm);
-  background:var(--accent-tint)}
-/* The one key the field answers to, shown while it is listening. */
-form.omni::after{content:"enter";flex:none;font-size:var(--fs-100);
-  font-family:var(--font-mono);letter-spacing:var(--tr-caps);
-  text-transform:uppercase;color:var(--faint);
-  padding:var(--sp-0) var(--sp-2);border:var(--border-hair);
-  border-radius:var(--r-sm);opacity:0;
-  transition:opacity var(--dur-2) var(--ease-out)}
-form.omni:focus-within::after{opacity:1}
-form.omni input[type="search"]{flex:1 1 var(--search);min-width:0;
+  color:var(--faint);font-family:var(--font-mono);
+  padding-right:var(--sp-2);border-right:var(--border-hair)}
+form.omni input[type="search"]{flex:1 1 var(--omni);min-width:0;
   font:inherit;font-size:var(--fs-300);color:var(--ink);
   background:transparent;border:0;padding:var(--sp-1) var(--sp-0);
   appearance:none}
@@ -1407,7 +1371,7 @@ form.omni input[type="search"]::-webkit-search-cancel-button{appearance:none}
 /* Each link keeps `nowrap` so a break lands between them rather than
    inside one. */
 .chrome-nav{display:flex;flex-wrap:wrap;align-items:center;
-  gap:var(--sp-2) var(--sp-4);font-size:var(--fs-300)}
+  margin-left:auto;gap:var(--sp-2) var(--sp-4);font-size:var(--fs-300)}
 .chrome-nav>*{white-space:nowrap}
 .chrome-nav a{color:var(--muted);text-decoration:none;
   transition:color var(--dur-1) var(--ease-out)}
@@ -1742,23 +1706,24 @@ ol.thread .body{margin:var(--sp-0);white-space:pre-wrap;
    so it appears only where the shortcut actually works -- a legend for a
    key that does nothing is worse than no legend. */
 .omni-key{flex:none;font-family:var(--font-mono);font-size:var(--fs-100);
-  color:var(--faint);background:var(--raise);border:var(--border-hair);
-  border-radius:var(--r-xs);padding:var(--sp-0) var(--sp-1);
-  letter-spacing:var(--tr-body)}
+  color:var(--faint);letter-spacing:var(--tr-body)}
 dialog.palette{margin:auto;padding:var(--sp-0);max-width:var(--palette);
   max-height:70vh;inline-size:calc(100% - var(--sp-8));
   display:flex;flex-direction:column;overflow:hidden;
   color:var(--ink);background:var(--card-wash);
   border:var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-3)}
 dialog.palette::backdrop{background:var(--scrim)}
-dialog.palette[open]{animation:pop var(--dur-4) var(--ease-emphatic) both}
+@supports (backdrop-filter:blur(var(--blur-2))){
+  dialog.palette::backdrop{backdrop-filter:blur(var(--blur-2))}
+}
+dialog.palette[open]{animation:pop var(--dur-3) var(--ease-out) both}
 dialog.palette[open]::backdrop{animation:fade var(--dur-3) var(--ease-out) both}
-/* Not a spring library: three stops on the sheet's own emphatic curve,
-   which overshoots by a hair and settles. The one place this surface
-   animates scale at all, because a dialog that fades without moving
-   reads as a screenshot rather than as something that opened. */
+/* A fade and the smallest step this sheet has. It overshot and settled
+   before, on the emphatic curve, and a dialog that bounces is a dialog
+   a reader watches instead of reads -- the point of a key is to be
+   already typing. */
 @keyframes pop{
-  from{opacity:0;transform:translateY(calc(var(--sp-2) * -1)) scale(.97)}
+  from{opacity:0;transform:translateY(calc(var(--sp-1) * -1))}
   to{opacity:1;transform:none}}
 .palette-head{display:flex;align-items:center;gap:var(--sp-3);
   padding:var(--sp-3) var(--sp-4);border-bottom:var(--border)}
@@ -1774,12 +1739,11 @@ input.palette-q::placeholder{color:var(--faint)}
 input.palette-q::-webkit-search-cancel-button{display:none}
 .palette-scopes{display:flex;flex:none;gap:var(--sp-1)}
 button.palette-scope{font:inherit;font-size:var(--fs-200);color:var(--faint);
-  background:none;border:var(--bw-0);border-radius:var(--r-pill);
-  padding:var(--sp-1) var(--sp-3);cursor:pointer;
-  transition:color var(--dur-1) var(--ease-out),
-             background-color var(--dur-1) var(--ease-out)}
-button.palette-scope:hover{color:var(--ink);background:var(--raise)}
-button.palette-scope.here{color:var(--accent-ink);background:var(--accent-tint)}
+  background:none;border:var(--bw-0);border-radius:var(--r-xs);
+  padding:var(--sp-1) var(--sp-2);cursor:pointer;
+  transition:color var(--dur-1) var(--ease-out)}
+button.palette-scope:hover{color:var(--ink)}
+button.palette-scope.here{color:var(--strong);font-weight:var(--fw-medium)}
 ul.palette-list{list-style:none;margin:var(--sp-0);padding:var(--sp-2);
   overflow-y:auto;display:flex;flex-direction:column;gap:var(--sp-1)}
 li.palette-row{border-radius:var(--r-sm)}

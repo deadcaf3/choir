@@ -5116,7 +5116,7 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
         Some((repo, rev)) => (
             format!("/r/{repo}/search/{}", url_path(rev)),
             repo.to_string(),
-            "files, code and commits",
+            "files, code, commits",
         ),
         None => ("/r/".to_string(), "all repositories".into(), "repositories"),
     };
