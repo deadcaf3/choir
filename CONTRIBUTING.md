@@ -75,6 +75,11 @@ One-way doors. Breaking one is a data migration.
 - Harness modules share a process and run in parallel: no wall-clock
   assertions, process globals (env, cwd, allocator), fixed ports or
   reused temp-dir names.
+- The harness's open-file count grows with its test count, because every
+  test's node keeps its listener and log open until the process exits.
+  `./gate` raises the soft limit to 4096; a bare `cargo test -p
+  choir-node --test it` from a terminal at the macOS default of 256
+  fails with `Too many open files`, which is the limit, not a bug.
 - **Gate thresholds are assertions.**
 - No fixtures or golden files; test data is generated inline.
 
