@@ -38,6 +38,7 @@ pub mod hooks;
 mod join_page;
 pub mod limits;
 pub mod platform;
+mod syntax;
 /// How many times this process has shelled out to git while serving.
 ///
 /// Exposed so a test can budget it. A page's read latency is mostly its

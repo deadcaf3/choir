@@ -2710,12 +2710,19 @@ fn blob(
                     conflicted_file(&mut h, &regions);
                 } else {
                     h.push_str("<pre class=\"code\">");
-                    for (n, line) in text.lines().enumerate() {
-                        h.push_str("<span class=\"ln\">");
-                        h.push_str(&(n + 1).to_string());
-                        h.push_str("</span>");
-                        h.push_str(&esc(line));
-                        h.push('\n');
+                    // Coloured where this node knows the language, and
+                    // plain where it does not. The fallback is not a
+                    // degraded mode: it is the same escaped text with
+                    // the same line numbers, which is what every file
+                    // got before there was a highlighter at all.
+                    if !crate::syntax::highlight(&mut h, path, &text) {
+                        for (n, line) in text.lines().enumerate() {
+                            h.push_str("<span class=\"ln\">");
+                            h.push_str(&(n + 1).to_string());
+                            h.push_str("</span>");
+                            h.push_str(&esc(line));
+                            h.push('\n');
+                        }
                     }
                     h.push_str("</pre>");
                 }
