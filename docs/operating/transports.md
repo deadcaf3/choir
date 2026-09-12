@@ -5,6 +5,7 @@
 | Git over HTTPS | agents, CI, anything holding a token | |
 | The read-only browser page | a person who wants to look | D28 |
 | Repository browsing under `/r/` | reading code and reviews without a clone | D30 |
+| The command palette | `Ctrl-K` to search from any page | D81 |
 | Git over SSH | people who expect `user@host:owner/repo.git` | D31 |
 
 All four sit behind the same auth wall and `--acl-file` grants; a
@@ -27,9 +28,18 @@ Browser writes exist in one place (D39): a verdict or comment on a review
 page, and passkey enrolment on `/account`, signed with a key that never
 leaves the device.
 
-The client half is `/static/webauthn.js`. Its two pages are served
-`script-src 'self'`; every other page, including `/r/`, is
-`default-src 'none'`.
+The client half is `/static/webauthn.js`.
+
+The second script is `/static/palette.js`, the command palette (D81):
+`Ctrl-K`, `Cmd-K` or `/` opens the search that is already in the bar,
+over whatever page you are on. It reads `/api/search` (D62) and writes
+nothing, and with scripting off the box in the bar still submits to the
+same search page.
+
+Every page that draws the bar is served `script-src 'self'; connect-src
+'self'`. The pages that draw no bar -- the invite pages, whose own
+address is a live credential -- stay `default-src 'none'` with no
+`script-src` at all.
 
 ### The pages that are not repositories
 

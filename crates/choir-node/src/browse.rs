@@ -2158,7 +2158,10 @@ fn about_pane(
 /// The strip over the README: the other documents, one click away.
 ///
 /// Links rather than tabs that switch in place, because this surface
-/// runs no script. What it buys is the same thing GitHub's tab strip
+/// has to work with no script. D81 added one, and changed nothing here:
+/// it is an enhancement over a page that is already whole, so a control
+/// whose *only* implementation is script is still a control this page
+/// may not have. What it buys is the same thing GitHub's tab strip
 /// buys -- a reader who wants the licence or the contributing guide
 /// finds it without going back to the listing to look for the file.
 fn readme_tabs(h: &mut String, repo: &str, rev: &str, names: &[String]) {
@@ -2261,9 +2264,10 @@ fn ago(now: i64, then: i64) -> String {
 
 /// The revision picker: every branch and tag, one click each.
 ///
-/// A `<details>` rather than a `<select>` because this surface runs no
-/// script, and a `<select>` without one is a control that changes nothing
-/// when a reader uses it.
+/// A `<details>` rather than a `<select>` because this surface has to
+/// work with no script, and a `<select>` without one is a control that
+/// changes nothing when a reader uses it. The palette (D81) does not
+/// change that: it is additive, and this control is the page's own.
 fn ref_picker(h: &mut String, repo: &str, rev: &str, branches: &[String], tags: &[String]) {
     h.push_str("<details class=\"picker\"><summary>");
     h.push_str(&esc(rev));
@@ -4857,6 +4861,7 @@ fn shell(title: &str, bar: Bar<'_>) -> String {
         h.push_str("\">");
     }
     h.push_str(crate::ui::STYLE);
+    h.push_str(crate::ui::PALETTE_SCRIPT);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     chrome(&mut h, bar);
@@ -5117,7 +5122,20 @@ pub(crate) fn chrome(h: &mut String, bar: Bar<'_>) {
     };
     h.push_str("<form class=\"omni\" method=\"get\" action=\"");
     h.push_str(&esc(&action));
-    h.push_str("\" role=\"search\"><span class=\"scope\">");
+    h.push_str("\" role=\"search\"");
+    // The two facts the palette (D81) cannot get from the action: a
+    // revision may legitimately contain a `/`, so splitting the URL back
+    // apart is guesswork, and the scope is decided here anyway. Absent on
+    // a page about no repository, which is how the palette knows to search
+    // node-wide.
+    if let Some((repo, rev)) = bar.scope {
+        h.push_str(" data-repo=\"");
+        h.push_str(&esc(repo));
+        h.push_str("\" data-rev=\"");
+        h.push_str(&esc(rev));
+        h.push('"');
+    }
+    h.push_str("><span class=\"scope\">");
     h.push_str(&esc(&scope_label));
     h.push_str(
         "</span><input type=\"search\" name=\"q\" autocomplete=\"off\" \
@@ -5218,8 +5236,9 @@ pub(crate) fn theme_attribute(h: &mut String, theme: Option<&str>) {
 /// The palette control: three states, the current one not a link.
 ///
 /// Written as links rather than as a form or a toggle for the reason
-/// the whole surface is: this page runs no script, a form here would be
-/// a `POST` and a button in a row of navigation, and a two-state toggle
+/// the whole surface is: this page must work with no script, a form here
+/// would be a `POST` and a button in a row of navigation, and a
+/// two-state toggle
 /// cannot express "follow the system", which is the default and has to
 /// stay reachable.
 ///

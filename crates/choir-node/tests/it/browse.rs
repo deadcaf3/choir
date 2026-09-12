@@ -2067,9 +2067,16 @@ fn a_read_only_browser_renders_no_mutation_control_anywhere() {
         "/status",
     ];
     /// Markup that only a write affordance emits.
+    ///
+    /// `<script` was in this list and is not any more. D81 puts the
+    /// command palette on every page that draws the bar, so the tag no
+    /// longer distinguishes a page that can write from one that cannot
+    /// -- and a probe that matches every page is a probe that has to be
+    /// deleted or weakened the first time it fires. What replaces it is
+    /// the assertion below, which is the claim that was actually meant:
+    /// the only script here is the one that reads.
     const CONTROLS: &[&str] = &[
         "<button",
-        "<script",
         "/static/webauthn.js",
         "/api/prepare",
         "/api/accounts/passkey",
@@ -2088,6 +2095,18 @@ fn a_read_only_browser_renders_no_mutation_control_anywhere() {
                 "{path} renders `{control}` under --read-only-browser: the control ends in a 403"
             );
         }
+        // Exactly one script, and it is the read-only palette (D81).
+        // Under `--read-only-browser` the page may still be searched;
+        // what it may not do is offer a way to write.
+        assert_eq!(
+            body.matches("<script").count(),
+            1,
+            "{path} carries a script that is not the palette: {body}"
+        );
+        assert!(
+            body.contains("src=\"/static/palette.js\""),
+            "{path} lost the palette, or fetched some other script: {body}"
+        );
         // A GET form is navigation -- the search box is one. Anything
         // else submits a change, and there must be none.
         for form in body.split("<form").skip(1) {

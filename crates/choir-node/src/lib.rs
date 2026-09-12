@@ -1569,8 +1569,19 @@ impl Node {
                 // file instead took sign-in and D72's ask down with them,
                 // which is a page whose button does nothing rather than a
                 // page that offers no button.
-                if request.url().split('?').next() == Some(ui::WEBAUTHN_JS_PATH) {
-                    let outcome = respond_static_script(request);
+                // The palette (D81) is served from the same arm and on
+                // the same terms: ahead of authentication, because it
+                // ships on every page including the ones a stranger
+                // reads, and a script withheld until sign-in is a
+                // shortcut that works only for people who already know
+                // the node.
+                let script = match request.url().split('?').next() {
+                    Some(ui::WEBAUTHN_JS_PATH) => Some(ui::WEBAUTHN_JS),
+                    Some(ui::PALETTE_JS_PATH) => Some(ui::PALETTE_JS),
+                    _ => None,
+                };
+                if let Some(body) = script {
+                    let outcome = respond_static_script(request, body);
                     // "anon" and not a name: no credential was
                     // evaluated on this path, and the request log must
                     // say what happened rather than what was sent.
@@ -2185,7 +2196,7 @@ impl Node {
                         .with_header(
                             tiny_http::Header::from_bytes(
                                 &b"Content-Security-Policy"[..],
-                                SCRIPTED_PAGE_CSP,
+                                BROWSER_CSP,
                             )
                             .expect("static header"),
                         );
@@ -2393,9 +2404,9 @@ impl Node {
                 // that is served.
                 // Setting the palette. A `GET` that mutates nothing but
                 // one display cookie, so it is a link rather than a
-                // form: the read surface runs no script, and a form
-                // would put a `POST` and a button in a bar that is
-                // otherwise navigation.
+                // form: the read surface must work with no script,
+                // and a form would put a `POST` and a button in a bar
+                // that is otherwise navigation.
                 if request.url().split(['?', '#']).next().unwrap_or("") == "/theme" {
                     let url = request.url().to_string();
                     let set = browse::param(&url, "set").unwrap_or_default();
@@ -2640,7 +2651,7 @@ fn header(request: &tiny_http::Request, name: &str) -> Option<String> {
 /// the review page licenses any same-origin URL as a script source, and
 /// a browser will happily execute a `text/plain` body as JavaScript
 /// unless this header says not to. One funnel, so the claim in
-/// [`SCRIPTED_PAGE_CSP`] is true by construction rather than by
+/// [`BROWSER_CSP`] is true by construction rather than by
 /// inspection.
 fn served<R: std::io::Read>(
     request: tiny_http::Request,
@@ -2861,39 +2872,57 @@ const REFERRER_POLICY: &[u8] = b"same-origin";
 /// and when. That is D28 and D59's whole point, and it is worth more than
 /// a row of badges.
 ///
+/// **`script-src 'self'` and `connect-src 'self'` are node-wide as of
+/// D81, and that is a real loss worth naming.** Before it, a page with
+/// no ceremony on it carried `default-src 'none'` with no `script-src`
+/// at all: the read surface could not run anything even if an escaping
+/// miss put a `<script>` in it, and the two pages that could run
+/// something were the two a reader had to navigate to on purpose. The
+/// command palette ships in the chrome, so it ships everywhere, and a
+/// policy that licensed it on some pages would be licensing it on the
+/// pages an attacker would pick anyway.
+///
+/// What still holds is the part that was ever a guarantee about other
+/// people: `'self'` is this node and nowhere else. Nothing on this
+/// surface can fetch, post to, frame, or load script from a third
+/// party, and `X-Content-Type-Options: nosniff` on every response is
+/// what keeps `'self'` from meaning "any bytes this node ever served" --
+/// a browser will execute only what is typed as JavaScript, and the two
+/// URLs that are typed that way are [`ui::WEBAUTHN_JS_PATH`] and
+/// [`ui::PALETTE_JS_PATH`], both compile-time constants.
+///
 /// `'self'` is still the whole guarantee that matters here: a form on
 /// this surface can submit to this origin and to no other, so no page
 /// this node renders can be turned into a way of posting a reader's
 /// input somewhere else.
-const BROWSER_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+const BROWSER_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
 
-/// [`BROWSER_CSP`] plus permission to run [`ui::WEBAUTHN_JS`] and to
-/// `fetch` this node (D39), carried by the two pages with a ceremony on
-/// them and by nothing else.
+/// [`BROWSER_CSP`] with the two script directives taken back off, for
+/// the documents that carry no script at all.
 ///
-/// **Per page, never node-wide.** A single header would license script
-/// on a dozen pages that must never run any, and the read surface's whole
-/// guarantee is that it runs none. Pages with no ceremony keep
-/// [`BROWSER_CSP`] untouched, which is `default-src 'none'` with no
-/// `script-src` at all.
+/// **The split runs the other way round from the one D81 removed.** That
+/// one had a strict default and widened two pages; this one has the
+/// surface's policy as the default and narrows the pages that opted out
+/// of it. The difference matters because the failure modes are
+/// opposite: a page that forgets to widen renders a dead button, which
+/// is visible, while a page that forgets to narrow is merely less
+/// defended, which is not.
 ///
-/// **`'self'` rather than a digest per script, and what that costs.** The
-/// digests were narrower: they licensed three exact byte strings, where
-/// this licenses any same-origin URL a `<script src>` can name. What
-/// makes that trade sound is `X-Content-Type-Options: nosniff` on every
-/// response this node sends — with it, a browser refuses to execute
-/// anything whose type is not JavaScript, and the only JavaScript type
-/// served here is [`ui::WEBAUTHN_JS_PATH`], a compile-time constant.
-/// Repository content is served as escaped HTML, and git's own CGI
-/// output gets the header added on the way out for exactly this reason.
-///
-/// What it buys: the digests were computed by shelling out to `openssl`
-/// at bind, and a host without `openssl` fell back to `'unsafe-inline'`
-/// — a weaker policy than intended, reached silently, visible only in a
-/// served header. That path is gone rather than documented.
-const SCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'self'; connect-src 'self'";
+/// **The invite page is the reason this exists rather than being
+/// tidied away.** Its own address is a live credential (D36): the
+/// secret is in the URL, so a script on that page is a script holding
+/// somebody's invite in `location`, and `connect-src 'self'` would be
+/// somewhere to send it. It runs nothing today and `join_page` builds
+/// its own document precisely so that stays true -- but the header is
+/// the layer that holds when an escaper misses something, and it is the
+/// layer that would have had to hold. `/people` takes it for the
+/// plainer reason its own module gives: the console renders forms and
+/// no script, and a policy admitting one would be permission granted to
+/// a page with no use for it.
+const UNSCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
-/// Serves [`ui::WEBAUTHN_JS`], the only script this node has.
+/// Serves one of the node's two scripts: [`ui::WEBAUTHN_JS`] or
+/// [`ui::PALETTE_JS`].
 ///
 /// A weak `ETag` over the bytes rather than a version string: the file
 /// changes when the binary does and never otherwise, so a digest of what
@@ -2907,19 +2936,23 @@ const SCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; sty
 /// single URL on the node that *is* JavaScript, and a browser under
 /// `script-src 'self'` must be able to tell it apart from everything
 /// else.
-fn respond_static_script(request: tiny_http::Request) -> std::io::Result<(u16, u64)> {
-    static ETAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let tag = ETAG.get_or_init(|| {
-        format!(
-            "W/\"{}\"",
-            &choir_oplog::ContentHash::blake3(ui::WEBAUTHN_JS.as_bytes()).to_hex()[..18]
-        )
-    });
+fn respond_static_script(
+    request: tiny_http::Request,
+    body: &'static str,
+) -> std::io::Result<(u16, u64)> {
+    // Per body rather than one cell for the pair: two files that shared
+    // a tag would each be served the other's `304`, and the second
+    // script is what turned that from a latent bug into a reachable
+    // one.
+    let tag = format!(
+        "W/\"{}\"",
+        &choir_oplog::ContentHash::blake3(body.as_bytes()).to_hex()[..18]
+    );
     if header(&request, "If-None-Match").as_deref() == Some(tag.as_str()) {
-        return served(request, not_modified(tag, BROWSER_CSP), 304, 0);
+        return served(request, not_modified(&tag, BROWSER_CSP), 304, 0);
     }
-    let bytes = ui::WEBAUTHN_JS.len() as u64;
-    let response = tiny_http::Response::from_string(ui::WEBAUTHN_JS)
+    let bytes = body.len() as u64;
+    let response = tiny_http::Response::from_string(body)
         .with_header(
             tiny_http::Header::from_bytes(
                 &b"Content-Type"[..],
@@ -3233,15 +3266,15 @@ fn respond_page(
     served(request, response, status, bytes)
 }
 
-/// A page that carries the ceremony script, under the policy that lets
-/// it run.
+/// A page that carries the ceremony script, and must never be cached.
 ///
-/// [`respond_page`] sends [`BROWSER_CSP`], which has no `script-src`
-/// at all -- correct for every refusal and every read-only page, and
-/// wrong for the one page whose entire purpose is a control the script
-/// reveals. Kept as a separate function rather than a flag on the
-/// other, so widening the policy is something a caller asks for by
-/// name.
+/// The policy is no longer what separates this from [`respond_page`]:
+/// D81 put `script-src 'self'` on the whole surface, so both send
+/// [`BROWSER_CSP`]. What is left is `Cache-Control: no-store`, which is
+/// the part that was always specific to a ceremony -- a page holding a
+/// challenge is a page that must not be re-served from a disk, and a
+/// reader who goes back to one must be handed a fresh one rather than
+/// the spent challenge a shared cache kept.
 fn respond_scripted_page(
     request: tiny_http::Request,
     status: u16,
@@ -3267,7 +3300,7 @@ fn respond_scripted_page(
                 .expect("static header"),
         )
         .with_header(
-            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], SCRIPTED_PAGE_CSP)
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
                 .expect("static header"),
         );
     served(request, response, status, bytes)
@@ -4029,6 +4062,10 @@ fn respond_join(
         )
     };
     let bytes = page.html.len() as u64;
+    // The page knows whether it emitted a `<script>` tag (D72), and the
+    // header follows that rather than the route. A responder deciding
+    // from the route is how D71's sign-in page shipped with a button the
+    // header would not let run.
     let scripted = page.scripted;
     // A passwordless redemption ends signed in (D75): there is no
     // credential for the reader to present afterwards, so the cookie is
@@ -4053,9 +4090,9 @@ fn respond_join(
             tiny_http::Header::from_bytes(
                 &b"Content-Security-Policy"[..],
                 if scripted {
-                    SCRIPTED_PAGE_CSP
-                } else {
                     BROWSER_CSP
+                } else {
+                    UNSCRIPTED_PAGE_CSP
                 },
             )
             .expect("static header"),
@@ -4655,9 +4692,12 @@ fn respond_people_result(request: tiny_http::Request, said: &str) -> std::io::Re
 
 /// Sends a console page with the headers every browser surface carries.
 ///
-/// [`BROWSER_CSP`], not the scripted one: nothing on this page runs, and
-/// a header that allowed script here would be permission granted to a
-/// page that has no use for it.
+/// [`BROWSER_CSP`], because this page draws the bar. D81's rule is that
+/// the search box and the key that opens it ship together, and the
+/// console renders the same bar every browse page does. Its own
+/// controls are still plain forms that post -- nothing here depends on
+/// script, and `people_page` asserts that -- but the document loads the
+/// palette, so the header has to license it.
 fn respond_console(
     request: tiny_http::Request,
     page: people_page::Page,
@@ -5555,11 +5595,7 @@ fn handle_browse(
         if header(&request, "If-None-Match").as_deref() == Some(tag) {
             // The same policy the `200` would have carried: a `304`
             // that named a weaker one would leave the client on it.
-            let csp = match page {
-                browse::Page::Review { .. } if browser_writes => SCRIPTED_PAGE_CSP,
-                _ => BROWSER_CSP,
-            };
-            return served(request, not_modified(tag, csp), 304, 0);
+            return served(request, not_modified(tag, BROWSER_CSP), 304, 0);
         }
     }
 
@@ -5578,19 +5614,14 @@ fn handle_browse(
         // are attacker-supplied by definition here, so even an escaping
         // miss must not be able to run or fetch anything.
         //
-        // The review page is the one exception and it is narrow by
-        // construction: the strict header plus one same-origin source,
-        // so every other page under `/r/` still runs nothing at all
-        // (D39).
+        // Since D81 every page here loads one same-origin source,
+        // the command palette, and `script-src 'self'` is what lets it
+        // run. The pages that still run nothing -- the invite pages,
+        // which draw no bar -- take `UNSCRIPTED_PAGE_CSP` instead, and
+        // that is the line the split is drawn on now.
         .with_header(
-            tiny_http::Header::from_bytes(
-                &b"Content-Security-Policy"[..],
-                match page {
-                    browse::Page::Review { .. } if browser_writes => SCRIPTED_PAGE_CSP,
-                    _ => BROWSER_CSP,
-                },
-            )
-            .expect("static header"),
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], BROWSER_CSP)
+                .expect("static header"),
         )
         .with_header(
             tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)

@@ -1061,10 +1061,16 @@ fn a_reviewer_is_offered_a_passkey_verdict_and_a_reader_is_not() {
         bobs.contains("src=\"/static/webauthn.js\""),
         "the ceremony is missing"
     );
+    // Two, since D81: the ceremony and the command palette, both off
+    // this origin and both named here, so a third would fail this.
     assert_eq!(
         bobs.matches("src=").count(),
-        1,
+        2,
         "the review page fetches something else"
+    );
+    assert!(
+        bobs.contains("src=\"/static/palette.js\""),
+        "the palette is missing from a page that draws the bar"
     );
     assert!(bobs.contains("<noscript>"), "no scripting-off fallback");
     assert!(
@@ -1206,10 +1212,16 @@ fn a_person_can_reach_a_page_that_enrols_a_passkey() {
     assert!(empty.contains("src=\"/static/webauthn.js\""), "no ceremony");
     assert!(empty.contains("Add a passkey"), "no control");
     assert!(empty.contains("<noscript>"), "no scripting-off fallback");
+    // Two, since D81: the ceremony and the palette this page draws the
+    // bar for. Both named, so a third fails here.
     assert_eq!(
         empty.matches("src=").count(),
-        1,
+        2,
         "the account page fetches something else"
+    );
+    assert!(
+        empty.contains("src=\"/static/palette.js\""),
+        "the account page draws the bar and lost its key"
     );
 
     // After enrolling, the page lists it under the name he gave it — and
@@ -1550,24 +1562,45 @@ fn only_the_pages_that_carry_script_are_allowed_to_run_it() {
         );
     }
 
-    // And every other browser surface still runs nothing at all. This is
-    // the property the read path has always had and the one a single
-    // shared header would have quietly spent.
+    // Every page that draws the bar draws it under the policy that runs
+    // the palette (D81). This loop used to assert the opposite -- that
+    // the read path runs nothing at all -- and that property is the one
+    // D81 spent on purpose. What replaces it is the narrower true claim:
+    // the directive says exactly `'self'`, so the widening is to this
+    // node and to nothing else, and `default-src 'none'` still refuses
+    // every fetch the two named directives do not cover.
     for path in ["/", "/r/", "/r/agents/demo", "/r/agents/demo/reviews"] {
         let header = csp(path).unwrap_or_else(|| panic!("{path} sends no CSP"));
-        assert!(
-            !header.contains("script-src"),
-            "{path} may run script: {header}"
+        assert_eq!(
+            directive(&header, "script-src").as_deref(),
+            Some("'self'"),
+            "{path} licenses script from somewhere other than this node: {header}"
+        );
+        assert_eq!(
+            directive(&header, "connect-src").as_deref(),
+            Some("'self'"),
+            "{path}: {header}"
         );
         assert!(header.contains("default-src 'none'"), "{path}: {header}");
     }
 
-    // The two policies are two hand-written constants, and the scripted
-    // one is meant to be the read surface's plus two directives. Read
-    // off the wire because that is where a divergence would show: drop
+    // And the pages that draw no bar keep what the loop above gave up.
+    // The invite page is the one that matters: its address is a live
+    // credential (D36), so a script on it would hold somebody's secret
+    // in `location`. It builds its own document, renders no bar, and
+    // must still be served `UNSCRIPTED_PAGE_CSP`.
+    let header = csp("/join").expect("/join sends no CSP");
+    assert!(
+        !header.contains("script-src"),
+        "/join may run script, and it draws no bar that would need it: {header}"
+    );
+
+    // The two policies are two hand-written constants, and the strict
+    // one is meant to be the surface's minus two directives. Read off
+    // the wire because that is where a divergence would show: drop
     // `frame-ancestors` from one of them and every page still looks
     // right, on a node that can now be framed.
-    let read = csp("/").expect("the node page sends a CSP");
+    let read = csp("/join").expect("the invite door sends a CSP");
     let scripted = csp("/account").expect("the account page sends a CSP");
     // Every page that carries the tag must also be served under the policy
     // that lets it run. Read off the wire, both halves together, because a
@@ -1805,23 +1838,39 @@ fn the_ceremony_pages_carry_no_code_and_fetch_one_file() {
             Vec::<String>::new(),
             "{what} carries an event handler"
         );
+        // Two files, both this node's and both named: the ceremony
+        // that writes and the palette that reads (D81). The count is
+        // what makes this a test rather than a description -- a third
+        // script, from anywhere, fails here.
         assert_eq!(
             page.matches("<script").count(),
-            1,
-            "{what} pulls in more than the one file"
+            2,
+            "{what} pulls in more than the two files"
         );
         assert!(
             page.contains("src=\"/static/webauthn.js\""),
             "{what} fetches something else: {page}"
         );
+        assert!(
+            page.contains("src=\"/static/palette.js\""),
+            "{what} lost the palette: {page}"
+        );
     }
 
-    // A reader with nothing to sign gets no ceremony and no request for
-    // one: the read surface's guarantee, kept by construction.
+    // A reader with nothing to sign gets no ceremony: the read
+    // surface's guarantee, kept by construction. Since D81 the page
+    // does carry a script, so the claim is about *which* -- the palette
+    // reads and the ceremony writes, and a page with nothing to sign
+    // must not be handed the one that signs.
     let listing = body("alice:a", "/r/agents/demo/reviews");
     assert!(
-        !listing.contains("<script"),
-        "a read page fetched script: {listing}"
+        !listing.contains("/static/webauthn.js"),
+        "a read page fetched the ceremony: {listing}"
+    );
+    assert_eq!(
+        listing.matches("<script").count(),
+        1,
+        "a read page fetched a script that is not the palette: {listing}"
     );
 
     // The file itself: typed as JavaScript, since under `script-src

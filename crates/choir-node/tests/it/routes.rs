@@ -78,6 +78,7 @@ const TABLE: &[Row] = &[
     ("/robots.txt",           "/robots.txt",                       200, 200, 200),
     ("/static/card.png",      "/static/card.png",                  200, 200, 200),
     ("/static/webauthn.js",   "/static/webauthn.js",               200, 200, 200),
+    ("/static/palette.js",    "/static/palette.js",                200, 200, 200),
     // The browse surface (D30).
     ("/r/",                   "/r/",                               401, 200, 200),
     ("/r/{}/{}",              "/r/agents/one",                     401, 200, 200),
@@ -130,6 +131,10 @@ const UNLINKED: &[(&str, &str)] = &[
     (
         "/static/webauthn.js",
         "a `<script src>`, which is not an `href`",
+    ),
+    (
+        "/static/palette.js",
+        "a `<script src>` too, on every page rather than two (D81)",
     ),
     (
         "/llms.txt",

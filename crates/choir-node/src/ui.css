@@ -1731,6 +1731,87 @@ ol.thread .body{margin:var(--sp-0);white-space:pre-wrap;
    and a row of dashes reads as content. */
 .side pre .row.gap{background:var(--hairline)}
 
+/* ------------------------------------------------------------------
+   THE COMMAND PALETTE (D81)
+   A dialog the chrome's own search box opens, over a scrim. Nothing
+   below styles a state the server can render: this whole section is
+   dead CSS on a page whose script did not load, which is the shape the
+   decision asks for.
+   ------------------------------------------------------------------ */
+/* The key, drawn into the box the server rendered. Added by the script,
+   so it appears only where the shortcut actually works -- a legend for a
+   key that does nothing is worse than no legend. */
+.omni-key{flex:none;font-family:var(--font-mono);font-size:var(--fs-100);
+  color:var(--faint);background:var(--raise);border:var(--border-hair);
+  border-radius:var(--r-xs);padding:var(--sp-0) var(--sp-1);
+  letter-spacing:var(--tr-body)}
+dialog.palette{margin:auto;padding:var(--sp-0);max-width:var(--palette);
+  max-height:70vh;inline-size:calc(100% - var(--sp-8));
+  display:flex;flex-direction:column;overflow:hidden;
+  color:var(--ink);background:var(--card-wash);
+  border:var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-3)}
+dialog.palette::backdrop{background:var(--scrim)}
+dialog.palette[open]{animation:pop var(--dur-4) var(--ease-emphatic) both}
+dialog.palette[open]::backdrop{animation:fade var(--dur-3) var(--ease-out) both}
+/* Not a spring library: three stops on the sheet's own emphatic curve,
+   which overshoots by a hair and settles. The one place this surface
+   animates scale at all, because a dialog that fades without moving
+   reads as a screenshot rather than as something that opened. */
+@keyframes pop{
+  from{opacity:0;transform:translateY(calc(var(--sp-2) * -1)) scale(.97)}
+  to{opacity:1;transform:none}}
+.palette-head{display:flex;align-items:center;gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-4);border-bottom:var(--border)}
+/* Overrides the surface's field styling wholesale: inside the dialog the
+   input *is* the frame, so a second border around it draws a box in a
+   box. */
+input.palette-q{flex:1 1 auto;min-width:0;max-width:none;
+  font:inherit;font-size:var(--fs-600);color:var(--strong);
+  background:none;border:var(--bw-0);border-radius:var(--r-xs);
+  padding:var(--sp-1) var(--sp-0)}
+input.palette-q:hover{border-color:transparent}
+input.palette-q::placeholder{color:var(--faint)}
+input.palette-q::-webkit-search-cancel-button{display:none}
+.palette-scopes{display:flex;flex:none;gap:var(--sp-1)}
+button.palette-scope{font:inherit;font-size:var(--fs-200);color:var(--faint);
+  background:none;border:var(--bw-0);border-radius:var(--r-pill);
+  padding:var(--sp-1) var(--sp-3);cursor:pointer;
+  transition:color var(--dur-1) var(--ease-out),
+             background-color var(--dur-1) var(--ease-out)}
+button.palette-scope:hover{color:var(--ink);background:var(--raise)}
+button.palette-scope.here{color:var(--accent-ink);background:var(--accent-tint)}
+ul.palette-list{list-style:none;margin:var(--sp-0);padding:var(--sp-2);
+  overflow-y:auto;display:flex;flex-direction:column;gap:var(--sp-1)}
+li.palette-row{border-radius:var(--r-sm)}
+li.palette-row a{display:flex;flex-direction:column;gap:var(--sp-1);
+  padding:var(--sp-2) var(--sp-3);color:var(--ink);text-decoration:none;
+  min-width:0;border-radius:var(--r-sm)}
+li.palette-row .what{font-size:var(--fs-400);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+li.palette-row .where{font-family:var(--font-mono);font-size:var(--fs-200);
+  color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* One highlight, moved rather than repainted: the row a reader is on is
+   the only one carrying the wash, and the accent tick at its leading
+   edge is the same tick `.note` uses, so "this one" means the same
+   thing here as everywhere else on the surface. */
+li.palette-row.here{background:var(--accent-tint);
+  box-shadow:inset var(--bw-rule) 0 0 var(--accent)}
+li.palette-row.here .what{color:var(--accent-ink)}
+li.palette-note{padding:var(--sp-4) var(--sp-3);color:var(--faint);
+  font-size:var(--fs-300)}
+li.palette-more a{color:var(--accent-ink);font-size:var(--fs-300)}
+.palette-foot{margin:var(--sp-0);padding:var(--sp-2) var(--sp-4);
+  border-top:var(--border);color:var(--faint);font-size:var(--fs-100);
+  letter-spacing:var(--tr-body)}
+/* Waiting, drawn as the shape of the answer rather than as a spinner: a
+   row-height block where a row is about to be. Three of them, because
+   the palette asks for eight and pretending to know how many are coming
+   is the part that reads as a lie. */
+.skeleton{min-height:var(--sp-10);border-radius:var(--r-sm);
+  background:linear-gradient(90deg,var(--raise),var(--sunken),var(--raise));
+  background-size:200% 100%;animation:shimmer var(--dur-6) var(--ease-linear) infinite}
+@keyframes shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+
 /* A disclosure that opens rather than jumps. `::details-content` is the
    box a browser already wraps everything after the `<summary>` in, and
    `interpolate-size` is what makes `auto` an end a length can be

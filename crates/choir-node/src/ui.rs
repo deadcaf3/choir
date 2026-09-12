@@ -309,6 +309,7 @@ fn render(json: &str, seq: u64, roster: &Roster, chrome: crate::browse::Chrome<'
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir</title>");
     h.push_str(STYLE);
+    h.push_str(PALETTE_SCRIPT);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     // The same fixed bar the browse pages carry. This page is about the
@@ -936,6 +937,7 @@ pub(crate) fn refusal(
     h.push_str(&esc(headline));
     h.push_str("</title>");
     h.push_str(STYLE);
+    h.push_str(PALETTE_SCRIPT);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     // Even here. A refusal is where a reader is most lost, and the box
@@ -1199,6 +1201,43 @@ pub(crate) const WEBAUTHN_JS: &str = include_str!("webauthn.js");
 /// sits.
 pub(crate) const CEREMONY_SCRIPT: &str = "<script src=\"/static/webauthn.js\" defer></script>";
 
+/// The URL the command palette is served from. One constant for the
+/// same reason [`WEBAUTHN_JS_PATH`] is: the route, the tag and the
+/// tests all have to name one string.
+pub(crate) const PALETTE_JS_PATH: &str = "/static/palette.js";
+
+/// The command palette: the browser surface's second script, and the
+/// second narrowing of D28's no-JavaScript rule.
+///
+/// **What makes this narrow is what it may not do.** D39's reversal
+/// bought a capability an HTML form does not have -- producing a
+/// signature. This one buys no capability at all: every row it draws is
+/// a link `/search/` already draws, it reads [`crate::browse::api_search`]
+/// and nothing else, it writes nothing, and `Enter` on an empty list is
+/// the form submission that would have happened anyway. The test for it
+/// is the one D39 wrote for itself: turn scripting off and the page is
+/// not worse than before this file existed -- the box in the bar
+/// submits, and the search page renders the same results one navigation
+/// later.
+///
+/// **It ships on every page because the box does.** The alternative was
+/// a key that works on some pages, which is worse than no key: a reader
+/// learns a shortcut once and then meets the page that forgot it. That
+/// is the cost, stated plainly -- the read surface now carries one
+/// same-origin script everywhere rather than on two pages, and
+/// [`crate::BROWSER_CSP`] says so rather than a comment claiming
+/// otherwise.
+pub(crate) const PALETTE_JS: &str = include_str!("palette.js");
+
+/// The element that pulls [`PALETTE_JS`] in, on every page [`crate::browse::shell`]
+/// builds.
+///
+/// `defer` for the reason the ceremony script defers, and here it is
+/// load-bearing twice over: the palette reads the search form out of the
+/// document at startup, so running before the parser reached it would
+/// mean finding nothing and returning.
+pub(crate) const PALETTE_SCRIPT: &str = "<script src=\"/static/palette.js\" defer></script>";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1387,13 +1426,28 @@ mod tests {
         for probe in ["http://", "https://", "//cdn", "@import"] {
             assert!(!page.contains(probe), "page reaches out via {probe}");
         }
-        assert!(
-            !page.contains("<script"),
-            "the D28 read surface gained script; D39's reversal was scoped to the review page"
+        // D81 put one script on every page. The claim this test makes
+        // is therefore no longer "none" but "that one and nothing
+        // else", which is the claim worth keeping: the number that
+        // matters is not zero, it is whether a page can be made to
+        // fetch something this repository did not write.
+        assert_eq!(
+            page.matches("<script").count(),
+            1,
+            "this page carries a script that is not the palette, or lost the palette"
         );
         assert!(
-            !page.contains("src="),
+            page.contains(PALETTE_SCRIPT),
+            "the one script here must be the palette, byte for byte"
+        );
+        assert_eq!(
+            page.matches("src=").count(),
+            1,
             "a fetched resource is a fetched resource whether or not it is script"
+        );
+        assert!(
+            page.contains(&format!("src=\"{PALETTE_JS_PATH}\"")),
+            "the one fetch is not the one this node serves"
         );
     }
 
@@ -1435,6 +1489,79 @@ mod tests {
         assert!(
             CEREMONY_SCRIPT.contains(" defer"),
             "the ceremonies run before the DOM exists"
+        );
+    }
+
+    /// D81's scope, held to D39's terms: one same-origin file, no
+    /// library, no build step, no third party, and one endpoint.
+    ///
+    /// The `innerHTML` probe is the one that is not a copy of the
+    /// ceremony's list. This file renders repository paths and source
+    /// lines, which on a node serving somebody else's push are
+    /// attacker-supplied by definition, and the escaping the rest of
+    /// this crate does in Rust does not reach a string the browser
+    /// assembles. `textContent` is the whole defence, and "there is no
+    /// `innerHTML` in the file" is a property a reader can check by
+    /// searching rather than by following every branch -- so it is
+    /// asserted rather than described.
+    #[test]
+    fn the_palette_is_one_same_origin_file_that_only_reads() {
+        for probe in [
+            "http://",
+            "https://",
+            "//cdn",
+            "@import",
+            "import ",
+            "require(",
+            "innerHTML",
+        ] {
+            assert!(
+                !PALETTE_JS.contains(probe),
+                "the palette reaches out via {probe}"
+            );
+        }
+        assert!(
+            PALETTE_JS.contains("\"/api/search?q=\""),
+            "the palette reads some endpoint other than D62's search"
+        );
+        // A read surface's script must not be able to write. `fetch`
+        // sends GET unless an init object names another verb, so the
+        // property is exactly "this file never says `method`" -- one
+        // probe, on the only mechanism, failing on the line that would
+        // introduce a write.
+        //
+        // The obvious version of this probed for `PUT` and `DELETE` as
+        // words, and `PUT` is inside `INPUT`: the tag name this file
+        // tests against to decide whether `/` is being typed into a
+        // field. A probe that matches the substring of an unrelated
+        // identifier is a probe that will be deleted the first time it
+        // fires, which is worse than not having it.
+        assert!(
+            !PALETTE_JS.contains("method"),
+            "the palette names a request method, and D81 licenses reads only"
+        );
+        assert!(
+            !PALETTE_JS.contains("<script"),
+            "a script file carrying markup"
+        );
+        // Nothing is interpolated into it, which is what lets one
+        // response serve every reader and be cached once.
+        assert!(!PALETTE_JS.contains("{}"));
+        assert!(
+            PALETTE_SCRIPT.contains(PALETTE_JS_PATH),
+            "the tag points somewhere the node does not serve: {PALETTE_SCRIPT}"
+        );
+        assert!(
+            PALETTE_SCRIPT.contains(" defer"),
+            "the palette reads the search form, so it must run after the parser reaches it"
+        );
+        // The contract that makes this a two-way door: with the script
+        // gone the page is unchanged, so every element it needs it
+        // creates, and the only thing it reads out of the document is
+        // the form the server renders regardless.
+        assert!(
+            PALETTE_JS.contains("form.omni"),
+            "the palette no longer enhances the box the server draws"
         );
     }
 
@@ -1617,16 +1744,20 @@ mod tests {
     /// would narrow this one silently at the same moment. Two lists means
     /// two decisions.
     ///
-    /// **The decision, taken rather than deferred:** this list stays
-    /// strict, `<script` included, where D39 scoped its reversal to the
-    /// review page. A refusal page is a dead end by construction — its
-    /// entire content is what happened and the one action that changes
-    /// it, and there is no interaction on it to progressively enhance.
-    /// So the probe list here is the rule for this surface rather than a
-    /// lagging copy of another surface's. If a later change wants script
-    /// on a refusal page, this test failing is the point: the question is
-    /// worth asking then, and answering it by matching the other list is
-    /// how a rule turns into a habit.
+    /// **The decision, re-taken.** This list held `<script` while D39's
+    /// reversal was scoped to the review page, on the grounds that a
+    /// refusal is a dead end with no interaction to enhance. That
+    /// grounds was right about the body of the page and wrong about its
+    /// bar: a refusal draws the same fixed search box every other page
+    /// draws, precisely because a reader who has just been refused is
+    /// the one most in need of it. D81's key therefore belongs here too,
+    /// and withholding it would make the refusal page the one page where
+    /// a learned shortcut silently does nothing.
+    ///
+    /// So the list narrows by exactly one entry and no more, and the
+    /// assertion under it is the replacement rule: one script, the
+    /// palette, byte for byte. If a later change wants a *second* script
+    /// on a refusal page, this test failing is still the point.
     #[test]
     fn a_refusal_page_references_no_external_resource() {
         let page = refusal(
@@ -1643,9 +1774,18 @@ mod tests {
             crate::browse::Chrome::default(),
         );
         let page = without_the_svg_namespace(&page);
-        for probe in ["http://", "https://", "//cdn", "<script", "@import"] {
+        for probe in ["http://", "https://", "//cdn", "@import"] {
             assert!(!page.contains(probe), "a refusal reaches out via {probe}");
         }
+        assert_eq!(
+            page.matches("<script").count(),
+            1,
+            "a refusal carries a script that is not the palette, or lost the palette"
+        );
+        assert!(
+            page.contains(PALETTE_SCRIPT),
+            "the one script on a refusal must be the palette, byte for byte"
+        );
     }
 
     /// Every token the component block references must be one the

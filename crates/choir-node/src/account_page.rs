@@ -59,6 +59,11 @@ fn open_page(h: &mut String, user: &str, console: bool, chrome: crate::browse::C
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     h.push_str("<title>choir: your account</title>");
     h.push_str(crate::ui::STYLE);
+    // This page draws the bar below, so it takes the key (D81). The
+    // ceremony script arrives separately, further down the document and
+    // only where there is a ceremony to run; this one is unconditional
+    // for the same reason the bar is.
+    h.push_str(crate::ui::PALETTE_SCRIPT);
     h.push_str("</head><body>");
     h.push_str("<a class=\"skip\" href=\"#main\">Skip to content</a>");
     // The same fixed bar every other page carries. Without it this page
@@ -375,6 +380,20 @@ mod tests {
         );
         assert_eq!(page.status, 200);
         assert!(page.html.contains("does not run account self-service"));
-        assert!(!page.html.contains("<script"), "no store, no ceremony");
+        // The palette is unconditional on this page (D81) and the
+        // ceremony is not, so the claim is about which script is here
+        // rather than how many. A node with no store has nothing to
+        // enrol against, and a page that loaded the ceremony anyway
+        // would render a button that cannot work.
+        assert!(
+            !page.html.contains("/static/webauthn.js"),
+            "no store, no ceremony"
+        );
+        assert_eq!(
+            page.html.matches("<script").count(),
+            1,
+            "the one script here must be the palette: {}",
+            page.html
+        );
     }
 }
