@@ -6,7 +6,8 @@ against a choir node, both sides running their whole script at once.
 
     --plain         no colour, no live rows: for a pipe or a file
     --port N        the node's loopback port (default 8447, or the next free one)
-    --agents N      how many agents (default 20, at least 12)
+    --agents N      how many agents (default 20, at least 18)
+    --overlap K     how many agents rewrite the greeting line (default 2)
     --ci-seconds S  how long the repo's test.sh takes (default 3): the cost
                     model of beat 2 is the maintainer paying it once per
                     merge in series, and the round paying it once
@@ -30,6 +31,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -150,6 +152,7 @@ class Env:
         self.bin = Path(bin_dir)
         self.port = port
         self.ci_seconds = ci_seconds
+        self.overlap = 2
         self.api = f"http://127.0.0.1:{port}"
         self.url = f"{self.api}/{REPO}"
         self.agents = agents
@@ -460,38 +463,87 @@ def free_port(first):
 
 
 def seed_tree(path, agents, ci_seconds=0.0):
-    (path / "config.toml").write_text('greeting = "hello"\n')
+    """The repository both columns start from: a config, one file per
+    service, and the tests. Three tests, each a line of shell, so the
+    take can show a textual conflict (greeting), a real dependency
+    (farewell) and a semantic conflict (ports) with nothing hidden."""
+    (path / "config.toml").write_text(
+        'greeting = "hello"\n\n[service]\nname = "app"\nport = 8080\n\n[features]\nfarewell = false\n'
+    )
     test = path / "test.sh"
     test.write_text(
-        "#!/bin/sh\n# the repo's own test: the greeting must be a quoted word.\n"
-        f"# It takes {ci_seconds:g} s, the way a real suite takes minutes.\n"
+        "#!/bin/sh\n"
+        f"# the repo's tests. They take {ci_seconds:g} s, the way a real suite takes minutes.\n"
         f"sleep {ci_seconds:g}\n"
-        "grep -q '^greeting = \"[a-z]*\"$' config.toml\n"
+        "fail=0\n"
+        "# 1. the greeting is one quoted word, and the file carries no conflict marker\n"
+        "grep -q '^<<<<<<<' config.toml && { echo 'conflict: config.toml carries markers'; fail=1; }\n"
+        "grep -q '^greeting = \"[a-z]*\"$' config.toml || { echo 'greeting: not a quoted word'; fail=1; }\n"
+        "# 2. a service that says farewell needs the feature switched on\n"
+        "if grep -q '^farewell = true' svc/*.toml; then\n"
+        "  grep -q '^farewell = true' config.toml || { echo 'farewell: a service uses it, config has it off'; fail=1; }\n"
+        "fi\n"
+        "# 3. two enabled services cannot share a port\n"
+        "ports=$(for f in svc/*.toml; do grep -q '^enabled = true' \"$f\" && sed -n 's/^port = //p' \"$f\"; done | sort)\n"
+        "dup=$(printf '%s\\n' \"$ports\" | uniq -d)\n"
+        "[ -z \"$dup\" ] || { echo \"port $dup: two enabled services\"; fail=1; }\n"
+        "exit $fail\n"
     )
     test.chmod(0o755)
     (path / "svc").mkdir()
     for name in agents:
-        (path / "svc" / f"{name}.toml").write_text("enabled = false\n")
+        (path / "svc" / f"{name}.toml").write_text(f"enabled = false\nport = {port_of(name)}\n")
 
 
-def agent_change(wt, name):
-    """What agent <name> does in its worktree. 03 and 07 also touch THE line."""
-    (wt / "svc" / f"{name}.toml").write_text("enabled = true\n")
-    files = f"svc/{name}.toml"
-    if name.endswith("-03"):
-        (wt / "config.toml").write_text('greeting = "hola"\n')
-        files += ", config.toml"
-    if name.endswith("-07"):
-        (wt / "config.toml").write_text('greeting = "bonjour"\n')
+def port_of(name):
+    return 9000 + int(name.rsplit("-", 1)[-1])
+
+
+GREETINGS = ["hola", "bonjour", "ciao", "hallo", "hej", "salut", "servus", "aloha", "namaste",
+             "salve", "ahoj", "hei", "moi", "oi", "yo"]
+# The agents that touch the greeting line, in the order --overlap takes
+# them: 03 and 07 always (beat 3 turns on 07), then more. 05, 09, 12, 15
+# and 18 are kept out: beats 3 and 5 and the port clash need them clean.
+OVERLAP_ORDER = [3, 7, 11, 14, 17, 20, 2, 6, 10, 13, 16, 19, 1, 4, 8]
+PORT_CLASH = ("agent-18", "agent-15")  # 18 takes 15's port: clean merge, red together
+
+
+def overlap_agents(env):
+    picks = [n for n in OVERLAP_ORDER if n <= env.agents][: env.overlap]
+    return [f"agent-{n:02d}" for n in picks]
+
+
+def agent_change(wt, name, env):
+    """What agent <name> does in its worktree. Returns the files touched.
+
+    Everyone enables its service. The overlap agents also rewrite THE
+    greeting line, each to a different word; 07 also switches the
+    farewell feature on, which is what agent-12 will need in beat 3.
+    agent-18 takes agent-15's port: a change that merges cleanly and
+    fails the tests only next to 15's."""
+    overlap = overlap_agents(env)
+    port = port_of(PORT_CLASH[1]) if name == PORT_CLASH[0] else port_of(name)
+    (wt / "svc" / f"{name}.toml").write_text(f"enabled = true\nport = {port}\n")
+    files = f"svc/{name}.toml" + (f" (port {port}, same as {PORT_CLASH[1]})" if name == PORT_CLASH[0] else "")
+    if name in overlap:
+        cfg = wt / "config.toml"
+        text = cfg.read_text().replace('greeting = "hello"', f'greeting = "{GREETINGS[overlap.index(name)]}"', 1)
+        if name == "agent-07":
+            text = text.replace("farewell = false", "farewell = true", 1)
+        cfg.write_text(text)
         files += ", config.toml"
     return files
 
 
 def run_ci(runner, cwd, env):
     """The maintainer's CI step: a shell runs the runner, so a runner that
-    cannot start is exit 126, the way any CI script would see it."""
-    return subprocess.run(["/bin/sh", "-c", f'exec "{runner}"'], cwd=cwd, env=env.git_env,
-                          capture_output=True, check=False, timeout=STEP_TIMEOUT).returncode
+    cannot start is exit 126, the way any CI script would see it.
+    Returns (exit code, the tests' one-line reason)."""
+    p = subprocess.run(["/bin/sh", "-c", f'exec "{runner}"'], cwd=cwd, env=env.git_env,
+                       capture_output=True, text=True, check=False, timeout=STEP_TIMEOUT)
+    if p.returncode == 126:
+        return 126, "exit 126: could not run ci/run-tests"
+    return p.returncode, "; ".join(p.stdout.strip().splitlines())
 
 
 def round_names(env):
@@ -560,32 +612,39 @@ def parallel(fns, on_error=None):
 
 # ---- narration, one voice per column ----------------------------------------
 LEFT_NARRATION = {
-    0: "a bare repo, fast-forward only. The same seed, test.sh and agents as the other column.",
-    1: "each agent enables its service on its own branch; 03 and 07 also change the greeting line. Nobody rejects a push: isolation is free.",
-    2: "the maintainer merges in order and runs the tests after each merge. Watch agent-07.",
-    3: "agent-12 needs agent-07's change, and can only get it by taking on 07's conflict.",
+    0: "a bare repo, fast-forward only. The same seed, tests and agents as the other column.",
+    1: "each agent enables its service on its own branch. The overlap agents also rewrite the greeting line; 18 takes 15's port. Nobody rejects a push: isolation is free.",
+    2: "a batch queue, the way bors does it: merge everything pending in order, test once, and on red bisect for the culprit. Watch 07 and 18.",
+    3: "agent-12's change needs the farewell feature, which only agent-07's branch switches on.",
     4: "what this side can prove afterwards: a commit graph, which is honest and good.",
-    5: "two more branches: 05 breaks the test, 09 adds a note. Then the CI runner loses its exec bit. Who gets blamed, and what happens once it is back.",
+    5: "two more branches: 05 breaks the greeting test, 09 adds a note; 18 is back with a free port. Then the CI runner loses its exec bit. Who gets blamed, and what happens once it is back.",
 }
 RIGHT_NARRATION = {
-    0: "a choir node. The same seed, test.sh and agents as the other column.",
-    1: "each agent enables its service on its own branch, proposed as refs/for/main/<agent>/enable. Nobody rejects a push here either.",
-    2: "one queue round. Watch agent-07, and what happens to 08 to 20 behind it.",
-    3: "07 lands the conflict on main as-is, the node reads it three-sided, 12 builds on top, 07 resolves later.",
+    0: "a choir node. The same seed, tests and agents as the other column.",
+    1: "each agent enables its service on its own branch, proposed as refs/for/main/<agent>/enable. The same overlap, the same port clash. Nobody rejects a push here either.",
+    2: "one queue round: a speculative train, every candidate tested on top of the ones before it, all at once. Watch 07 and 18.",
+    3: "07 lands the conflict on main as-is, the node reads it three-sided, 12 builds on top of it, 07 resolves later.",
     4: "what this side can prove afterwards: every landing, check verdict and ref move as one signed hash chain, verified offline with the node's public key.",
-    5: "the same two branches and the same broken runner. Errored is a statement about the runner; Failed is a statement about the change.",
+    5: "the same three proposals and the same broken runner. Errored is a statement about the runner; Failed is a statement about the change.",
 }
 
 
 # ---- the left column: git alone ----------------------------------------------
 def left_script(ui):
     env, L = ui.env, ui.left
+    runner = env.left / "ci" / "run-tests"
+    m = env.left / "maintainer"
 
     # beat 0
     L.beat(0, "one remote, one base")
     L.cmd(["git", "init", "-q", "--bare", "origin.git"], cwd=env.left, label="left ")
-    L.cmd(["git", "-C", "origin.git", "config", "receive.denyNonFastForwards", "true"], cwd=env.left, label="left ")
-    L.note("  every push is a compare-and-swap; nobody can overwrite anybody")
+    hook = env.left / "origin.git" / "hooks" / "update"
+    hook.write_text("#!/bin/sh\n# main is protected: fast-forward only, the way a branch rule does it\n"
+                    "[ \"$1\" = refs/heads/main ] || exit 0\n"
+                    "git merge-base --is-ancestor \"$2\" \"$3\" || { echo 'main: not a fast-forward' >&2; exit 1; }\n")
+    hook.chmod(0o755)
+    L.put("left $ install origin.git/hooks/update   # main: fast-forward only, like a branch rule", PROMPT)
+    L.note("  every push is a compare-and-swap on its ref; nobody can overwrite anybody's branch, and main only moves forward")
     seed_side(ui, L, env.left, str(env.left / "origin.git"))
 
     # beat 1
@@ -594,43 +653,33 @@ def left_script(ui):
     push_all(ui, L, env.left, lambda n: n)
 
     # beat 2
-    L.beat(2, f"integration: {env.agents} branches become one main")
-    m = env.left / "maintainer"
+    L.beat(2, f"integration: {env.agents} branches, one batch")
     env.git(env.left, "clone", "-q", str(env.left / "origin.git"), "maintainer")
-    L.put(f"maintainer $ for b in agent-01..{env.agents:02d}: git merge --no-ff origin/$b && ci/run-tests || skip", PROMPT)
+    L.put("maintainer $ merge all pending branches in order; ci/run-tests once; on red, bisect; push main", PROMPT)
     t0 = time.monotonic()
-    merged, blocked, ci = [], [], 0
-    env.git(m, "fetch", "-q", "origin")
-    for name in env.names():
-        t1 = time.monotonic()
-        L.set_status(f"merged {len(merged)}  blocked {len(blocked)}  ci runs {ci}  now: {name}", timed=True, keep_clock=bool(name != env.names()[0]))
-        p = env.git(m, "merge", "-q", "--no-ff", "-m", f"merge {name}", f"origin/{name}", check=False)
-        if p.returncode != 0:
-            conflict = [l.split(" in ", 1)[-1] for l in p.stdout.splitlines() if l.startswith("CONFLICT")]
-            env.git(m, "merge", "--abort")
-            blocked.append(name)
-            L.bad(f"  merge {name}  CONFLICT {', '.join(conflict)}  → skipped; author paged, branch waits")
-            continue
-        ci += 1
-        rc = run_ci(env.left / "ci" / "run-tests", m, env)
-        if rc == 0:
-            merged.append(name)
-            L.put(f"  merge {name}  ✓ tests ✓  {ms(t1)}", OK)
-        else:
-            env.git(m, "reset", "-q", "--hard", "HEAD~1")
-            blocked.append(name)
-            L.bad(f"  merge {name}  tests ✗ (exit {rc})  → reverted; author paged")
-    env.git(m, "push", "-q", "origin", "main")
-    L.set_status("")
-    L.put(f"  {len(merged)} merged, {len(blocked)} blocked, {ci} CI runs one after another, {ms(t0)}", NOTE)
-    L.note(f"  the cost: {ci} merges x {env.ci_seconds:g} s of tests, in series, plus a merge each")
+    res = batch_land(ui, L, m, runner, [(n, f"origin/{n}") for n in env.names()])
+    L.put(f"  {len(res['merged'])} merged, {len(res['blocked'])} blocked, {len(res['evicted'])} evicted, "
+          f"{res['tests']} test runs one after another, {ms(t0)}", NOTE)
+    if res["tests"] > 1:
+        L.note(f"  the cost: {res['tests']} x {env.ci_seconds:g} s of tests in series: one for the batch, "
+               f"{res['tests'] - 2} to find the culprit, one to land the rest")
+    else:
+        L.note(f"  the cost: one test run of {env.ci_seconds:g} s for the whole batch, plus a merge each")
     L.note("  agent-07's work is on a branch nobody else can see on main until its author comes back")
+    fix_port(ui, L, env.left, lambda n: n)
+    storm_left(ui, L, m, runner)
 
     # beat 3
     L.beat(3, "the conflict: a branch that waits")
     wt = env.left / "wt" / "agent-12"
     env.git(wt, "fetch", "-q", "origin")
-    env.git(wt, "merge", "-q", "origin/main", check=False)
+    env.git(wt, "merge", "-q", "origin/main")
+    (wt / "svc" / "agent-12.toml").write_text(f"enabled = true\nport = {port_of('agent-12')}\nfarewell = true\n")
+    env.git(wt, "commit", "-q", "-am", "agent-12: farewell")
+    L.put("agent-12 $ echo 'farewell = true' >> svc/agent-12.toml && git commit -qam farewell && ./test.sh", PROMPT)
+    rc, why = run_ci(runner, wt, env)
+    L.bad(f"  tests ✗  {why}")
+    L.note("  the feature is on in exactly one place: agent-07's branch, the one the batch skipped")
     rc, _ = L.cmd(["git", "merge", "origin/agent-07"], cwd=wt, quiet=True)
     L.bad("  CONFLICT (content): Merge conflict in config.toml" if rc else "  merged")
     L.cmd(["git", "merge", "--abort"], cwd=wt)
@@ -641,40 +690,146 @@ def left_script(ui):
     L.beat(4, "what this side can prove")
     L.cmd(["git", "log", "--oneline", "-3", "main"], cwd=m)
     L.note("  proof of order: parent pointers. signatures on merges: none configured. CI verdicts: not recorded.")
-    L.note("  who merged what, in what order, and what the tests said lives in the maintainer's terminal history")
+    L.note("  a forge adds a database of check runs and an audit log; you trust the forge for both")
 
     # beat 5
     L.beat(5, "a broken test runner is not a failing test")
     second_branches(ui, env.left, lambda n: f"HEAD:{n}-2")
-    runner = env.left / "ci" / "run-tests"
+    pending = [("agent-05", "origin/agent-05-2"), ("agent-09", "origin/agent-09-2")]
+    if env.overlap == 2:  # otherwise 18, port fixed, went in with the rebased authors
+        pending.append(("agent-18", "origin/agent-18"))
 
-    def merge_two(broken):
-        env.git(m, "fetch", "-q", "origin")
-        for name in ("agent-05", "agent-09"):
-            L.set_status(f"merge {name}, then ci/run-tests", timed=True)
-            env.git(m, "merge", "-q", "--no-ff", "-m", f"merge {name}", f"origin/{name}-2", check=False)
-            rc = run_ci(runner, m, env)
-            if rc == 0:
-                L.put(f"  merge {name}  ✓ tests ✓", OK)
-            else:
-                env.git(m, "reset", "-q", "--hard", "HEAD~1")
-                L.bad(f"  merge {name}  tests ✗ (exit {rc})  → reverted; author paged")
-        L.set_status("")
+    def batch(broken):
+        L.put("maintainer $ merge pending in order; ci/run-tests; on red, bisect", PROMPT)
+        res = batch_land(ui, L, m, runner, pending)
         if broken:
-            L.note("  exit 126 is 'could not run', but red is red to a script: both authors paged for a runner they do not own")
+            L.note(f"  exit 126 is 'could not run', but red is red to a queue: {len(res['evicted'])} authors paged "
+                   f"for a runner they do not own, {res['tests']} test runs spent on it")
 
     L.put(f"$ chmod -x {typed([runner], env.run)}", PROMPT)
     runner.chmod(0o644)
-    merge_two(True)
+    batch(True)
     L.put(f"$ chmod +x {typed([runner], env.run)}   # the runner is back", PROMPT)
     runner.chmod(0o755)
-    merge_two(False)
+    batch(False)
     L.done = time.monotonic()
+
+
+def batch_land(ui, L, m, runner, items):
+    """A batch queue on plain git. `items` are (label, ref) in queue order.
+
+    Merge every item onto main in order, skipping the ones that
+    conflict; test the batch once; on red, bisect for the first item
+    whose prefix fails, evict it, and test the rest again. Pushes main
+    when green. This is bors; GitHub's queue is a train like choir's."""
+    env = ui.env
+    env.git(m, "fetch", "-q", "origin")
+    env.git(m, "checkout", "-q", "main")
+    env.git(m, "reset", "-q", "--hard", "origin/main")
+    base = env.git(m, "rev-parse", "HEAD").stdout.strip()
+    blocked, evicted, tests = [], [], 0
+
+    def build(batch):
+        env.git(m, "reset", "-q", "--hard", base)
+        for label, ref in batch:
+            p = env.git(m, "merge", "-q", "--no-ff", "-m", f"merge {label}", ref, check=False)
+            if p.returncode != 0:
+                env.git(m, "merge", "--abort")
+                raise RuntimeError(f"{label} conflicted inside a batch that was clean before")
+
+    # first pass: who merges at all
+    cands = []
+    env.git(m, "reset", "-q", "--hard", base)
+    for label, ref in items:
+        p = env.git(m, "merge", "-q", "--no-ff", "-m", f"merge {label}", ref, check=False)
+        if p.returncode != 0:
+            conflict = [l.split(" in ", 1)[-1] for l in p.stdout.splitlines() if l.startswith("CONFLICT")]
+            env.git(m, "merge", "--abort")
+            blocked.append(label)
+            L.bad(f"  skip {label}  CONFLICT {', '.join(conflict)}  → author paged, branch waits")
+        else:
+            cands.append((label, ref))
+    L.put(f"  batch: {compact([l for l, _ in cands]) or '-'}  ({len(cands)})")
+
+    def test(batch, what):
+        nonlocal tests
+        tests += 1
+        L.set_status(f"test run {tests}: {what}", timed=True)
+        rc, why = run_ci(runner, m, env)
+        L.set_status("")
+        return rc, why
+
+    while cands:
+        rc, why = test(cands, f"the batch of {len(cands)}")
+        if rc == 0:
+            L.put(f"  test run {tests} on {len(cands)}  ✓  → main", OK)
+            break
+        L.bad(f"  test run {tests} on {len(cands)}  ✗  {why}")
+        # bisect: the smallest prefix that fails names the culprit
+        lo, hi = 1, len(cands)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            build(cands[:mid])
+            rc, why = test(cands[:mid], f"bisecting, prefix of {mid}")
+            L.put(f"  test run {tests} on {mid}  {'✓' if rc == 0 else '✗'}", OK if rc == 0 else BAD)
+            if rc == 0:
+                lo = mid + 1
+            else:
+                hi = mid
+        culprit = cands[lo - 1][0]
+        evicted.append(culprit)
+        L.bad(f"  evict {culprit}  tests ✗  → author paged")
+        cands = cands[: lo - 1] + cands[lo:]
+        build(cands)
+    if cands:
+        env.git(m, "push", "-q", "origin", "main")
+    else:
+        env.git(m, "reset", "-q", "--hard", base)
+    return {"merged": [l for l, _ in cands], "blocked": blocked, "evicted": evicted, "tests": tests}
+
+
+def storm_left(ui, L, m, runner):
+    """--overlap beyond 2: the other greeting authors rebase onto main,
+    keep main's greeting, push again, and the next batch takes them."""
+    env = ui.env
+    extras = [n for n in overlap_agents(env) if n not in ("agent-03", "agent-07")]
+    if not extras:
+        return
+    L.say(f"{len(extras)} more authors rewrote the greeting line and were skipped, paged, and now rebase: each keeps main's word and pushes again.")
+    t0 = time.monotonic()
+    for name in extras:
+        rebase_by_hand(ui, L, env.left / "wt" / name, name, lambda n: n)
+    L.put("maintainer $ merge pending in order; ci/run-tests; on red, bisect", PROMPT)
+    res = batch_land(ui, L, m, runner, [(n, f"origin/{n}") for n in extras + [PORT_CLASH[0]]])
+    L.note(f"  {len(extras)} rebases by {len(extras)} paged authors, then one batch, {res['tests']} test run(s), {ms(t0)}")
+
+
+def fix_port(ui, pane, side, refspec):
+    """agent-18 picks a free port and pushes again; the next batch or
+    round takes it. Same on both sides."""
+    env = ui.env
+    name = PORT_CLASH[0]
+    wt = side / "wt" / name
+    (wt / "svc" / f"{name}.toml").write_text(f"enabled = true\nport = {port_of(name)}\n")
+    env.git(wt, "commit", "-q", "-am", f"{name}: a port of its own")
+    env.git(wt, "push", "-q", "-f", "origin", refspec(name))
+    pane.put(f"{name} $ sed -i 's/port = {port_of(PORT_CLASH[1])}/port = {port_of(name)}/' svc/{name}.toml && git commit -qam 'a port of its own' && git push -f origin {refspec(name)}", PROMPT)
+
+
+def rebase_by_hand(ui, pane, wt, name, refspec):
+    env = ui.env
+    env.git(wt, "fetch", "-q", "origin")
+    env.git(wt, "reset", "-q", "--hard", "origin/main")
+    agent_change(wt, name, env)
+    env.git(wt, "commit", "-q", "-am", f"{name}: enable (rebased on main, greeting conflict resolved by its author)")
+    env.git(wt, "push", "-q", "-f", "origin", refspec(name))
+    pane.put(f"{name} $ git rebase origin/main   # keeps main's greeting, pushes again", PROMPT)
 
 
 # ---- the right column: choir -------------------------------------------------
 def right_script(ui):
     env, R = ui.env, ui.right
+    runner = env.run / "ci" / "run-tests"
 
     # beat 0
     R.beat(0, "one node, one base")
@@ -689,17 +844,11 @@ def right_script(ui):
 
     # beat 2
     R.beat(2, f"integration: {env.agents} proposals, one round")
-    t0 = time.monotonic()
-    R.put("$ curl -X POST /api/queue/run  {repo, branch: main}", PROMPT)
-    R.set_status(f"one round: {env.agents} speculative merges, then {env.agents} test runs at once", timed=True)
-    names = round_names(env)
-    r = env.queue_run()
-    R.set_status("")
-    for line in round_lines(env, r, names):
-        R.put(line, BAD if "Conflict" in line else NORMAL)
-    R.put(f"  {len(r['merged'])} landed, {len(r['rejected'])} evicted, {env.agents} CI runs in one train, {ms(t0)}", NOTE)
-    R.note(f"  the cost: {env.ci_seconds:g} s of tests once, all {env.agents} at the same time, plus one merge per candidate")
-    R.note("  agent-07 was a verdict in the round, not a stop: evicted first-class, 08 to 20 landed behind it")
+    r = one_round(ui, R, f"one round: {env.agents} speculative merges, every candidate tested at once")
+    R.note(f"  the cost: {env.ci_seconds:g} s of tests, {r['ci_runs']} runs side by side, plus one merge per candidate")
+    R.note("  every eviction is a verdict inside the round, with its reason, not a stop: the rest landed behind them in the same call")
+    fix_port(ui, R, env.right, lambda n: f"HEAD:refs/for/main/{n}/enable")
+    storm_right(ui, R)
 
     # beat 3
     R.beat(3, "the conflict: a value on main")
@@ -720,19 +869,28 @@ def right_script(ui):
     html = env.get_text(f"/r/{REPO[:-4]}/blob/main/config.toml")
     for line in env.shown("conflict", html):
         R.put(line, OK)
-    R.say("agent-12 pulls main, gets the conflict commit, does its own work on top, lands.")
+    R.say("agent-12 pulls main: the conflict commit, farewell switched on. Builds on it, tests, lands.")
     env.git(wt12, "pull", "--no-rebase", "-q", "origin", "main")
-    (wt12 / "svc" / "agent-12.toml").write_text("enabled = true\nreplicas = 2\n")
-    R.cmd(["git", "commit", "-q", "-am", "agent-12: replicas (on top of the unresolved conflict)"], cwd=wt12)
+    (wt12 / "svc" / "agent-12.toml").write_text(f"enabled = true\nport = {port_of('agent-12')}\nfarewell = true\n")
+    R.put("agent-12 $ echo 'farewell = true' >> svc/agent-12.toml && ./test.sh", PROMPT)
+    rc, why = run_ci(runner, wt12, env)
+    R.put(f"  tests {'✓' if rc == 0 else '✗'}  {why}".rstrip(), OK if rc == 0 else BAD)
+    R.note("  the farewell check passes: 07's feature switch is on main. The one red is 07's open conflict, and it is 07's to close, not 12's")
+    R.note("  12's work goes to main now; it does not wait on somebody else's line")
+    R.cmd(["git", "commit", "-q", "-am", "agent-12: farewell (on top of the unresolved conflict)"], cwd=wt12)
     rc, out = R.cmd(["git", "push", "origin", "HEAD:main"], cwd=wt12, quiet=True)
     for line in out.splitlines():
         if "->" in line or "rejected" in line:
             R.put("  " + line.strip(), OK if rc == 0 else BAD)
     R.say("agent-07 comes back and resolves. One more commit; the history keeps the conflict.")
     env.git(wt07, "pull", "--no-rebase", "-q", "origin", "main")
-    (wt07 / "config.toml").write_text('greeting = "hola"\n')
+    cfg = wt07 / "config.toml"
+    cfg.write_text(cfg.read_text().split("<<<<<<<")[0] + 'greeting = "hola"\n' + cfg.read_text().split(">>>>>>>", 1)[1].split("\n", 1)[1])
     R.cmd(["git", "commit", "-q", "-am", "resolve: greeting is Spanish"], cwd=wt07)
     env.git(wt07, "push", "-q", "origin", "HEAD:main")
+    R.put("agent-07 $ ./test.sh", PROMPT)
+    rc, why = run_ci(runner, wt07, env)
+    R.put(f"  tests {'✓' if rc == 0 else '✗'}  {why}".rstrip(), OK if rc == 0 else BAD)
     R.cmd(["git", "log", "--oneline", "-4", "origin/main"], cwd=wt07)
 
     # beat 4
@@ -748,25 +906,19 @@ def right_script(ui):
     R.put(f"$ choir log {env.api} --verify --keys node.pub", PROMPT)
     p = env.choir("log", env.api, "--verify", "--keys", str(env.run / "node.pub"))
     R.put("  " + p.stderr.strip().splitlines()[-1], OK)
-    R.note("  continuity, every hash recomputed, every signature checked, with nothing but the wire format and one key")
+    R.note("  one key, the node's. This proves the order and that nothing was rewritten or dropped, and anyone can check it offline.")
+    R.note("  it does not prove who pushed: git pushes reach the log as the node's own signed ops. A forge's audit log you trust; this one you verify.")
 
     # beat 5
     R.beat(5, "a broken test runner is not a failing test")
     second_branches(ui, env.right, lambda n: f"HEAD:refs/for/main/{n}/second")
-    runner = env.run / "ci" / "run-tests"
 
     def round_two(broken):
-        R.put("$ curl -X POST /api/queue/run", PROMPT)
-        R.set_status("one round over the two new proposals", timed=True)
-        names = round_names(env)
-        r = env.queue_run()
-        R.set_status("")
-        for line in round_lines(env, r, names):
-            R.put(line, BAD if ("Conflict" in line or "CiFailure" in line or "could not" in line) else NORMAL)
+        r = one_round(ui, R, "one round over the three open proposals")
         if broken:
-            R.note("  Errored is a statement about us: both requeued, nothing evicted, main unmoved, reason recorded")
+            R.note("  Errored is a statement about us: all requeued, nothing evicted, main unmoved, reason recorded")
         else:
-            R.note("  Failed is a statement about the change: only agent-05 pays; agent-09 landed in the same round")
+            R.note(f"  Failed is a statement about the change: only agent-05 pays; the others landed in the same round, {r['ci_runs']} test runs")
 
     R.put(f"$ chmod -x {typed([runner], env.run)}", PROMPT)
     runner.chmod(0o644)
@@ -777,6 +929,42 @@ def right_script(ui):
     R.done = time.monotonic()
 
 
+def one_round(ui, R, status):
+    env = ui.env
+    t0 = time.monotonic()
+    R.put("$ curl -X POST /api/queue/run  {repo, branch: main}", PROMPT)
+    R.set_status(status, timed=True)
+    names = round_names(env)
+    r = env.queue_run()
+    R.set_status("")
+    for line in round_lines(env, r, names):
+        R.put(line, BAD if ("Conflict" in line or "CiFailure" in line or "could not" in line) else NORMAL)
+    R.put(f"  {len(r['merged'])} landed, {len(r['rejected'])} evicted, {r['ci_runs']} CI runs in one train, {ms(t0)}", NOTE)
+    r["names"] = {names.get(i, "").split("/")[0] for i in r["merged"]}
+    return r
+
+
+def storm_right(ui, R):
+    """--overlap beyond 2: the other greeting authors rebase onto main,
+    keep main's greeting, propose again, and the next round takes them."""
+    env = ui.env
+    extras = [n for n in overlap_agents(env) if n not in ("agent-03", "agent-07")]
+    if not extras:
+        return
+    R.say(f"{len(extras)} more authors rewrote the greeting line and were evicted, each with the reason in the round's answer; now they rebase: each keeps main's word and proposes again.")
+    t0 = time.monotonic()
+    rounds = runs = 0
+    waiting = list(extras)
+    while waiting:
+        for name in waiting:
+            rebase_by_hand(ui, R, env.right / "wt" / name, name, lambda n: f"HEAD:refs/for/main/{n}/enable")
+        r = one_round(ui, R, f"one round over {len(waiting)} rebased proposals")
+        rounds += 1
+        runs += r["ci_runs"]
+        waiting = [n for n in waiting if n not in r["names"]]
+    R.note(f"  {len(extras)} rebases, {rounds} round(s), {runs} test runs, {ms(t0)}. The same work as the other column; what differed was the first round: one call, a verdict each")
+
+
 # ---- steps both columns share, each on its own tree --------------------------
 def seed_side(ui, pane, side, url):
     env = ui.env
@@ -784,10 +972,10 @@ def seed_side(ui, pane, side, url):
     env.git(side, "clone", "-q", url, "seed")
     seed_tree(seed_dir, env.names(), env.ci_seconds)
     env.git(seed_dir, "add", ".")
-    env.git(seed_dir, "commit", "-q", "-m", "base: greeting, test.sh, the services")
+    env.git(seed_dir, "commit", "-q", "-m", "base: config, tests, the services")
     env.git(seed_dir, "push", "-q", "origin", "HEAD:main")
     pane.put("seed $ git push origin HEAD:main", PROMPT)
-    pane.note(f"  base: config.toml, test.sh ({env.ci_seconds:g} s per run), svc/agent-01..{env.agents:02d}.toml")
+    pane.note(f"  base: config.toml, test.sh (three checks, {env.ci_seconds:g} s per run), svc/agent-01..{env.agents:02d}.toml")
 
 
 def push_all(ui, pane, side, refspec):
@@ -805,7 +993,7 @@ def push_all(ui, pane, side, refspec):
         wt = side / "wt" / name
         with adding:
             env.git(seed, "worktree", "add", "-q", str(wt), "-b", name, "main")
-        files = agent_change(wt, name)
+        files = agent_change(wt, name, env)
         env.git(wt, "add", ".")
         env.git(wt, "commit", "-q", "-m", f"{name}: enable")
         p = env.git(wt, "push", "-q", "origin", refspec(name), check=False)
@@ -821,17 +1009,18 @@ def push_all(ui, pane, side, refspec):
 
 
 def second_branches(ui, side, refspec):
-    """Beat 5's two branches: 05 breaks the test, 09 adds a note."""
+    """Beat 5's two branches: 05 breaks the greeting test, 09 adds a note."""
     env = ui.env
     env.git(side / "seed", "fetch", "-q", "origin")
-    for name, edit in (("agent-05", lambda wt: (wt / "config.toml").write_text("greeting = hi\n")),
+    for name, edit in (("agent-05", lambda wt: (wt / "config.toml").write_text(
+                            re.sub(r"^greeting = .*$", "greeting = hi", (wt / "config.toml").read_text(), count=1, flags=re.M))),
                        ("agent-09", lambda wt: (wt / "NOTES.md").write_text("Run ./test.sh before you push.\n"))):
         wt = side / "wt" / name
         env.git(wt, "checkout", "-q", "--detach", "origin/main")
         env.git(wt, "checkout", "-q", "-b", f"{name}-2")
         edit(wt)
         env.git(wt, "add", ".")
-        env.git(wt, "commit", "-q", "-m", f"{name}: {'unquoted greeting (breaks test.sh)' if name.endswith('05') else 'notes'}")
+        env.git(wt, "commit", "-q", "-m", f"{name}: {'unquoted greeting (breaks test 1)' if name.endswith('05') else 'notes'}")
         env.git(wt, "push", "-q", "origin", refspec(name))
 
 
@@ -847,23 +1036,16 @@ def play(ui):
         side.bad(f"demo error: {e!r}")
 
     try:
-        parallel([left_script_named(ui), right_script_named(ui)], on_error=report)
+        parallel([named("left", left_script, ui), named("right", right_script, ui)], on_error=report)
     finally:
         ui.finished = True
         ui.closing()
 
 
-def left_script_named(ui):
+def named(name, script, ui):
     def run():
-        threading.current_thread().name = "left"
-        left_script(ui)
-    return run
-
-
-def right_script_named(ui):
-    def run():
-        threading.current_thread().name = "right"
-        right_script(ui)
+        threading.current_thread().name = name
+        script(ui)
     return run
 
 
@@ -872,12 +1054,17 @@ def main():
     ap.add_argument("--bin", required=True, help="directory holding choir-node and choir")
     ap.add_argument("--plain", "--dump", action="store_true", help="no colour, no live rows")
     ap.add_argument("--port", type=int, default=None, help="default 8447, or the next free port")
-    ap.add_argument("--agents", type=int, default=20)
+    ap.add_argument("--agents", type=int, default=20, help="default 20, at least 18")
+    ap.add_argument("--overlap", type=int, default=2, help="agents that rewrite the greeting line (default 2, at least 2)")
     ap.add_argument("--ci-seconds", type=float, default=3.0, help="how long test.sh takes (default 3)")
     args = ap.parse_args()
-    if args.agents < 12 or args.ci_seconds < 0:
-        sys.exit("beats 3 and 5 need agents 05, 07, 09 and 12: --agents 12 or more; --ci-seconds 0 or more")
+    if args.agents < 18 or args.ci_seconds < 0:
+        sys.exit("the beats name agents 05, 07, 09, 12, 15 and 18: --agents 18 or more; --ci-seconds 0 or more")
+    most = len([n for n in OVERLAP_ORDER if n <= args.agents])
+    if not 2 <= args.overlap <= most:
+        sys.exit(f"--overlap takes 2 to {most} with {args.agents} agents")
     env = Env(args.bin, args.port or free_port(8447), args.agents, args.ci_seconds)
+    env.overlap = args.overlap
     for b in ("choir-node", "choir"):
         if not (env.bin / b).exists():
             sys.exit(f"no {b} in {env.bin}; run demo/run.sh")

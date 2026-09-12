@@ -427,6 +427,11 @@ fn the_endpoint_runs_a_round_and_makes_its_own_tree() {
     let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(answer["merged"], serde_json::json!([1, 2]), "{body}");
     assert!(answer["stalled"].is_null(), "{body}");
+    assert_eq!(
+        answer["ci_runs"],
+        serde_json::json!(2),
+        "one job per candidate: {body}"
+    );
 
     // The branch moved, and the node built the tree it needed to move it.
     let after = platform.proposal_round(REPO, "main").unwrap().base;

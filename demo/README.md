@@ -7,12 +7,28 @@ demo is about what happens when twenty isolated branches have to become
 one `main`: at the conflict, at the infrastructure failure, and in what
 you can prove afterwards.
 
-- **Left column, his workflow done well.** A bare repo with
-  `receive.denyNonFastForwards`, twenty worktrees on twenty branches, and
-  a careful maintainer that merges in order and runs the tests after
-  every merge, skipping a branch that conflicts and paging its author.
+- **Left column, his workflow done well.** A bare repo whose `main` is
+  fast-forward only, twenty worktrees on twenty branches, and a batch
+  queue the way bors runs one: merge everything pending in order, test
+  once, and on red bisect for the culprit, paging its author. A branch
+  that conflicts is skipped and its author paged.
 - **Right column, choir.** The same twenty branches proposed to a node as
-  `refs/for/main/<agent>/<topic>`, landed by one queue round.
+  `refs/for/main/<agent>/<topic>`, landed by one queue round: a
+  speculative train, every candidate tested on top of the ones before
+  it, all at the same time.
+
+The work is the same on both sides and it is not tidy on purpose:
+every agent enables its service; the overlap agents (03 and 07 by
+default, `--overlap` for more) each rewrite the same greeting line;
+agent-07 also switches on a feature that agent-12's later change needs;
+and agent-18 takes agent-15's port, a change that merges cleanly and
+fails the tests only next to 15's. The repository's `test.sh` has three
+checks, each a line of shell, so nothing about a verdict is hidden.
+
+GitHub's merge queue is a train like choir's, not a bisecting batch, so
+against it the beat 2 wall times are closer than what the left column
+shows. The differences that survive that are beats 3 and 5, and what
+beat 4 can verify.
 
 Nothing is mocked or emulated. Every line on either side is the output
 of git, curl, or the node. There is no fake forge: an emulated merge
@@ -26,7 +42,8 @@ demo/run.sh                  # build into demo/.target, then play, both columns 
 demo/run.sh --no-build       # skip cargo; use the binaries as built
 demo/run.sh --plain          # no colour, no live rows: for a pipe or a file
 demo/run.sh --port N         # default 8447, or the next free port
-demo/run.sh --agents N       # default 20, at least 12
+demo/run.sh --agents N       # default 20, at least 18
+demo/run.sh --overlap K      # agents that rewrite the greeting line, default 2
 demo/run.sh --ci-seconds S   # how long test.sh takes, default 3
 ```
 
@@ -65,17 +82,18 @@ happened while writing this.
 
 Each column plays its six beats in order, with its own headers and its
 own clock; the two are not kept in step, and that is the comparison.
-With the default 3 s test the right column is finished in about 22 s
-and the left in about 70 s, most of it beat 2.
+With the default 3 s test the right column is finished in about 32 s
+and the left in about 43 s; the gap is the bisection in beat 2 and the
+serial batches in beat 5.
 
 | beat | what happens | what to say |
 |------|--------------|-------------|
-| 0 | left: bare repo, fast-forward only. right: node up. Same seed on both: `config.toml`, `test.sh`, twenty `svc/` files | one substrate, two integration models |
-| 1 | twenty worktrees, twenty branches, twenty pushes on each side; agents 03 and 07 also change the greeting line | isolation is free, and neither side rejects a push. Concede it |
-| 2 | left: the maintainer merges 01 to 20 in order with tests after each; 07 conflicts, is skipped, its author paged. right: one round; 07 evicted as `Conflict`, the other nineteen land behind it. Counters: merged, blocked, CI runs, wall time, and each side's cost model in one line | the conflict is a verdict in the round, not a stop. The maintainer pays the test suite once per merge in series; the round pays it once |
-| 3 | left: agent-12 needs 07's change and can only get it by taking on 07's conflict in its own worktree. right: 07 pushes the conflict to `main` as-is; the node's web view reads it three-sided; 12 builds on top and lands; 07 resolves later | nobody can build on a conflict that lives on a branch. Here it is a value on `main` that anyone can pick up |
-| 4 | left: `git log`, and what it proves: parent pointers, no signatures, no test verdicts. right: the op log by kind, the last landings decoded, and `choir log --verify` over all of it | the commit graph is honest and good. The chain is what a forge does not give you: every landing and every check verdict, verified offline with one key |
-| 5 | two more branches: 05 breaks the test, 09 adds a note. Both CI runners lose their exec bit. left: both merges go red (exit 126), both authors paged. right: `Errored`, nothing evicted. Runners back: left reverts 05 and merges 09; right evicts 05 as `CiFailure` and lands 09 | a red runner is not a red change. Only the change at fault pays |
+| 0 | left: bare repo, `main` fast-forward only through an `update` hook. right: node up. Same seed on both: `config.toml`, `test.sh` with three checks, twenty `svc/` files | one substrate, two integration models |
+| 1 | twenty worktrees, twenty branches, twenty pushes on each side; 03 and 07 rewrite the greeting line, 07 switches the farewell feature on, 18 takes 15's port | isolation is free, and neither side rejects a push. Concede it |
+| 2 | left: one batch of 19 (07 skipped for its conflict), the test goes red on the port clash, five bisection runs find 18, one more lands the rest: 6 test runs in series. right: one round, 21 CI runs at once, 07 evicted as `Conflict`, 18 as `CiFailure`, 18 land. Then 18 fixes its port on both sides | a conflict and a semantic failure are both verdicts inside the round, each with its reason. The batch queue finds them one test run at a time |
+| 3 | left: agent-12 adds farewell, its test fails (feature off), the feature is on only in 07's skipped branch, merging that is 07's conflict. right: 07 lands the conflict on `main` as-is, the node's view reads it three-sided, 12 pulls it, its farewell check passes, the one red is 07's markers, 12 lands; 07 resolves, tests green | the dependency is real and the only way through on a branch is to take on somebody else's conflict. Here the conflict is a value on `main` and 12's work does not wait on it |
+| 4 | left: `git log`: parent pointers, no signatures, no verdicts; a forge adds check runs and an audit log you trust. right: the op log by kind, the last landings decoded, `choir log --verify` with the node's one key | the chain proves order and that nothing was rewritten, and you verify it offline. It does not prove who pushed: say so before he does |
+| 5 | three pending changes: 05 breaks the greeting test, 09 adds a note, 18 is back with a free port. Both runners lose their exec bit. left: 6 test runs, exit 126 each, all three authors paged. right: `Errored`, nothing evicted. Runners back: left bisects 05 out in 4 runs and lands the rest; right evicts 05 as `CiFailure`, lands 09 and 18, 5 runs | a red runner is not a red change. Only the change at fault pays, and nobody's time is spent finding that out |
 
 When both sides are done, each column prints its start-to-finish time,
 then the concession and the claim, one per column: for disjoint work at
@@ -87,36 +105,34 @@ prove after.
 
 - **Pushes rejected: 0 on both sides.** Branch-per-agent has no push
   contention. Do not pretend otherwise.
-- **Left integration: 19 merges, 19 CI runs one after another, about
-  60 s** with the 3 s test. Serial by construction: 19 times the test
-  suite, plus a merge each.
-- **Right round: 19 landings, 20 CI runs in one speculative train,
-  about 14 s.** Once the test suite, because the train runs all twenty
-  at the same time, plus a fixed cost of about 4 s that is git process
+- **Left beat 2: 18 merged, 1 blocked, 1 evicted, 6 test runs one after
+  another, about 23 s** with the 3 s test: one run for the batch, four
+  to bisect the port clash down to agent-18, one to land the rest.
+- **Right beat 2: 18 landed, 2 evicted, 21 CI runs in one train, about
+  11 s.** Twenty candidates plus one re-speculation behind the failure,
+  all at once, plus about 4 s of fixed cost that is git process
   overhead: the speculator checks out and merges each candidate in a
-  worktree and the runner provisions a worktree per job, about seven
-  `git` invocations per candidate at macOS process-spawn cost. An
-  in-memory `git merge-tree --write-tree` speculator would remove most
-  of that fixed cost; it is the obvious next optimisation and is not
-  done.
-- **The two scale differently, which is why the test takes time.**
-  Beat 2 alone, measured on one laptop:
-
-  | test.sh takes | maintainer, 19 runs in series | choir, one round |
-  |---------------|-------------------------------|------------------|
-  | 0 s | 0.9 s | 4.4 s |
-  | 3 s | 58 s | 10.5 s |
-
-  With an instant test the round is the slower side and the take argues
-  against itself, which is what the first version of this demo did. A
-  real suite takes minutes; at 60 s per run the left column would take
-  twenty minutes and the right about seventy seconds.
-- **`choir log --verify`: about 125 entries, chain holds, all signatures
+  worktree and the runner provisions a worktree per job. An in-memory
+  `git merge-tree --write-tree` speculator would remove most of that;
+  it is the obvious next optimisation and is not done.
+- **The two scale differently, which is why the test takes time.** With
+  an instant test the round is the slower side, from that fixed cost. A
+  real suite takes minutes, and then the left column pays it once per
+  bisection step and the right once per round.
+- **Beat 5 with the runner broken: left 6 runs, 3 authors paged; right
+  3 runs, `Errored`, nobody paged.** Exit 126 is instant, so this costs
+  the left no wall time here; in a real queue it costs a human each.
+- **`choir log --verify`: about 130 entries, chain holds, all signatures
   verified**, with the node's public key as the only input.
+- **`--overlap 5`** puts four skips and four evictions in beat 2 instead
+  of one each, and the rebases after are one batch or one round on
+  either side. The conflict rate becomes a knob you turn in front of
+  him instead of a number you assert. Your own positioning says the
+  real rate is unmeasured; this does not measure it either.
 
 ## What changed in the node for this demo
 
-Both are real fixes, both tested in `crates/choir-node/tests/it/node_queue.rs`.
+All three are small and tested in `crates/choir-node/tests/it/node_queue.rs`.
 
 1. **A queue landing moves git's own ref in the same request.** Before,
    git's ref lagged until startup reconciliation, and every push to the
@@ -128,6 +144,9 @@ Both are real fixes, both tested in `crates/choir-node/tests/it/node_queue.rs`.
    them as no-ops. `ProposalRound::already_integrated` reads ancestry
    from git and the round skips those; the answer names them under
    `already_integrated`.
+3. **The round's answer carries `ci_runs`.** The train's own cost
+   multiplier, per D23, without a borrowed rate; the right column prints
+   it instead of assuming one run per candidate.
 
 ## Gaps still open
 

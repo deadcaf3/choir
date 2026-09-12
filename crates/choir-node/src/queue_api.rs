@@ -239,6 +239,9 @@ pub fn run(
         "tip": report.final_state,
         "stalled": report.provider_error,
         "unreported_checks": report.unreported_checks,
+        // How many CI jobs the round ran: the train's own cost multiplier,
+        // derivable per D23 without any borrowed rate.
+        "ci_runs": report.ci_runs,
         // Null when git holds what the log landed; otherwise why it does
         // not yet, and startup reconciliation will bring it forward.
         "git_lag": git_lag,
