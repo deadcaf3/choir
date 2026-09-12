@@ -241,7 +241,22 @@
     skeleton();
     timer = window.setTimeout(function () {
       var url = "/api/search?q=" + encodeURIComponent(q) + "&in=" + encodeURIComponent(scope) + "&limit=" + LIMIT;
-      if (repo) url += "&repo=" + encodeURIComponent(repo) + "&rev=" + encodeURIComponent(rev);
+      if (repo) {
+        // The separator survives, the segments do not. `/api/search`
+        // reads `repo=` with `raw_param`, which does no decoding at all:
+        // the handler splits on a literal `/` and percent-decodes each
+        // half itself. So `encodeURIComponent` over the whole name sent
+        // `choir%2Fchoir`, which has no slash to split on and is
+        // therefore no repository -- every scoped search answered `404`
+        // and the palette reported that it was not answering. `rev` and
+        // `q` go the other way: those are read with `param`, which does
+        // decode, so they are encoded whole.
+        url +=
+          "&repo=" +
+          repo.split("/").map(encodeURIComponent).join("/") +
+          "&rev=" +
+          encodeURIComponent(rev);
+      }
       flight = new AbortController();
       window
         .fetch(url, {
@@ -256,6 +271,7 @@
           if (response.status === 401 || response.status === 403) {
             throw new Error("refused");
           }
+          if (response.status === 404) throw new Error("missing");
           if (!response.ok) throw new Error(String(response.status));
           return response.json();
         })
@@ -264,6 +280,10 @@
           if (error && error.name === "AbortError") return;
           if (error && error.message === "refused") {
             say("Sign in to search here.");
+            return;
+          }
+          if (error && error.message === "missing") {
+            say("This node has no such repository. \u21b5 opens the full page.");
             return;
           }
           say("Search is not answering. ↵ opens the full page.");

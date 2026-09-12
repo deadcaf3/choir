@@ -1607,6 +1607,27 @@ mod tests {
             PALETTE_JS.contains("form.omni"),
             "the palette no longer enhances the box the server draws"
         );
+
+        // The repository separator is not a character to encode, and
+        // the whole of D81's scoped search turned on it. `/api/search`
+        // reads `repo=` with `browse::raw_param`, which does no
+        // decoding: the handler splits on a literal `/` and decodes
+        // each half itself. `encodeURIComponent` over the whole name
+        // sent `owner%2Fname`, which has no slash to split on, so every
+        // scoped search answered `404 no such repository` and the
+        // palette reported that search was not answering. It shipped
+        // that way and no test here could see it, because the URL is
+        // built in the client and every test of the endpoint wrote the
+        // query by hand.
+        assert!(
+            !PALETTE_JS.contains("encodeURIComponent(repo)"),
+            "the palette encodes the repository whole, which encodes the separator \
+             the endpoint splits on"
+        );
+        assert!(
+            PALETTE_JS.contains("repo.split(\"/\").map(encodeURIComponent).join(\"/\")"),
+            "the palette must encode the segments of a repository name and not its slash"
+        );
     }
 
     /// The crawl policy says what D57 decided, and the two constants
