@@ -184,8 +184,7 @@
   --col-min:15rem;
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
-  --blur-1:14px;
-  --blur-2:24px; /* the palette's backdrop, deeper than a card's */
+  --blur-1:10px; /* the palette's backdrop: depth, not a smear */
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block
@@ -246,11 +245,6 @@
     transparent 0 24%,var(--line-strong) 25% 42%,transparent 43%);
   --node-head:radial-gradient(circle at 50% 50%,
     var(--accent) 0 42%,transparent 43%);
-  /* What the page becomes while the palette is over it. Built out of
-     `--strong`, the darkest ink in whichever palette is in force, so
-     the dark theme dims with its own near-black rather than with a
-     neutral one that reads as a hole cut in the page. */
-  --scrim:color-mix(in oklab,var(--strong) 46%,transparent);
 }
 
 /* A phone is not a desktop with less room; it is a different page
@@ -328,6 +322,14 @@
   --focus:oklch(40.53% 0.122 271.74);
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
   --selection:oklch(43.69% 0.1221 271.84 / .16);
+  /* What the page becomes while the palette is over it. Per theme, and
+     it has to be: the first version mixed `--strong`, on the reasoning
+     that it is the darkest ink in whichever palette is in force. It is
+     the ink, and in the dark theme the ink is a warm bone -- so the
+     overlay lightened the page it was meant to dim, and everything
+     behind the dialog went to grey mush. A scrim is dark in both themes
+     or it is not a scrim. */
+  --scrim:color-mix(in oklab,var(--strong) 42%,transparent);
 
   /* Depth is still carried mostly by whitespace and hairlines. What
      these add is the small amount of separation a card needs to sit on
@@ -426,6 +428,7 @@
     --focus:oklch(76.73% 0.0817 274.2);
     --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
     --selection:oklch(76.73% 0.0817 274.2 / .26);
+    --scrim:color-mix(in oklab,var(--sunken) 68%,transparent);
 
     --shadow-1:0 1px 1px oklch(0% 0 0 / .4);
     --shadow-2:0 1px 2px oklch(0% 0 0 / .5),0 8px 20px -14px oklch(0% 0 0 / .8);
@@ -500,6 +503,7 @@
   --focus:oklch(76.73% 0.0817 274.2);
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
   --selection:oklch(76.73% 0.0817 274.2 / .26);
+  --scrim:color-mix(in oklab,var(--sunken) 68%,transparent);
 
   --shadow-1:0 1px 1px oklch(0% 0 0 / .4);
   --shadow-2:0 1px 2px oklch(0% 0 0 / .5),0 8px 20px -14px oklch(0% 0 0 / .8);
@@ -1711,22 +1715,35 @@ dialog.palette{margin:auto;padding:var(--sp-0);max-width:var(--palette);
   max-height:70vh;inline-size:calc(100% - var(--sp-8));
   display:flex;flex-direction:column;overflow:hidden;
   color:var(--ink);background:var(--card-wash);
-  border:var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-3)}
+  border:var(--border);border-radius:var(--r-lg);
+  /* The contact shadow, the wide ambient one, and a hairline of light
+     along the top edge. The inset is what stops a dark panel on a dark
+     scrim reading as a hole: it is the only thing in the dialog that
+     says the surface has a top. */
+  box-shadow:var(--shadow-3),var(--shadow-inset)}
 dialog.palette::backdrop{background:var(--scrim)}
-@supports (backdrop-filter:blur(var(--blur-2))){
-  dialog.palette::backdrop{backdrop-filter:blur(var(--blur-2))}
+/* Enough to say the page is behind something, not enough to destroy it.
+   This was a blur more than twice as deep, over a scrim built from the
+   wrong token -- together they turned the whole surface into grey mush,
+   which is what a reader asked about before anybody called it a
+   design. */
+@supports (backdrop-filter:blur(var(--blur-1))){
+  dialog.palette::backdrop{backdrop-filter:blur(var(--blur-1));
+    -webkit-backdrop-filter:blur(var(--blur-1))}
 }
-dialog.palette[open]{animation:pop var(--dur-3) var(--ease-out) both}
+dialog.palette[open]{animation:pop var(--dur-4) var(--ease-out) both}
 dialog.palette[open]::backdrop{animation:fade var(--dur-3) var(--ease-out) both}
 /* A fade and the smallest step this sheet has. It overshot and settled
    before, on the emphatic curve, and a dialog that bounces is a dialog
    a reader watches instead of reads -- the point of a key is to be
    already typing. */
 @keyframes pop{
-  from{opacity:0;transform:translateY(calc(var(--sp-1) * -1))}
+  from{opacity:0;transform:translateY(calc(var(--sp-2) * -1))}
   to{opacity:1;transform:none}}
 .palette-head{display:flex;align-items:center;gap:var(--sp-3);
-  padding:var(--sp-3) var(--sp-4);border-bottom:var(--border)}
+  padding:var(--sp-3) var(--sp-4);border-bottom:var(--border);
+  transition:border-color var(--dur-2) var(--ease-out)}
+.palette-head:focus-within{border-bottom-color:var(--accent-line)}
 /* Overrides the surface's field styling wholesale: inside the dialog the
    input *is* the frame, so a second border around it draws a box in a
    box. */
@@ -1734,6 +1751,12 @@ input.palette-q{flex:1 1 auto;min-width:0;max-width:none;
   font:inherit;font-size:var(--fs-600);color:var(--strong);
   background:none;border:var(--bw-0);border-radius:var(--r-xs);
   padding:var(--sp-1) var(--sp-0)}
+/* No focus ring. The dialog focuses this field on open and it is the
+   only text field in it, so a two-ring halo around the one thing a
+   reader is already typing into is a ring drawn for nobody. The head's
+   own rule answers instead, which is the same language the bar's box
+   uses. */
+input.palette-q:focus-visible{box-shadow:none;outline:0}
 input.palette-q:hover{border-color:transparent}
 input.palette-q::placeholder{color:var(--faint)}
 input.palette-q::-webkit-search-cancel-button{display:none}

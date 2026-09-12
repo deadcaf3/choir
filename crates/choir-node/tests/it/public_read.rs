@@ -149,6 +149,88 @@ fn a_published_repository_answers_a_reader_who_has_no_account() {
     );
 }
 
+/// A reader who may browse a published repository may also search it,
+/// and a refused search never summons the browser's own password box.
+///
+/// Both halves of this are D81's palette meeting D78's allowlist. The
+/// page at `/r/<repo>/search/<rev>` was in the allowlist and the
+/// endpoint its own three functions answer was not, so the palette --
+/// which ships on every page including the ones a stranger reads --
+/// fetched `/api/search` on a repository it was rendering at that
+/// moment and was answered `401`. The reader saw a native credential
+/// dialog naming a host and a port, over a page they had not asked to
+/// leave, because they pressed a key.
+///
+/// The second assertion is the one that holds even when the first
+/// should not. A node that publishes nothing, or a session that has
+/// expired, still refuses; what it must not do is hand a background
+/// request a `WWW-Authenticate` header, because the browser answers
+/// that itself with a box no page can style, explain or dismiss.
+#[test]
+fn a_published_repository_can_be_searched_without_an_account() {
+    let s = served("search", "@anon\topen/source.git\tread\nalice\t*\twrite\n");
+
+    assert_eq!(
+        anon(&format!("{}/api/search?q=the&in=files", s.base)),
+        200,
+        "a reader who may browse a published repository may not search it"
+    );
+    // The grant is applied inside the walk, so this says nothing about
+    // what a stranger is *told* -- only that they may ask.
+    let body = anon_body(&format!("{}/api/search?q=the&in=files", s.base));
+    assert!(
+        !body.contains("closed/thing"),
+        "the search answered for a repository nobody published: {body}"
+    );
+}
+
+/// The challenge is for clients that speak it, and a `fetch` does not.
+#[test]
+fn a_refused_background_request_carries_no_credential_challenge() {
+    let s = served("challenge", "alice\t*\twrite\n");
+
+    // Nothing is published here, so every anonymous request is refused.
+    // The refusal is the same; what differs is whether the browser is
+    // invited to take it over.
+    let plain = std::process::Command::new("curl")
+        .args(["-s", "-D", "-", "-o", "/dev/null"])
+        .arg(format!("{}/api/search?q=the", s.base))
+        .output()
+        .expect("curl runs");
+    let plain = String::from_utf8_lossy(&plain.stdout).to_ascii_lowercase();
+    assert!(
+        plain.contains("401"),
+        "an unpublished node answered a stranger: {plain}"
+    );
+    assert!(
+        plain.contains("www-authenticate"),
+        "git and every API client learn how to authenticate here: {plain}"
+    );
+
+    let scripted = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-D",
+            "-",
+            "-o",
+            "/dev/null",
+            "-H",
+            "X-Requested-With: choir-palette",
+        ])
+        .arg(format!("{}/api/search?q=the", s.base))
+        .output()
+        .expect("curl runs");
+    let scripted = String::from_utf8_lossy(&scripted.stdout).to_ascii_lowercase();
+    assert!(
+        scripted.contains("401"),
+        "the refusal changed for a caller that said it was script: {scripted}"
+    );
+    assert!(
+        !scripted.contains("www-authenticate"),
+        "a background request was handed the browser's own password box: {scripted}"
+    );
+}
+
 /// Publishing a repository publishes the repository, not the node.
 #[test]
 fn the_op_log_and_the_node_scope_stay_behind_the_wall() {

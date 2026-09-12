@@ -1874,7 +1874,28 @@ impl Node {
                             // page from a node without passkeys withheld
                             // the form too and left the grey box as the
                             // whole answer.
+                            // A `fetch` gets the refusal and no
+                            // challenge. `WWW-Authenticate: Basic` is
+                            // answered by the browser's own credential
+                            // box -- a native dialog naming a host and a
+                            // port, over a page that cannot explain it,
+                            // dismiss it, or say what it is for. That is
+                            // bad enough on a navigation, which is why
+                            // `wants_page` exists; on a background
+                            // request it is worse, because nothing the
+                            // reader did asked for a sign-in at all.
+                            // They pressed a key and a password prompt
+                            // appeared.
+                            //
+                            // `X-Requested-With` is the client saying it
+                            // is script and will read the status itself.
+                            // It cannot be set cross-origin without a
+                            // preflight this node never answers, so it
+                            // is not a way for another site to turn the
+                            // challenge off for somebody.
+                            let from_script = header(&request, "x-requested-with").is_some();
                             let wants_page = !request.url().contains(".git")
+                                && !from_script
                                 && header(&request, "accept")
                                     .is_some_and(|a| a.contains("text/html"));
                             let outcome = if wants_page {
@@ -1889,15 +1910,17 @@ impl Node {
                                 respond_scripted_page(request, page.status, page.html)
                             } else {
                                 let body = "unauthorized\n";
-                                let response = tiny_http::Response::from_string(body)
-                                    .with_status_code(401)
-                                    .with_header(
+                                let mut response =
+                                    tiny_http::Response::from_string(body).with_status_code(401);
+                                if !from_script {
+                                    response.add_header(
                                         tiny_http::Header::from_bytes(
                                             &b"WWW-Authenticate"[..],
                                             &b"Basic realm=\"choir\""[..],
                                         )
                                         .expect("static header"),
                                     );
+                                }
                                 served(request, response, 401, body.len() as u64)
                             };
                             access.finish(log, &user, &outcome);
@@ -3218,6 +3241,18 @@ fn anon_may_try(acl: Option<&acl::Effective>, request: &tiny_http::Request) -> b
         || path == "/index.html"
         || path == "/r"
         || path.starts_with("/r/")
+        // Search, on exactly the terms the page beside it already has.
+        // `/r/<repo>/search/<rev>` is in the set above and `/api/search`
+        // was not, so the same reader could search a published
+        // repository by loading a page and not by asking the endpoint
+        // that page's own three functions answer -- which is how D81's
+        // palette met a `401` on a repository it was reading at the
+        // time. There is no second authorization rule here either:
+        // `api_search` applies the same `readable()` grant the index
+        // walk applies, and a repository the caller was not granted is
+        // answered exactly as one that does not exist (D62), so this
+        // widens what can be *asked* and nothing about what is told.
+        || path == "/api/search"
 }
 
 /// Answers a browser-surface request with a page.

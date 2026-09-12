@@ -238,14 +238,28 @@
       if (repo) url += "&repo=" + encodeURIComponent(repo) + "&rev=" + encodeURIComponent(rev);
       flight = new AbortController();
       window
-        .fetch(url, { credentials: "same-origin", signal: flight.signal })
+        .fetch(url, {
+          credentials: "same-origin",
+          // The node answers a request carrying this without
+          // `WWW-Authenticate`, so a refusal is a status rendered here
+          // rather than the browser's own credential box over the page.
+          headers: { "X-Requested-With": "choir-palette" },
+          signal: flight.signal,
+        })
         .then(function (response) {
+          if (response.status === 401 || response.status === 403) {
+            throw new Error("refused");
+          }
           if (!response.ok) throw new Error(String(response.status));
           return response.json();
         })
         .then(render)
         .catch(function (error) {
           if (error && error.name === "AbortError") return;
+          if (error && error.message === "refused") {
+            say("Sign in to search here.");
+            return;
+          }
           say("Search is not answering. ↵ opens the full page.");
         });
     }, DEBOUNCE);
@@ -303,16 +317,24 @@
     }
   });
 
-  /* The box in the bar becomes the way in rather than a second search:
-     focusing it opens the palette with whatever is already typed. A
-     reader who has scripting off never reaches this and submits the
-     form, which is the same search one page later. */
-  if (field) {
-    field.addEventListener("focus", function () {
-      open();
-      field.blur();
-    });
-  }
+  /* The box in the bar is the way in rather than a second search.
+   *
+   * On `mousedown`, not on `focus`, and the difference is a bug that
+   * made `Esc` look broken. A modal dialog returns focus to whatever
+   * held it when the dialog opened -- which was this field -- so a
+   * `focus` handler closed and reopened the palette forever: press
+   * `Esc`, the dialog closes, focus lands back here, the handler fires,
+   * the dialog opens again, and there is no way out.
+   *
+   * `preventDefault` keeps the click from focusing the field at all, so
+   * there is no focus to return to and `Esc` simply closes. Tabbing to
+   * the field still reaches the plain form and submits it, which is the
+   * same search one page later, and is what a reader with no script
+   * gets anyway. */
+  bar.addEventListener("mousedown", function (event) {
+    event.preventDefault();
+    open();
+  });
 
   /* What a reader has to be told once: the key. Drawn into the box the
      server rendered, so it is never on a page the palette failed to

@@ -195,8 +195,7 @@
   --col-min:15rem;
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
-  --blur-1:14px;
-  --blur-2:24px; /* the palette's backdrop, deeper than a card's */
+  --blur-1:10px; /* the palette's backdrop: depth, not a smear */
   /* Whether a listing shows the commit subject at all. A column that has
      been truncated to two characters is not a column; it is noise where
      a column used to be. Carried as a token because the component block
@@ -257,11 +256,6 @@
     transparent 0 24%,var(--line-strong) 25% 42%,transparent 43%);
   --node-head:radial-gradient(circle at 50% 50%,
     var(--accent) 0 42%,transparent 43%);
-  /* What the page becomes while the palette is over it. Built out of
-     `--strong`, the darkest ink in whichever palette is in force, so
-     the dark theme dims with its own near-black rather than with a
-     neutral one that reads as a hole cut in the page. */
-  --scrim:color-mix(in oklab,var(--strong) 46%,transparent);
 }
 
 /* A phone is not a desktop with less room; it is a different page
@@ -339,6 +333,14 @@
   --focus:oklch(40.53% 0.122 271.74);
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
   --selection:oklch(43.69% 0.1221 271.84 / .16);
+  /* What the page becomes while the palette is over it. Per theme, and
+     it has to be: the first version mixed `--strong`, on the reasoning
+     that it is the darkest ink in whichever palette is in force. It is
+     the ink, and in the dark theme the ink is a warm bone -- so the
+     overlay lightened the page it was meant to dim, and everything
+     behind the dialog went to grey mush. A scrim is dark in both themes
+     or it is not a scrim. */
+  --scrim:color-mix(in oklab,var(--strong) 42%,transparent);
 
   /* Depth is still carried mostly by whitespace and hairlines. What
      these add is the small amount of separation a card needs to sit on
@@ -437,6 +439,7 @@
     --focus:oklch(76.73% 0.0817 274.2);
     --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
     --selection:oklch(76.73% 0.0817 274.2 / .26);
+    --scrim:color-mix(in oklab,var(--sunken) 68%,transparent);
 
     --shadow-1:0 1px 1px oklch(0% 0 0 / .4);
     --shadow-2:0 1px 2px oklch(0% 0 0 / .5),0 8px 20px -14px oklch(0% 0 0 / .8);
@@ -511,6 +514,7 @@
   --focus:oklch(76.73% 0.0817 274.2);
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
   --selection:oklch(76.73% 0.0817 274.2 / .26);
+  --scrim:color-mix(in oklab,var(--sunken) 68%,transparent);
 
   --shadow-1:0 1px 1px oklch(0% 0 0 / .4);
   --shadow-2:0 1px 2px oklch(0% 0 0 / .5),0 8px 20px -14px oklch(0% 0 0 / .8);
