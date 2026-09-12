@@ -754,13 +754,20 @@ impl Shared {
     /// `GET /api/witness` on a seed.
     pub(crate) fn witness_json(&self, home: &Home, key: &ActorKey) -> serde_json::Value {
         let statements = self.statements.lock().expect("replica statements lock");
+        let status = self.status.lock().expect("replica status lock");
         serde_json::json!({
             "format_version": 1,
             "witness": key.actor_id().to_hex(),
             "public_key_hex": crate::platform::hex_encode(&key.public_key_bytes()),
             "home": home.url,
             "home_node_id": home.node_id.to_hex(),
-            "gap": self.status.lock().expect("replica status lock").gap,
+            "gap": status.gap,
+            // A halt is the event a witness exists to surface, so it is
+            // here beside the statement it froze, not only in `/api/view`.
+            "halted": status.halted.as_ref().map(|(seq, reason)| serde_json::json!({
+                "seq": seq,
+                "reason": reason,
+            })),
             "latest": statements.back().map(SignedStatement::to_json),
             "history": statements.iter().map(SignedStatement::to_json).collect::<Vec<_>>(),
         })

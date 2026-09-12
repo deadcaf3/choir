@@ -407,4 +407,5 @@ new op kind never reaches a seed that cannot read it.
 
 Readers point `choir` at seeds with `seeds = <url>[, <url>]` beside
 `node =` in `.choir/config`; `choir doctor` then compares each seed's
-statement with what the home shows them, and fails on a fork.
+statement with what the home shows them, fails on a fork, and warns on a
+seed that halted, with the seq and the reason.

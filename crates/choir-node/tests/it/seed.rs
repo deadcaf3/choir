@@ -454,6 +454,15 @@ fn a_tampered_entry_halts_replication_there_and_the_prefix_is_still_served() {
     println!("replica after the halt: {}", view["replica"]);
     assert_eq!(view["replica"]["halted"]["seq"], flip);
     assert_eq!(view["replica"]["head_seq"], flip - 1);
+    // The witness body says so too, which is what `choir doctor` reads.
+    let served = witness(&seed);
+    assert_eq!(served["halted"]["seq"], flip, "{served}");
+    assert!(
+        served["halted"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("does not hash to")),
+        "{served}"
+    );
     assert_eq!(
         view["replica"]["home_head_seq"],
         end - 1,

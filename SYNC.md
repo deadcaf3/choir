@@ -294,10 +294,13 @@ is never older than the one the seed folded, and a statement the walk
 cannot reach from it is two histories, one shown to the seed and one
 shown to you.
 
+The body around the statement carries `gap` and `halted` from `replica`,
+so a reader of `/api/witness` alone sees why a statement stopped moving.
+
 `choir doctor` runs this for every seed named by `seeds =` in
-`.choir/config`: a fork is an error, a seed with `gap` is a warning, and
-a statement far behind the home's current attestation is a warning that
-says how far.
+`.choir/config`: a fork is an error, a seed with `gap` or `halted` is a
+warning naming the seq and reason, and a statement far behind the home's
+current attestation is a warning that says how far.
 
 ### What this still does not catch
 

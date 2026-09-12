@@ -477,7 +477,38 @@ fn get(
     Ok((status, value))
 }
 
-/// One seed's rows: a gap if it has one, and its fork check.
+/// What the seed says about its own copy, from its `/api/witness` body: a
+/// gap, and a halt with the seq and reason. Both are warnings and not
+/// failures, because neither says the home lied; a halt on a page that
+/// failed a check is the reader's cue to look, which is why it is named
+/// here rather than left to show as a statement falling behind.
+fn copy_rows(seed: &str, witness: &serde_json::Value) -> Vec<Check> {
+    let mut rows = Vec::new();
+    if witness["gap"] == true {
+        rows.push(
+            Check::warn(
+                "seed gap",
+                format!("{seed}: its copy has a hole, so it is a copy and not a witness"),
+            )
+            .with_fix("re-seed it from an export of the home (choir-node --import)"),
+        );
+    }
+    if let (Some(seq), Some(reason)) = (
+        witness["halted"]["seq"].as_u64(),
+        witness["halted"]["reason"].as_str(),
+    ) {
+        rows.push(
+            Check::warn(
+                "seed halted",
+                format!("{seed}: stopped replicating at seq {seq}: {reason}"),
+            )
+            .with_fix("read that page from the home yourself; a seed never skips an entry"),
+        );
+    }
+    rows
+}
+
+/// One seed's rows: what it says about its copy, and its fork check.
 ///
 /// The seed is read **before** the home. An honest home's current
 /// attestation is then never older than the one the seed folded, so a
@@ -501,16 +532,7 @@ fn seed_checks(
         }
         Err(why) => return warn(format!("cannot be read: {why}")),
     };
-    let mut rows = Vec::new();
-    if witness["gap"] == true {
-        rows.push(
-            Check::warn(
-                "seed gap",
-                format!("{seed}: its copy has a hole, so it is a copy and not a witness"),
-            )
-            .with_fix("re-seed it from an export of the home (choir-node --import)"),
-        );
-    }
+    let mut rows = copy_rows(seed, &witness);
     let Some(statement) = choir_node::replica::SignedStatement::from_json(&witness["latest"])
     else {
         rows.extend(warn(
@@ -959,6 +981,27 @@ mod tests {
             stale.detail.contains("attestations behind"),
             "{}",
             stale.detail
+        );
+    }
+
+    /// A halt is named by seq and reason, and a clean copy adds no row.
+    #[test]
+    fn a_halted_seed_is_named_with_the_seq_it_stopped_at() {
+        let clean = serde_json::json!({"gap": false, "halted": null});
+        assert!(super::copy_rows("seed", &clean).is_empty());
+        let halted = serde_json::json!({
+            "gap": false,
+            "halted": {"seq": 3, "reason": "entry 3 does not hash to what the page claimed"},
+        });
+        let rows = super::copy_rows("seed", &halted);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, super::Status::Warn);
+        assert_eq!(rows[0].name, "seed halted");
+        assert!(rows[0].detail.contains("seq 3"), "{}", rows[0].detail);
+        assert!(
+            rows[0].detail.contains("does not hash"),
+            "{}",
+            rows[0].detail
         );
     }
 }
