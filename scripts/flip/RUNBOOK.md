@@ -466,6 +466,8 @@ tunnel-and-plaintext behaviour, matching a marker rollback on the node.
 ## Still open
 
 - A node without a persisted log returns `log_evicted` when a reader falls
-- A node without a persisted log returns `log_evicted` when a reader falls
   behind its in-memory window. The reader can resume at `window_base`, but
-  cannot verify continuity across the gap. See the [sync contract](../../SYNC.md).
+  cannot verify continuity across the gap; a seed (D80) stops at the gap
+  instead and signs nothing more. See the [sync contract](../../SYNC.md).
+- No seed of the dogfood node runs anywhere yet, and running one is still
+  a raw `choir-node --seed` invocation rather than a `choir` command.

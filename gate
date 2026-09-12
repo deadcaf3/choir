@@ -1,6 +1,8 @@
 #!/bin/sh
-# The release gate, in three lanes.
+# The release gate, in four lanes.
 #
+#   ./gate touched  the inner loop: tests and clippy for the crates this
+#                 tree changed, selected from git diff plus untracked files
 #   ./gate        every release check (before a commit or an artifact)
 #   ./gate fast   the edit loop: skips the measurement binaries
 #   ./gate quick  the sub-minute lane: every check that never invokes

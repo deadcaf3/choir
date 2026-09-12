@@ -36,13 +36,18 @@ choir host
 `choir host` mints the repository root, a `0600` credential, a trusted key
 and a config file, then installs the daemon under launchd or systemd.
 
-Narrated demo, no install:
+Two demos, no install beyond a toolchain:
 
 ```bash
 git clone https://choirs.dev/choir/choir.git
 cd choir
-cargo run -p choir-demo
+demo/run.sh                 # the same twenty agents on git alone and on choir, side by side, about a minute
+cargo run -p choir-demo     # narrated walkthrough of every layer
 ```
+
+`demo/run.sh` builds into its own target dir and plays against a live
+loopback node with plain `git` and `curl`; [`demo/README.md`](demo/README.md)
+says what each beat shows and what the numbers mean.
 
 ---
 
@@ -118,8 +123,17 @@ the token, points git at it and clones each repository the invite names.
 > [Authorization](docs/operating/authorization.md).
 
 `./choirctl pull-backup` copies the log, node fingerprint, policy files
-and one git bundle per repository. `choir backup verify <dir>` checks it
-restores. Neither carries a secret.
+and one git bundle per repository; `choir backup verify <dir>` checks it
+restores and `choir backup restore <dir> <root>` proves it. Neither
+carries a secret. `choir-node --export <root> <dir>` is the lighter copy
+with no policy in it, verified with `--verify-export`.
+
+A **seed** is a live copy of another node's log: it verifies every page
+before keeping it, serves reads under its own ACL, signs a statement
+about what it saw, and answers every write with `421 not_home` naming
+the home. `choir-node <root> [port] --seed <home-url> --seed-credential
+<file>` runs one; `seeds = <url>` beside `node =` in `.choir/config` makes
+`choir doctor` check each for a fork. [Run a seed](docs/operating/running-a-node.md#run-a-seed).
 
 Every flag and policy file: [**Running a node**](docs/operating/running-a-node.md).
 

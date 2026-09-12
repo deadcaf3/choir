@@ -36,6 +36,10 @@ marker `choir docs` replaces with a link to the node (D76).
 | [Observability and repair](operating/observability.md) | Decision journal, `choir repair`, derived records |
 | [Transports and the browser surface](operating/transports.md) | Git over HTTPS and SSH (D31), read-only page (D28), browsing (D30) |
 
+Seeds, a live verified copy of a node's log, are the last two sections of
+[Running a node](operating/running-a-node.md#run-a-seed) and the Seeds
+section of [`SYNC.md`](../SYNC.md).
+
 Runbooks:
 
 - [Private single-node beta runbook](private-beta-runbook.md): network
@@ -53,6 +57,7 @@ Runbooks:
 | [The contribution workflow](using/workflow.md) | Workspace to landed ref, review rules |
 | [Agent templates](../templates/README.md) | Snippets for Claude Code, Codex and Cursor |
 | [`AGENTS.md`](../AGENTS.md) | The surface, written for an agent |
+| [The two-column demo](../demo/README.md) | Twenty agents on git alone and on choir, side by side, with what each beat shows |
 
 ## Reference
 

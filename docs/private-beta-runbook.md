@@ -2,6 +2,14 @@
 
 ## Status and launch hold
 
+**Where the dogfood node stands (2026-09-12):** it has served a public
+name over TLS since 2026-08-27, with the daemon on loopback behind the
+proxy, the D42 review gate on since 2026-09-01, and its own installers
+on `/download/` since 2026-09-10. Of the receipts below, 2 and 4 are
+partly collected: the off-host scan of the daemon's port and a backup
+schedule on a second physical host are still owed. The hold that follows
+is the rule for the next instance.
+
 Keep production DNS unpublished and the production firewall closed to
 non-operator addresses until every go-live receipt below is attached to the
 release record. Reach staging over the operator VPN or an allowlist.
