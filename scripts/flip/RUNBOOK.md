@@ -3,7 +3,12 @@
 Nothing below needs memorizing: `./choirctl` with no arguments
 lists every command. The long forms are kept here so the procedure is
 auditable, but `choirctl install`, `choirctl status`, `choirctl sync`,
-and `choirctl logs` are the usual operator path.
+and `choirctl logs` are the usual operator path. `choirctl` is this
+project's ssh hop from the laptop to its one node, plus the forge legs
+(`sync`, `mirror`, `publish-release`); the operator steps themselves are
+`choir` commands run on the node host: `choir node upgrade --source`,
+`choir backup take|schedule`, `choir repo follower add` and
+`choir seed`. Nothing in `choir` runs `ssh`.
 
 This is the D20 operator procedure. The flip makes the choir node canonical
 and Forgejo a follower (D21 single-canonical invariant — one direction,
@@ -145,8 +150,11 @@ git rev-parse HEAD     # must equal the oid under refs/heads/main
 
    The oid in the view carries codec byte `11` (git oid) — a bare
    BLAKE3 digest there means something bypassed the git path.
-4. Repoint the follower: from here on use `./choirctl sync`,
-   which pushes to the node first and the Forgejo mirror second, and
+4. Repoint the follower: `choir repo follower add choir/choir.git
+   forgejo <url>` on the node host names the mirror as a remote, and
+   the daemon pushes every landing to it, never forced. Before that
+   flag was there, `./choirctl sync` did the same from the laptop: it
+   pushes to the node first and the Forgejo mirror second, and
    stops before the mirror if the canonical push failed — so the
    follower can never get ahead of the node. `push` and `mirror` remain
    available separately. Do not add a push from Forgejo back to the
@@ -255,7 +263,9 @@ node moves to the mirror VM (built there by hand: rustup + a temporary
 swapfile — the host has under a gigabyte of RAM); the laptop becomes a
 client over an SSH tunnel, and the backup direction inverts: the laptop
 pulls (`choirctl pull-backup`), because a live log and its only copy on
-one disk is not a backup.
+one disk is not a backup. `choir backup take <dir>` on the node host
+writes the same shape locally, and `choir backup schedule <dir>` keeps
+it current; the copy off the host is then a plain `rsync`.
 
 ### What a bare Linux host needs first
 
@@ -300,6 +310,11 @@ environment: `enabled` plus `Linger=yes` is what survives a reboot.
 
 Rebuilding the VM node after a landing (`choirctl install` prints this
 too): check `/proc/swaps` still lists the 3 GiB swapfile, then on the VM
+fetch and ff-merge into `~/choir-build` as below, then
+`choir node upgrade --source ~/choir-build`, which does the build,
+rename, restart and stamp check. The long form, and the
+bootstrap for a host whose installed `choir` predates that command
+(`~/choir-build/target/release/choir node upgrade --source ~/choir-build --into ~/bin`):
 
 ```
 git -C ~/choir-build fetch ~/.choir/repos/choir/choir.git main && git -C ~/choir-build merge --ff-only FETCH_HEAD
@@ -469,5 +484,5 @@ tunnel-and-plaintext behaviour, matching a marker rollback on the node.
   behind its in-memory window. The reader can resume at `window_base`, but
   cannot verify continuity across the gap; a seed (D80) stops at the gap
   instead and signs nothing more. See the [sync contract](../../SYNC.md).
-- No seed of the dogfood node runs anywhere yet, and running one is still
-  a raw `choir-node --seed` invocation rather than a `choir` command.
+- No seed of the dogfood node runs anywhere yet. `choir seed <home-url>`
+  on a second host is how one starts.

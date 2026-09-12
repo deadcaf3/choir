@@ -1,6 +1,7 @@
 # Runbook: restoring a node from a backup
 
-Turn a backup written by `scripts/flip/pull_backup.sh` into a node.
+Turn a backup written by `choir backup take` (or by
+`scripts/flip/pull_backup.sh` over ssh; same shape) into a node.
 
 First confirm the backup can be restored *from*:
 
@@ -162,6 +163,6 @@ Pull a backup from the restored node before trusting it:
 
 ```bash
 choir backup take <dir>         # on the node host; verifies what it wrote
-./choirctl pull-backup          # or from the laptop: still shell, it ssh's to the node host
+./choirctl pull-backup          # or from the laptop, over ssh (this project's dogfood hop)
 choir backup verify ~/choir-backup
 ```

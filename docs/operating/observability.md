@@ -123,5 +123,6 @@ records that.
 repository. It places files; the daemon adopts them. Settle a restore by
 accepting a write.
 
-`scripts/flip/pull_backup.sh` is the disaster-recovery path over ssh;
-`--export` is the format tool beside it.
+`choir backup take` on the node host, or `scripts/flip/pull_backup.sh`
+over ssh, is the disaster-recovery path; `--export` is the format tool
+beside it.

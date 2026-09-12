@@ -104,7 +104,9 @@ pages must show no mutation control.
 
 ## Backup and recovery
 
-Run `pull_backup.sh` hourly to encrypted off-host storage. It publishes only
+Run `choir backup schedule <dir>` on the node host, or `pull_backup.sh`
+hourly from another machine, and copy the result to encrypted off-host
+storage. Either publishes only
 after checksum, append-only prefix, format version, sequence, parent-chain
 and recomputed-hash verification. Contents and the secrets you supply:
 [Restoring from a backup](runbook-restore.md).

@@ -124,7 +124,7 @@ fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "backup at $DEST is restorable"
-  echo "restore with: ./choirctl restore-from-backup $DEST <target-root>"
+  echo "restore with: choir backup restore $DEST <target-root>"
   exit 0
 fi
 echo "backup at $DEST is NOT restorable — see the failures above" >&2

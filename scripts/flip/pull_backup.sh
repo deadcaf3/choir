@@ -272,4 +272,4 @@ done
 chmod 700 "$DEST"
 
 echo "backup: $DEST — $LINES ops, next_seq $NEXT_SEQ, verified $STAMP"
-echo "restorable? run: ./choirctl verify-backup $DEST"
+echo "restorable? run: choir backup verify $DEST"
