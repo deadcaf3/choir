@@ -30,6 +30,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -322,6 +323,7 @@ class UI:
         self.width = shutil.get_terminal_size((160, 40)).columns
         self.live_shown = False
         self.frame = 0
+        self.tally = {}  # what each side measured, for the closing tables
         self.left = Pane(self, "L", "git: worktrees, branches, a careful maintainer", LEFT_NARRATION)
         self.right = Pane(self, "R", "choir: the same branches, one round", RIGHT_NARRATION)
         # Every row either column shows, with its time, so a take can be
@@ -436,6 +438,9 @@ class UI:
             self.emit(pane, f"  this side, start to finish: {took}", NOTE)
         self.left.note("  the honest summary: for disjoint work at a low conflict rate, branches and a merge queue are fine.")
         self.right.note("  the claim is what happens at the conflict, at the infra failure, and in what you can prove after.")
+        for plain, painted in scorecard_lines(self):
+            self.transcript("=│ " + plain)
+            sys.stdout.write(painted + "\n")
         sys.stdout.write(self.paint(f"transcript: {self.env.run / 'take.log'}   node log: {self.env.run / 'node.log'}", NOTE) + "\n")
         sys.stdout.flush()
 
@@ -660,6 +665,8 @@ def left_script(ui):
     res = batch_land(ui, L, m, runner, [(n, f"origin/{n}") for n in env.names()])
     L.put(f"  {len(res['merged'])} merged, {len(res['blocked'])} blocked, {len(res['evicted'])} evicted, "
           f"{res['tests']} test runs one after another, {ms(t0)}", NOTE)
+    ui.tally["L2"] = dict(landed=len(res["merged"]), runs=res["tests"], secs=time.monotonic() - t0,
+                          conflicts=len(res["blocked"]), failures=len(res["evicted"]))
     if res["tests"] > 1:
         L.note(f"  the cost: {res['tests']} x {env.ci_seconds:g} s of tests in series: one for the batch, "
                f"{res['tests'] - 2} to find the culprit, one to land the rest")
@@ -701,7 +708,10 @@ def left_script(ui):
 
     def batch(broken):
         L.put("maintainer $ merge pending in order; ci/run-tests; on red, bisect", PROMPT)
+        t0 = time.monotonic()
         res = batch_land(ui, L, m, runner, pending)
+        ui.tally["L5b" if broken else "L5"] = dict(landed=len(res["merged"]), runs=res["tests"],
+                                                   secs=time.monotonic() - t0, paged=len(res["evicted"]))
         if broken:
             L.note(f"  exit 126 is 'could not run', but red is red to a queue: {len(res['evicted'])} authors paged "
                    f"for a runner they do not own, {res['tests']} test runs spent on it")
@@ -845,6 +855,9 @@ def right_script(ui):
     # beat 2
     R.beat(2, f"integration: {env.agents} proposals, one round")
     r = one_round(ui, R, f"one round: {env.agents} speculative merges, every candidate tested at once")
+    ui.tally["R2"] = dict(landed=len(r["merged"]), runs=r["ci_runs"], secs=r["secs"],
+                          conflicts=sum(x["why"] == "Conflict" for x in r["rejected"]),
+                          failures=sum(x["why"] != "Conflict" for x in r["rejected"]))
     R.note(f"  the cost: {env.ci_seconds:g} s of tests, {r['ci_runs']} runs side by side, plus one merge per candidate")
     R.note("  every eviction is a verdict inside the round, with its reason, not a stop: the rest landed behind them in the same call")
     fix_port(ui, R, env.right, lambda n: f"HEAD:refs/for/main/{n}/enable")
@@ -906,6 +919,7 @@ def right_script(ui):
     R.put(f"$ choir log {env.api} --verify --keys node.pub", PROMPT)
     p = env.choir("log", env.api, "--verify", "--keys", str(env.run / "node.pub"))
     R.put("  " + p.stderr.strip().splitlines()[-1], OK)
+    ui.tally["verified"] = len(entries)
     R.note("  one key, the node's. This proves the order and that nothing was rewritten or dropped, and anyone can check it offline.")
     R.note("  it does not prove who pushed: git pushes reach the log as the node's own signed ops. A forge's audit log you trust; this one you verify.")
 
@@ -915,6 +929,8 @@ def right_script(ui):
 
     def round_two(broken):
         r = one_round(ui, R, "one round over the three open proposals")
+        ui.tally["R5b" if broken else "R5"] = dict(landed=len(r["merged"]), runs=r["ci_runs"], secs=r["secs"],
+                                                   paged=len(r["rejected"]))
         if broken:
             R.note("  Errored is a statement about us: all requeued, nothing evicted, main unmoved, reason recorded")
         else:
@@ -941,6 +957,7 @@ def one_round(ui, R, status):
         R.put(line, BAD if ("Conflict" in line or "CiFailure" in line or "could not" in line) else NORMAL)
     R.put(f"  {len(r['merged'])} landed, {len(r['rejected'])} evicted, {r['ci_runs']} CI runs in one train, {ms(t0)}", NOTE)
     r["names"] = {names.get(i, "").split("/")[0] for i in r["merged"]}
+    r["secs"] = time.monotonic() - t0
     return r
 
 
@@ -1025,6 +1042,164 @@ def second_branches(ui, side, refspec):
 
 
 # ---- main --------------------------------------------------------------------
+# ---- the closing scorecard --------------------------------------------------
+def secs(x):
+    if x < 100:
+        return f"{x:.0f} s"
+    if x < 6000:
+        return f"{x / 60:.0f} min"
+    return f"{x / 3600:.1f} h"
+
+
+WIN_L, WIN_R, EVEN = "L", "R", None
+
+
+def scorecard_lines(ui):
+    """One boxed scorecard: what this take measured, an estimate for a much
+    bigger day worked out from those measurements, and the short version.
+    Each row names a winner or calls it even; the winning cell is green,
+    the other dim. Returns (plain, painted) line pairs."""
+    env, t = ui.env, ui.tally
+    L2, R2 = t.get("L2"), t.get("R2")
+    L5b, R5b, L5, R5 = t.get("L5b"), t.get("R5b"), t.get("L5"), t.get("R5")
+    ltot = ui.left.done - ui.left.started if ui.left.done else None
+    rtot = ui.right.done - ui.right.started if ui.right.done else None
+    na = "did not get there"
+
+    def faster(a, b):
+        if a is None or b is None or secs(a["secs"]) == secs(b["secs"]):
+            return EVEN  # equal as printed is a tie, whatever the milliseconds say
+        return WIN_L if a["secs"] < b["secs"] else WIN_R
+
+    measured = [
+        (f"{env.agents} changes landed",
+         f"{L2['runs']} runs in series · {secs(L2['secs'])}" if L2 else na,
+         f"{R2['runs']} runs at once · {secs(R2['secs'])}" if R2 else na,
+         faster(L2, R2)),
+        ("authors sent back",
+         f"{L2['conflicts'] + L2['failures']}, paged one at a time" if L2 else na,
+         f"{R2['conflicts'] + R2['failures']}, each told why, in one answer" if R2 else na,
+         WIN_R),
+        ("a change needing 07's work",
+         "waits for 07",
+         "lands now; 07 resolves later",
+         WIN_R),
+        ("the test runner breaks",
+         f"{L5b['paged']} authors blamed, {L5b['runs']} runs wasted" if L5b else na,
+         "nobody blamed, everything retried" if R5b else na,
+         WIN_R),
+        ("the runner is back",
+         f"{L5['runs']} runs · {secs(L5['secs'])}" if L5 else na,
+         f"{R5['runs']} runs · {secs(R5['secs'])}" if R5 else na,
+         faster(L5, R5)),
+        ("proof afterwards",
+         "the forge's word",
+         f"{t.get('verified', '?')} signed entries, checked offline",
+         WIN_R),
+        ("who pushed",
+         "the forge's audit log",
+         "not proven: one key, the node's",
+         EVEN),
+        ("what you need",
+         "nothing new",
+         "a node to run",
+         WIN_L),
+        ("whole script",
+         secs(ltot) if ltot else "did not finish",
+         secs(rtot) if rtot else "did not finish",
+         faster({"secs": ltot} if ltot else None, {"secs": rtot} if rtot else None)),
+    ]
+
+    bigger = []
+    if L2 and R2:
+        S = env.ci_seconds
+        per_left_run = max(S, L2["secs"] / max(1, L2["runs"]))       # test plus merges, as measured
+        per_cand = max(0.05, (R2["secs"] - S) / max(1, R2["runs"]))  # git work per candidate, as measured
+        conf_rate, fail_rate = L2["conflicts"] / env.agents, L2["failures"] / env.agents
+        window = 20  # the train tests at most this many candidates per round
+        for n in (200, 2000):
+            conf, fail = round(conf_rate * n), round(fail_rate * n)
+            left_runs = 1 + fail * (math.ceil(math.log2(n)) + 1)  # one batch, a bisection per failure, a retest each
+            rounds = math.ceil(n / window)
+            left_secs = left_runs * per_left_run
+            right_secs = rounds * (S + per_cand * min(n, window)) + per_cand * fail
+            bigger.append((f"{n} changes waiting",
+                           f"{left_runs} runs in series · about {secs(left_secs)}",
+                           f"{rounds} rounds · about {secs(right_secs)}",
+                           WIN_L if left_secs < right_secs else WIN_R))
+        bigger.append(("a broken runner all day", "every author paged", "nobody paged, one retry", WIN_R))
+        bigger.append(("how this was worked out",
+                       f"from this take: a {S:g} s test, {L2['conflicts']} conflict + {L2['failures']} failure per {env.agents}, "
+                       f"{per_cand:.1f} s of git per candidate. Not run.",
+                       "a real fleet's conflict rate is unmeasured; this one is a setting",
+                       EVEN))
+    else:
+        bigger.append(("no estimate", "beat 2 did not finish on both sides", "", EVEN))
+
+    short = [
+        ("pick git + a queue when", "work is disjoint and conflicts are rare", "", WIN_L),
+        ("pick choir when", "", "a conflict must not block others, runners flake, or someone has to verify the record", WIN_R),
+        ("against GitHub's queue", "GitHub's queue is a train too: most of the speed gap closes",
+         "what stays: the conflict as a value, Errored apart from Failed, a record you verify", EVEN),
+    ]
+
+    return box(ui, f"scorecard · {env.agents} agents, the same work, twice",
+               ("git: branches + batch queue", "choir"),
+               [("what happened", measured), ("a bigger day, estimated", bigger), ("the short version", short)])
+
+
+def box(ui, title, heads, sections):
+    """A bordered three-column card, cells wrapped, winners green, losers dim."""
+    width = min(max(96, ui.width - 1), 132)
+    label_w = 30
+    cell_w = (width - label_w - 4) // 2
+    width = label_w + 2 * cell_w + 4  # four border characters
+    out = []
+
+    def line(plain, painted):
+        out.append((plain, painted))
+
+    def rule(l, m, r, fill="─"):
+        s = l + fill * label_w + m + fill * cell_w + m + fill * cell_w + r
+        line(s, ui.paint(s, NOTE))
+
+    def span(text, style):
+        inner = width - 2
+        plain = "│" + text.center(inner) + "│"
+        line(plain, ui.paint("│", NOTE) + ui.paint(text.center(inner), style) + ui.paint("│", NOTE))
+
+    def cells(label, a, b, winner, styles=None):
+        cols = [textwrap.wrap(x, w - 4, break_long_words=True, break_on_hyphens=False) or [""]
+                for x, w in ((label, label_w), (a, cell_w), (b, cell_w))]
+        if styles is None:
+            styles = (PROMPT, OK if winner == WIN_L else NOTE if winner == WIN_R else NORMAL,
+                      OK if winner == WIN_R else NOTE if winner == WIN_L else NORMAL)
+        marks = ("", " ✓" if winner == WIN_L else "", " ✓" if winner == WIN_R else "")
+        for i in range(max(map(len, cols))):
+            plain = "│"
+            painted = ui.paint("│", NOTE)
+            for col, w, st, mark in zip(cols, (label_w, cell_w, cell_w), styles, marks):
+                text = col[i] if i < len(col) else ""
+                cell = " " + text.ljust(w - 4) + (mark if i == 0 and text and mark else "  ") + " "
+                plain += cell + "│"
+                painted += ui.paint(cell, st) + ui.paint("│", NOTE)
+            line(plain, painted)
+
+    line("", "")
+    rule("╭", "─", "╮")
+    span(title, HEAD)
+    rule("├", "┬", "┤")
+    cells("", heads[0], heads[1], EVEN, styles=(NORMAL, HEAD, HEAD))
+    for name, rows in sections:
+        rule("├", "┼", "┤")
+        cells(name.upper(), "", "", EVEN, styles=(HEAD, NORMAL, NORMAL))
+        for label, a, b, winner in rows:
+            cells(label, a, b, winner)
+    rule("╰", "┴", "╯")
+    line("", "")
+    return out
+
+
 def play(ui):
     ui.banner()
     ticker = threading.Thread(target=ui.tick, daemon=True)

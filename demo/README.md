@@ -99,7 +99,13 @@ When both sides are done, each column prints its start-to-finish time,
 then the concession and the claim, one per column: for disjoint work at
 a low conflict rate, branches and a merge queue are fine; the claim is
 what happens at the conflict, at the infra failure, and in what you can
-prove after.
+prove after. Then one boxed scorecard, in plain words, a winner ticked
+per row: what this take measured, side by side; an estimate for 200 and
+2000 changes waiting, worked out from this take's own numbers (its test
+time, its conflict and failure counts, its measured git cost per
+candidate) and labelled as an estimate, not a run; and the short
+version, including what survives against GitHub's merge queue. The
+conflict rate a real fleet has is unmeasured, and the card says so.
 
 ## Numbers you will see, and what they mean
 
