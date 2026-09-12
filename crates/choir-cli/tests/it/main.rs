@@ -29,6 +29,7 @@ mod python;
 mod repair;
 mod restore;
 mod runner;
+mod seeds;
 mod serve;
 mod skill;
 mod supervise;

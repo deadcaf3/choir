@@ -57,6 +57,10 @@ jobs:
             || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
           command -v cargo-cyclonedx >/dev/null \
             || cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked
+      # A choir-cli test executes choirctl under zsh, which the runner
+      # image does not ship; nightly.yml says why it must execute.
+      - name: Install zsh
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends zsh
       - name: Fail-closed quality gate
         run: |
           ./gate

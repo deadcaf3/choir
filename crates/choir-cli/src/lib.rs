@@ -76,6 +76,3 @@ pub mod surface;
 // Same reason as `docs`: the module's own header carries intra-doc links.
 pub mod tls;
 pub mod triage;
-
-/// `SYNC.md`'s checks over a served log page.
-pub mod verify;

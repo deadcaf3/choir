@@ -122,6 +122,10 @@ pub(crate) struct Offers {
     /// table, and passed as one value so a page cannot answer it a
     /// second way.
     pub publishes: bool,
+    /// Whether the node serves a release shelf (D79), so the terminal
+    /// door can install `choir` from this node rather than naming a
+    /// release host.
+    pub downloads: bool,
 }
 
 /// What the front door can offer somebody who arrives with nothing (D72).
@@ -163,6 +167,9 @@ pub(crate) struct Door<'a> {
     /// number rendered beside a link that disagrees with it is the kind
     /// of drift this file already has one comment about.
     pub publishes: bool,
+    /// Whether this node serves a release shelf (D79), and so can hand a
+    /// reader its own installer rather than a release host's.
+    pub downloads: bool,
 }
 
 /// Opens the document and the brand header.
@@ -370,6 +377,7 @@ fn offer(
         ssh,
         passkeys,
         publishes: _,
+        downloads,
     } = offers;
     let mut h = shell("choir: you're invited", theme);
     // The card a chat client shows. Deliberately generic: it names no
@@ -435,7 +443,20 @@ fn offer(
         h.push_str("</td></tr>");
     }
     h.push_str("</tbody></table>");
-    h.push_str("<p class=\"note\">The link works a single time.</p>");
+    h.push_str(
+        "<p class=\"note\">The link works a single time, so take one of the two ways in \
+         below.</p></section>",
+    );
+    // Two doors, because two kinds of reader hold this link. One has git
+    // and a browser and wants nothing else; the other runs `choir` or a
+    // coding agent, and for them this page's whole job is the one line
+    // that sets a machine up. Both spend the same invite, which is why
+    // the sentence above says to take one.
+    h.push_str("<section><h2>Join in this browser</h2>");
+    h.push_str(
+        "<p class=\"note\">The next page gives you one <code>git clone</code> line. You need \
+         only git.</p>",
+    );
     h.push_str("<form id=\"claim\" method=\"post\" action=\"/join\">");
     h.push_str("<input type=\"hidden\" name=\"i\" value=\"");
     h.push_str(&esc(id));
@@ -447,7 +468,7 @@ fn offer(
     // or typed by the operator, both of which decide on their behalf
     // something neither of them has to live with.
     if summary.user.is_none() {
-        h.push_str("<h2>Pick your username</h2>");
+        h.push_str("<h3>Pick your username</h3>");
         h.push_str(
             "<p class=\"note\">Letters, digits, <code>-</code> and <code>_</code>. It is \
              what every change you make here will be signed as, and it cannot be changed \
@@ -509,6 +530,38 @@ fn offer(
         );
     }
     h.push_str("</form></section>");
+
+    // The terminal door: this page's own address in the one command that
+    // redeems it, so nothing is assembled by hand. It reveals nothing the
+    // reader does not already hold, but it does carry the secret, and a
+    // screenshot of the page as it opens must not -- the same reason the
+    // waiting page keeps its link off the page. So it is folded shut.
+    let node = origin.unwrap_or("<this node>");
+    h.push_str("<section><h2>Or join from a terminal</h2>");
+    h.push_str(
+        "<p class=\"note\">For the <code>choir</code> tool and coding agents. It creates your \
+         account and puts a copy of the code in the folder you run it in.</p>",
+    );
+    h.push_str("<details><summary>Show what to paste</summary><pre class=\"cmd\">");
+    if downloads {
+        h.push_str(&esc(&format!("curl -fsSL {node}/download/install.sh | sh")));
+        h.push('\n');
+        // The installer puts `choir` in `~/.cargo/bin` and tells new
+        // terminals so, but no child process can change the PATH of the
+        // terminal it runs in. Without this line the join below it is
+        // `command not found` on any machine with no Rust on it.
+        h.push_str(&esc("export PATH=\"$HOME/.cargo/bin:$PATH\""));
+        h.push('\n');
+    }
+    h.push_str(&esc(&format!("choir join '{node}/join?i={id}&k={secret}'")));
+    h.push_str("</pre>");
+    if !downloads {
+        h.push_str("<p class=\"note\">This needs <code>choir</code> installed first.</p>");
+    }
+    h.push_str(
+        "<p class=\"note\">It carries this invite, so keep it out of screenshots.</p>\
+         </details></section>",
+    );
     if passkeys {
         h.push_str(crate::ui::CEREMONY_SCRIPT);
     }
@@ -554,6 +607,27 @@ fn welcome(
                 "Put it in your password manager before you close this tab. If you lose it, \
                  ask for a new invite; there is no reset.",
             );
+            // The complaint this answers is the one every credential
+            // handed over on a page produces within the hour: git asks for
+            // it again on the next push, and again after that. Git already
+            // knows how to remember it -- `credential approve` is the
+            // documented way to put a secret into whatever helper is
+            // configured -- and macOS and Windows ship one. Linux often
+            // does not, which is said rather than assumed.
+            //
+            // Folded rather than a numbered step, because on the two
+            // systems that ship a helper it is a step nobody has to take,
+            // and a list of steps is read as a list of things to do.
+            h.push_str("<details><summary>Git keeps asking for this password?</summary>");
+            h.push_str(
+                "<p>Git will ask for that password on every push unless it has somewhere to \
+                 keep it. macOS and Windows come with somewhere; on Linux, run <code>git \
+                 config --global credential.helper</code> first to check you have one. Then \
+                 run this once:</p>",
+            );
+            h.push_str("<pre class=\"cmd\">");
+            h.push_str(&esc(&approve_command(node, user, token)));
+            h.push_str("</pre></details>");
             h.push_str("</section>");
         }
         None => {
@@ -607,34 +681,6 @@ fn welcome(
         h.push_str("</p></li>");
         step += 1;
     }
-    // The complaint this answers is the one every credential handed over
-    // on a page produces within the hour: git asks for it again on the
-    // next push, and again after that. Git already knows how to remember
-    // it -- `credential approve` is the documented way to put a secret
-    // into whatever helper is configured -- and macOS and Windows ship
-    // one. Linux often does not, which is said rather than assumed.
-    h.push_str("<li><h3><span class=\"step\">");
-    h.push_str(&step.to_string());
-    h.push_str("</span>Stop being asked</h3>");
-    h.push_str(
-        "<p>Git will ask for that password on every push unless it has somewhere to keep \
-         it. macOS and Windows come with somewhere; on Linux, run <code>git config \
-         --global credential.helper</code> first to check you have one.</p>",
-    );
-    match token {
-        Some(token) => {
-            h.push_str("<pre class=\"cmd\">");
-            h.push_str(&esc(&approve_command(node, user, token)));
-            h.push_str("</pre>");
-        }
-        None => h.push_str(
-            "<p class=\"note\">Make a token on your <a href=\"/account\">account page</a> \
-             first; that page prints this same line with it filled in.</p>",
-        ),
-    }
-    h.push_str("</li>");
-    step += 1;
-
     h.push_str("<li><h3><span class=\"step\">");
     h.push_str(&step.to_string());
     h.push_str("</span>Teach your agent</h3>");
@@ -983,30 +1029,31 @@ pub(crate) fn landing(theme: Option<&str>, door: &Door<'_>) -> Page {
     // `RELEASE-HOST` is a placeholder for the same reason `NODE` and
     // `REPO` are, and stands out for the same reason: this page is
     // static by construction and must not learn any address, including
-    // the one it is served from.
+    // the one it is served from. A node with a shelf (D79) serves the
+    // installer itself, so its line is spelled with `NODE` like the rest.
     h.push_str(
-        "<p class=\"muted\">You need <code>choir</code> first. One command, no toolchain:</p>\
-         <pre class=\"cmd\">curl -fsSL https://RELEASE-HOST/choir-cli-installer.sh | sh</pre>",
+        "<p class=\"muted\">You need <code>choir</code> first. One command, no toolchain:</p>",
     );
+    h.push_str(if door.downloads {
+        "<pre class=\"cmd\">curl -fsSL NODE/download/install.sh | sh</pre>"
+    } else {
+        "<pre class=\"cmd\">curl -fsSL https://RELEASE-HOST/choir-cli-installer.sh | sh</pre>"
+    });
     h.push_str("<pre class=\"session\">");
     h.push_str(
         "<span class=\"said\"># Paste the whole invite link, quotes included. It mints \
-                your key,\n# stores your token, and points git at that token for this \
-                node.</span>\n",
+                your key,\n# stores your token, points git at that token for this node, \
+                and clones\n# each repository you were invited to into a folder of its \
+                own name.</span>\n",
     );
     h.push_str("<span class=\"cmd\">choir join 'NODE/join?i=…&amp;k=…'</span>\n\n");
-    h.push_str(
-        "<span class=\"said\"># An ordinary clone. The token stays in the file \
-                `choir join` wrote and\n# never enters the URL, so it cannot leak through \
-                `git remote -v`.</span>\n",
-    );
-    h.push_str("<span class=\"cmd\">git clone NODE/REPO.git</span>\n\n");
     h.push_str(
         "<span class=\"said\"># Commit on a branch as you always would, then propose it, \
                 from inside\n# the checkout and with no arguments. Run it again after an \
                 amend and it\n# updates the same proposal rather than opening a second \
                 one.</span>\n",
     );
+    h.push_str("<span class=\"cmd\">cd REPO</span>\n");
     h.push_str("<span class=\"cmd\">choir propose</span>");
     h.push_str("</pre>");
 
@@ -1442,6 +1489,7 @@ mod tests {
             asking: false,
             docs: None,
             publishes: false,
+            downloads: false,
         }
     }
 
@@ -1495,6 +1543,7 @@ mod tests {
                 asking: false,
                 docs: None,
                 publishes: true,
+                downloads: false,
             },
         )
         .html;
@@ -1517,6 +1566,7 @@ mod tests {
                 asking: true,
                 docs: None,
                 publishes: false,
+                downloads: false,
             },
         );
         assert!(page.scripted, "the page declares no script");
@@ -1559,6 +1609,55 @@ mod tests {
         assert!(!page.scripted);
         assert!(!page.html.contains("ask-go"), "{}", page.html);
         assert!(!page.html.contains("<script"), "{}", page.html);
+    }
+
+    /// A node with a release shelf (D79) installs from itself, spelled
+    /// with the same `NODE` placeholder as the rest of the listing, so
+    /// the page still learns no address of its own.
+    #[test]
+    fn a_door_with_a_shelf_installs_from_this_node() {
+        let html = super::landing(
+            None,
+            &super::Door {
+                downloads: true,
+                ..shut()
+            },
+        )
+        .html;
+        assert!(
+            html.contains("curl -fsSL NODE/download/install.sh | sh"),
+            "{html}"
+        );
+        assert!(!html.contains("RELEASE-HOST"), "{html}");
+    }
+
+    /// After a browser join the page is a clone line and one paste. The
+    /// line that stores the password is folded away for the machines
+    /// that need it, rather than being a step everybody has to read.
+    #[test]
+    fn the_welcome_page_folds_the_keychain_line_under_the_clone() {
+        let html = super::welcome(
+            "bea",
+            Some("t0ken"),
+            &["agents/demo.git write".to_string()],
+            Some("https://choir.example"),
+            None,
+        )
+        .html;
+        assert!(
+            html.contains("git clone https://bea@choir.example/agents/demo.git"),
+            "{html}"
+        );
+        let (_, folded) = html.split_once("<details>").expect("a fold");
+        let (folded, _) = folded.split_once("</details>").expect("the fold closes");
+        assert!(
+            folded.contains("git credential approve"),
+            "the keychain line is not in the fold: {html}"
+        );
+        assert!(
+            !html.contains("Stop being asked"),
+            "the keychain line is still a numbered step: {html}"
+        );
     }
 
     /// The credential line has to be one git will actually find again.

@@ -42,6 +42,8 @@
 //!
 //! It builds on [`choir_hash`] and [`choir_oplog`].
 
+pub mod sync;
+
 use choir_hash::ContentHash;
 use choir_oplog::{OpEntry, Witness};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};

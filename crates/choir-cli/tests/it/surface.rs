@@ -463,6 +463,13 @@ fn every_day_one_command_exists() {
 #[test]
 fn local_only_files_stay_ignored() {
     let root = repo_root();
+    // A worktree may carry `internal` as a symlink to the main checkout's
+    // directory. Git refuses a path beyond a symlink outright, and what it
+    // would publish there is the link itself, whose target is a local path
+    // naming the machine's owner. So there, the link is what must be
+    // ignored.
+    let linked = std::fs::symlink_metadata(root.join("internal"))
+        .is_ok_and(|meta| meta.file_type().is_symlink());
     // `internal/` is private in full, with no allowlist. The four files
     // below were once excepted back into the public set, which is exactly
     // how they came to be tracked; naming them here means re-adding any
@@ -479,6 +486,11 @@ fn local_only_files_stay_ignored() {
         // writes is a credential and the daemon's key.
         ".choir/config",
     ] {
+        let local = if linked && local.starts_with("internal/") {
+            "internal"
+        } else {
+            local
+        };
         let ignored = std::process::Command::new("git")
             .args(["check-ignore", "--no-index", local])
             .current_dir(&root)
@@ -590,7 +602,13 @@ fn operator_and_template_guidance_matches_the_shipped_paths() {
 fn the_binarys_help_is_the_tables_help() {
     // A CLI whose help disagrees with the README is the drift this exists
     // to stop, so check the shipped binary rather than the function.
+    //
+    // On a machine that runs a node: one with nothing set up gets the
+    // six-line orientation instead, and a fresh CI runner is that machine.
+    let home = std::env::temp_dir().join("choir-surface-operator-home");
+    std::fs::create_dir_all(home.join(".choir/repos")).expect("operator home");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_choir"))
+        .env("HOME", &home)
         .output()
         .expect("choir runs");
     let printed = String::from_utf8_lossy(&out.stderr);

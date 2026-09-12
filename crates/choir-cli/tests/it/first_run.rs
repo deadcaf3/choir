@@ -1,12 +1,12 @@
 //! The first five minutes, from a `$HOME` with nothing in it.
 //!
 //! The claim is not that `choir join` returns 0. It is that a person who
-//! pastes one link is *finished*: the next thing they type is `git
-//! clone`, and the thing after that is `choir propose` with no
+//! pastes one link is *finished*: the next thing they type is `cd` into
+//! the copy it made, and the thing after that is `choir propose` with no
 //! arguments. Every intermediate step this product used to ask for -- an
-//! invite file, a key path, a credential-helper line, a node URL on
-//! every command -- is absent from this test on purpose. If one of them
-//! comes back, one of these assertions stops holding.
+//! invite file, a key path, a credential-helper line, a clone URL, a
+//! node URL on every command -- is absent from this test on purpose. If
+//! one of them comes back, one of these assertions stops holding.
 //!
 //! `HOME` and `GIT_CONFIG_GLOBAL` are set on the child processes, never
 //! on this one: these modules share a process with every other file in
@@ -167,9 +167,14 @@ fn served(tag: &str) -> Served {
 /// Mints an invite as the operator and returns the one link a
 /// contributor is sent, exactly as the node builds it.
 fn link(s: &Served, user: Option<&str>) -> String {
+    link_granting(s, user, r#""agents/demo write""#)
+}
+
+/// [`link`], granting `grants` (a JSON array's contents) instead.
+fn link_granting(s: &Served, user: Option<&str>, grants: &str) -> String {
     let body = match user {
-        Some(user) => format!(r#"{{"user":"{user}","grants":["agents/demo write"]}}"#),
-        None => r#"{"grants":["agents/demo write"]}"#.to_string(),
+        Some(user) => format!(r#"{{"user":"{user}","grants":[{grants}]}}"#),
+        None => format!(r#"{{"grants":[{grants}]}}"#),
     };
     let (status, answer) = curl(&[
         "-u",
@@ -203,11 +208,16 @@ fn one_link_leaves_a_contributor_able_to_clone_push_and_propose() {
     std::fs::create_dir_all(&machine.home).unwrap();
     let invite = link(&s, Some("bea"));
 
-    // 1. The one command. No invite file, no key path, no node URL.
+    // 1. The one command. No invite file, no key path, no node URL, and
+    //    no clone line to assemble afterwards.
     let joined = machine.choir(&s.work, &["join", &invite]);
     assert!(joined.status.success(), "join failed: {}", shown(&joined));
     let report = String::from_utf8_lossy(&joined.stdout).to_string();
     assert!(report.contains("Joined"), "{report}");
+    assert!(
+        report.contains("cd demo"),
+        "the report does not say where the copy is: {report}"
+    );
     assert!(
         report.contains("choir propose"),
         "the report names no next step: {report}"
@@ -237,20 +247,22 @@ fn one_link_leaves_a_contributor_able_to_clone_push_and_propose() {
     let written = std::fs::read_to_string(&config).unwrap();
     assert!(written.contains(&format!("node = {}", s.api)), "{written}");
 
-    // 2. An ordinary clone, with no credential anywhere in the URL and
-    //    no helper configured by hand.
-    let clone = s.work.join("clone");
-    let cloned = machine.git(
-        &s.work,
-        &[
-            "clone",
-            "-q",
-            &format!("{}/agents/demo.git", s.api),
-            clone.to_str().unwrap(),
-        ],
+    // 2. The copy join made: an ordinary clone of the repository the
+    //    invite named, in a folder of its own name, with no credential
+    //    anywhere in the URL and no helper configured by hand.
+    let clone = s.work.join("demo");
+    assert!(
+        clone.join("f.txt").exists(),
+        "join left no copy of the repository: {}",
+        shown(&joined)
     );
-    assert!(cloned.status.success(), "clone failed: {}", shown(&cloned));
-    assert!(clone.join("f.txt").exists());
+    let origin = machine.git(&clone, &["remote", "get-url", "origin"]);
+    assert_eq!(
+        String::from_utf8_lossy(&origin.stdout).trim(),
+        format!("{}/agents/demo.git", s.api),
+        "origin is not the plain URL: {}",
+        shown(&origin)
+    );
     // The token is in the file join wrote, and nowhere git recorded.
     let stored = std::fs::read_to_string(&auth).unwrap();
     let token = stored.trim().split_once(':').expect("user:token").1;
@@ -259,6 +271,10 @@ fn one_link_leaves_a_contributor_able_to_clone_push_and_propose() {
         !git_config.contains(token),
         "the token landed in .git/config"
     );
+    // `git pull` with nothing after it: the clone tracks its upstream,
+    // so the habit a person arrives with works on the first day.
+    let pulled = machine.git(&clone, &["pull", "-q"]);
+    assert!(pulled.status.success(), "pull failed: {}", shown(&pulled));
 
     // 3. A push, which is the half of git a read-only clone would not
     //    have exercised.
@@ -343,6 +359,127 @@ fn a_second_join_refuses_rather_than_replacing_the_key() {
     assert!(said.contains("already joined"), "{said}");
     assert!(said.contains("next: choir join"), "{said}");
     assert_eq!(std::fs::read(&key).unwrap(), before, "the key was replaced");
+
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
+/// The same link a second time is a join that already happened, which is
+/// what somebody runs who is not sure the first one worked, or who ran it
+/// in the wrong folder: nothing is redeemed or rewritten, a copy already
+/// here is pointed at, and one that is missing is made.
+#[test]
+fn the_same_link_again_finishes_the_join_instead_of_refusing() {
+    let s = served("same-link");
+    let machine = Machine {
+        home: s.work.join("home"),
+        gitconfig: s.work.join("home").join("gitconfig"),
+    };
+    std::fs::create_dir_all(&machine.home).unwrap();
+    let invite = link(&s, Some("ivy"));
+
+    let first = machine.choir(&s.work, &["join", &invite]);
+    assert!(first.status.success(), "{}", shown(&first));
+    let auth = machine.home.join(".choir").join("auth");
+    let token = std::fs::read(&auth).unwrap();
+
+    let again = machine.choir(&s.work, &["join", &invite]);
+    assert!(again.status.success(), "{}", shown(&again));
+    let report = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(report.contains("Already joined"), "{report}");
+    assert!(report.contains("cd demo"), "{report}");
+    assert_eq!(
+        std::fs::read(&auth).unwrap(),
+        token,
+        "the token was rewritten"
+    );
+
+    let elsewhere = s.work.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let there = machine.choir(&elsewhere, &["join", &invite]);
+    assert!(there.status.success(), "{}", shown(&there));
+    let origin = machine.git(&elsewhere.join("demo"), &["remote", "get-url", "origin"]);
+    assert_eq!(
+        String::from_utf8_lossy(&origin.stdout).trim(),
+        format!("{}/agents/demo.git", s.api),
+        "no copy was made where there was none: {}",
+        shown(&there)
+    );
+
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
+/// A folder by the repository's name is somebody's work, so the clone
+/// steps around it rather than into it, and says so.
+#[test]
+fn a_folder_already_there_is_left_as_it_was() {
+    let s = served("folder-there");
+    let machine = Machine {
+        home: s.work.join("home"),
+        gitconfig: s.work.join("home").join("gitconfig"),
+    };
+    std::fs::create_dir_all(&machine.home).unwrap();
+    let theirs = s.work.join("demo");
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(theirs.join("mine.txt"), "keep me\n").unwrap();
+
+    let joined = machine.choir(&s.work, &["join", &link(&s, Some("fay"))]);
+    assert!(joined.status.success(), "{}", shown(&joined));
+    let report = String::from_utf8_lossy(&joined.stdout).to_string();
+    assert!(report.contains("already here"), "{report}");
+    assert_eq!(
+        std::fs::read_to_string(theirs.join("mine.txt")).unwrap(),
+        "keep me\n"
+    );
+    assert!(!theirs.join(".git").exists(), "cloned into their folder");
+
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
+/// `--no-clone` is for somebody who wants the copy somewhere else: the
+/// join is whole, and the directory it ran in is untouched.
+#[test]
+fn no_clone_joins_without_making_a_copy() {
+    let s = served("no-clone");
+    let machine = Machine {
+        home: s.work.join("home"),
+        gitconfig: s.work.join("home").join("gitconfig"),
+    };
+    std::fs::create_dir_all(&machine.home).unwrap();
+
+    let joined = machine.choir(&s.work, &["join", &link(&s, Some("gil")), "--no-clone"]);
+    assert!(joined.status.success(), "{}", shown(&joined));
+    assert!(
+        String::from_utf8_lossy(&joined.stdout).contains("as gil"),
+        "{}",
+        shown(&joined)
+    );
+    assert!(!s.work.join("demo").exists(), "--no-clone cloned anyway");
+
+    std::fs::remove_dir_all(&s.work).ok();
+}
+
+/// The account exists and the token is stored before any clone starts,
+/// so a clone that fails is not a failed join: the report says what did
+/// not happen and the exact line that finishes it, and exits 0, because
+/// the account exists either way.
+#[test]
+fn a_clone_that_fails_leaves_the_join_standing_and_names_the_retry() {
+    let s = served("clone-fails");
+    let machine = Machine {
+        home: s.work.join("home"),
+        gitconfig: s.work.join("home").join("gitconfig"),
+    };
+    std::fs::create_dir_all(&machine.home).unwrap();
+    let invite = link_granting(&s, Some("hal"), r#""agents/missing write""#);
+
+    let joined = machine.choir(&s.work, &["join", &invite]);
+    assert!(joined.status.success(), "{}", shown(&joined));
+    let report = String::from_utf8_lossy(&joined.stdout).to_string();
+    assert!(
+        report.contains(&format!("git clone {}/agents/missing.git", s.api)),
+        "the report does not name the retry: {report}"
+    );
+    assert!(machine.home.join(".choir").join("auth").is_file());
 
     std::fs::remove_dir_all(&s.work).ok();
 }

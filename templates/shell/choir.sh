@@ -129,8 +129,8 @@ choir_key() {
 	choir_run key "$@"
 }
 
-# choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]
-#   redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, and the node URL in ~/.choir/config; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory
+# choir join <link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>] [--no-clone]
+#   redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, the node URL in ~/.choir/config, and a clone of each repository the invite names in the current directory (--no-clone skips it); the same link run again on this machine clones only what is missing; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory
 choir_join() {
 	choir_run join "$@"
 }
@@ -286,7 +286,7 @@ choir_view() {
 }
 
 # choir doctor [<api>] [--state <dir>]
-#   check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers
+#   check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers; with `seeds =` in .choir/config, a fork check per seed
 choir_doctor() {
 	choir_run doctor "$@"
 }

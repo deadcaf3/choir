@@ -347,8 +347,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "join",
-        args: "<link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>]",
-        summary: "redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, and the node URL in ~/.choir/config; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory",
+        args: "<link> | <api> <invite-file> <key-file>  [--user <name>] [--channel <name>] [--key-file <path>] [--ssh-key <path>] [--token-file <path>] [--no-clone]",
+        summary: "redeem an invite link and set this machine up: actor key at ~/.choir/agent.key, token at ~/.choir/auth (0600), a git credential helper for that node, the node URL in ~/.choir/config, and a clone of each repository the invite names in the current directory (--no-clone skips it); the same link run again on this machine clones only what is missing; --user names the account when the invite left it open, asked on the terminal otherwise; the three-argument form takes the invite from a file, answers JSON and touches neither git nor your home directory",
         agent_facing: true,
         group: "getting started",
     },
@@ -705,7 +705,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "doctor",
         args: "[<api>] [--state <dir>]",
-        summary: "check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers",
+        summary: "check everything the other commands assume: the binaries shelled out to, the auth file and its mode, and whether a node answers; each failure prints the fix; on a hosting machine it adds bind address, TLS, certificate expiry, linger, unit state and whether the public URL answers; with `seeds =` in .choir/config, a fork check per seed",
         // The one command worth reaching for when nothing else works,
         // so it is not gated on being an agent's habit.
         agent_facing: true,
@@ -760,7 +760,7 @@ pub const ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         method: "GET",
         path: "/api/view?limit=N&offset=M",
-        purpose: "The materialized view plus the latest ref-state attestation, key bindings, T2 review outcomes, T3 concentration, T4 newcomer harm, view growth, the build commit, and the sequencer's p99 against the 100 ms gate. Under an ACL you get your own slice; node-wide sections need a node-wide grant, and a missing repository is one you were not granted. Map-shaped sections are bounded: `limit` rows (200 default, 1000 max), `offset`, `<section>_omitted`, and `paging.next`",
+        purpose: "The materialized view plus the latest ref-state attestation, key bindings, T2 review outcomes, T3 concentration, T4 newcomer harm, view growth, the build commit, and the sequencer's p99 against the 100 ms gate; on a seed, `replica` says whose copy it is and how far behind. Under an ACL you get your own slice; node-wide sections need a node-wide grant, and a missing repository is one you were not granted. Map-shaped sections are bounded: `limit` rows (200 default, 1000 max), `offset`, `<section>_omitted`, and `paging.next`",
         mcp: Some(McpTool {
             name: "choir_view",
             input_schema: PAGING_MCP_SCHEMA,
@@ -788,6 +788,18 @@ pub const ENDPOINTS: &[Endpoint] = &[
             input_schema: LOG_MCP_SCHEMA,
             arguments: McpArguments::Query { parameters: &["from"] },
         }),
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/signers",
+        purpose: "This node's public key and every key it trusts, with the channel a key is bound to, versioned: what SYNC.md's authorship check needs, since the log names a key's id and never the key. Behind the same node-wide read grant as `/api/log`",
+        mcp: None,
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/witness",
+        purpose: "On a seed: its signed statements that it folded the home's attestations, the latest and the last 64, versioned. Compare one with the home's `snapshot` by ancestry in the `prev_snapshot` chain (SYNC.md, Seeds); neither an ancestor of the other is a fork. 404 on a home",
+        mcp: None,
     },
     Endpoint {
         method: "POST",
@@ -1328,17 +1340,18 @@ pub fn contribute_html() -> String {
             "1",
             "join",
             "Paste the whole link your operator sent you, quotes included. This mints your key, \
-             stores your token, and points git at that token for this node -- so the clone \
-             below needs no credential in its URL. There is no registration, and no second \
-             message to wait for.",
+             stores your token, points git at that token for this node, and clones each \
+             repository the invite names into a folder of its own name. There is no \
+             registration, and no second message to wait for.",
             "choir join 'NODE/join?i=…&amp;k=…'",
         ),
         (
             "2",
             "git-credential",
-            "Clone normally. The token stays in the file `choir join` wrote and never enters \
-             the URL, so it cannot leak through `git remote -v` or a pasted clone line. This \
-             command is here for anybody who would rather wire that up by hand.",
+            "Anything else you can read, clone normally. The token stays in the file `choir \
+             join` wrote and never enters the URL, so it cannot leak through `git remote -v` \
+             or a pasted clone line. This command is here for anybody who would rather wire \
+             that up by hand.",
             "git clone NODE/REPO.git",
         ),
         (

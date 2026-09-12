@@ -1906,9 +1906,14 @@ fn the_oplog_backup_carries_the_log_and_the_pin_but_never_the_key() {
 
     // The script is run as `sh`, never as the zsh in its shebang, and a
     // runtime-only failure here would skip the backup while the receipt
-    // still ended in success. `sh -n` catches at least the syntax half.
-    let syntax = std::process::Command::new("sh")
-        .arg("-n")
+    // still ended in success. `-n` catches at least the syntax half.
+    //
+    // That `sh` is macOS's, which is bash 3.2 in POSIX mode and accepts
+    // the script's arrays. A Linux runner's `sh` is dash, which does not,
+    // so name the shell that actually runs it rather than whichever one
+    // the host calls `sh`.
+    let syntax = std::process::Command::new("bash")
+        .args(["--posix", "-n"])
         .arg(repo_root().join("scripts/push_mirror.sh"))
         .output()
         .expect("run sh -n");

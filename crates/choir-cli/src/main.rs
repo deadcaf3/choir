@@ -107,7 +107,64 @@ fn may_hold_credential(api: &str) -> bool {
     if matches!(name, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
         return true;
     }
-    configured("node").is_some_and(|node| node.trim_end_matches('/') == api.trim_end_matches('/'))
+    let same = |url: &str| url.trim_end_matches('/') == api.trim_end_matches('/');
+    // A seed named in `seeds =` (D80) was named by the reader in the same
+    // file as the node, which is the same assertion about where the
+    // credential may go.
+    configured("node").is_some_and(|node| same(&node))
+        || configured_seeds().iter().any(|seed| same(seed))
+}
+
+/// The seeds `.choir/config` names, as `seeds = <url>[, <url>]` beside
+/// `node =` (D80). Empty when there is no such line.
+fn configured_seeds() -> Vec<String> {
+    configured("seeds")
+        .map(|line| {
+            line.split(',')
+                .map(|url| url.trim().trim_end_matches('/').to_string())
+                .filter(|url| !url.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The home a `421 not_home` answer names, when `(status, body)` is one
+/// (D80).
+fn not_home(status: u16, body: &str) -> Option<String> {
+    if status != 421 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value["code"] != "not_home" {
+        return None;
+    }
+    value["home"]
+        .as_str()
+        .map(|home| home.trim_end_matches('/').to_string())
+}
+
+/// Whether to resend a request a seed at `api` refused to its `home`, and
+/// if not, says why on stderr.
+///
+/// Once, and only to a home this command may hand a credential to: the
+/// loopback, or the node `.choir/config` names. A seed chooses the address
+/// in its answer, so following any address it names would let a seed send
+/// this command's credential wherever it liked.
+fn follow_home(api: &str, home: &str) -> bool {
+    if home == api.trim_end_matches('/') {
+        return false;
+    }
+    if may_hold_credential(home) {
+        eprintln!("choir: {api} is a seed of {home}; sent this to the home instead");
+        true
+    } else {
+        eprintln!(
+            "choir: {api} is a seed of {home}, and writes go there. Not following it: \
+             {home} is not the node .choir/config names, and this command's credential \
+             would go with it. Rerun against {home}."
+        );
+        false
+    }
 }
 
 impl<'a> AuthOptions<'a> {
@@ -439,6 +496,22 @@ fn http(
     tool: &str,
     arguments: serde_json::Value,
 ) -> (u16, String) {
+    let (status, body) = http_once(api, auth, tool, &arguments);
+    // D80. A seed answers every write with its home; the same request,
+    // unchanged, is admissible there, because a seed's view already names
+    // the home's log.
+    match not_home(status, &body) {
+        Some(home) if follow_home(api, &home) => http_once(&home, auth, tool, &arguments),
+        _ => (status, body),
+    }
+}
+
+fn http_once(
+    api: &str,
+    auth: AuthOptions<'_>,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> (u16, String) {
     let client = match choir_cli::mcp::HttpClient::new(
         api,
         auth.file_for(api).map(std::path::Path::new),
@@ -451,7 +524,7 @@ fn http(
         }
     };
     let endpoint = choir_cli::surface::mcp_endpoint(tool).expect("CLI endpoint is in the table");
-    match client.request(endpoint, &arguments) {
+    match client.request(endpoint, arguments) {
         Ok(response) => response,
         Err(error) => {
             eprintln!("choir: {error}");
@@ -502,23 +575,30 @@ fn operator_call(
 ) -> serde_json::Value {
     let endpoint = choir_cli::surface::endpoint(method, path)
         .unwrap_or_else(|| panic!("{path} is in the endpoint table"));
-    let client = match choir_cli::mcp::HttpClient::new(
-        api,
-        auth.file_for(api).map(std::path::Path::new),
-        auth.user,
-    ) {
-        Ok(client) => client,
-        Err(error) => {
-            eprintln!("choir: {error}");
-            std::process::exit(2);
+    let send = |api: &str| {
+        let client = match choir_cli::mcp::HttpClient::new(
+            api,
+            auth.file_for(api).map(std::path::Path::new),
+            auth.user,
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("choir: {error}");
+                std::process::exit(2);
+            }
+        };
+        match client.request(endpoint, body) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("choir: {error}");
+                std::process::exit(1);
+            }
         }
     };
-    let (status, text) = match client.request(endpoint, body) {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("choir: {error}");
-            std::process::exit(1);
-        }
+    let (status, text) = send(api);
+    let (status, text) = match not_home(status, &text) {
+        Some(home) if follow_home(api, &home) => send(&home),
+        _ => (status, text),
     };
     let parsed = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
     if !(200..300).contains(&status) {
@@ -1317,14 +1397,17 @@ fn redeem_next(body: &str) -> String {
 ///
 /// Admission in one command: mint an actor key, redeem the operator's
 /// invite, store the token where the rest of the CLI reads it, and — for
-/// the link form — leave git and `~/.choir/config` set up so that the
-/// next thing the reader types is `git clone` and the thing after it is
+/// the link form — leave git and `~/.choir/config` set up and a clone of
+/// each granted repository in the current directory, so that the next
+/// thing the reader types is `cd` and the thing after it is
 /// `choir propose`.
 ///
 /// **The link is the whole input.** It carries the node and the invite,
 /// which is why the one thing a person was actually sent is now the one
 /// thing they have to paste. It reaches `curl` over stdin like every
 /// other credential here, never on an argv, where `ps` would show it.
+/// Pasted again on the machine that redeemed it, it finishes the join
+/// that already happened (see [`rejoin`]) rather than refusing.
 ///
 /// The three-argument form stays because agents and provisioning
 /// scripts hold those paths. It answers with JSON, writes the token
@@ -1340,8 +1423,16 @@ fn redeem_next(body: &str) -> String {
 fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) -> ! {
     let (mut channel, mut ssh_key, mut token_file, mut chosen_user) = (None, None, None, None);
     let mut key_flag = None;
+    let mut no_clone = false;
     let mut index = 0;
     while index < rest.len() {
+        // The one flag that takes no value: the copy goes somewhere else,
+        // or nowhere yet.
+        if rest[index] == "--no-clone" && !no_clone {
+            no_clone = true;
+            index += 1;
+            continue;
+        }
         let Some(value) = rest.get(index + 1).copied() else {
             usage();
         };
@@ -1389,6 +1480,20 @@ fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) ->
         (None, None) => {
             let joined =
                 std::path::Path::new(&default_key).exists() && state_dir().join("auth").exists();
+            // Except for the link this machine already redeemed, on the
+            // node it redeemed it at: that is a join that already
+            // happened, run again by somebody unsure the first one worked,
+            // so it is finished rather than refused. Any other link still
+            // stops here, because what a second invite should do to an
+            // account that exists is the node's to decide.
+            if let (true, Invite::Pair(id, _)) = (joined, &invite) {
+                let home = state_dir().join("config");
+                if configured_in(&home, "node").as_deref() == Some(api.trim_end_matches('/'))
+                    && configured_in(&home, "invite").as_deref() == Some(id.as_str())
+                {
+                    rejoin(api, no_clone);
+                }
+            }
             if joined {
                 eprintln!(
                     "choir join: this machine has already joined a node: there is a key at \
@@ -1552,17 +1657,21 @@ fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) ->
 
     let bound = account["actor_key_bound"] == serde_json::Value::Bool(true);
     let channel = account["channel"].as_str().unwrap_or(user);
+    let grants: Vec<&str> = account["grants"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
     // Only the link form writes to git and to `~/.choir`. The positional
     // form is what tests and provisioning scripts run, often as a user
     // whose `~/.gitconfig` belongs to somebody else's automation, and a
     // command that edits it without being asked is one nobody can run
     // twice safely.
-    let (git_config, home_config) = match from_link {
-        false => (None, None),
-        true => (
+    let (git_config, home_config) = match (from_link, &invite) {
+        (true, Invite::Pair(id, _)) => (
             configure_git_credential(api, &token_path.display().to_string()),
-            write_home_config(api, channel, key_file),
+            write_home_config(api, channel, key_file, id, &grants),
         ),
+        _ => (None, None),
     };
     let next = if bound {
         "choir propose".to_string()
@@ -1625,7 +1734,69 @@ fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) ->
             style.dim("(so no command has to be told the node again)")
         );
     }
-    match &git_config {
+    say_git(git_config.as_deref(), api, &token_path, style);
+    let copies = if no_clone {
+        Vec::new()
+    } else {
+        clone_granted(api, &grants, style)
+    };
+    if bound {
+        say_where_to_go(&copies, style);
+    } else {
+        println!(
+            "\n  {}\n  {}\n",
+            style.dim(
+                "This node does not register keys at redemption. Send the operator this line:"
+            ),
+            style.cyan(&format!("choir key {key_file} {channel}")),
+        );
+    }
+    std::process::exit(0);
+}
+
+/// `choir join` with the link this machine already redeemed, on the node
+/// it redeemed it at.
+///
+/// The node forgets an invite once it is spent, so redeeming again would
+/// only be refused as a link that was never valid. Instead the join is
+/// finished from what the first run recorded: nothing is redeemed and
+/// neither the key nor the token is touched. The git helper is set again
+/// because it is the same value and every clone below needs it: a first
+/// run on a machine that had no git yet recorded the account and could
+/// neither configure git nor clone.
+fn rejoin(api: &str, no_clone: bool) -> ! {
+    let token_path = state_dir().join("auth");
+    let user = std::fs::read_to_string(&token_path)
+        .ok()
+        .and_then(|line| line.split_once(':').map(|(user, _)| user.to_string()))
+        .unwrap_or_default();
+    let repos = configured_in(&state_dir().join("config"), "repos").unwrap_or_default();
+    let repos: Vec<&str> = repos.split_whitespace().collect();
+    let style = choir_cli::style::Style::for_stdout();
+    println!(
+        "\n  {}\n",
+        style.green(&format!("Already joined {api} as {user}."))
+    );
+    let git_config = configure_git_credential(api, &token_path.display().to_string());
+    say_git(git_config.as_deref(), api, &token_path, style);
+    let copies = if no_clone {
+        Vec::new()
+    } else {
+        clone_granted(api, &repos, style)
+    };
+    say_where_to_go(&copies, style);
+    std::process::exit(0);
+}
+
+/// The report's `git` row: where the helper was written, or the line
+/// that writes it by hand.
+fn say_git(
+    git_config: Option<&str>,
+    api: &str,
+    token_path: &std::path::Path,
+    style: choir_cli::style::Style,
+) {
+    match git_config {
         Some(path) => println!(
             "  {}  {} {}",
             style.dim("git     "),
@@ -1642,22 +1813,100 @@ fn join(api: &str, invite: Invite<'_>, key_file: Option<&str>, rest: &[&str]) ->
             )),
         ),
     }
-    if bound {
-        println!(
+}
+
+/// The report's last lines: into a copy, then `choir propose`.
+fn say_where_to_go(copies: &[String], style: choir_cli::style::Style) {
+    match copies.first() {
+        Some(folder) => println!(
+            "\n  {}\n  {}\n  {}\n",
+            style.dim(if copies.len() == 1 {
+                "Go into your copy, commit on a branch as you always would, then propose it:"
+            } else {
+                "Go into a copy, commit on a branch as you always would, then propose it:"
+            }),
+            style.cyan(&format!("cd {folder}")),
+            style.cyan("choir propose")
+        ),
+        None => println!(
             "\n  {}\n  {}\n",
             style.dim("Clone anything you were granted, commit on a branch, then:"),
             style.cyan("choir propose")
-        );
-    } else {
-        println!(
-            "\n  {}\n  {}\n",
-            style.dim(
-                "This node does not register keys at redemption. Send the operator this line:"
-            ),
-            style.cyan(&format!("choir key {key_file} {channel}")),
-        );
+        ),
     }
-    std::process::exit(0);
+}
+
+/// Clones each repository `grants` names into the current directory, one
+/// report row per repository, and returns the folders that hold a copy.
+///
+/// Runs after the token and the credential helper are written, so the
+/// clone authenticates the way every later `git pull` and `git push` in
+/// that folder will: through the helper, from a URL that carries no
+/// credential. A folder already there that pulls from the same URL is the
+/// copy, which is the ordinary case on a second run; any other folder by
+/// that name is somebody's work and is left as it was. A clone that fails
+/// is reported with the line that finishes it rather than failing the
+/// join, because the account already exists, and the same link run again
+/// tries only what is still missing.
+fn clone_granted(api: &str, grants: &[&str], style: choir_cli::style::Style) -> Vec<String> {
+    let label = style.dim("copy    ");
+    let mut copies = Vec::new();
+    for (repo, folder) in choir_cli::join::repositories(grants) {
+        let url = format!("{}/{repo}.git", api.trim_end_matches('/'));
+        if std::path::Path::new(folder).exists() {
+            let origin = std::process::Command::new("git")
+                .args(["-C", folder, "remote", "get-url", "origin"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+            if origin.as_deref() == Some(url.as_str()) {
+                println!(
+                    "  {label}  ./{folder} {}",
+                    style.dim("is already your copy")
+                );
+                copies.push(folder.to_string());
+            } else {
+                println!(
+                    "  {label}  ./{folder} {}",
+                    style.dim("is already here, so it was left as it was")
+                );
+            }
+            continue;
+        }
+        // Never a prompt: the helper answers, and a question for a
+        // password would ask the reader for something they were never
+        // shown. `--` because the folder is the node's word, not ours.
+        let cloned = std::process::Command::new("git")
+            .args(["clone", "-q", "--", &url, folder])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .output();
+        match cloned {
+            Ok(out) if out.status.success() => {
+                println!("  {label}  ./{folder} {}", style.dim(&format!("({repo})")));
+                copies.push(folder.to_string());
+            }
+            outcome => {
+                let why = match &outcome {
+                    Ok(out) => String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .rfind(|line| !line.trim().is_empty())
+                        .unwrap_or("git gave no reason")
+                        .trim()
+                        .to_string(),
+                    Err(error) => format!("git did not run: {error}"),
+                };
+                println!("  {label}  {repo} was not cloned: {why}");
+                println!(
+                    "  {:8}  {}",
+                    "",
+                    style.cyan(&format!("to try again: git clone {url}"))
+                );
+            }
+        }
+    }
+    copies
 }
 
 /// Points git at the token for one node, and returns the file it wrote.
@@ -1711,23 +1960,41 @@ fn configure_git_credential(api: &str, auth_file: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Records the node, channel and key in `~/.choir/config`.
+/// Records the node, channel and key in `~/.choir/config`, and the invite
+/// redeemed with the repositories it named.
 ///
 /// The fallback the `.choir/config` walk reaches when no directory above
 /// the working one names a node — see [`configured`]. Existing keys are
 /// preserved rather than the file being rewritten, because `choir init`
 /// writes this same file when it is run from `$HOME`.
 ///
+/// The invite is its id and never its secret: enough to tell the same
+/// link run again from a second invite, and nothing anybody can redeem.
+/// The repositories are what a run again clones when a copy is missing.
+///
 /// `None` when it could not be written, which is reported rather than
 /// fatal for the same reason [`configure_git_credential`]'s failure is.
-fn write_home_config(api: &str, channel: &str, key_file: &str) -> Option<String> {
+fn write_home_config(
+    api: &str,
+    channel: &str,
+    key_file: &str,
+    invite: &str,
+    grants: &[&str],
+) -> Option<String> {
     let path = state_dir().join("config");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut out = String::new();
+    let repos: Vec<&str> = choir_cli::join::repositories(grants)
+        .into_iter()
+        .map(|(repo, _)| repo)
+        .collect();
+    let repos = repos.join(" ");
     let written = [
         ("node", api.trim_end_matches('/')),
         ("channel", channel),
         ("key", key_file),
+        ("invite", invite),
+        ("repos", repos.as_str()),
     ];
     for line in existing.lines() {
         let key = line.split_once('=').map(|(k, _)| k.trim()).unwrap_or("");
@@ -2546,11 +2813,11 @@ fn load_registry(path: &str) -> Registry {
 /// claims rather than more, and the alternative — treating an
 /// unanswerable question as "revoked" — would report a sound log as
 /// broken.
-fn revocations(api: &str, auth: AuthOptions<'_>) -> choir_cli::verify::Revocations {
+fn revocations(api: &str, auth: AuthOptions<'_>) -> choir_identity::sync::Revocations {
     let (status, body) = http(api, auth, "choir_view", serde_json::json!({}));
     if !(200..300).contains(&status) {
         eprintln!("choir log: cannot read bindings ({status}); revocations not checked");
-        return choir_cli::verify::Revocations::new();
+        return choir_identity::sync::Revocations::new();
     }
     let view: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     view["bindings"]
@@ -2600,7 +2867,7 @@ fn log(api: &str, from: u64, verify: bool, keys: Option<&str>, auth: AuthOptions
     // makes its own log verify, while one that invents one is caught by
     // the entry it points at.
     let revoked = revocations(api, auth);
-    let report = choir_cli::verify::page(&entries, &registry, &revoked);
+    let report = choir_identity::sync::page(&entries, &registry, &revoked);
     for note in &report.notes {
         eprintln!("choir log: {note}");
     }
@@ -4016,6 +4283,17 @@ fn main() {
             let effective = api.as_deref().and_then(|api| auth.file_for(api));
             let credential = effective.or(auth.file);
             let mut checks = choir_cli::doctor::run(api.as_deref(), credential);
+            // D80: a fork check per seed `.choir/config` names, against
+            // the node it names.
+            let seeds = configured_seeds();
+            if !seeds.is_empty() {
+                checks.extend(choir_cli::doctor::seeds(
+                    api.as_deref(),
+                    &seeds,
+                    &|url: &str| auth.file_for(url).map(str::to_string),
+                    auth.user,
+                ));
+            }
             // The six host facts, and only on a machine that has a node:
             // "linger is off" told to a laptop that only ever clones is
             // six rows of noise on a report whose whole value is that

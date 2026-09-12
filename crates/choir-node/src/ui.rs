@@ -360,6 +360,32 @@ fn header(h: &mut String, v: &serde_json::Value, seq: u64) {
     h.push_str("<span class=\"pill\">node ");
     h.push_str(&esc(&short(s(&log, "node"))));
     h.push_str("</span>");
+    // D80. A seed says whose copy this is, in the header, because a
+    // reader who does not know they are on a copy reads a stale page as
+    // the truth.
+    if let Some(replica) = v.get("replica").filter(|r| r.is_object()) {
+        let at = |key: &str| replica.get(key).and_then(serde_json::Value::as_u64);
+        let behind = match (at("home_head_seq"), at("head_seq")) {
+            (Some(home), Some(here)) => home.saturating_sub(here),
+            (Some(home), None) => home + 1,
+            (None, _) => 0,
+        };
+        h.push_str("<span class=\"pill\">seed of ");
+        h.push_str(&esc(s(replica, "home")));
+        h.push_str(", ");
+        h.push_str(&behind.to_string());
+        h.push_str(" behind");
+        if replica
+            .get("halted")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            h.push_str(" <b class=\"tag warn\">halted</b>");
+        }
+        if replica.get("gap").and_then(serde_json::Value::as_bool) == Some(true) {
+            h.push_str(" <b class=\"tag warn\">gap</b>");
+        }
+        h.push_str("</span>");
+    }
     // The way out. `/r/` links back here and this did not link there, so
     // a reader who opened the node's front door could see everything it
     // *knows* and never find the code — which is the thing they came for.
@@ -1340,6 +1366,15 @@ mod tests {
     /// ceremony pages fetch exactly one thing, [`WEBAUTHN_JS`], from
     /// this origin; `the_client_half_is_one_same_origin_file` below is
     /// the rule for that, and this stays the rule for the read surface.
+    /// The dark theme's grain is an SVG in a data URI, and an SVG
+    /// document names its namespace by URL. Nothing is fetched from it:
+    /// it is an identifier the parser compares, not an address it
+    /// visits, so the probes below look past exactly that string and
+    /// nothing else.
+    fn without_the_svg_namespace(page: &str) -> String {
+        page.replace("xmlns='http://www.w3.org/2000/svg'", "")
+    }
+
     #[test]
     fn the_page_references_no_external_resource() {
         let page = render(
@@ -1348,6 +1383,7 @@ mod tests {
             &Roster::new(),
             crate::browse::Chrome::default(),
         );
+        let page = without_the_svg_namespace(&page);
         for probe in ["http://", "https://", "//cdn", "@import"] {
             assert!(!page.contains(probe), "page reaches out via {probe}");
         }
@@ -1606,6 +1642,7 @@ mod tests {
             &[("/r/", "repositories")],
             crate::browse::Chrome::default(),
         );
+        let page = without_the_svg_namespace(&page);
         for probe in ["http://", "https://", "//cdn", "<script", "@import"] {
             assert!(!page.contains(probe), "a refusal reaches out via {probe}");
         }
@@ -1952,7 +1989,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{theme} palette has no {name}"))
                     .clone()
             };
-            for ground in ["--ground", "--surface", "--raise", "--sunken"] {
+            for ground in ["--ground", "--surface", "--raise", "--sunken", "--head"] {
                 for ink in [
                     "--ink",
                     "--strong",

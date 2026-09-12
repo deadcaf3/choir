@@ -290,9 +290,10 @@ fn code_all_lists_every_variant() {
             Code::QuotaExceeded => 24,
             Code::VouchState => 25,
             Code::WitnessState => 26,
+            Code::NotHome => 27,
         }
     }
-    const COUNT: usize = 27;
+    const COUNT: usize = 28;
 
     let all = Code::all();
     assert_eq!(

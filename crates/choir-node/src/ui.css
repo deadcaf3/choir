@@ -194,6 +194,7 @@
      may not author a breakpoint, and the narrow override below is the
      one place that decides. */
   --col-subject:table-cell;
+  --col-meta:inline;   /* the commit strip's hash and age */
 
   /* ---- z ----------------------------------------------------------- */
   --z-under:-1;
@@ -203,6 +204,28 @@
   --z-dropdown:30;
   --z-scrim:40;
   --z-palette:50;
+
+  /* ---- icons ------------------------------------------------------ */
+  /* Sixteen-unit glyphs, each an SVG the browser draws once from a
+     data URI and uses as a mask over the text colour, so a glyph takes
+     the colour of whatever it sits in, hover and theme included. In
+     the stylesheet rather than the markup, so twenty-five rows of
+     folders cost one glyph and not twenty-five. */
+  --icon:1rem;
+  --i-folder:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='black' d='M1 3.5C1 2.67 1.67 2 2.5 2h3.38c.4 0 .78.16 1.06.44L8.06 3.5H13.5c.83 0 1.5.67 1.5 1.5v7.5c0 .83-.67 1.5-1.5 1.5h-11C1.67 14 1 13.33 1 12.5z'/%3E%3C/svg%3E");
+  --i-file:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 1.75h5.5l3.5 3.5v8a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1z'/%3E%3Cpath d='M9 1.75v3.5h3.5'/%3E%3C/svg%3E");
+  --i-code:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5'/%3E%3C/svg%3E");
+  --i-history:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.25 8a5.75 5.75 0 1 0 1.7-4.1L2.25 5.6'/%3E%3Cpath d='M2.25 2.5v3.1h3.1'/%3E%3Cpath d='M8 4.75V8l2.25 1.25'/%3E%3C/svg%3E");
+  --i-review:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.75 3.25h10.5a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-6l-3 2.5v-2.5h-1.5a1 1 0 0 1-1-1v-6.5a1 1 0 0 1 1-1z'/%3E%3Cpath d='M5.75 7.5l1.5 1.5 3-3'/%3E%3C/svg%3E");
+  --i-contribute:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='4' cy='3.5' r='1.75'/%3E%3Ccircle cx='4' cy='12.5' r='1.75'/%3E%3Ccircle cx='12' cy='12.5' r='1.75'/%3E%3Cpath d='M4 5.25v5.5M12 10.75V7a3 3 0 0 0-3-3H7.5M9 2.5L7.5 4 9 5.5'/%3E%3C/svg%3E");
+  --i-branch:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='4.5' cy='3.5' r='1.75'/%3E%3Ccircle cx='4.5' cy='12.5' r='1.75'/%3E%3Ccircle cx='11.5' cy='5' r='1.75'/%3E%3Cpath d='M4.5 5.25v5.5M11.5 6.75c0 3-7 2.5-7 4'/%3E%3C/svg%3E");
+  --i-tag:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.75 2.75v4.5l7 7 5.5-5.5-7-7h-4.5a1 1 0 0 0-1 1z'/%3E%3Ccircle cx='5' cy='5' r='.75' fill='black'/%3E%3C/svg%3E");
+  --i-terminal:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 4l3.5 4-3.5 4M8 12h5.5'/%3E%3C/svg%3E");
+  --i-law:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2.25v11.5M5 13.75h6M3.5 4.5h9'/%3E%3Cpath d='M2 9.5a2 1.25 0 0 0 4 0L4 4.5zM10 9.5a2 1.25 0 0 0 4 0L12 4.5z'/%3E%3C/svg%3E");
+  --i-shield:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 1.75l5.25 2v4c0 3.25-2.25 5.5-5.25 6.5-3-1-5.25-3.25-5.25-6.5v-4z'/%3E%3C/svg%3E");
+  --i-book:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 4.25c-1.5-1-3.5-1.5-6.25-1.5v9.5c2.75 0 4.75.5 6.25 1.5 1.5-1 3.5-1.5 6.25-1.5v-9.5c-2.75 0-4.75.5-6.25 1.5zM8 4.25v9.5'/%3E%3C/svg%3E");
+  --i-people:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='5.5' r='2.25'/%3E%3Cpath d='M1.75 13.5c.4-2.25 2.1-3.5 4.25-3.5s3.85 1.25 4.25 3.5'/%3E%3Cpath d='M10.5 3.5a2.25 2.25 0 0 1 0 4.25M12 10.25c1.25.5 2 1.6 2.25 3.25'/%3E%3C/svg%3E");
+  --i-caret:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5'/%3E%3C/svg%3E");
 }
 
 /* A phone is not a desktop with less room; it is a different page
@@ -222,6 +245,7 @@
     --pad-x:var(--sp-4);
     --pad-card:var(--sp-4);
     --col-subject:none;
+    --col-meta:none;
   }
 }
 
@@ -296,6 +320,13 @@
      it is legible as depth. */
   --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.18),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(122,84,16,.09),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(59,74,148,.07),transparent 70%);
+  --head:#f6f3ee;            /* the header strip of a box */
+  /* Tooth. A tile of monochrome noise the browser draws once from the
+     SVG in the dark theme's value and repeats; the last row of the
+     colour matrix is its whole opacity. Off on paper, where a texture
+     on white reads as dirt rather than depth. */
+  --grain:none;
   /* A rule that fades out rather than stopping. Used under an eyebrow
      and above the footer, where a full-strength line across the page
      would be the loudest thing on it. */
@@ -379,6 +410,9 @@
 
     --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
     --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+    --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
+    --head:#201f1c;
+    --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
     --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
     --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
@@ -450,6 +484,9 @@
 
   --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
   --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
+  --head:#201f1c;
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
   --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
@@ -526,6 +563,7 @@ img,svg,canvas{max-width:100%}
   :root{--dur-1:0ms;--dur-2:0ms;--dur-3:0ms;--dur-4:0ms;--dur-5:0ms;--dur-6:0ms;
     --rise:0;--lift:0;--stagger:0ms}
   html{scroll-behavior:auto}
+  body::after{display:none}
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;animation-timeline:auto !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
 }
 
@@ -582,11 +620,33 @@ header.top h1{view-transition-name:title}
 body{background:var(--ground);color:var(--ink);margin:0 auto;
   padding:var(--pad-y) var(--pad-x) var(--sp-20);max-width:var(--page-max);
   position:relative}
-/* The light behind the page: two very weak washes at the top, fixed so
-   they belong to the viewport rather than to the scroll. Behind
-   everything, and inert to the cursor. */
+/* The light behind the page: grain over three very weak washes, two at
+   the top and one at the foot, fixed so they belong to the viewport
+   rather than to the scroll. Behind everything, and inert to the
+   cursor. */
 body::before{content:"";position:fixed;inset:0;z-index:var(--z-under);
-  pointer-events:none;background-image:var(--glow-1),var(--glow-2)}
+  pointer-events:none;
+  background-image:var(--grain),var(--glow-1),var(--glow-2),var(--glow-3)}
+/* Two answers to the scroll itself, where the browser can tie an
+   animation to it. A hairline at the top of the viewport grows with the
+   distance read, so a long page says how long it is; and the chrome
+   settles as the page moves under it, its shadow deepening and its edge
+   firming, so the bar reads as resting on the page rather than painted
+   over it. Neither touches layout: the line is a transform, the settle
+   is paint. A page too short to scroll has no timeline and shows
+   neither. */
+@supports (animation-timeline:scroll()){
+  body::after{content:"";position:fixed;top:var(--sp-0);left:var(--sp-0);
+    right:var(--sp-0);height:var(--bw-2);z-index:var(--z-palette);
+    pointer-events:none;background:var(--accent);
+    transform-origin:left;transform:scaleX(0);
+    animation:grow linear both;animation-timeline:scroll(root)}
+  .chrome{animation:settle linear both;animation-timeline:scroll(root);
+    animation-range:var(--sp-0) calc(var(--topbar-h) * 3)}
+}
+@keyframes grow{from{transform:scaleX(0)}to{transform:none}}
+@keyframes settle{to{border-color:var(--line);
+  box-shadow:var(--shadow-3),var(--shadow-inset)}}
 
 /* The pages that are one column of prose and one control rather than a
    tool's readout: the front door, signing in, asking, and redeeming an
@@ -621,8 +681,9 @@ main>section,.panes>.pane,.rail>.pane{
   .panes>.pane-content{animation-timeline:view();
     animation-range:entry 0% entry 35%;animation-delay:var(--sp-0)}
 }
-/* Rows, one after another for a screen's worth and then all at once:
-   past the fold, a stagger is a delay nobody is watching. */
+/* Rows, one after another for a screen's worth; past the fold, a
+   stagger is a delay nobody is watching, so the rest arrive all at
+   once, or with the scroll where the browser can tie them to it. */
 tbody tr{animation:fade var(--dur-4) var(--ease-out) both;
   animation-delay:calc(var(--delay-3) + var(--stagger) * 25)}
 tbody tr:nth-child(1){animation-delay:calc(var(--delay-3) + var(--stagger) * 1)}
@@ -649,6 +710,10 @@ tbody tr:nth-child(21){animation-delay:calc(var(--delay-3) + var(--stagger) * 21
 tbody tr:nth-child(22){animation-delay:calc(var(--delay-3) + var(--stagger) * 22)}
 tbody tr:nth-child(23){animation-delay:calc(var(--delay-3) + var(--stagger) * 23)}
 tbody tr:nth-child(24){animation-delay:calc(var(--delay-3) + var(--stagger) * 24)}
+@supports (animation-timeline:view()){
+  tbody tr:nth-child(n+25){animation-timeline:view();
+    animation-range:entry 0% cover 12%;animation-delay:var(--sp-0)}
+}
 
 /* skip link */
 .skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
@@ -704,20 +769,84 @@ h3{font-size:var(--fs-500);color:var(--strong);letter-spacing:var(--tr-heading);
   transition:background-color var(--dur-2) var(--ease-out),
              color var(--dur-2) var(--ease-out)}
 .pill a:hover{background:var(--accent-tint);color:var(--accent-hover)}
-/* The clone URL is the one string on the surface that exists to be
-   taken rather than read, so it is set into the page like a field and
-   selects whole on a single click. */
-.pill.clone{background:var(--sunken);color:var(--ink);
-  padding:var(--sp-1) var(--sp-3);border:var(--border-hair);
-  border-radius:var(--r-pill);min-width:0;overflow-wrap:anywhere;
-  box-shadow:var(--shadow-inset);cursor:text;
-  -webkit-user-select:all;user-select:all;
+/* The command that copies the repository: set into the page like a
+   field, selected whole on one click, and what it selects is a line a
+   terminal runs. One run of inline text rather than a flex row: in a
+   row each word is its own item, and on a phone each wrapped alone. */
+.clone{display:inline-block;min-width:0;max-width:100%;
+  padding:var(--sp-1) var(--sp-3);border:var(--bw-1) solid var(--line);
+  border-radius:var(--r-sm);background:var(--sunken);box-shadow:var(--shadow-inset);
+  font-family:var(--font-mono);font-size:var(--fs-300);color:var(--ink);
+  overflow-wrap:anywhere;cursor:text;-webkit-user-select:all;user-select:all;
   transition:border-color var(--dur-2) var(--ease-out),
-             background-color var(--dur-2) var(--ease-out),
-             box-shadow var(--dur-2) var(--ease-out)}
-/* Under the cursor it becomes the field it behaves as. */
-.pill.clone:hover{border-color:var(--accent-line);background:var(--surface);
-  box-shadow:var(--shadow-1)}
+             background-color var(--dur-2) var(--ease-out)}
+.clone .k{color:var(--faint)}
+.clone:hover{border-color:var(--accent-line);background:var(--surface)}
+
+/* A repository's tabs: the same four on every one of its pages, the
+   current one underlined in the accent where the row meets its rule. */
+nav.repotabs{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-1);
+  margin:var(--sp-5) var(--sp-0) var(--sp-0);padding-bottom:var(--sp-2);
+  border-bottom:var(--bw-1) solid var(--line);view-transition-name:repotabs}
+nav.repotabs a{position:relative;display:inline-flex;align-items:center;gap:var(--sp-2);
+  padding:var(--sp-1) var(--sp-3);border-radius:var(--r-sm);
+  color:var(--muted);text-decoration:none;font-size:var(--fs-400);
+  transition:background-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+nav.repotabs a:hover{background:var(--raise);color:var(--strong)}
+nav.repotabs a.on{color:var(--strong);font-weight:var(--fw-medium)}
+nav.repotabs a.on::after{content:"";position:absolute;left:var(--sp-2);right:var(--sp-2);
+  bottom:calc(-1 * (var(--sp-2) + var(--bw-1)));height:var(--bw-2);
+  border-radius:var(--r-pill);background:var(--accent)}
+
+/* Glyphs: an empty box the size of a letter, painted in the colour of
+   the text around it and cut to shape by one of the icon masks. */
+nav.repotabs a::before,.clone::before,.picker>summary::before,
+.picker>summary::after,.repobar .rstat::before,.commitbar .history::before,
+table.listing .dir::before,table.listing .file::before,ul.facts li::before,
+section.readme .head h2::before{content:"";flex:none;display:inline-block;
+  min-width:var(--icon);height:var(--icon);background-color:currentColor;
+  -webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+  -webkit-mask-position:center;mask-position:center;
+  -webkit-mask-size:contain;mask-size:contain}
+.t-code::before{-webkit-mask-image:var(--i-code);mask-image:var(--i-code)}
+.t-history::before,.commitbar .history::before{
+  -webkit-mask-image:var(--i-history);mask-image:var(--i-history)}
+.t-reviews::before{-webkit-mask-image:var(--i-review);mask-image:var(--i-review)}
+.t-contribute::before{-webkit-mask-image:var(--i-contribute);mask-image:var(--i-contribute)}
+.clone::before{-webkit-mask-image:var(--i-terminal);mask-image:var(--i-terminal);
+  background-color:var(--faint);vertical-align:middle;margin-right:var(--sp-2)}
+.picker>summary::before,.s-branch::before{
+  -webkit-mask-image:var(--i-branch);mask-image:var(--i-branch)}
+.picker>summary::after{-webkit-mask-image:var(--i-caret);mask-image:var(--i-caret)}
+.s-tag::before,.f-tag::before{-webkit-mask-image:var(--i-tag);mask-image:var(--i-tag)}
+table.listing .dir::before{-webkit-mask-image:var(--i-folder);mask-image:var(--i-folder);
+  background-color:var(--accent)}
+table.listing .file::before{-webkit-mask-image:var(--i-file);mask-image:var(--i-file);
+  background-color:var(--faint)}
+.f-law::before{-webkit-mask-image:var(--i-law);mask-image:var(--i-law)}
+.f-people::before{-webkit-mask-image:var(--i-people);mask-image:var(--i-people)}
+.f-shield::before{-webkit-mask-image:var(--i-shield);mask-image:var(--i-shield)}
+.f-branch::before{-webkit-mask-image:var(--i-branch);mask-image:var(--i-branch)}
+.f-commit::before{-webkit-mask-image:var(--i-history);mask-image:var(--i-history)}
+section.readme .head h2::before{-webkit-mask-image:var(--i-book);mask-image:var(--i-book)}
+
+/* Visually hidden and still read: a heading a screen reader needs where
+   the frame around it already says the same thing to the eye. */
+.vh{position:absolute;max-width:var(--bw-1);height:var(--bw-1);
+  margin:calc(-1 * var(--bw-1));overflow:hidden;clip-path:inset(50%);
+  white-space:nowrap}
+/* A person, drawn as the first letter of their name in a ring: this
+   node stores no pictures, and a letter tells authors apart at a glance. */
+.av{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  min-width:var(--sp-5);height:var(--sp-5);border-radius:var(--r-pill);
+  border:var(--bw-1) solid var(--accent-line);background:var(--accent-tint);
+  color:var(--accent-ink);font-size:var(--fs-100);font-weight:var(--fw-bold);
+  line-height:1;font-family:var(--font-sans)}
+.newest{display:inline-flex;align-items:center;margin-left:var(--sp-2);
+  padding:var(--sp-0) var(--sp-2);border:var(--bw-1) solid var(--ok-line);
+  border-radius:var(--r-pill);color:var(--ok);font-size:var(--fs-200);
+  font-weight:var(--fw-medium);font-family:var(--font-sans)}
 
 /* ------------------------------------------------------------------
    SECTIONS
@@ -923,91 +1052,79 @@ pre.diff .del mark{background:var(--danger-line)}
 td details{margin:var(--sp-0)}
 td summary{padding:var(--sp-0);display:inline-block}
 
-/* The bar above a repository's file list: which revision is shown, and
-   how much is under it. A shallow tray rather than a rule, because it
-   holds a control and a control needs somewhere to sit. */
-.repobar{display:flex;align-items:center;flex-wrap:wrap;
-  gap:var(--sp-3) var(--sp-5);margin:var(--sp-6) var(--sp-0) var(--sp-6);
-  padding:var(--sp-3) var(--sp-4);border:var(--border-hair);
-  border-radius:var(--r-lg);background-image:var(--card-wash);
-  box-shadow:var(--shadow-1),var(--shadow-inset)}
-.repobar .counts{display:flex;flex-wrap:wrap;gap:var(--sp-4);
-  font-size:var(--fs-300);color:var(--faint);
-  font-variant-numeric:tabular-nums}
-.repobar .counts a{color:var(--muted);text-decoration:none;
-  padding:var(--sp-1) var(--sp-2);margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));
-  border-radius:var(--r-sm);
-  transition:background-color var(--dur-2) var(--ease-out),
-             color var(--dur-2) var(--ease-out)}
-.repobar .counts a:hover{background:var(--accent-tint);color:var(--accent-ink)}
-/* The revision picker. A `<details>`, because this surface runs no
-   script and a `<select>` without script is a control that changes
-   nothing when a reader uses it. The open panel is positioned static,
-   not absolute: an overlay that cannot be dismissed by a click handler
-   is a trap on a page with no handlers. */
-.picker{margin:var(--sp-0)}
-/* The revision is the state this page is in, which is what the accent
-   is for: a tinted chip with a mark, where every other control is
-   plain. */
+/* The row over a repository's files: which revision, how many of each
+   ref, and the command that copies it. A row and not a tray, because
+   the listing under it is already the box. Raised above the panes so
+   the picker's menu opens over them rather than under. */
+.repobar{position:relative;z-index:var(--z-dropdown);display:flex;align-items:center;
+  flex-wrap:wrap;gap:var(--sp-3) var(--sp-5);margin:var(--sp-0) var(--sp-0) var(--sp-4)}
+.repobar .rstat{display:inline-flex;align-items:center;gap:var(--sp-2);
+  font-size:var(--fs-400);color:var(--muted);white-space:nowrap}
+.repobar .rstat::before{background-color:var(--faint)}
+.repobar .rstat b{color:var(--strong);font-weight:var(--fw-bold)}
+.repobar .clone{margin-left:auto}
+/* The revision picker: a button that opens a menu. A `<details>`,
+   because this surface runs no script and a `<select>` without one
+   changes nothing when a reader uses it. The menu closes from the
+   button that opened it, and choosing a branch is a navigation, so
+   there is nothing open for a reader to be left holding. */
+.picker{position:relative;margin:var(--sp-0)}
 .picker>summary{display:inline-flex;align-items:center;gap:var(--sp-2);
-  cursor:pointer;list-style:none;
-  padding:var(--sp-1) var(--sp-3);border:var(--bw-1) solid var(--accent-line);
-  border-radius:var(--r-pill);background:var(--accent-tint);
-  box-shadow:var(--shadow-1);
-  font-family:var(--font-mono);font-size:var(--fs-300);color:var(--accent-ink);
-  font-weight:var(--fw-medium);
+  cursor:pointer;list-style:none;padding:var(--sp-1) var(--sp-3);
+  border:var(--bw-1) solid var(--line-strong);border-radius:var(--r-sm);
+  background:var(--raise);box-shadow:var(--shadow-1),var(--shadow-inset);
+  font-family:var(--font-mono);font-size:var(--fs-300);font-weight:var(--fw-medium);
+  color:var(--strong);
   transition:border-color var(--dur-2) var(--ease-out),
-             color var(--dur-2) var(--ease-out),
-             box-shadow var(--dur-2) var(--ease-out),
-             transform var(--dur-2) var(--ease-out)}
+             background-color var(--dur-2) var(--ease-out)}
 .picker>summary::-webkit-details-marker{display:none}
-/* The branch mark: a ring, drawn from a border like the state dots. */
-.picker>summary::before{content:"";border-radius:var(--r-pill);
-  border:var(--bw-rule) solid currentColor}
-.picker>summary:hover{border-color:var(--accent);color:var(--accent-hover);
-  box-shadow:var(--shadow-2);transform:translateY(var(--lift))}
+.picker>summary::before{background-color:var(--accent-ink)}
+.picker>summary::after{background-color:var(--faint);
+  transition:transform var(--dur-2) var(--ease-out)}
+.picker[open]>summary::after{transform:scaleY(-1)}
+.picker>summary:hover,.picker[open]>summary{border-color:var(--accent-line);
+  background:var(--surface)}
+.picker .menu{position:absolute;top:calc(100% + var(--sp-2));left:var(--sp-0);
+  z-index:var(--z-dropdown);min-width:var(--side);max-height:calc(var(--sp-40) * 3);
+  overflow-y:auto;padding:var(--sp-1) var(--sp-4) var(--sp-4);
+  background:var(--surface);border:var(--bw-1) solid var(--line);
+  border-radius:var(--r-md);box-shadow:var(--shadow-3);
+  animation:rise var(--dur-3) var(--ease-out) both}
 .picker h3{font-size:var(--fs-100);letter-spacing:var(--tr-caps);
   text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
   margin:var(--sp-4) var(--sp-0) var(--sp-1)}
+.picker .menu>h3:first-child{margin-top:var(--sp-3)}
 .picker ul{list-style:none;padding:var(--sp-0);margin:var(--sp-0);
-  display:flex;flex-wrap:wrap;gap:var(--sp-1) var(--sp-3)}
-.picker li a{font-family:var(--font-mono);font-size:var(--fs-300)}
-/* The file listing. The subject is the flexible column: it truncates,
-   and everything else keeps its natural width so the rhythm of the rows
-   survives a very long commit message. */
-table.listing{table-layout:auto;width:100%}
-table.listing td:first-child{white-space:nowrap}
-table.listing td.subject{display:var(--col-subject);
-  max-width:0;width:100%;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-300);
-  color:var(--muted)}
+  display:flex;flex-direction:column}
+.picker li a{display:block;padding:var(--sp-1) var(--sp-2);
+  margin:var(--sp-0) calc(-1 * var(--sp-2));border-radius:var(--r-sm);
+  font-family:var(--font-mono);font-size:var(--fs-300);color:var(--ink);
+  text-decoration:none}
+.picker li a:hover{background:var(--accent-tint);color:var(--accent-ink)}
+/* The file listing, edge to edge inside its box: a glyph and a name,
+   the subject that last touched it, when, and how big. The subject is
+   the flexible column; it truncates, and everything else keeps its
+   natural width so the rhythm of the rows survives a long message. */
+table.listing{table-layout:auto;width:100%;font-size:var(--fs-400)}
+table.listing td{padding-top:var(--sp-2);padding-bottom:var(--sp-2);
+  vertical-align:middle}
+table.listing tr>td:first-child{padding-left:var(--sp-4);white-space:nowrap}
+table.listing tr>td:last-child{padding-right:var(--sp-4)}
+table.listing td.subject{display:var(--col-subject);max-width:0;width:100%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
 table.listing td.when{white-space:nowrap;font-size:var(--fs-300);
-  color:var(--faint)}
+  color:var(--muted);text-align:right}
 /* A size is one token to a reader and two words to a line-breaker. */
-table.listing td.num{white-space:nowrap}
-/* A directory and a file read differently at a glance without an icon
-   font: the directory is the weight, the file is the plain face. */
-table.listing td .dir{font-weight:var(--fw-medium)}
-/* Names are set plain, not underlined: twenty-five underlines in a
-   column is a texture, and the row's hover already says it is a link.
-   The row is given a little more height than a scanned table gets,
-   because this one is where a reader lands. */
-table.listing td{padding-top:var(--sp-3);padding-bottom:var(--sp-3)}
-table.listing td:first-child a{text-decoration:none;color:var(--ink);
+table.listing td.num{white-space:nowrap;font-size:var(--fs-300);color:var(--faint)}
+table.listing td:first-child a{display:inline-flex;align-items:center;
+  gap:var(--sp-3);text-decoration:none;color:var(--ink);
   transition:color var(--dur-2) var(--ease-out)}
-table.listing td:first-child .dir{color:var(--strong)}
+table.listing td:first-child .dir{color:var(--strong);font-weight:var(--fw-medium)}
 table.listing tr:hover td:first-child a{color:var(--accent-ink)}
 table.listing tr:hover td.subject{color:var(--ink)}
-/* A directory carries a mark: a small tinted tab, drawn from a bordered
-   box with a heavier top edge, which is what a folder is when it is
-   nine pixels wide. Files carry nothing; the absence is the glyph. */
-table.listing .dir::before{content:"";display:inline-block;
-  vertical-align:baseline;margin-right:var(--sp-2);
-  padding:var(--sp-1) var(--sp-2);
-  border:var(--bw-1) solid var(--accent-line);border-top-width:var(--bw-2);
-  border-radius:var(--r-xs);background:var(--accent-tint);
-  transition:background-color var(--dur-2) var(--ease-out)}
-table.listing tr:hover .dir::before{background:var(--accent-line)}
+/* Inside a box the hover wash runs edge to edge: a band, not the
+   rounded slab a table set straight on the page gets. */
+table.listing tbody tr:hover>td{border-radius:var(--sp-0)}
 
 /* The README: the one block on this surface holding prose the node did
    not author, so it is set as a document — one reading measure,
@@ -1016,9 +1133,18 @@ table.listing tr:hover .dir::before{background:var(--accent-line)}
 section.readme{margin-top:var(--sp-0)}
 /* A `#fragment` target stops clear of the sticky top bar, not under it. */
 section.readme [id]{scroll-margin-top:calc(var(--topbar-h) + var(--sp-5))}
-section.readme>h2{font-size:var(--fs-100);letter-spacing:var(--tr-caps);
-  text-transform:uppercase;color:var(--faint);font-weight:var(--fw-medium);
-  margin:var(--sp-0) var(--sp-0) var(--sp-6)}
+/* The README's box: a header strip naming the file, with the other
+   documents beside it, over the prose. */
+section.readme .head{display:flex;flex-wrap:wrap;align-items:center;
+  gap:var(--sp-2) var(--sp-5);padding:var(--sp-3) var(--sp-4);
+  background:var(--head);border-bottom:var(--bw-1) solid var(--line)}
+section.readme .head h2{display:inline-flex;align-items:center;gap:var(--sp-2);
+  margin:var(--sp-0);font-size:var(--fs-400);text-transform:none;
+  letter-spacing:var(--tr-body);color:var(--strong);font-weight:var(--fw-medium)}
+section.readme .head h2::after{content:none}
+section.readme .head h2::before{background-color:var(--faint)}
+section.readme .md{padding:var(--sp-6) var(--sp-8) var(--sp-8)}
+section.readme .md>:first-child{margin-top:var(--sp-0)}
 /* One document title is enough. The page already says `owner/name`
    overhead, so the README's own `h1` steps down to sit under it rather
    than restate it louder. */
@@ -1026,11 +1152,23 @@ section.readme h1{font-size:var(--fs-700);margin-top:var(--sp-0);
   font-family:var(--font-display);letter-spacing:var(--tr-heading)}
 /* Headings inside the prose are not section heads, and were inheriting
    the eyebrow treatment from the global `h2`. */
-section.readme h2:not(:first-child){font-size:var(--fs-600);
+section.readme .md h2{font-size:var(--fs-600);
   text-transform:none;letter-spacing:var(--tr-heading);color:var(--strong);
   font-weight:var(--fw-bold);margin-top:var(--sp-8);display:block}
-section.readme h2:not(:first-child)::after{content:none}
+section.readme .md h2::after{content:none}
 section.readme h3{font-size:var(--fs-500)}
+/* Below the fold the prose arrives with the scroll: each block fades in
+   as it enters, and a rule draws itself from the left. Blocks only,
+   never a code sample or a table, whose height would hold the fade open
+   for a screen. */
+@supports (animation-timeline:view()){
+  section.readme .md>:is(h2,h3,h4,p,ul,ol,blockquote){
+    animation:fade linear both;animation-timeline:view();
+    animation-range:entry 0% cover 15%}
+  section.readme .md>hr{animation:draw linear both;animation-timeline:view();
+    animation-range:entry 0% cover 18%;transform-origin:left}
+}
+@keyframes draw{from{transform:scaleX(0)}to{transform:none}}
 section.readme p,section.readme li{max-width:var(--measure);
   line-height:var(--lh-copy)}
 section.readme pre{background-image:var(--sunken-wash);padding:var(--sp-4);
@@ -1183,7 +1321,17 @@ form.omni:hover{border-color:var(--line)}
 form.omni:focus-within{border-color:var(--accent-line);background:var(--surface);
   box-shadow:var(--sp-0) var(--sp-0) var(--sp-0) var(--bw-4) var(--accent-tint),var(--shadow-1)}
 form.omni .scope{white-space:nowrap;font-size:var(--fs-200);
-  color:var(--faint);font-family:var(--font-mono)}
+  color:var(--accent-ink);font-family:var(--font-mono);
+  padding:var(--sp-0) var(--sp-2);border-radius:var(--r-sm);
+  background:var(--accent-tint)}
+/* The one key the field answers to, shown while it is listening. */
+form.omni::after{content:"enter";flex:none;font-size:var(--fs-100);
+  font-family:var(--font-mono);letter-spacing:var(--tr-caps);
+  text-transform:uppercase;color:var(--faint);
+  padding:var(--sp-0) var(--sp-2);border:var(--border-hair);
+  border-radius:var(--r-sm);opacity:0;
+  transition:opacity var(--dur-2) var(--ease-out)}
+form.omni:focus-within::after{opacity:1}
 form.omni input[type="search"]{flex:1 1 var(--search);min-width:0;
   font:inherit;font-size:var(--fs-300);color:var(--ink);
   background:transparent;border:0;padding:var(--sp-1) var(--sp-0);
@@ -1234,22 +1382,32 @@ b.theme.here{color:var(--strong);font-weight:var(--fw-medium);
   color:var(--faint)}
 b.tab.here .count{color:var(--muted)}
 
-/* Three panes at the repository root: what work is in flight, what
-   files exist, what the README says. Flex rather than grid, and
-   wrapping rather than a breakpoint. Each is a card, because a pane is
-   an object on the page and the page is what is between them. */
+/* Three panes at the repository root: the files, what is in flight and
+   what this is, and the README. Flex rather than grid, and wrapping
+   rather than a breakpoint. Each is a box with a visible edge: a pane
+   is an object on the page, and an object has an outline before it has
+   a shadow. */
 .panes{display:flex;flex-wrap:wrap;align-items:flex-start;
-  gap:var(--gap-pane)}
+  gap:var(--sp-6) var(--sp-8)}
 .pane{min-width:0;overflow-x:auto;display:flex;flex-direction:column;
-  background-image:var(--card-wash);border:var(--border-hair);
-  border-radius:var(--r-xl);padding:var(--pad-card);
-  box-shadow:var(--shadow-2),var(--shadow-inset);
-  transition:border-color var(--dur-3) var(--ease-out),
-             box-shadow var(--dur-3) var(--ease-out)}
-/* A pane the cursor is over comes forward by one step of shadow and
-   one of line. No lift: it is a surface the reader is working on, not
-   a button they are about to press. */
-.pane:hover{border-color:var(--line);box-shadow:var(--shadow-3),var(--shadow-inset)}
+  background:var(--surface);border:var(--bw-1) solid var(--line);
+  border-radius:var(--r-md);padding:var(--pad-card);
+  box-shadow:var(--shadow-1)}
+/* The files and the README carry a header strip, so their padding is
+   the strip's and the rows' rather than the box's. */
+.pane-files,.pane-content{padding:var(--sp-0);overflow:hidden}
+/* The root is two columns: the files with the README under them, and
+   the rail. One flex child holding the two boxes, so the rail runs
+   beside both and the right-hand column is never empty under a rail
+   shorter than the listing. */
+.panes>.col{flex:7 1 var(--measure);min-width:0;display:flex;
+  flex-direction:column;gap:var(--sp-6)}
+/* Inside the column a pane's basis would be a height, and the width
+   basis below would cut the listing off at thirty-six rems. */
+.panes>.col>.pane{flex:0 0 auto}
+.pane-files>:not(table,h2,.commitbar){margin:var(--sp-4)}
+.pane-content>p{margin:var(--sp-5)}
+main>.pane+.pane{margin-top:var(--sp-6)}
 /* The listing leads and the rails follow. Equal weights put an empty
    "no open reviews" card on half the front page while every commit
    subject beside it truncated mid-word, which is the wrong half of the
@@ -1264,50 +1422,73 @@ b.tab.here .count{color:var(--muted)}
    repository is. One flex child holding both cards, so the listing keeps
    its width whether the rail carries two of them or one. */
 .rail{flex:2 1 var(--side);min-width:0;display:flex;flex-direction:column;
-  gap:var(--gap-pane);
-  /* Sticky, parked under the bar: the listing is long and the rail is
-     short, and a rail that scrolled away left the right-hand column
-     empty for most of the page. `align-items:flex-start` on `.panes` is
-     what lets it stick at all. */
-  position:sticky;top:calc(var(--topbar-h) + var(--sp-6))}
+  gap:var(--gap-pane)}
 .rail>.pane{flex:0 0 auto}
 
-/* The one row above a listing that says what state it is in: who wrote
-   last, what they called it, when. The subject takes the slack and
-   truncates, because the two facts around it are short and fixed and it
-   is the one that can be any length at all. */
-.commitbar{display:flex;align-items:baseline;gap:var(--sp-3);
-  padding:var(--sp-1) var(--sp-0) var(--sp-3);
-  margin-bottom:var(--sp-2);border-bottom:var(--border-hair)}
-.commitbar .who{white-space:nowrap;color:var(--strong);
-  font-weight:var(--fw-medium);display:inline-flex;align-items:center;
-  gap:var(--sp-2)}
-/* The author's mark: a ring in the accent, the size of a state dot's
-   bigger sibling, standing in for the avatar this node does not have. */
-.commitbar .who::before{content:"";border-radius:var(--r-pill);
-  border:var(--bw-4) solid var(--accent-line);background:var(--accent-tint)}
-.commitbar .what{flex:1 1 var(--sp-0);min-width:0;color:var(--ink);
-  text-decoration:none;white-space:nowrap;overflow:hidden;
-  text-overflow:ellipsis}
-.commitbar .what:hover{color:var(--accent-ink);text-decoration:underline}
-.commitbar .when{white-space:nowrap;font-size:var(--fs-200)}
+/* The header strip of the listing's box: who wrote last, what they
+   called it, which commit and when, and how much history is under it,
+   the facts a reader checks before reading anything else. */
+.commitbar{display:flex;align-items:center;gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-4);background:var(--head);
+  border-bottom:var(--bw-1) solid var(--line);font-size:var(--fs-400)}
+.commitbar .who{display:inline-flex;align-items:center;gap:var(--sp-2);
+  white-space:nowrap;color:var(--strong);font-weight:var(--fw-medium)}
+.commitbar .what{flex:1 1 var(--sp-0);min-width:0;color:var(--muted);
+  text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.commitbar .what:hover{color:var(--accent-ink)}
+.commitbar .oid{font-family:var(--font-mono);font-size:var(--fs-300);
+  color:var(--faint);text-decoration:none;white-space:nowrap}
+.commitbar .oid:hover{color:var(--accent-ink)}
+.commitbar .when{white-space:nowrap;font-size:var(--fs-300);color:var(--faint)}
+/* On a phone the strip keeps who, what and how much; the hash and the
+   age are one tap away on the commit itself. */
+.commitbar .oid,.commitbar .when{display:var(--col-meta)}
+.commitbar .history{display:inline-flex;align-items:center;gap:var(--sp-2);
+  white-space:nowrap;padding:var(--sp-1) var(--sp-2);
+  margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2)) calc(-1 * var(--sp-1)) var(--sp-2);
+  border-radius:var(--r-sm);color:var(--ink);text-decoration:none;
+  font-size:var(--fs-300);
+  transition:background-color var(--dur-2) var(--ease-out),
+             color var(--dur-2) var(--ease-out)}
+.commitbar .history b{color:var(--strong);font-weight:var(--fw-bold)}
+.commitbar .history:hover{background:var(--raise);color:var(--accent-ink)}
 
-/* The About rail. Two plain lists: what this repository carries, and who
-   has been writing it. */
-.pane-about .says{margin:var(--sp-0) var(--sp-0) var(--sp-4);color:var(--ink)}
+/* The About rail, without a box: a sidebar is the page's margin, so it
+   is sections divided by rules rather than one more card. Each row
+   leads with a glyph that says what it is. */
+.rail>.pane-about{background:none;border-color:transparent;box-shadow:none;
+  padding:var(--sp-0);overflow:visible}
+.pane-about h2{font-size:var(--fs-500);text-transform:none;
+  letter-spacing:var(--tr-heading);color:var(--strong);
+  font-weight:var(--fw-bold);margin:var(--sp-0) var(--sp-0) var(--sp-3)}
+.pane-about h2::after{content:none}
+.pane-about h2~h2{margin-top:var(--sp-5);padding-top:var(--sp-5);
+  border-top:var(--bw-1) solid var(--line)}
+.pane-about .count{padding:var(--sp-0) var(--sp-2);border-radius:var(--r-pill);
+  background:var(--raise);color:var(--muted);font-size:var(--fs-200);
+  font-weight:var(--fw-medium)}
+.pane-about .says{margin:var(--sp-0) var(--sp-0) var(--sp-4);color:var(--ink);
+  font-size:var(--fs-500);line-height:var(--lh-snug)}
 ul.facts,ul.who{list-style:none;margin:var(--sp-0);padding:var(--sp-0);
-  display:flex;flex-direction:column;gap:var(--sp-2);
-  font-size:var(--fs-300)}
-ul.who li{color:var(--muted)}
-.pane-about h2+ul.facts{margin-top:var(--sp-0)}
-.pane-about ul.facts+h2{margin-top:var(--sp-6)}
+  display:flex;flex-direction:column;gap:var(--sp-3);font-size:var(--fs-400)}
+ul.facts li,ul.who li{display:flex;align-items:center;gap:var(--sp-2);color:var(--ink)}
+ul.facts li::before{background-color:var(--faint)}
+ul.facts a{color:var(--ink);text-decoration:none}
+ul.facts a:hover{color:var(--accent-ink);text-decoration:underline}
+/* The newest commits: subject over hash and age, the glyph aligned to
+   the first line. */
+ul.recent li{align-items:flex-start}
+ul.recent li::before{margin-top:var(--sp-1)}
+ul.recent li>a{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0}
+ul.recent .what{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ul.recent .meta{font-size:var(--fs-200);color:var(--faint)}
+ul.recent .meta code{font-size:var(--fs-200)}
+ul.recent li.more::before{content:none}
+ul.recent li.more a{color:var(--accent-ink);font-size:var(--fs-300)}
 
-/* The other documents, over the README. Links and not tabs that switch
-   in place: this surface runs no script, and what a tab strip is for is
-   finding the licence without going back to the listing to look. */
-nav.doctabs{display:flex;flex-wrap:wrap;gap:var(--sp-4);
-  margin:var(--sp-0) var(--sp-0) var(--sp-5);padding-bottom:var(--sp-3);
-  border-bottom:var(--border-hair);font-size:var(--fs-300)}
+/* The other documents, beside the README's name in its header strip.
+   Links and not tabs that switch in place: this surface runs no script. */
+nav.doctabs{display:flex;flex-wrap:wrap;gap:var(--sp-4);font-size:var(--fs-300)}
 nav.doctabs a{color:var(--muted);text-decoration:none;
   padding:var(--sp-1) var(--sp-2);margin:calc(-1 * var(--sp-1)) calc(-1 * var(--sp-2));
   border-radius:var(--r-sm);

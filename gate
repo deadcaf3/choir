@@ -96,6 +96,26 @@ if [ "$LANE" = full ] || [ "$LANE" = fast ]; then
     export CARGO_BUILD_JOBS
   fi
 fi
+
+# ------------------------------------------------------------- capacity
+# The merged harness (crates/choir-node/tests/it/) binds one node per
+# test, and every node keeps its listener and log open until the process
+# exits, so its open-file count grows with the number of tests and never
+# comes back down. It passed 370 tests at a soft limit of 512 and failed
+# 62 of them at 256, which is what a macOS terminal starts with; the
+# shells that ran the gate green had a limit of a million. Raise the
+# floor once here so a terminal and a session agree, and never lower a
+# limit that is already higher. The number is headroom, not a
+# measurement: 8x the last passing point.
+FD_FLOOR=4096
+# shellcheck disable=SC3045
+FD_NOW=$(ulimit -n)
+if [ "$FD_NOW" != unlimited ] && [ "$FD_NOW" -lt "$FD_FLOOR" ]; then
+  # shellcheck disable=SC3045
+  ulimit -n "$FD_FLOOR" 2>/dev/null \
+    || echo "gate: open-file limit is $FD_NOW and could not be raised to $FD_FLOOR;" \
+            "the node lane may fail with 'Too many open files'" >&2
+fi
 # One log directory per checkout, not per machine. Two gates running at
 # once — a worktree's and the main checkout's — used to share this
 # directory, and the second run's `rm` of the status files handed the
