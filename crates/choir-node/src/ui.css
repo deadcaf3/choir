@@ -42,17 +42,17 @@
 
   /* A 16px root, so a rem is a round number and the space scale below
      lands on a 4px grid without a decimal in sight. */
-  --fs-100:0.6875rem;  /* 11px — micro labels, table eyebrows */
-  --fs-200:0.75rem;    /* 12px — captions, meta, counts */
-  --fs-300:0.8125rem;  /* 13px — code, oids, dense tables */
-  --fs-400:0.875rem;   /* 14px — UI default */
-  --fs-500:1rem;       /* 16px — body copy */
-  --fs-600:1.125rem;   /* 18px — lede */
-  --fs-700:1.3125rem;  /* 21px — h3 */
-  --fs-800:1.625rem;   /* 26px — h2 */
-  --fs-900:2.125rem;   /* 34px — h1 */
-  --fs-1000:2.75rem;   /* 44px — the top of the fixed scale */
-  --fs-1100:3.5rem;    /* 56px — the ceiling the display step reaches */
+  --fs-100:0.6875rem; /* 11px — micro labels, table eyebrows */
+  --fs-200:0.75rem;   /* 12px — captions, meta, counts */
+  --fs-300:0.8125rem; /* 13px — code, oids, dense tables */
+  --fs-400:0.875rem;  /* 14px — UI default */
+  --fs-500:1rem;      /* 16px — body copy */
+  --fs-600:1.125rem;  /* 18px — lede */
+  --fs-700:1.3125rem; /* 21px — h3 */
+  --fs-800:1.625rem;  /* 26px — h2 */
+  --fs-900:2.125rem;  /* 34px — h1 */
+  --fs-1000:2.75rem;  /* 44px — the top of the fixed scale */
+  --fs-1100:3.5rem;   /* 56px — the ceiling the display step reaches */
 
   /* Fluid steps. A door read on a phone and a door read on a 27-inch
      display are the same page at two sizes, and picking one fixed size
@@ -62,19 +62,19 @@
      sheet, and they are here rather than in a media query because a
      breakpoint is a raw length by definition and the component block may
      not author one. */
-  --fs-display:clamp(2.125rem,1.35rem + 3.4vw,3.5rem);   /* the front door's title */
-  --fs-title:clamp(1.75rem,1.35rem + 1.9vw,2.75rem);     /* every other task page */
-  --fs-lede:clamp(1.0625rem,1rem + 0.4vw,1.3125rem);     /* the sentence under it */
+  --fs-display:clamp(2.125rem,1.35rem + 3.4vw,3.5rem); /* the front door's title */
+  --fs-title:clamp(1.75rem,1.35rem + 1.9vw,2.75rem);   /* every other task page */
+  --fs-lede:clamp(1.0625rem,1rem + 0.4vw,1.3125rem);   /* the sentence under it */
 
   --lh-tight:1.08;
   --lh-snug:1.3;
   --lh-normal:1.5;
-  --lh-copy:1.65;   /* prose: the front door and a README */
+  --lh-copy:1.65; /* prose: the front door and a README */
   --lh-code:1.6;
 
   --fw-regular:400;
   --fw-medium:500;
-  --fw-bold:600;   /* 600, not 700: a system face at 700 shouts */
+  --fw-bold:600; /* 600, not 700: a system face at 700 shouts */
 
   /* Tracking is nearly zero on purpose. `system-ui` is drawn for screen
      text at these sizes and does not want the optical correction a
@@ -85,23 +85,23 @@
   --tr-heading:-0.012em;
   --tr-body:0;
   --tr-mono:0;
-  --tr-caps:0.085em;   /* eyebrows, small-caps labels */
+  --tr-caps:0.085em; /* eyebrows, small-caps labels */
 
   /* ---- space (4px grid at a 16px root) ----------------------------- */
   --sp-0:0;
-  --sp-1:0.25rem;    /* 4  */
-  --sp-2:0.5rem;     /* 8  */
-  --sp-3:0.75rem;    /* 12 */
-  --sp-4:1rem;       /* 16 */
-  --sp-5:1.25rem;    /* 20 */
-  --sp-6:1.5rem;     /* 24 */
-  --sp-8:2rem;       /* 32 */
-  --sp-10:2.5rem;    /* 40 */
-  --sp-12:3rem;      /* 48 */
-  --sp-16:4rem;      /* 64 */
-  --sp-20:5rem;      /* 80 */
-  --sp-28:7rem;      /* 112 */
-  --sp-40:10rem;     /* 160 */
+  --sp-1:0.25rem; /* 4  */
+  --sp-2:0.5rem;  /* 8  */
+  --sp-3:0.75rem; /* 12 */
+  --sp-4:1rem;    /* 16 */
+  --sp-5:1.25rem; /* 20 */
+  --sp-6:1.5rem;  /* 24 */
+  --sp-8:2rem;    /* 32 */
+  --sp-10:2.5rem; /* 40 */
+  --sp-12:3rem;   /* 48 */
+  --sp-16:4rem;   /* 64 */
+  --sp-20:5rem;   /* 80 */
+  --sp-28:7rem;   /* 112 */
+  --sp-40:10rem;  /* 160 */
 
   /* The page's own margins, as tokens rather than as a media query, so
      the narrow-viewport override below is the only place a breakpoint
@@ -130,8 +130,8 @@
   --bw-1:1px;
   --bw-0:0;
   --bw-2:2px;
-  --bw-4:4px;         /* the outer radius of the focus ring */
-  --bw-rule:2px;      /* the accent tick */
+  --bw-4:4px;    /* the outer radius of the focus ring */
+  --bw-rule:2px; /* the accent tick */
   --border:var(--bw-1) solid var(--line);
   --border-hair:var(--bw-hair) solid var(--hairline);
   --border-accent:var(--bw-1) solid var(--accent-line);
@@ -143,12 +143,12 @@
      page having arrived; the state flips are 60–120ms because a hover
      that takes longer than that feels loose.
      ------------------------------------------------------------------ */
-  --dur-1:60ms;    /* state flips: hover, focus */
+  --dur-1:60ms; /* state flips: hover, focus */
   --dur-2:120ms;
   --dur-3:180ms;
   --dur-4:240ms;
-  --dur-5:320ms;   /* an element arriving */
-  --dur-6:520ms;   /* the one long one: the door's title */
+  --dur-5:320ms; /* an element arriving */
+  --dur-6:520ms; /* the one long one: the door's title */
   --ease-out:cubic-bezier(.22,.61,.36,1);
   --ease-in-out:cubic-bezier(.45,.05,.55,.95);
   --ease-emphatic:cubic-bezier(.16,.84,.24,1);
@@ -167,15 +167,16 @@
   --lift:-1px;
 
   /* ---- layout ------------------------------------------------------ */
-  --measure:36rem;      /* a book's measure: ~66 characters at 16px */
-  --search:20rem;       /* the one search box: a field, not a banner */
-  --article:42rem;      /* prose that carries code, slightly wider */
-  --side:17rem;         /* a narrow pane */
+  --measure:36rem; /* a book's measure: ~66 characters at 16px */
+  --search:20rem;  /* the one search box: a field, not a banner */
+  --article:42rem; /* prose that carries code, slightly wider */
+  --side:17rem;    /* a narrow pane */
+  --palette:38rem; /* the command palette, a shade wider than a measure */
   --toc:14rem;
   --topbar-h:3rem;
   --page-max:76rem;
   --tool-header-h:2.75rem;
-  --card-min:14rem;     /* a claim on the front door, before it wraps */
+  --card-min:14rem; /* a claim on the front door, before it wraps */
   /* One column of a three-up conflict. A floor rather than a width, so
      the columns stack rather than overflow when the viewport cannot
      give three of them this much. */
@@ -183,7 +184,7 @@
   /* The blur behind the chrome bar, so what scrolls under it is present
      without being legible. */
   --blur-1:14px;
-  --blur-2:24px;        /* the chrome's glass, deeper than a card's */
+  --blur-2:24px; /* the chrome's glass, deeper than a card's */
   /* One step between a row's entrance and the next. Multiplied in the
      component block and never authored there: `calc(var(--stagger) * 4)`
      is a token doing arithmetic, not a duration. */
@@ -194,7 +195,7 @@
      may not author a breakpoint, and the narrow override below is the
      one place that decides. */
   --col-subject:table-cell;
-  --col-meta:inline;   /* the commit strip's hash and age */
+  --col-meta:inline; /* the commit strip's hash and age */
 
   /* ---- z ----------------------------------------------------------- */
   --z-under:-1;
@@ -226,6 +227,33 @@
   --i-book:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 4.25c-1.5-1-3.5-1.5-6.25-1.5v9.5c2.75 0 4.75.5 6.25 1.5 1.5-1 3.5-1.5 6.25-1.5v-9.5c-2.75 0-4.75.5-6.25 1.5zM8 4.25v9.5'/%3E%3C/svg%3E");
   --i-people:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='5.5' r='2.25'/%3E%3Cpath d='M1.75 13.5c.4-2.25 2.1-3.5 4.25-3.5s3.85 1.25 4.25 3.5'/%3E%3Cpath d='M10.5 3.5a2.25 2.25 0 0 1 0 4.25M12 10.25c1.25.5 2 1.6 2.25 3.25'/%3E%3C/svg%3E");
   --i-caret:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5'/%3E%3C/svg%3E");
+
+  /* ---- the chain --------------------------------------------------
+     The one figure on this surface that is about what the product is
+     rather than about the page. The rail's Activity list is this
+     repository's own ordered log, so it is drawn as one: a node per
+     entry, joined top to bottom, newest first. An ordinary entry is a
+     ring; the head is filled, because it is the single entry an append
+     can land after; a merge is a diamond, two lines of history
+     rejoining at one committed value.
+
+     Drawn as gradients over the glyph box the list already reserves,
+     so a node costs no markup and stays on the same baseline the
+     masked icons sit on. The stops are percentages rather than
+     lengths: the figure is then a function of `--icon` and scales with
+     it, and the component block below stays free of raw values. The
+     theme tokens inside resolve on `:root`, the element all three
+     palettes declare them on, which is what lets these be written once
+     rather than once per theme. */
+  --node:radial-gradient(circle at 50% 50%,
+    transparent 0 24%,var(--line-strong) 25% 42%,transparent 43%);
+  --node-head:radial-gradient(circle at 50% 50%,
+    var(--accent) 0 42%,transparent 43%);
+  /* What the page becomes while the palette is over it. Built out of
+     `--strong`, the darkest ink in whichever palette is in force, so
+     the dark theme dims with its own near-black rather than with a
+     neutral one that reads as a hole cut in the page. */
+  --scrim:color-mix(in oklab,var(--strong) 46%,transparent);
 }
 
 /* A phone is not a desktop with less room; it is a different page
@@ -266,62 +294,62 @@
 :root[data-theme="light"]{
   color-scheme:light;
 
-  --ground:#faf8f4;          /* page */
-  --surface:#ffffff;         /* a card, a pane, the chrome bar */
-  --card:#ffffff;
-  --raise:#f0ece4;           /* hover fills, inputs */
-  --sunken:#f4f1ea;          /* code wells, diffs */
+  --ground:oklch(97.96% 0.0057 84.57); /* page */
+  --surface:oklch(100% 0 0);           /* a card, a pane, the chrome bar */
+  --card:oklch(100% 0 0);
+  --raise:oklch(94.4% 0.0115 84.58);   /* hover fills, inputs */
+  --sunken:oklch(95.85% 0.0098 87.47); /* code wells, diffs */
 
-  --ink:#26231f;             /* body copy      — 14.6:1 */
-  --strong:#12100e;          /* headings       — 17.9:1 */
-  --muted:#57524a;           /* secondary      —  7.5:1 */
-  --faint:#6a645b;           /* tertiary, meta —  5.7:1 */
-  --inverse:#ffffff;         /* text on an accent fill — 7.2:1 */
+  --ink:oklch(25.8% 0.0086 75.21);     /* body copy      — 14.6:1 */
+  --strong:oklch(17.47% 0.0052 67.47); /* headings       — 17.9:1 */
+  --muted:oklch(44.08% 0.0144 79.71);  /* secondary      —  7.5:1 */
+  --faint:oklch(50.6% 0.0159 78.18);   /* tertiary, meta —  5.7:1 */
+  --inverse:oklch(100% 0 0);           /* text on an accent fill — 7.2:1 */
 
-  --line:rgba(38,35,31,.13);
-  --hairline:rgba(38,35,31,.07);
-  --line-strong:rgba(38,35,31,.26);
+  --line:oklch(25.8% 0.0086 75.21 / .13);
+  --hairline:oklch(25.8% 0.0086 75.21 / .07);
+  --line-strong:oklch(25.8% 0.0086 75.21 / .26);
 
-  --accent:#3b4a94;          /* the one accent: a deep indigo */
-  --accent-ink:#33418a;      /* accent as text/links — 7.9:1 */
-  --accent-hover:#232f6e;
-  --accent-tint:rgba(59,74,148,.08);
-  --accent-line:rgba(59,74,148,.32);
+  --accent:oklch(43.69% 0.1221 271.84);    /* the one accent: a deep indigo */
+  --accent-ink:oklch(40.53% 0.122 271.74); /* accent as text/links — 7.9:1 */
+  --accent-hover:oklch(33.42% 0.1098 271.13);
+  --accent-tint:oklch(43.69% 0.1221 271.84 / .08);
+  --accent-line:oklch(43.69% 0.1221 271.84 / .32);
 
   /* Status colours are desaturated and live on text and thin rules. The
      `-tint` washes are backgrounds only; a foreground always takes the
      solid token beside it. */
-  --ok:#1a6b47;      --ok-tint:rgba(26,107,71,.08);    --ok-line:rgba(26,107,71,.32);
-  --warn:#7a5410;    --warn-tint:rgba(122,84,16,.08);  --warn-line:rgba(122,84,16,.32);
-  --danger:#a8323a;  --danger-tint:rgba(168,50,58,.07);--danger-line:rgba(168,50,58,.32);
+  --ok:oklch(47.04% 0.0964 159.31);      --ok-tint:oklch(47.04% 0.0964 159.31 / .08);    --ok-line:oklch(47.04% 0.0964 159.31 / .32);
+  --warn:oklch(47.56% 0.0932 76.04);    --warn-tint:oklch(47.56% 0.0932 76.04 / .08);  --warn-line:oklch(47.56% 0.0932 76.04 / .32);
+  --danger:oklch(49.67% 0.1535 21.08);  --danger-tint:oklch(49.67% 0.1535 21.08 / .07);--danger-line:oklch(49.67% 0.1535 21.08 / .32);
   --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
 
   /* A plain ring, no blur and no colour bleed: two solid pixels offset
      from the control. Written as a `box-shadow` pair because several
      controls draw their own border and an `outline` on those sits
      outside it at an inconsistent distance. */
-  --focus:#33418a;
+  --focus:oklch(40.53% 0.122 271.74);
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
-  --selection:rgba(59,74,148,.16);
+  --selection:oklch(43.69% 0.1221 271.84 / .16);
 
   /* Depth is still carried mostly by whitespace and hairlines. What
      these add is the small amount of separation a card needs to sit on
      the page rather than be drawn on it: one contact shadow and one
      wide, very light ambient one. Warm, never neutral black. */
-  --shadow-1:0 1px 1px rgba(38,35,31,.04);
-  --shadow-2:0 1px 2px rgba(38,35,31,.05),0 8px 20px -14px rgba(38,35,31,.22);
-  --shadow-3:0 1px 2px rgba(38,35,31,.05),0 14px 32px -18px rgba(38,35,31,.28),
-             0 30px 60px -40px rgba(38,35,31,.3);
-  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.7);
+  --shadow-1:0 1px 1px oklch(25.8% 0.0086 75.21 / .04);
+  --shadow-2:0 1px 2px oklch(25.8% 0.0086 75.21 / .05),0 8px 20px -14px oklch(25.8% 0.0086 75.21 / .22);
+  --shadow-3:0 1px 2px oklch(25.8% 0.0086 75.21 / .05),0 14px 32px -18px oklch(25.8% 0.0086 75.21 / .28),
+             0 30px 60px -40px oklch(25.8% 0.0086 75.21 / .3);
+  --shadow-inset:inset 0 1px 0 oklch(100% 0 0 / .7);
 
   /* The light behind the page. Two very wide, very weak radial washes
      at the top, so the first screen has a horizon and the rest of the
      page settles onto plain paper. Nothing here is legible as a colour;
      it is legible as depth. */
-  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(59,74,148,.18),transparent 68%);
-  --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(122,84,16,.09),transparent 70%);
-  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(59,74,148,.07),transparent 70%);
-  --head:#f6f3ee;            /* the header strip of a box */
+  --glow-1:radial-gradient(72% 46% at 50% -8%,oklch(43.69% 0.1221 271.84 / .18),transparent 68%);
+  --glow-2:radial-gradient(46% 34% at 88% 2%,oklch(47.56% 0.0932 76.04 / .09),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,oklch(43.69% 0.1221 271.84 / .07),transparent 70%);
+  --head:oklch(96.51% 0.0074 80.72); /* the header strip of a box */
   /* Tooth. A tile of monochrome noise the browser draws once from the
      SVG in the dark theme's value and repeats; the last row of the
      colour matrix is its whole opacity. Off on paper, where a texture
@@ -330,7 +358,7 @@
   /* A rule that fades out rather than stopping. Used under an eyebrow
      and above the footer, where a full-strength line across the page
      would be the loudest thing on it. */
-  --rule-fade:linear-gradient(90deg,var(--line),rgba(38,35,31,0));
+  --rule-fade:linear-gradient(90deg,var(--line),oklch(25.8% 0.0086 75.21 / 0));
   /* The stave: the one ornament on this surface, and the only place the
      name of the product shows up as a shape. Four hairlines, a musical
      staff at rest. */
@@ -340,24 +368,24 @@
   --stave-mark:repeating-linear-gradient(90deg,var(--accent) 0 2px,transparent 2px 5px);
   /* A card's fill. A hair lighter at the top than at the bottom, which
      is what makes a flat rectangle read as a surface catching light. */
-  --card-wash:linear-gradient(180deg,#ffffff,#fdfbf8);
-  --sunken-wash:linear-gradient(180deg,#f4f1ea,#f7f4ee);
+  --card-wash:linear-gradient(180deg,oklch(100% 0 0),oklch(98.88% 0.0045 78.3));
+  --sunken-wash:linear-gradient(180deg,oklch(95.85% 0.0098 87.47),oklch(96.78% 0.0086 84.57));
 
   /* Syntax: one hue family plus three signals, all ≥ 4.5:1 on
      `--sunken`, which is the surface code is set on. */
-  --syn-plain:#26231f;
-  --syn-comment:#6a645b;
-  --syn-keyword:#33418a;
-  --syn-type:#2f5c7e;
-  --syn-func:#2c5170;
-  --syn-string:#1a6b47;
-  --syn-number:#7a5410;
-  --syn-const:#6a4485;
-  --syn-macro:#8f4520;
-  --syn-punct:#57524a;
-  --syn-added:rgba(26,107,71,.1);
-  --syn-removed:rgba(168,50,58,.09);
-  --syn-gutter:#6f6960;
+  --syn-plain:oklch(25.8% 0.0086 75.21);
+  --syn-comment:oklch(50.6% 0.0159 78.18);
+  --syn-keyword:oklch(40.53% 0.122 271.74);
+  --syn-type:oklch(45.83% 0.0747 243.27);
+  --syn-func:oklch(42.18% 0.0672 245.6);
+  --syn-string:oklch(47.04% 0.0964 159.31);
+  --syn-number:oklch(47.56% 0.0932 76.04);
+  --syn-const:oklch(45.84% 0.1097 309.68);
+  --syn-macro:oklch(47.8% 0.1119 44.99);
+  --syn-punct:oklch(44.08% 0.0144 79.71);
+  --syn-added:oklch(47.04% 0.0964 159.31 / .1);
+  --syn-removed:oklch(49.67% 0.1535 21.08 / .09);
+  --syn-gutter:oklch(52.35% 0.0157 78.18);
 }
 
 /* =========================================================================
@@ -371,69 +399,69 @@
   :root:not([data-theme="light"]){
     color-scheme:dark;
 
-    --ground:#131211;
-    --surface:#1a1917;
-    --card:#1a1917;
-    --raise:#232120;
-    --sunken:#0f0e0d;
+    --ground:oklch(18.3% 0.0026 67.66);
+    --surface:oklch(21.38% 0.0042 84.59);
+    --card:oklch(21.38% 0.0042 84.59);
+    --raise:oklch(24.96% 0.0036 48.58);
+    --sunken:oklch(16.45% 0.0027 67.64);
 
-    --ink:#d9d4cb;           /* 12.4:1 */
-    --strong:#f6f3ed;        /* 16.9:1 */
-    --muted:#9d968c;         /*  6.3:1 */
-    --faint:#948d83;         /*  5.6:1 */
-    --inverse:#131211;
+    --ink:oklch(87.14% 0.0134 82.4);     /* 12.4:1 */
+    --strong:oklch(96.48% 0.0086 84.57); /* 16.9:1 */
+    --muted:oklch(67.62% 0.0166 77.02);  /*  6.3:1 */
+    --faint:oklch(64.65% 0.0168 77.01);  /*  5.6:1 */
+    --inverse:oklch(18.3% 0.0026 67.66);
 
-    --line:rgba(217,212,203,.14);
-    --hairline:rgba(217,212,203,.07);
-    --line-strong:rgba(217,212,203,.28);
+    --line:oklch(87.14% 0.0134 82.4 / .14);
+    --hairline:oklch(87.14% 0.0134 82.4 / .07);
+    --line-strong:oklch(87.14% 0.0134 82.4 / .28);
 
-    --accent:#7f8fd8;
-    --accent-ink:#a3b0e8;    /*  8.7:1 */
-    --accent-hover:#c3ccf4;
-    --accent-tint:rgba(163,176,232,.12);
-    --accent-line:rgba(163,176,232,.36);
+    --accent:oklch(66.74% 0.1101 273.65);
+    --accent-ink:oklch(76.73% 0.0817 274.2); /*  8.7:1 */
+    --accent-hover:oklch(85.14% 0.0566 275.18);
+    --accent-tint:oklch(76.73% 0.0817 274.2 / .12);
+    --accent-line:oklch(76.73% 0.0817 274.2 / .36);
 
-    --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
-    --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
-    --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
+    --ok:oklch(75.1% 0.1043 162.01);      --ok-tint:oklch(75.1% 0.1043 162.01 / .1);   --ok-line:oklch(75.1% 0.1043 162.01 / .34);
+    --warn:oklch(75.72% 0.1074 81.11);    --warn-tint:oklch(75.72% 0.1074 81.11 / .1);  --warn-line:oklch(75.72% 0.1074 81.11 / .34);
+    --danger:oklch(73.41% 0.1149 16.17);  --danger-tint:oklch(73.41% 0.1149 16.17 / .1);--danger-line:oklch(73.41% 0.1149 16.17 / .34);
     --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
 
-    --focus:#a3b0e8;
+    --focus:oklch(76.73% 0.0817 274.2);
     --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
-    --selection:rgba(163,176,232,.26);
+    --selection:oklch(76.73% 0.0817 274.2 / .26);
 
-    --shadow-1:0 1px 1px rgba(0,0,0,.4);
-    --shadow-2:0 1px 2px rgba(0,0,0,.5),0 8px 20px -14px rgba(0,0,0,.8);
-    --shadow-3:0 1px 2px rgba(0,0,0,.5),0 14px 32px -18px rgba(0,0,0,.75),
-               0 30px 60px -40px rgba(0,0,0,.9);
-    --shadow-inset:inset 0 1px 0 rgba(255,255,255,.04);
+    --shadow-1:0 1px 1px oklch(0% 0 0 / .4);
+    --shadow-2:0 1px 2px oklch(0% 0 0 / .5),0 8px 20px -14px oklch(0% 0 0 / .8);
+    --shadow-3:0 1px 2px oklch(0% 0 0 / .5),0 14px 32px -18px oklch(0% 0 0 / .75),
+               0 30px 60px -40px oklch(0% 0 0 / .9);
+    --shadow-inset:inset 0 1px 0 oklch(100% 0 0 / .04);
 
-    --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
-    --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
-    --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
-    --head:#201f1c;
+    --glow-1:radial-gradient(72% 46% at 50% -8%,oklch(66.74% 0.1101 273.65 / .16),transparent 68%);
+    --glow-2:radial-gradient(46% 34% at 88% 2%,oklch(75.72% 0.1074 81.11 / .07),transparent 70%);
+    --glow-3:radial-gradient(90% 36% at 50% 108%,oklch(66.74% 0.1101 273.65 / .08),transparent 70%);
+    --head:oklch(23.93% 0.0058 91.6);
     --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
-    --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
+    --rule-fade:linear-gradient(90deg,var(--line),oklch(87.14% 0.0134 82.4 / 0));
     --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
      a box the size of a capital letter. */
   --stave-mark:repeating-linear-gradient(90deg,var(--accent) 0 2px,transparent 2px 5px);
-    --card-wash:linear-gradient(180deg,#1d1c1a,#191816);
-    --sunken-wash:linear-gradient(180deg,#0f0e0d,#121110);
+    --card-wash:linear-gradient(180deg,oklch(22.68% 0.0041 84.59),oklch(20.94% 0.0042 84.59));
+    --sunken-wash:linear-gradient(180deg,oklch(16.45% 0.0027 67.64),oklch(17.84% 0.0026 67.66));
 
-    --syn-plain:#d9d4cb;
-    --syn-comment:#948d83;
-    --syn-keyword:#a3b0e8;
-    --syn-type:#a9c8e6;
-    --syn-func:#b9cfe8;
-    --syn-string:#8ecfa8;
-    --syn-number:#d9b571;
-    --syn-const:#c3a8e0;
-    --syn-macro:#e0a17e;
-    --syn-punct:#9d968c;
-    --syn-added:rgba(108,195,154,.12);
-    --syn-removed:rgba(232,138,144,.12);
-    --syn-gutter:#968f85;
+    --syn-plain:oklch(87.14% 0.0134 82.4);
+    --syn-comment:oklch(64.65% 0.0168 77.01);
+    --syn-keyword:oklch(76.73% 0.0817 274.2);
+    --syn-type:oklch(82% 0.054 247.62);
+    --syn-func:oklch(84.61% 0.0423 251.67);
+    --syn-string:oklch(79.99% 0.0865 157.44);
+    --syn-number:oklch(79% 0.0959 82.46);
+    --syn-const:oklch(77.41% 0.0835 306.47);
+    --syn-macro:oklch(76.11% 0.0892 50.01);
+    --syn-punct:oklch(67.62% 0.0166 77.02);
+    --syn-added:oklch(75.1% 0.1043 162.01 / .12);
+    --syn-removed:oklch(73.41% 0.1149 16.17 / .12);
+    --syn-gutter:oklch(65.31% 0.0168 77.01);
   }
 }
 
@@ -445,69 +473,69 @@
 :root[data-theme="dark"]{
   color-scheme:dark;
 
-  --ground:#131211;
-  --surface:#1a1917;
-  --card:#1a1917;
-  --raise:#232120;
-  --sunken:#0f0e0d;
+  --ground:oklch(18.3% 0.0026 67.66);
+  --surface:oklch(21.38% 0.0042 84.59);
+  --card:oklch(21.38% 0.0042 84.59);
+  --raise:oklch(24.96% 0.0036 48.58);
+  --sunken:oklch(16.45% 0.0027 67.64);
 
-  --ink:#d9d4cb;
-  --strong:#f6f3ed;
-  --muted:#9d968c;
-  --faint:#948d83;
-  --inverse:#131211;
+  --ink:oklch(87.14% 0.0134 82.4);
+  --strong:oklch(96.48% 0.0086 84.57);
+  --muted:oklch(67.62% 0.0166 77.02);
+  --faint:oklch(64.65% 0.0168 77.01);
+  --inverse:oklch(18.3% 0.0026 67.66);
 
-  --line:rgba(217,212,203,.14);
-  --hairline:rgba(217,212,203,.07);
-  --line-strong:rgba(217,212,203,.28);
+  --line:oklch(87.14% 0.0134 82.4 / .14);
+  --hairline:oklch(87.14% 0.0134 82.4 / .07);
+  --line-strong:oklch(87.14% 0.0134 82.4 / .28);
 
-  --accent:#7f8fd8;
-  --accent-ink:#a3b0e8;
-  --accent-hover:#c3ccf4;
-  --accent-tint:rgba(163,176,232,.12);
-  --accent-line:rgba(163,176,232,.36);
+  --accent:oklch(66.74% 0.1101 273.65);
+  --accent-ink:oklch(76.73% 0.0817 274.2);
+  --accent-hover:oklch(85.14% 0.0566 275.18);
+  --accent-tint:oklch(76.73% 0.0817 274.2 / .12);
+  --accent-line:oklch(76.73% 0.0817 274.2 / .36);
 
-  --ok:#6cc39a;      --ok-tint:rgba(108,195,154,.1);   --ok-line:rgba(108,195,154,.34);
-  --warn:#d3a95c;    --warn-tint:rgba(211,169,92,.1);  --warn-line:rgba(211,169,92,.34);
-  --danger:#e88a90;  --danger-tint:rgba(232,138,144,.1);--danger-line:rgba(232,138,144,.34);
+  --ok:oklch(75.1% 0.1043 162.01);      --ok-tint:oklch(75.1% 0.1043 162.01 / .1);   --ok-line:oklch(75.1% 0.1043 162.01 / .34);
+  --warn:oklch(75.72% 0.1074 81.11);    --warn-tint:oklch(75.72% 0.1074 81.11 / .1);  --warn-line:oklch(75.72% 0.1074 81.11 / .34);
+  --danger:oklch(73.41% 0.1149 16.17);  --danger-tint:oklch(73.41% 0.1149 16.17 / .1);--danger-line:oklch(73.41% 0.1149 16.17 / .34);
   --info:var(--accent-ink); --info-tint:var(--accent-tint); --info-line:var(--accent-line);
 
-  --focus:#a3b0e8;
+  --focus:oklch(76.73% 0.0817 274.2);
   --focus-ring:0 0 0 var(--bw-2) var(--ground),0 0 0 var(--bw-4) var(--focus);
-  --selection:rgba(163,176,232,.26);
+  --selection:oklch(76.73% 0.0817 274.2 / .26);
 
-  --shadow-1:0 1px 1px rgba(0,0,0,.4);
-  --shadow-2:0 1px 2px rgba(0,0,0,.5),0 8px 20px -14px rgba(0,0,0,.8);
-  --shadow-3:0 1px 2px rgba(0,0,0,.5),0 14px 32px -18px rgba(0,0,0,.75),
-             0 30px 60px -40px rgba(0,0,0,.9);
-  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.04);
+  --shadow-1:0 1px 1px oklch(0% 0 0 / .4);
+  --shadow-2:0 1px 2px oklch(0% 0 0 / .5),0 8px 20px -14px oklch(0% 0 0 / .8);
+  --shadow-3:0 1px 2px oklch(0% 0 0 / .5),0 14px 32px -18px oklch(0% 0 0 / .75),
+             0 30px 60px -40px oklch(0% 0 0 / .9);
+  --shadow-inset:inset 0 1px 0 oklch(100% 0 0 / .04);
 
-  --glow-1:radial-gradient(72% 46% at 50% -8%,rgba(127,143,216,.16),transparent 68%);
-  --glow-2:radial-gradient(46% 34% at 88% 2%,rgba(211,169,92,.07),transparent 70%);
-  --glow-3:radial-gradient(90% 36% at 50% 108%,rgba(127,143,216,.08),transparent 70%);
-  --head:#201f1c;
+  --glow-1:radial-gradient(72% 46% at 50% -8%,oklch(66.74% 0.1101 273.65 / .16),transparent 68%);
+  --glow-2:radial-gradient(46% 34% at 88% 2%,oklch(75.72% 0.1074 81.11 / .07),transparent 70%);
+  --glow-3:radial-gradient(90% 36% at 50% 108%,oklch(66.74% 0.1101 273.65 / .08),transparent 70%);
+  --head:oklch(23.93% 0.0058 91.6);
   --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
-  --rule-fade:linear-gradient(90deg,var(--line),rgba(217,212,203,0));
+  --rule-fade:linear-gradient(90deg,var(--line),oklch(87.14% 0.0134 82.4 / 0));
   --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
      a box the size of a capital letter. */
   --stave-mark:repeating-linear-gradient(90deg,var(--accent) 0 2px,transparent 2px 5px);
-  --card-wash:linear-gradient(180deg,#1d1c1a,#191816);
-  --sunken-wash:linear-gradient(180deg,#0f0e0d,#121110);
+  --card-wash:linear-gradient(180deg,oklch(22.68% 0.0041 84.59),oklch(20.94% 0.0042 84.59));
+  --sunken-wash:linear-gradient(180deg,oklch(16.45% 0.0027 67.64),oklch(17.84% 0.0026 67.66));
 
-  --syn-plain:#d9d4cb;
-  --syn-comment:#948d83;
-  --syn-keyword:#a3b0e8;
-  --syn-type:#a9c8e6;
-  --syn-func:#b9cfe8;
-  --syn-string:#8ecfa8;
-  --syn-number:#d9b571;
-  --syn-const:#c3a8e0;
-  --syn-macro:#e0a17e;
-  --syn-punct:#9d968c;
-  --syn-added:rgba(108,195,154,.12);
-  --syn-removed:rgba(232,138,144,.12);
-  --syn-gutter:#968f85;
+  --syn-plain:oklch(87.14% 0.0134 82.4);
+  --syn-comment:oklch(64.65% 0.0168 77.01);
+  --syn-keyword:oklch(76.73% 0.0817 274.2);
+  --syn-type:oklch(82% 0.054 247.62);
+  --syn-func:oklch(84.61% 0.0423 251.67);
+  --syn-string:oklch(79.99% 0.0865 157.44);
+  --syn-number:oklch(79% 0.0959 82.46);
+  --syn-const:oklch(77.41% 0.0835 306.47);
+  --syn-macro:oklch(76.11% 0.0892 50.01);
+  --syn-punct:oklch(67.62% 0.0166 77.02);
+  --syn-added:oklch(75.1% 0.1043 162.01 / .12);
+  --syn-removed:oklch(73.41% 0.1149 16.17 / .12);
+  --syn-gutter:oklch(65.31% 0.0168 77.01);
 }
 
 /* --- legacy aliases -----------------------------------------------------
@@ -604,6 +632,14 @@ img,svg,canvas{max-width:100%}
    not honoured everywhere, and a row that fades beside one that slides
    reads as a bug rather than as a choice. */
 @keyframes fade{from{opacity:0}to{opacity:1}}
+/* The chain drawing itself downward, and the one ring the head gets as
+   it arrives. The ring fires once and stops: an indefinite pulse is
+   content that moves with no way to stop it, which is the thing
+   WCAG 2.2.2 is about, and this surface has no control to offer. */
+@keyframes draw{from{transform:scaleY(0)}to{transform:none}}
+@keyframes head-ring{
+  from{box-shadow:0 0 0 0 var(--accent-line)}
+  to{box-shadow:0 0 0 var(--sp-2) transparent}}
 /* Between pages. The bar and the title are named, so a navigation inside
    this node carries them across instead of fading them out and back in:
    the chrome stays put and the title glides to its new text. The rest
@@ -953,6 +989,22 @@ b.warn{color:var(--warn)}
 b.pending{color:var(--muted)}
 b.danger{color:var(--danger)}
 .v{padding:var(--sp-0) 0;font-size:var(--fs-200)}
+/* A cast verdict arriving. The chip already draws a dot in the colour
+   of the state, so the dot is the thing that moves and no markup
+   changes: an approval settles into place, a refusal knocks once. Both
+   fire on arrival and then stop. A verdict is a fact in the log by the
+   time this page renders it -- it is not an alarm, and an indefinite
+   one would be movement with no control to stop it. Scoped to `.v`,
+   which is a verdict and not the dozen other things `b.tag` marks. */
+.v b.tag.ok::before{animation:settle var(--dur-5) var(--ease-emphatic) var(--delay-2) both}
+.v b.tag.warn::before,.v b.tag.danger::before{
+  animation:knock var(--dur-5) var(--ease-in-out) var(--delay-2) both}
+@keyframes settle{from{transform:scale(0)}60%{transform:scale(1.4)}to{transform:none}}
+@keyframes knock{
+  from{transform:none}
+  25%{transform:translateX(calc(var(--sp-1) * -1))}
+  60%{transform:translateX(var(--sp-1))}
+  to{transform:none}}
 .empty{color:var(--faint);font-size:var(--fs-400);margin:var(--sp-3) var(--sp-0)}
 /* A note is one sentence of consequence, marked by a thin rule at its
    leading edge and nothing else. */
@@ -1035,8 +1087,17 @@ pre.code .ln{display:inline-block;min-width:var(--sp-10);
 /* Inline, not block. The line's own newline is emitted after the
    closing tag, so a block here renders every changed line as two: one
    for the span and one for the newline that follows it. */
-pre.diff .add{color:var(--ok);background:var(--syn-added)}
-pre.diff .del{color:var(--danger);background:var(--syn-removed)}
+/* A bar at the leading edge as well as a wash behind: the wash is the
+   only thing that distinguished an added line from a removed one, and
+   the two washes differ in hue and barely in lightness -- which is the
+   distinction a red-green reader does not have. An inset shadow rather
+   than a pseudo-element because these are inline spans inside one
+   `<pre>`, and a box drawn across an inline fragment is a box whose
+   height depends on where the line wrapped. */
+pre.diff .add{color:var(--ok);background:var(--syn-added);
+  box-shadow:inset var(--bw-rule) 0 0 var(--ok)}
+pre.diff .del{color:var(--danger);background:var(--syn-removed);
+  box-shadow:inset var(--bw-rule) 0 0 var(--danger)}
 pre.diff .hunk{color:var(--faint)}
 /* A `diff --git` header is the seam a reader scrolls for. */
 pre.diff .file{color:var(--strong);font-weight:var(--fw-medium)}
@@ -1475,10 +1536,46 @@ ul.facts li,ul.who li{display:flex;align-items:center;gap:var(--sp-2);color:var(
 ul.facts li::before{background-color:var(--faint)}
 ul.facts a{color:var(--ink);text-decoration:none}
 ul.facts a:hover{color:var(--accent-ink);text-decoration:underline}
-/* The newest commits: subject over hash and age, the glyph aligned to
-   the first line. */
-ul.recent li{align-items:flex-start}
-ul.recent li::before{margin-top:var(--sp-1)}
+/* The newest commits: subject over hash and age, the chain aligned to
+   the first line.
+
+   This list is the one place the surface draws what the product is. It
+   is a log: entries in one total order, newest first, each one built on
+   the entry below it. So the repeated clock glyph that used to mark
+   every row -- eight copies of the same word, saying only "this is a
+   commit", which the column heading already said -- is replaced by the
+   reader's position in that order. A ring is an entry; the filled node
+   at the top is the head, the single entry an append lands after; a
+   diamond is a merge, two lines of history rejoining at one committed
+   value. The chain runs on past the last row into `All history`,
+   because it does: this pane shows the newest few and the log does not
+   stop there. */
+ul.recent li{align-items:flex-start;position:relative}
+ul.recent li::before{margin-top:var(--sp-1);background-color:transparent;
+  background-image:var(--node);border-radius:var(--r-pill);
+  -webkit-mask-image:none;mask-image:none}
+ul.recent li.head::before{background-image:var(--node-head);
+  animation:head-ring var(--dur-6) var(--ease-out) var(--delay-4) both}
+ul.recent li.fork::before{background-image:none;border-radius:0;
+  border:var(--bw-1) solid var(--line-strong);transform:rotate(45deg) scale(.62)}
+ul.recent li.head.fork::before{background-color:var(--accent);border-color:var(--accent)}
+/* The join, drawn from under one node to under the next. `border-left`
+   and no `width`: a box with no width cannot overflow anything, and the
+   rule this sheet is held to forbids pinning one to a token. The
+   negative offset is the list's own `gap`, which is the distance the
+   line has to cross to reach the row below. */
+ul.recent li::after{content:"";position:absolute;left:calc(var(--icon) / 2);
+  top:calc(var(--sp-1) + var(--icon));bottom:calc((var(--sp-3) + var(--sp-1)) * -1);
+  border-left:var(--bw-hair) solid var(--line-strong);transform-origin:top}
+ul.recent li.more::after{content:none}
+/* Drawn as the pane arrives rather than on a clock, so a reader who
+   never scrolls to it never sees a figure animate at them. Outside the
+   `@supports`, and under `prefers-reduced-motion`, the chain is simply
+   already drawn -- `both` is what makes the end state the resting one. */
+@supports (animation-timeline:view()){
+  ul.recent li::after{animation:draw linear both;animation-timeline:view();
+    animation-range:entry 10% cover 28%}
+}
 ul.recent li>a{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0}
 ul.recent .what{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 ul.recent .meta{font-size:var(--fs-200);color:var(--faint)}
@@ -1633,6 +1730,21 @@ ol.thread .body{margin:var(--sp-0);white-space:pre-wrap;
    than filled with a placeholder character: the absence is the fact,
    and a row of dashes reads as content. */
 .side pre .row.gap{background:var(--hairline)}
+
+/* A disclosure that opens rather than jumps. `::details-content` is the
+   box a browser already wraps everything after the `<summary>` in, and
+   `interpolate-size` is what makes `auto` an end a length can be
+   transitioned to; a browser with neither simply shows the panel, which
+   is what every browser did before this and what reduced motion asks
+   for regardless. The reviews table's `n of m` verdicts and the branch
+   picker are the two that open here. */
+@supports selector(details::details-content){
+  details::details-content{block-size:0;overflow:hidden;
+    interpolate-size:allow-keywords;
+    transition:block-size var(--dur-4) var(--ease-out),
+               content-visibility var(--dur-4) allow-discrete}
+  details[open]::details-content{block-size:auto}
+}
 
 /* ------------------------------------------------------------------
    FORMS AND CONTROLS

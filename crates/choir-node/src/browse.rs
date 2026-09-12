@@ -1803,6 +1803,16 @@ struct Recent {
     oid: String,
     subject: String,
     at: i64,
+    /// Whether this entry has more than one parent.
+    ///
+    /// The chain the rail draws is the repository's own ordered log, and
+    /// a merge is the one entry in it that is not a single step: two
+    /// lines of history rejoining at one committed value. It is drawn as
+    /// a different shape for that reason and not as decoration -- it is
+    /// the closest thing git's object graph has to D6's conflict-as-a-
+    /// value, and a chain that drew every entry identically would be
+    /// claiming the history is linear when it is not.
+    merge: bool,
 }
 
 /// The tip commit and everyone who has written here, in one walk.
@@ -1821,7 +1831,7 @@ fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool, Ve
     let depth = format!("-{AUTHOR_WALK}");
     let Ok(text) = git_text(
         dir,
-        &["log", &depth, "--format=%H%x00%an%x00%at%x00%s", oid],
+        &["log", &depth, "--format=%H%x00%an%x00%at%x00%P%x00%s", oid],
     ) else {
         return (None, Vec::new(), false, Vec::new());
     };
@@ -1830,10 +1840,17 @@ fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool, Ve
     let mut recent: Vec<Recent> = Vec::new();
     let mut walked = 0usize;
     for line in text.lines() {
-        let mut fields = line.splitn(4, '\0');
-        let (Some(hash), Some(author), Some(at), Some(subject)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
+        // Five fields, subject last: a subject may contain anything,
+        // including the separator, so it stays the remainder of the
+        // split rather than a field with a delimiter after it.
+        let mut fields = line.splitn(5, '\0');
+        let (Some(hash), Some(author), Some(at), Some(parents), Some(subject)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             continue;
         };
         walked += 1;
@@ -1850,6 +1867,7 @@ fn tip_and_authors(dir: &Path, oid: &str) -> (Option<Tip>, Vec<String>, bool, Ve
                 oid: hash.to_string(),
                 subject: subject.to_string(),
                 at,
+                merge: parents.split_whitespace().count() > 1,
             });
         }
         // Linear rather than a set: the list this builds is rendered in
@@ -2088,8 +2106,17 @@ fn about_pane(
     if !recent.is_empty() {
         let now = now_secs();
         h.push_str("<h2>Activity</h2><ul class=\"facts recent\">");
-        for one in recent {
-            h.push_str("<li class=\"f-commit\"><a href=\"/r/");
+        for (n, one) in recent.iter().enumerate() {
+            // `head` is the single-writer head: the newest entry, and the
+            // only one a next operation can be appended after.
+            h.push_str("<li class=\"f-commit");
+            if n == 0 {
+                h.push_str(" head");
+            }
+            if one.merge {
+                h.push_str(" fork");
+            }
+            h.push_str("\"><a href=\"/r/");
             h.push_str(&esc(repo));
             h.push_str("/commit/");
             h.push_str(&esc(&one.oid));

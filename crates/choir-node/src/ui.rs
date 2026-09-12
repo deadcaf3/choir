@@ -1733,7 +1733,7 @@ mod tests {
     /// check here, and it cost the diff its two most important lines.
     ///
     /// `pre.diff .add` and `.del` set `--syn-added` and `--syn-removed`
-    /// as `color`. Both are `rgba(…,.14)` — washes, meant as backgrounds
+    /// as `color`. Both carry an alpha — washes, meant as backgrounds
     /// — so on `--sunken`, the darkest surface in the sheet, the added
     /// and removed lines a reader opens a diff *for* rendered at 14%
     /// opacity. `the_component_sheet_authors_no_raw_values` passed the
@@ -1746,7 +1746,7 @@ mod tests {
     /// exactly as unreadable and exactly as green under every other test.
     ///
     /// An alias is followed rather than missed. `--info-tint:
-    /// var(--accent-tint)` is not *defined* as an `rgba(…)` and used to
+    /// var(--accent-tint)` carries no alpha of its own and used to
     /// slip through, which this recorded as a named gap on the grounds
     /// that resolving it meant writing a CSS evaluator. It does not: a
     /// declaration that is exactly one `var(--x)` is a rename, and
@@ -1772,12 +1772,22 @@ mod tests {
                 }
             }
         }
-        // A token is a wash if its definition is an `rgba(…)` or renames
-        // one. The cap is what keeps a cycle from hanging the suite; no
-        // chain in this sheet is anywhere near it.
+        // A token is a wash if its definition carries an alpha, mixes
+        // with `transparent`, or renames one that does. `rgba(` is kept
+        // beside the `oklch()` spelling the palette now uses so a token
+        // written either way is caught: the sheet converted in one pass, and a rule that
+        // silently stopped applying to the old spelling is how the
+        // conversion would have taken this guard down with it. The cap
+        // is what keeps a cycle from hanging the suite; no chain in
+        // this sheet is anywhere near it.
         let resolve = |mut value: &str| -> bool {
             for _ in 0..8 {
-                if value.starts_with("rgba(") {
+                if value.starts_with("rgba(")
+                    || (value.starts_with("oklch(") && value.contains('/'))
+                    // A mix with `transparent` in it is translucent by
+                    // construction, whatever the other operand is.
+                    || (value.starts_with("color-mix(") && value.contains("transparent"))
+                {
                     return true;
                 }
                 let Some(alias) = value
@@ -2052,11 +2062,15 @@ mod tests {
         );
     }
 
-    /// Every `--name:#hex` in the block that opens with `selector`.
+    /// Every opaque `--name:oklch(…)` in the block that opens with
+    /// `selector`.
     ///
-    /// Deliberately hex-only: the wash tokens are `rgba()` and have no
-    /// single ratio to assert, and `no_translucent_token_is_used_as_a_foreground_colour`
-    /// already forbids painting text with one.
+    /// Deliberately opaque-only: a token carrying an alpha — spelled
+    /// `oklch(L% C H / a)` — is a wash with no single ratio to assert,
+    /// and `no_translucent_token_is_used_as_a_foreground_colour`
+    /// already forbids painting text with one. The slash is the whole
+    /// test for that, which is why the palette may not spell an opaque
+    /// colour with a redundant `/ 1`.
     ///
     /// Comments are stripped before anything is split, and that is not
     /// tidiness. This block is written one declaration per line with the
@@ -2091,26 +2105,72 @@ mod tests {
             .filter_map(|decl| {
                 let (name, value) = decl.split_once(':')?;
                 let (name, value) = (name.trim(), value.trim());
-                (name.starts_with("--") && value.starts_with('#'))
+                (name.starts_with("--") && value.starts_with("oklch(") && !value.contains('/'))
                     .then(|| (name.to_string(), value.to_string()))
             })
             .collect()
     }
 
-    /// The WCAG contrast ratio between two opaque `#rrggbb` colours.
+    /// The 8-bit sRGB a browser paints for an opaque `oklch(L% C H)`.
+    ///
+    /// Björn Ottosson's inverse, then the sRGB transfer function. The
+    /// quantisation at the end is not a rounding convenience: WCAG is
+    /// defined over the channel values a display is driven with, and
+    /// asserting a ratio against unquantised floats would be asserting
+    /// something no reader ever sees. It is also what keeps every ratio
+    /// in this suite identical to the one the palette asserted when it
+    /// was written in hex.
+    fn srgb8(colour: &str) -> [u8; 3] {
+        let body = colour
+            .trim()
+            .strip_prefix("oklch(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{colour} is not an opaque oklch() colour"));
+        let mut parts = body.split_whitespace();
+        let mut next = |what: &str| -> f64 {
+            parts
+                .next()
+                .unwrap_or_else(|| panic!("{colour} has no {what}"))
+                .trim_end_matches('%')
+                .parse()
+                .unwrap_or_else(|error| panic!("{colour} has an unreadable {what}: {error}"))
+        };
+        let (lightness, chroma, hue) = (next("lightness") / 100.0, next("chroma"), next("hue"));
+        let (a, b) = (
+            chroma * hue.to_radians().cos(),
+            chroma * hue.to_radians().sin(),
+        );
+        let l = (lightness + 0.396_337_777_4 * a + 0.215_803_757_3 * b).powi(3);
+        let m = (lightness - 0.105_561_345_8 * a - 0.063_854_172_8 * b).powi(3);
+        let s = (lightness - 0.089_484_177_5 * a - 1.291_485_548_0 * b).powi(3);
+        let linear = [
+            4.076_741_662_1 * l - 3.307_711_591_3 * m + 0.230_969_929_2 * s,
+            -1.268_438_004_6 * l + 2.609_757_401_1 * m - 0.341_319_396_5 * s,
+            -0.004_196_086_3 * l - 0.703_418_614_7 * m + 1.707_614_701_0 * s,
+        ];
+        linear.map(|c| {
+            let encoded = if c <= 0.003_130_8 {
+                12.92 * c
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            };
+            (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+        })
+    }
+
+    /// The WCAG contrast ratio between two opaque `oklch()` colours.
     fn contrast(a: &str, b: &str) -> f64 {
-        let luminance = |hex: &str| -> f64 {
-            let hex = hex.trim_start_matches('#');
-            let channel = |at: usize| {
-                let raw = u8::from_str_radix(&hex[at..at + 2], 16).expect("a hex pair") as f64;
-                let c = raw / 255.0;
+        let luminance = |colour: &str| -> f64 {
+            let channel = |raw: u8| {
+                let c = raw as f64 / 255.0;
                 if c <= 0.040_45 {
                     c / 12.92
                 } else {
                     ((c + 0.055) / 1.055).powf(2.4)
                 }
             };
-            0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
+            let [r, g, b] = srgb8(colour);
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
         };
         let (x, y) = (luminance(a), luminance(b));
         let (hi, lo) = if x > y { (x, y) } else { (y, x) };
