@@ -406,8 +406,8 @@
 
     --ink:oklch(87.14% 0.0134 82.4);     /* 12.4:1 */
     --strong:oklch(96.48% 0.0086 84.57); /* 16.9:1 */
-    --muted:oklch(67.62% 0.0166 77.02);  /*  6.3:1 */
-    --faint:oklch(64.65% 0.0168 77.01);  /*  5.6:1 */
+    --muted:oklch(72% 0.0166 77.02);     /*  7.5:1 */
+    --faint:oklch(68.5% 0.0168 77.01);   /*  6.6:1 */
     --inverse:oklch(18.3% 0.0026 67.66);
 
     --line:oklch(87.14% 0.0134 82.4 / .14);
@@ -440,7 +440,7 @@
     --glow-2:radial-gradient(46% 34% at 88% 2%,oklch(75.72% 0.1074 81.11 / .07),transparent 70%);
     --glow-3:radial-gradient(90% 36% at 50% 108%,oklch(66.74% 0.1101 273.65 / .08),transparent 70%);
     --head:oklch(23.93% 0.0058 91.6);
-    --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+    --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .04 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
     --rule-fade:linear-gradient(90deg,var(--line),oklch(87.14% 0.0134 82.4 / 0));
     --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
@@ -481,8 +481,8 @@
 
   --ink:oklch(87.14% 0.0134 82.4);
   --strong:oklch(96.48% 0.0086 84.57);
-  --muted:oklch(67.62% 0.0166 77.02);
-  --faint:oklch(64.65% 0.0168 77.01);
+  --muted:oklch(72% 0.0166 77.02);
+  --faint:oklch(68.5% 0.0168 77.01);
   --inverse:oklch(18.3% 0.0026 67.66);
 
   --line:oklch(87.14% 0.0134 82.4 / .14);
@@ -515,7 +515,7 @@
   --glow-2:radial-gradient(46% 34% at 88% 2%,oklch(75.72% 0.1074 81.11 / .07),transparent 70%);
   --glow-3:radial-gradient(90% 36% at 50% 108%,oklch(66.74% 0.1101 273.65 / .08),transparent 70%);
   --head:oklch(23.93% 0.0058 91.6);
-  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .04 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   --rule-fade:linear-gradient(90deg,var(--line),oklch(87.14% 0.0134 82.4 / 0));
   --stave:repeating-linear-gradient(180deg,var(--hairline) 0 1px,transparent 1px 7px);
   /* The same figure at mark size: three rules in the accent, drawn into
@@ -675,38 +675,27 @@ body.task header.top,body.task main>section{
   animation:rise var(--dur-5) var(--ease-out) both}
 body.task main>section{animation-delay:var(--delay-2)}
 body.task main>section+section{animation-delay:var(--delay-4)}
-/* The tool pages, arriving in order: the tray under the head, then the
-   panes left to right, then the rows of whichever list the page is. The
-   head itself does not move: it is the element the view transition
-   carries from page to page, and an entrance that faded it would hand
-   that transition an invisible snapshot to glide to. On a first load it
-   is simply there, which is what a title is for. */
-.repobar{animation:rise var(--dur-5) var(--ease-out) both;
-  animation-delay:var(--delay-1)}
-main>section,.panes>.pane,.rail>.pane{
-  animation:rise var(--dur-5) var(--ease-out) both;
-  animation-delay:var(--delay-2)}
-.rail>.pane:nth-child(1){animation-delay:var(--delay-3)}
-.rail>.pane:nth-child(2){animation-delay:var(--delay-4)}
-.panes>.pane-content{animation-delay:var(--delay-4)}
-/* The README is below the fold on most screens, so its entrance is tied
-   to the scroll where the browser can do that: it rises as it comes
-   into view rather than having risen while nobody was looking. A
-   browser without scroll timelines ignores the two lines and keeps the
-   timed entrance above. */
-@supports (animation-timeline:view()){
-  .panes>.pane-content{animation-timeline:view();
-    animation-range:entry 0% entry 35%;animation-delay:var(--sp-0)}
-}
-/* Rows arrive with the table that holds them, not one after another.
-   What was here was twenty-four hand-written delays and a scroll
-   timeline for everything past them, so a twenty-five-row listing spent
-   half a second assembling itself while a reader waited to read it, and
-   the rows below the fold kept arriving as they were scrolled to. A
-   table is one object and it is the object the page is for. */
-tbody tr{animation:fade var(--dur-4) var(--ease-out) both;
-  animation-delay:var(--delay-3)}
+/* The tool pages do not arrive; they are there. The tray, the panes
+   and the rows used to rise in on a ladder of delays, and for the first
+   half-second after paint the page a reader had come to read was a
+   ghost of itself -- which is what a screenshot taken "as soon as it
+   loads" showed, and it was right. Every code host paints its listing
+   on the first frame, and the reason is not that they lack taste: a
+   listing is an instrument, and an instrument that fades in is one you
+   wait for. Motion on this surface is spent where a reader is already
+   looking -- a row under the cursor, a pane under the hand, the README
+   as it scrolls into view, the palette as it opens -- and never between
+   the bytes arriving and the words being legible. */
 
+/* The one arrival kept: the README, when it is below the fold. It rises
+   as it scrolls into view, which is motion a reader caused by scrolling
+   towards it, and on a tall screen where it is already in view the
+   timeline is at its end and the pane is simply there. A browser
+   without scroll timelines never sees this rule. */
+@supports (animation-timeline:view()){
+  .panes>.pane-content{animation:rise linear both;animation-timeline:view();
+    animation-range:entry 0% entry 35%}
+}
 /* skip link */
 .skip{position:absolute;left:var(--sp-3);top:calc(-1 * var(--sp-16));
   z-index:var(--z-palette);padding:var(--sp-2) var(--sp-4);
@@ -1431,9 +1420,23 @@ b.tab.here .count{color:var(--muted)}
 .panes{display:flex;flex-wrap:wrap;align-items:flex-start;
   gap:var(--sp-6) var(--sp-8)}
 .pane{min-width:0;overflow-x:auto;display:flex;flex-direction:column;
-  background:var(--surface);border:var(--bw-1) solid var(--line);
+  background:var(--card-wash);border:var(--bw-1) solid var(--line);
   border-radius:var(--r-md);padding:var(--pad-card);
-  box-shadow:var(--shadow-1)}
+  /* Contact, ambient, and a hairline of light on the top edge: three
+     layers, because one flat shadow is what makes a card read as
+     painted on the page rather than resting on it. The wash is a hair
+     lighter at the top than the bottom for the same reason. */
+  box-shadow:var(--shadow-2),var(--shadow-inset);
+  transition:box-shadow var(--dur-3) var(--ease-out),
+             border-color var(--dur-3) var(--ease-out),
+             transform var(--dur-3) var(--ease-out)}
+/* A rail pane under the pointer lifts by one pixel and its edge firms.
+   Only the rail: the listing and the README are the page's working
+   surfaces, the cursor lives over them while a reader reads, and a card
+   that moved every time it crossed an edge would be a card that never
+   held still. */
+.rail>.pane:hover{transform:translateY(var(--lift));
+  border-color:var(--line-strong);box-shadow:var(--shadow-3),var(--shadow-inset)}
 /* The files and the README carry a header strip, so their padding is
    the strip's and the rows' rather than the box's. */
 .pane-files,.pane-content{padding:var(--sp-0);overflow:hidden}
