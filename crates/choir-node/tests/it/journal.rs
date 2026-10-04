@@ -66,6 +66,33 @@ fn read_journal(path: &std::path::Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Reads the journal once it holds `decisions` decision lines.
+///
+/// A 200 says the op was decided, not that its record is in the file:
+/// the writer hands the record to the journal's own thread and answers.
+/// Reading in the statement after the last submission is inside that
+/// window whenever the machine is busy, and one more submission does not
+/// close it, it only moves it to that submission's own record. A nightly
+/// run lost exactly that, with the last acceptance not yet written.
+/// Records are written in the order they were decided, so the last
+/// decision being there means everything before it is.
+fn read_journal_after(path: &std::path::Path, decisions: usize) -> Vec<serde_json::Value> {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let lines = read_journal(path);
+        if lines.iter().filter(|v| v["kind"] == "decision").count() >= decisions {
+            return lines;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the journal never held {decisions} decisions: {lines:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// An acceptance and a refusal both reach the file, and the refusal
 /// carries its reason. The refusal is the interesting half: it never
 /// appears in `/api/view`, so before this the only record of *why* a
@@ -106,8 +133,9 @@ fn both_an_acceptance_and_a_refusal_reach_the_journal() {
     ]);
     assert_ne!(code, 200, "an unknown key must not be admitted: {resp}");
 
-    // One more accepted op: the journal thread writes on its own
-    // schedule, and this both flushes the burst and proves ordering.
+    // One more accepted op, so the refusal sits between two acceptances.
+    // The journal thread writes on its own schedule, which is why the
+    // read below waits for all three.
     let (code, resp) = curl(&[
         "-X",
         "POST",
@@ -117,7 +145,7 @@ fn both_an_acceptance_and_a_refusal_reach_the_journal() {
     ]);
     assert_eq!(code, 200, "{resp}");
 
-    let decisions: Vec<serde_json::Value> = read_journal(&path)
+    let decisions: Vec<serde_json::Value> = read_journal_after(&path, 3)
         .into_iter()
         .filter(|v| v["kind"] == "decision")
         .collect();
@@ -197,7 +225,8 @@ fn a_lost_race_on_one_ref_is_recorded_as_contention() {
     ]);
     assert_ne!(code, 200, "a stale prev must not be admitted: {resp}");
 
-    // Flush the journal thread with a decision that must land after it.
+    // A decision that must land after it, which is what the read below
+    // waits for.
     let (_, _) = curl(&[
         "-X",
         "POST",
@@ -206,7 +235,7 @@ fn a_lost_race_on_one_ref_is_recorded_as_contention() {
         &format!("{api}/submit"),
     ]);
 
-    let lines = read_journal(&path);
+    let lines = read_journal_after(&path, 3);
     let cas: Vec<&serde_json::Value> = lines
         .iter()
         .filter(|v| v["kind"] == "cas_failure")
