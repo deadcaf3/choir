@@ -176,6 +176,28 @@ fn a_landing_is_pushed_to_the_repositorys_remote() {
     assert_eq!(pushed["remote"], "mirror");
 }
 
+/// The sequencer accepts a ref inside `pre-receive`, and git applies it
+/// only once that hook has exited. The follower is offered the landing
+/// at the accept, so a push made straight away reads a repository that
+/// does not hold the ref yet, sends nothing, and is never repeated.
+///
+/// The two tests around this one lost that race on a busy Linux runner
+/// more nights than not and won it everywhere else. A second of hook
+/// after the accept is what makes the gap stand still.
+#[test]
+fn a_landing_reaches_the_follower_when_git_applies_the_ref_late() {
+    let f = node_with_followers("late");
+    let hook = f.work.join("repos/owner/repo.git/hooks/pre-receive");
+    let script = std::fs::read_to_string(&hook).unwrap();
+    let accepting = script
+        .strip_suffix("exit 0\n")
+        .expect("the hook ends by accepting the push");
+    std::fs::write(&hook, format!("{accepting}sleep 1\nexit 0\n")).unwrap();
+
+    let oid = push_one(&f, "one");
+    wait_for_mirror(&f, &oid);
+}
+
 #[test]
 fn a_second_landing_follows_and_the_mirror_is_never_forced() {
     let f = node_with_followers("twice");

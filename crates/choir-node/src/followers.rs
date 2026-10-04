@@ -28,6 +28,21 @@
 //! same repository pushes everything, so a dropped offer is delay, not
 //! loss.
 //!
+//! # The log leads, so the push waits for git
+//!
+//! The offer is made when the sequencer accepts the ref, and git does
+//! not hold it yet: a push is still inside `pre-receive`, and the queue
+//! writes its ref after the round. A push made at the offer reads the
+//! repository as it was, sends nothing new, and nothing sends it again,
+//! which leaves the follower one landing behind until the next one. So
+//! an offer carries the value the view now holds, and the push thread
+//! waits until git reads the same before it pushes.
+//!
+//! The wait is bounded by `SETTLE`, because git may never get there: a
+//! push refused on a later ref is retracted, and its objects go out with
+//! the quarantine. Offers that arrive during the wait replace what is
+//! waited for, so a retraction ends it early instead of running it out.
+//!
 //! # Consent is the flag
 //!
 //! The daemon pushes only when started with `--followers`. Without it a
@@ -46,15 +61,33 @@
 //! assert_eq!(repository_of("refs/heads/main"), None);
 //! ```
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Offers waiting to be pushed. Small on purpose: every offer for a
 /// repository is the same work, so a deep queue would hold duplicates.
 const QUEUE_CAPACITY: usize = 64;
+
+/// How long the push thread waits for git to hold a landed ref before it
+/// pushes what git has. Far above a healthy apply, which is the tail of
+/// one hook, and short enough that a ref git will never hold delays the
+/// other repositories' pushes by seconds rather than stalling them.
+const SETTLE: Duration = Duration::from_secs(10);
+
+/// How often the wait looks again.
+const SETTLE_POLL: Duration = Duration::from_millis(25);
+
+/// A ref the view just moved, and the value it now holds there; `None`
+/// when the landing deleted it.
+struct Landing {
+    repo: String,
+    refname: String,
+    new: Option<String>,
+}
 
 /// The repository half of a view ref key, `<repo>:<refname>`.
 #[must_use]
@@ -65,7 +98,7 @@ pub fn repository_of(key: &str) -> Option<&str> {
 
 /// The push handle the writer thread holds.
 pub struct Followers {
-    tx: SyncSender<String>,
+    tx: SyncSender<Landing>,
     dropped: Arc<AtomicU64>,
 }
 
@@ -93,14 +126,20 @@ impl Followers {
         Ok(Self { tx, dropped })
     }
 
-    /// Offers a landed ref's repository to the push thread. **Never
-    /// blocks**; a full queue drops the offer and counts it, and the next
-    /// landing on the same repository pushes everything anyway.
-    pub fn offer(&self, key: &str) {
+    /// Offers a landed ref to the push thread, with the value the view
+    /// now holds for it (`None` for a deletion). **Never blocks**; a full
+    /// queue drops the offer and counts it, and the next landing on the
+    /// same repository pushes everything anyway.
+    pub fn offer(&self, key: &str, new: Option<&str>) {
         let Some(repo) = repository_of(key) else {
             return;
         };
-        match self.tx.try_send(repo.to_string()) {
+        let landing = Landing {
+            repo: repo.to_string(),
+            refname: key[repo.len() + 1..].to_string(),
+            new: new.map(str::to_string),
+        };
+        match self.tx.try_send(landing) {
             Ok(()) => {}
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -116,7 +155,7 @@ impl Followers {
 }
 
 struct Worker {
-    rx: Receiver<String>,
+    rx: Receiver<Landing>,
     root: PathBuf,
     log: PathBuf,
     dropped: Arc<AtomicU64>,
@@ -128,12 +167,25 @@ impl Worker {
         while let Ok(first) = self.rx.recv() {
             // Everything queued behind it, once each: twenty landings on
             // one repository while a slow push ran are one push after it.
-            let mut pending = BTreeSet::from([first]);
-            while let Ok(repo) = self.rx.try_recv() {
-                pending.insert(repo);
+            // Keyed by ref with the last value winning, because that is
+            // the one git ends up holding.
+            let mut pending = BTreeMap::from([((first.repo, first.refname), first.new)]);
+            let deadline = Instant::now() + SETTLE;
+            loop {
+                while let Ok(landing) = self.rx.try_recv() {
+                    pending.insert((landing.repo, landing.refname), landing.new);
+                }
+                let settled = pending
+                    .iter()
+                    .all(|((repo, refname), new)| held(&self.root.join(repo), refname) == *new);
+                if settled || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(SETTLE_POLL);
             }
-            for repo in pending {
-                for outcome in push_all(&self.root, &repo) {
+            let repos: BTreeSet<&String> = pending.keys().map(|(repo, _)| repo).collect();
+            for repo in repos {
+                for outcome in push_all(&self.root, repo) {
                     record(&self.log, &outcome);
                 }
             }
@@ -285,6 +337,12 @@ fn record(log: &Path, outcome: &Outcome) {
         use std::io::Write;
         let _ = writeln!(file, "{line}");
     }
+}
+
+/// What a bare repository holds at `refname`, unpeeled, the way a view
+/// ref spells it; `None` when it holds nothing there.
+fn held(bare: &Path, refname: &str) -> Option<String> {
+    git(bare, &["rev-parse", "--verify", "-q", refname]).map(|oid| oid.trim().to_string())
 }
 
 fn git(bare: &Path, args: &[&str]) -> Option<String> {

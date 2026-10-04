@@ -3399,7 +3399,7 @@ impl ChoirPolicy {
         };
         // Same discipline, same reason: a `try_send`, never a wait.
         if let Some(followers) = self.followers.lock().expect("followers lock").as_ref() {
-            followers.offer(name);
+            followers.offer(name, new.as_deref());
         }
         let guard = self.hooks.lock().expect("hooks lock");
         let Some(hooks) = guard.as_ref() else {
