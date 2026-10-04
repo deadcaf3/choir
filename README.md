@@ -1,16 +1,17 @@
 <div align="center">
 
-# choir
+<img src="docs/assets/hero.svg" width="100%" alt="choir. Many agents, one repository, one order: five agent lanes converge at one writer and leave it as a single ordered log.">
 
-### Agent-first code collaboration
+<br/>
+<br/>
 
-**many agents on one repository · one total order from a single-writer sequencer · merge conflicts as first-class values**
+**Agent-first code collaboration.** Many agents on one repository, one
+total order from a single-writer sequencer, merge conflicts as first-class
+values.
 
-![Rust](https://img.shields.io/badge/rust-1.97.1_·_edition_2021-B7410E?style=flat-square&logo=rust&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-4C72B0?style=flat-square)
-![Status](https://img.shields.io/badge/status-research_prototype-8A8A8A?style=flat-square)
+[**Why**](#why) · [**Quick start**](#quick-start) · [**How it works**](#how-it-works) · [**Install**](#install) · [**Run a node**](#run-a-node) · [**Documentation**](docs/README.md)
 
-[**Quick start**](#quick-start) · [**Install**](#install) · [**Run a node**](#run-a-node) · [**How it works**](#how-it-works) · [**Documentation**](docs/README.md) · [**Why**](docs/why.md)
+<sub>Rust 1.97.1 · MIT or Apache-2.0 · research prototype</sub>
 
 </div>
 
@@ -20,6 +21,27 @@ Every change is a signed operation on an append-only log, ordered by one
 writer thread. A race gets a compare-and-swap rejection, not a lost write.
 A merge conflict is a committed value. Plain `git clone`, `fetch` and
 `push` work: the sequencer is a `pre-receive` hook.
+
+---
+
+## Why
+
+Several coding agents on one repository collide over the *turn*, not the
+code. Each needs the tip of `main`, and the answer is only true until
+another agent pushes. On a forge built for people, a human arbitrates by
+merging and rebasing, so every agent queues behind that person.
+
+Merging is solved. The bottleneck is **ordering**: deciding which
+concurrent attempt came first, without a person. choir gives that question
+exactly one answer, because one writer thread per repository is the only
+thing that appends.
+
+<p align="center">
+  <img src="docs/assets/consequences.svg" width="100%" alt="Three consequences of one total order. A race is a compare-and-swap: the later push gets a rejection naming the head it lost to, and no lock is held. A conflict is a committed value: a merge that cannot resolve is appended like any other state and built on. Undo is arithmetic: a compensating operation subtracts a bad landing and the history stays.">
+</p>
+
+If one agent works on your repository at a time, you do not have this
+problem. The longer argument: [Why choir exists](docs/why.md).
 
 ---
 
@@ -48,6 +70,28 @@ cargo run -p choir-demo     # narrated walkthrough of every layer
 `demo/run.sh` builds into its own target dir and plays against a live
 loopback node with plain `git` and `curl`; [`demo/README.md`](demo/README.md)
 says what each beat shows and what the numbers mean.
+
+---
+
+## How it works
+
+<p align="center">
+  <img src="docs/assets/pipeline.svg" width="100%" alt="One operation, end to end. A choir command signed with the agent's key and a plain git push through the pre-receive hook both reach the sequencer, one writer thread per repository, which verifies the signature and runs a compare-and-swap. An accepted operation is appended to the hash-chained log, and the view of refs, reviews and workspaces is a fold over it. A rejected one goes back naming the head it lost to.">
+</p>
+
+A change is a **signed operation** on a hash-chained log. One writer thread
+per repository decides the order. Refs, reviews and workspaces are folds
+over that log.
+
+- **Two agents push the same ref.** The later one gets a compare-and-swap
+  rejection naming the winning head. Integrate and retry.
+- **A merge cannot be resolved.** The conflict is committed as a value.
+- **Proof.** `choir log --verify` recomputes every hash and checks the
+  signatures whose keys you hold.
+- **Not included.** No Git LFS server; submodules are unsequenced
+  gitlinks; a force-push over a rejection is refused.
+
+Layer map: [Architecture](docs/architecture.md).
 
 ---
 
@@ -138,24 +182,6 @@ what the home registers, the second takes the credential it issued.
 check each for a fork. [Run a seed](docs/operating/running-a-node.md#run-a-seed).
 
 Every flag and policy file: [**Running a node**](docs/operating/running-a-node.md).
-
----
-
-## How it works
-
-A change is a **signed operation** on a hash-chained log. One writer thread
-per repository decides the order. Refs, reviews and workspaces are folds
-over that log.
-
-- **Two agents push the same ref.** The later one gets a compare-and-swap
-  rejection naming the winning head. Integrate and retry.
-- **A merge cannot be resolved.** The conflict is committed as a value.
-- **Proof.** `choir log --verify` recomputes every hash and checks the
-  signatures whose keys you hold.
-- **Not included.** No Git LFS server; submodules are unsequenced
-  gitlinks; a force-push over a rejection is refused.
-
-Layer map: [Architecture](docs/architecture.md).
 
 ---
 

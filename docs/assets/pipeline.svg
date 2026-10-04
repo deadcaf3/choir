@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 410" width="1200" height="410" role="img" aria-labelledby="title desc">
+  <title id="title">One operation, end to end</title>
+  <desc id="desc">An agent's choir command and a plain git push both arrive at the sequencer as signed operations. The sequencer, one writer thread per repository, verifies the signature and runs a compare-and-swap. An accepted operation is appended to the hash-chained log, where each entry names its parent, and the view of refs, reviews and workspaces is a fold over that log. A rejected one goes back to its sender naming the winning head.</desc>
+  <style>
+    /* Palette: theme/choir-tokens.css as sRGB, light first. */
+    .ground{fill:#faf8f4;stroke:#26231f;stroke-opacity:.13}
+    .box{fill:#ffffff;stroke:#26231f;stroke-opacity:.16}
+    .box.key{stroke:#3b4a94;stroke-opacity:1;stroke-width:1.75}
+    .eyebrow{font:600 15px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;letter-spacing:.085em;fill:#6a645b}
+    .name{font:600 20px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;letter-spacing:-.012em;fill:#12100e}
+    .sub{font:400 14.5px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;fill:#57524a}
+    .item{font:400 16px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;fill:#26231f}
+    .cmd{font:600 16px ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;fill:#12100e}
+    .tag{font:400 14px ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;fill:#6a645b}
+    .tag.accent{fill:#33418a}
+    .tag.ok{fill:#1a6b47}
+    .tag.danger{fill:#a8323a}
+    .flow{fill:none;stroke:#57524a;stroke-width:1.75;stroke-linecap:round}
+    .flow.yes{stroke:#3b4a94;stroke-width:2}
+    .flow.no{stroke:#a8323a;stroke-dasharray:5 5}
+    .check{fill:none;stroke:#1a6b47;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+    .rail{stroke:#26231f;stroke-opacity:.3;stroke-width:1.5}
+    .ring{fill:#ffffff;stroke:#57524a;stroke-width:2}
+    .head{fill:#3b4a94}
+    .dot{fill:#6a645b}
+    .f-muted{fill:#57524a}
+    .f-accent{fill:#3b4a94}
+    .f-danger{fill:#a8323a}
+    @media (prefers-color-scheme:dark){
+      .ground{fill:#131211;stroke:#d9d4cb;stroke-opacity:.14}
+      .box{fill:#1a1917;stroke:#d9d4cb;stroke-opacity:.16}
+      .box.key{stroke:#7f8fd8;stroke-opacity:1}
+      .eyebrow,.tag{fill:#a0998f}
+      .name,.cmd{fill:#f6f3ed}
+      .sub{fill:#aba399}
+      .item{fill:#d9d4cb}
+      .tag.accent{fill:#a3b0e8}
+      .tag.ok{fill:#6cc39a}
+      .tag.danger{fill:#e88a90}
+      .flow{stroke:#aba399}
+      .flow.yes{stroke:#7f8fd8}
+      .flow.no{stroke:#e88a90}
+      .check{stroke:#6cc39a}
+      .rail{stroke:#d9d4cb;stroke-opacity:.3}
+      .ring{fill:#1a1917;stroke:#aba399}
+      .head,.f-accent{fill:#7f8fd8}
+      .dot{fill:#a0998f}
+      .f-muted{fill:#aba399}
+      .f-danger{fill:#e88a90}
+    }
+  </style>
+  <defs>
+    <marker id="tip-muted" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M1,1.4 L9,5 L1,8.6 Z"/></marker>
+    <marker id="tip-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-accent" d="M1,1.4 L9,5 L1,8.6 Z"/></marker>
+    <marker id="tip-danger" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-danger" d="M1,1.4 L9,5 L1,8.6 Z"/></marker>
+  </defs>
+
+  <rect class="ground" x=".5" y=".5" width="1199" height="409" rx="17.5"/>
+  <text class="eyebrow" x="48" y="66">ONE OPERATION, END TO END</text>
+
+  <!-- two ways in, one order -->
+  <rect class="box" x="48.500" y="118.500" width="256" height="70" rx="10"/>
+  <text class="cmd" x="68" y="148">choir propose</text>
+  <text class="sub" x="68" y="171">signed with the agent's key</text>
+  <rect class="box" x="48.500" y="222.500" width="256" height="70" rx="10"/>
+  <text class="cmd" x="68" y="252">git push</text>
+  <text class="sub" x="68" y="275">unmodified git, via pre-receive</text>
+  <path class="flow" d="M305,153 C348,153 348,196 392,196" marker-end="url(#tip-muted)"/>
+  <path class="flow" d="M305,257 C348,257 348,216 392,216" marker-end="url(#tip-muted)"/>
+
+  <!-- the sequencer -->
+  <rect class="box key" x="400" y="110" width="220" height="192" rx="14"/>
+  <text class="name" x="424" y="150">Sequencer</text>
+  <text class="sub" x="424" y="174">one writer thread</text>
+  <text class="sub" x="424" y="193">per repository</text>
+  <path class="check" d="M425,232 L429.500,236.500 L437,227"/>
+  <text class="item" x="448" y="237">verify the signature</text>
+  <path class="check" d="M425,262 L429.500,266.500 L437,257"/>
+  <text class="item" x="448" y="267">compare-and-swap</text>
+
+  <path class="flow yes" d="M621,206 H698" marker-end="url(#tip-accent)"/>
+  <text class="tag ok" x="660" y="192" text-anchor="middle">accepted</text>
+
+  <!-- the log -->
+  <rect class="box" x="708.500" y="110.500" width="240" height="191" rx="14"/>
+  <text class="name" x="732" y="150">The log</text>
+  <text class="sub" x="732" y="174">hash-chained, append-only</text>
+  <line class="rail" x1="740" y1="212" x2="740" y2="272"/>
+  <circle class="head" cx="740" cy="212" r="6.5"/>
+  <circle class="ring" cx="740" cy="242" r="5.5"/>
+  <circle class="ring" cx="740" cy="272" r="5.5"/>
+  <text class="tag accent" x="760" y="216.500">4111</text>
+  <text class="tag" x="808" y="216.500">parent 4110</text>
+  <text class="tag" x="760" y="246.500">4110</text>
+  <text class="tag" x="808" y="246.500">parent 4109</text>
+  <text class="tag" x="760" y="276.500">4109</text>
+  <text class="tag" x="808" y="276.500">parent 4108</text>
+
+  <path class="flow" d="M949,206 H1002" marker-end="url(#tip-muted)"/>
+  <text class="tag" x="976" y="192" text-anchor="middle">fold</text>
+
+  <!-- the view -->
+  <rect class="box" x="1012.500" y="110.500" width="139" height="191" rx="14"/>
+  <text class="name" x="1034" y="150">The view</text>
+  <text class="sub" x="1034" y="174">a pure fold</text>
+  <circle class="dot" cx="1038" cy="212" r="2.5"/>
+  <text class="item" x="1050" y="217">refs</text>
+  <circle class="dot" cx="1038" cy="242" r="2.5"/>
+  <text class="item" x="1050" y="247">reviews</text>
+  <circle class="dot" cx="1038" cy="272" r="2.5"/>
+  <text class="item" x="1050" y="277">workspaces</text>
+
+  <!-- the other answer -->
+  <path class="flow no" d="M510,303 V334 C510,346 502,354 490,354 H180 C168,354 160,346 160,334 V302" marker-end="url(#tip-danger)"/>
+  <text class="tag danger" x="335" y="380" text-anchor="middle">rejected, naming the head it lost to</text>
+</svg>

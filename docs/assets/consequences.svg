@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 412" width="1200" height="412" role="img" aria-labelledby="title desc">
+  <title id="title">Three consequences of one total order</title>
+  <desc id="desc">Three cards. A race is a compare-and-swap: two agents aim at the same entry, one lands, the other is rejected and lands next. A conflict is a committed value: two lines of history meet in a conflict entry and later entries build on it. Undo is arithmetic: a later compensating operation subtracts a bad landing and the history stays.</desc>
+  <style>
+    /* Palette: theme/choir-tokens.css as sRGB, light first. */
+    .card{fill:#faf8f4;stroke:#26231f;stroke-opacity:.13}
+    .well{fill:#f4f1ea}
+    .title{font:600 24px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;letter-spacing:-.012em;fill:#12100e}
+    .copy{font:400 17px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;fill:#57524a}
+    .tag{font:400 14px ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;fill:#6a645b}
+    .tag.b{font-weight:600;fill:#26231f}
+    .tag.accent{fill:#33418a}
+    .tag.warn{fill:#7a5410}
+    .tag.danger{fill:#a8323a}
+    .rule{fill:none;stroke:#26231f;stroke-opacity:.42;stroke-width:2}
+    .ring{fill:#f4f1ea;stroke:#57524a;stroke-width:2.25}
+    .head{fill:#3b4a94}
+    .slot{fill:#f4f1ea;stroke:#3b4a94;stroke-width:2;stroke-dasharray:3.5 3.5}
+    .agent{fill:#faf8f4;stroke:#26231f;stroke-opacity:.3;stroke-width:1.5}
+    .go{fill:none;stroke:#3b4a94;stroke-width:2;stroke-linecap:round}
+    .go.dash{stroke-dasharray:5 5}
+    .no{fill:none;stroke:#a8323a;stroke-width:2;stroke-linecap:round}
+    .no.dash{stroke-dasharray:5 5}
+    .held{fill:#f6ecd8;stroke:#7a5410;stroke-width:2.25;stroke-linejoin:round}
+    .bad{fill:#f4f1ea;stroke:#a8323a;stroke-width:2.25}
+    .comp{fill:#f4f1ea;stroke:#3b4a94;stroke-width:2.25}
+    .f-accent{fill:#3b4a94}
+    @media (prefers-color-scheme:dark){
+      .card{fill:#131211;stroke:#d9d4cb;stroke-opacity:.14}
+      .well{fill:#0f0e0d}
+      .title{fill:#f6f3ed}
+      .copy{fill:#aba399}
+      .tag{fill:#a0998f}
+      .tag.b{fill:#d9d4cb}
+      .tag.accent{fill:#a3b0e8}
+      .tag.warn{fill:#d3a95c}
+      .tag.danger{fill:#e88a90}
+      .rule{stroke:#d9d4cb;stroke-opacity:.42}
+      .ring{fill:#0f0e0d;stroke:#aba399}
+      .head,.f-accent{fill:#7f8fd8}
+      .slot{fill:#0f0e0d;stroke:#7f8fd8}
+      .agent{fill:#1a1917;stroke:#d9d4cb;stroke-opacity:.3}
+      .go{stroke:#7f8fd8}
+      .no{stroke:#e88a90}
+      .held{fill:#2a2418;stroke:#d3a95c}
+      .bad{fill:#0f0e0d;stroke:#e88a90}
+      .comp{fill:#0f0e0d;stroke:#7f8fd8}
+    }
+  </style>
+  <defs>
+    <marker id="tip" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="f-accent" d="M1,1.4 L9,5 L1,8.6 Z"/>
+    </marker>
+  </defs>
+
+  <!-- 1. a race is a compare-and-swap -->
+  <g>
+    <rect class="card" x=".5" y=".5" width="383" height="411" rx="17.5"/>
+    <rect class="well" x="16" y="16" width="352" height="192" rx="10"/>
+    <path class="rule" d="M40,88 H344"/>
+    <circle class="ring" cx="92" cy="88" r="9"/>
+    <circle class="head" cx="192" cy="88" r="10"/>
+    <circle class="slot" cx="292" cy="88" r="9"/>
+    <text class="tag" x="92" y="60" text-anchor="middle">4110</text>
+    <text class="tag accent" x="192" y="60" text-anchor="middle">4111</text>
+    <text class="tag" x="292" y="60" text-anchor="middle">4112</text>
+    <path class="go" d="M131,152 C135,128 156,110 180,98" marker-end="url(#tip)"/>
+    <path class="no dash" d="M251,152 C247,128 228,110 204,98"/>
+    <circle class="well" cx="234.500" cy="119.500" r="9"/>
+    <path class="no" d="M230,115 L239,124 M239,115 L230,124"/>
+    <path class="go" d="M263,152 C269,134 280,116 287,102" marker-end="url(#tip)"/>
+    <circle class="agent" cx="128" cy="168" r="15"/>
+    <circle class="agent" cx="256" cy="168" r="15"/>
+    <text class="tag b" x="128" y="172.500" text-anchor="middle">A</text>
+    <text class="tag b" x="256" y="172.500" text-anchor="middle">B</text>
+    <text class="tag accent" x="298" y="134">retry</text>
+    <text class="title" x="32" y="256">A race is a</text>
+    <text class="title" x="32" y="286">compare-and-swap</text>
+    <text class="copy" x="32" y="324">The later push gets a rejection</text>
+    <text class="copy" x="32" y="348">naming the head it lost to.</text>
+    <text class="copy" x="32" y="372">No lock is held, no write is lost.</text>
+  </g>
+
+  <!-- 2. a conflict is a committed value -->
+  <g transform="translate(408,0)">
+    <rect class="card" x=".5" y=".5" width="383" height="411" rx="17.5"/>
+    <rect class="well" x="16" y="16" width="352" height="192" rx="10"/>
+    <path class="rule" d="M40,70 H88 C122,70 122,108 152,108"/>
+    <path class="rule" d="M40,146 H88 C122,146 122,108 152,108"/>
+    <path class="rule" d="M168,108 H344"/>
+    <path class="held" d="M160,94 L174,108 L160,122 L146,108 Z"/>
+    <circle class="ring" cx="246" cy="108" r="9"/>
+    <circle class="head" cx="320" cy="108" r="10"/>
+    <text class="tag" x="40" y="58">ours</text>
+    <text class="tag" x="40" y="168">theirs</text>
+    <text class="tag warn" x="160" y="78" text-anchor="middle">conflict</text>
+    <text class="tag warn" x="160" y="148" text-anchor="middle">4109</text>
+    <text class="tag" x="246" y="148" text-anchor="middle">4110</text>
+    <text class="tag accent" x="320" y="148" text-anchor="middle">4111</text>
+    <text class="tag" x="283" y="78" text-anchor="middle">built on it</text>
+    <text class="title" x="32" y="256">A conflict is a</text>
+    <text class="title" x="32" y="286">committed value</text>
+    <text class="copy" x="32" y="324">A merge that cannot resolve is</text>
+    <text class="copy" x="32" y="348">appended like any other state.</text>
+    <text class="copy" x="32" y="372">Nothing silently picks a side.</text>
+  </g>
+
+  <!-- 3. undo is arithmetic -->
+  <g transform="translate(816,0)">
+    <rect class="card" x=".5" y=".5" width="383" height="411" rx="17.5"/>
+    <rect class="well" x="16" y="16" width="352" height="192" rx="10"/>
+    <path class="rule" d="M40,120 H344"/>
+    <circle class="ring" cx="72" cy="120" r="9"/>
+    <circle class="bad" cx="140" cy="120" r="10"/>
+    <path class="no" d="M136,116 L144,124 M144,116 L136,124"/>
+    <circle class="ring" cx="208" cy="120" r="9"/>
+    <circle class="comp" cx="276" cy="120" r="10"/>
+    <path class="go" d="M271,120 H281"/>
+    <circle class="head" cx="332" cy="120" r="10"/>
+    <path class="go dash" d="M270,105 C254,62 162,62 147,104" marker-end="url(#tip)"/>
+    <text class="tag accent" x="208" y="56" text-anchor="middle">subtracts</text>
+    <text class="tag danger" x="140" y="158" text-anchor="middle">bad landing</text>
+    <text class="tag accent" x="276" y="158" text-anchor="middle">undo</text>
+    <text class="title" x="32" y="256">Undo is</text>
+    <text class="title" x="32" y="286">arithmetic</text>
+    <text class="copy" x="32" y="324">State at any operation is a replay.</text>
+    <text class="copy" x="32" y="348">A compensating operation subtracts</text>
+    <text class="copy" x="32" y="372">a bad landing; the history stays.</text>
+  </g>
+</svg>

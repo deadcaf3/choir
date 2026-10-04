@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" width="1200" height="540" role="img" aria-labelledby="title desc">
+  <title id="title">choir: many agents, one repository, one order</title>
+  <desc id="desc">Five agent lanes run in parallel like the lines of a stave, converge at a single bar line, the sequencer, and leave it as one ordered log: the head entry first, a committed conflict among the older ones.</desc>
+  <style>
+    /* The palette is theme/choir-tokens.css, as sRGB: light first, dark
+       under the media query. Classes rather than custom properties, so a
+       renderer with no var() support still draws the light one. */
+    .ground{fill:#faf8f4}
+    .frame{fill:none;stroke:#26231f;stroke-opacity:.13}
+    .edge{fill:#3b4a94}
+    .word{font:600 128px ui-serif,"New York","Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;letter-spacing:-.028em;fill:#12100e}
+    .claim{font:400 28px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;letter-spacing:-.006em;fill:#26231f}
+    .eyebrow{font:600 15px system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;letter-spacing:.085em;fill:#6a645b}
+    .seq{font:400 14px ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;fill:#6a645b}
+    .seq.now{fill:#33418a}
+    .seq.held{fill:#7a5410}
+    .lane{fill:none;stroke-width:1.5}
+    .log{fill:none;stroke-width:2.25}
+    .bar{stroke:#12100e;stroke-width:3.5;stroke-linecap:round}
+    .bar.thin{stroke-width:1.25}
+    .ring{fill:#faf8f4;stroke:#57524a;stroke-width:2.25}
+    .head{fill:#3b4a94}
+    .halo{fill:none;stroke:#3b4a94;stroke-width:1.5;opacity:0;transform-box:fill-box;transform-origin:center;animation:arrive 1.4s cubic-bezier(.22,.61,.36,1) .9s infinite}
+    .held-mark{fill:#f6ecd8;stroke:#7a5410;stroke-width:2.25;stroke-linejoin:round}
+    .op{fill:#3b4a94}
+    .rest{fill:#3b4a94;display:none}
+    .s-ink{stop-color:#26231f}
+    .s-strong{stop-color:#12100e}
+    .s-accent{stop-color:#3b4a94}
+    .s-warm{stop-color:#7a5410}
+    @keyframes arrive{0%{transform:scale(1);opacity:.55}100%{transform:scale(2.6);opacity:0}}
+    @media (prefers-color-scheme:dark){
+      .ground{fill:#131211}
+      .frame{stroke:#d9d4cb;stroke-opacity:.14}
+      .edge{fill:#7f8fd8}
+      .word{fill:#f6f3ed}
+      .claim{fill:#d9d4cb}
+      .eyebrow,.seq{fill:#a0998f}
+      .seq.now{fill:#a3b0e8}
+      .seq.held{fill:#d3a95c}
+      .bar{stroke:#f6f3ed}
+      .ring{fill:#131211;stroke:#aba399}
+      .head,.op,.rest{fill:#7f8fd8}
+      .halo{stroke:#7f8fd8}
+      .held-mark{fill:#2a2418;stroke:#d3a95c}
+      .s-ink{stop-color:#d9d4cb}
+      .s-strong{stop-color:#f6f3ed}
+      .s-accent{stop-color:#7f8fd8}
+      .s-warm{stop-color:#d3a95c}
+    }
+    @media (prefers-reduced-motion:reduce){
+      .op{display:none}
+      .rest{display:inline}
+      .halo{animation:none}
+    }
+  </style>
+  <defs>
+    <clipPath id="panel"><rect width="1200" height="540" rx="22"/></clipPath>
+    <radialGradient id="glow-a">
+      <stop class="s-accent" offset="0" stop-opacity=".17"/>
+      <stop class="s-accent" offset=".68" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-b">
+      <stop class="s-warm" offset="0" stop-opacity=".1"/>
+      <stop class="s-warm" offset=".7" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="lane" gradientUnits="userSpaceOnUse" x1="64" x2="220" y1="0" y2="0">
+      <stop class="s-ink" offset="0" stop-opacity="0"/>
+      <stop class="s-ink" offset="1" stop-opacity=".34"/>
+    </linearGradient>
+    <linearGradient id="log" gradientUnits="userSpaceOnUse" x1="620" x2="1136" y1="0" y2="0">
+      <stop class="s-strong" offset="0" stop-opacity=".82"/>
+      <stop class="s-strong" offset=".62" stop-opacity=".5"/>
+      <stop class="s-strong" offset="1" stop-opacity="0"/>
+    </linearGradient>
+    <path id="v1" d="M64,340 H452 C536,340 536,396 620,396 H720"/>
+    <path id="v2" d="M64,368 H452 C536,368 536,396 620,396 H720"/>
+    <path id="v3" d="M64,396 H720"/>
+    <path id="v4" d="M64,424 H452 C536,424 536,396 620,396 H720"/>
+    <path id="v5" d="M64,452 H452 C536,452 536,396 620,396 H720"/>
+  </defs>
+
+  <g clip-path="url(#panel)">
+    <rect class="ground" width="1200" height="540"/>
+    <ellipse cx="600" cy="-40" rx="760" ry="330" fill="url(#glow-a)"/>
+    <ellipse cx="1090" cy="10" rx="470" ry="250" fill="url(#glow-b)"/>
+    <rect class="edge" width="10" height="540"/>
+  </g>
+  <rect class="frame" x=".5" y=".5" width="1199" height="539" rx="21.5"/>
+
+  <text class="word" x="600" y="176" text-anchor="middle">choir</text>
+  <text class="claim" x="600" y="238" text-anchor="middle">Many agents. One repository. One order.</text>
+
+  <!-- the stave: five voices, one bar line, one line out -->
+  <g class="lane" stroke="url(#lane)">
+    <path d="M64,340 H452 C536,340 536,396 620,396"/>
+    <path d="M64,368 H452 C536,368 536,396 620,396"/>
+    <path d="M64,396 H620"/>
+    <path d="M64,424 H452 C536,424 536,396 620,396"/>
+    <path d="M64,452 H452 C536,452 536,396 620,396"/>
+  </g>
+  <path class="log" stroke="url(#log)" d="M620,396 H1136"/>
+
+  <g class="rest">
+    <circle cx="238" cy="340" r="5.5"/>
+    <circle cx="402" cy="368" r="5.5"/>
+    <circle cx="150" cy="396" r="5.5"/>
+    <circle cx="330" cy="424" r="5.5"/>
+    <circle cx="420" cy="452" r="5.5"/>
+  </g>
+  <g class="op" opacity="0">
+    <circle r="5.5"><animateMotion dur="7s" begin="-3.3s" repeatCount="indefinite"><mpath href="#v1"/></animateMotion></circle>
+    <circle r="5.5"><animateMotion dur="7s" begin="-0.5s" repeatCount="indefinite"><mpath href="#v2"/></animateMotion></circle>
+    <circle r="5.5"><animateMotion dur="7s" begin="-4.7s" repeatCount="indefinite"><mpath href="#v3"/></animateMotion></circle>
+    <circle r="5.5"><animateMotion dur="7s" begin="-1.9s" repeatCount="indefinite"><mpath href="#v4"/></animateMotion></circle>
+    <circle r="5.5"><animateMotion dur="7s" begin="-6.1s" repeatCount="indefinite"><mpath href="#v5"/></animateMotion></circle>
+    <set attributeName="opacity" to="1" begin="0s"/>
+  </g>
+
+  <line class="bar thin" x1="610" y1="362" x2="610" y2="430"/>
+  <line class="bar" x1="620" y1="362" x2="620" y2="430"/>
+
+  <!-- the log, newest first, the way the node's own rail draws it -->
+  <circle class="halo" cx="720" cy="396" r="10"/>
+  <circle class="head" cx="720" cy="396" r="10"/>
+  <circle class="ring" cx="816" cy="396" r="9"/>
+  <path class="held-mark" d="M912,383.5 L924.5,396 L912,408.5 L899.500,396 Z"/>
+  <circle class="ring" cx="1008" cy="396" r="9" opacity=".72"/>
+  <circle class="ring" cx="1096" cy="396" r="9" opacity=".36"/>
+
+  <text class="seq now" x="720" y="436" text-anchor="middle">4111</text>
+  <text class="seq" x="816" y="436" text-anchor="middle">4110</text>
+  <text class="seq held" x="912" y="436" text-anchor="middle">4109</text>
+  <text class="seq" x="1008" y="436" text-anchor="middle" opacity=".72">4108</text>
+  <text class="seq" x="1096" y="436" text-anchor="middle" opacity=".36">4107</text>
+  <text class="seq now" x="720" y="366" text-anchor="middle">head</text>
+  <text class="seq held" x="912" y="366" text-anchor="middle">conflict</text>
+
+  <text class="eyebrow" x="64" y="496">MANY AGENTS</text>
+  <text class="eyebrow" x="615" y="496" text-anchor="middle">ONE WRITER</text>
+  <text class="eyebrow" x="1136" y="496" text-anchor="end">ONE ORDER</text>
+</svg>
