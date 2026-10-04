@@ -1487,6 +1487,133 @@ fn the_readme_renders_on_the_repository_page_and_carries_no_markup() {
     std::fs::remove_dir_all(&work).ok();
 }
 
+/// A README shows a picture its repository carries, and the address that
+/// serves it gives a picture to a reader holding the grant and nothing
+/// to anybody else.
+///
+/// From the wire, because every half of this is a header or a status:
+/// the type a browser is held to, the policy that keeps an SVG opened
+/// directly from running anything, the tag a repeat visit revalidates
+/// on, and the refusals.
+#[test]
+fn a_readme_shows_a_picture_the_repository_carries() {
+    let (base, work, _oid, _acl) = served("readme-picture", "alice  agents/one  write\n");
+    let clone = work.join("clone");
+    std::fs::create_dir_all(clone.join("docs")).unwrap();
+    // A script inside the picture, because that is the file somebody
+    // hostile pushes; and a page beside it, which is not a picture.
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\">\
+               <script>alert('svg')</script><circle r=\"4\"/></svg>\n";
+    std::fs::write(clone.join("docs/mark.svg"), svg).unwrap();
+    std::fs::write(
+        clone.join("docs/page.html"),
+        "<script>alert('html')</script>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        clone.join("README.md"),
+        "# hello\n\n![the mark](docs/mark.svg)\n\n\
+         ![a badge](https://example.invalid/badge.svg)\n",
+    )
+    .unwrap();
+    assert!(git(&clone, &["add", "."]).status.success());
+    assert!(git(&clone, &["commit", "-q", "-m", "a picture"])
+        .status
+        .success());
+    let push = git(&clone, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    // The page: the repository's own picture is an image, and the one on
+    // somebody else's host is a link.
+    let (status, _, page) = get(
+        &format!("{base}/r/agents/one/tree/main"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains("<img src=\"/r/agents/one/raw/main/docs/mark.svg\" alt=\"the mark\""),
+        "the README did not show the picture beside it: {page}"
+    );
+    assert!(
+        !page.contains("<img src=\"https://"),
+        "the README loads a picture from another host: {page}"
+    );
+    assert!(
+        page.contains("href=\"https://example.invalid/badge.svg\""),
+        "the picture on another host is not even a link: {page}"
+    );
+
+    // The bytes, typed as what they are and sandboxed against being
+    // opened as a document.
+    let url = format!("{base}/r/agents/one/raw/main/docs/mark.svg");
+    let (status, headers, body) = get(&url, &["-u", "alice:a"]);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, svg, "the picture served is not the picture pushed");
+    assert_eq!(
+        header_value(&headers, "Content-Type").as_deref(),
+        Some("image/svg+xml")
+    );
+    assert_eq!(
+        header_value(&headers, "X-Content-Type-Options").as_deref(),
+        Some("nosniff")
+    );
+    let csp = header_value(&headers, "Content-Security-Policy").expect("a CSP header");
+    assert!(
+        csp.contains("default-src 'none'") && csp.contains("sandbox"),
+        "an SVG opened directly could run its script: {csp}"
+    );
+    assert!(
+        !csp.contains("script-src"),
+        "the picture's policy admits script: {csp}"
+    );
+
+    // A repeat visit revalidates, under the same policy.
+    let tag = header_value(&headers, "ETag").expect("the picture carries an ETag");
+    let (status, headers, body) = get(
+        &url,
+        &["-u", "alice:a", "-H", &format!("If-None-Match: {tag}")],
+    );
+    assert_eq!(status, 304, "a repeat visit re-sent the picture");
+    assert!(body.is_empty(), "a 304 carried a body");
+    assert_eq!(
+        header_value(&headers, "Content-Security-Policy").as_deref(),
+        Some(csp.as_str()),
+        "the 304 named a different policy from the 200"
+    );
+
+    // The refusals. A file that is not a picture has no raw address at
+    // all, so a repository's HTML is never served from this origin.
+    let (status, _, body) = get(
+        &format!("{base}/r/agents/one/raw/main/docs/page.html"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 404, "a page was given a raw address: {body}");
+    assert!(
+        !body.contains("alert('html')"),
+        "a repository's HTML was served from this origin: {body}"
+    );
+    let (status, _, _) = get(
+        &format!("{base}/r/agents/one/raw/main/docs/none.png"),
+        &["-u", "alice:a"],
+    );
+    assert_eq!(status, 404, "a picture that is not there was served");
+    // No grant: the same answer a repository that does not exist gets.
+    let (status, _, body) = get(&url, &["-u", "bob:b"]);
+    assert_eq!(status, 404, "an ungranted reader fetched a picture");
+    assert!(
+        !body.contains("<svg"),
+        "an ungranted reader was sent the picture: {body}"
+    );
+    let (status, _, _) = get(&url, &[]);
+    assert_eq!(status, 401, "an anonymous reader got past the wall");
+
+    std::fs::remove_dir_all(&work).ok();
+}
+
 /// A node serving one project's own domain presents that repository and
 /// nothing else.
 ///

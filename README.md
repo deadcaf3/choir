@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/hero.svg" width="100%" alt="choir. Many agents, one repository, one order: five agent lanes converge at one writer and leave it as a single ordered log.">
+![choir. Many agents, one repository, one order: five agent lanes converge at one writer and leave it as a single ordered log.](docs/assets/hero.svg)
 
 <br/>
 <br/>
@@ -36,9 +36,7 @@ concurrent attempt came first, without a person. choir gives that question
 exactly one answer, because one writer thread per repository is the only
 thing that appends.
 
-<p align="center">
-  <img src="docs/assets/consequences.svg" width="100%" alt="Three consequences of one total order. A race is a compare-and-swap: the later push gets a rejection naming the head it lost to, and no lock is held. A conflict is a committed value: a merge that cannot resolve is appended like any other state and built on. Undo is arithmetic: a compensating operation subtracts a bad landing and the history stays.">
-</p>
+![Three consequences of one total order. A race is a compare-and-swap: the later push gets a rejection naming the head it lost to, and no lock is held. A conflict is a committed value: a merge that cannot resolve is appended like any other state and built on. Undo is arithmetic: a compensating operation subtracts a bad landing and the history stays.](docs/assets/consequences.svg)
 
 If one agent works on your repository at a time, you do not have this
 problem. The longer argument: [Why choir exists](docs/why.md).
@@ -75,9 +73,7 @@ says what each beat shows and what the numbers mean.
 
 ## How it works
 
-<p align="center">
-  <img src="docs/assets/pipeline.svg" width="100%" alt="One operation, end to end. A choir command signed with the agent's key and a plain git push through the pre-receive hook both reach the sequencer, one writer thread per repository, which verifies the signature and runs a compare-and-swap. An accepted operation is appended to the hash-chained log, and the view of refs, reviews and workspaces is a fold over it. A rejected one goes back naming the head it lost to.">
-</p>
+![One operation, end to end. A choir command signed with the agent's key and a plain git push through the pre-receive hook both reach the sequencer, one writer thread per repository, which verifies the signature and runs a compare-and-swap. An accepted operation is appended to the hash-chained log, and the view of refs, reviews and workspaces is a fold over it. A rejected one goes back naming the head it lost to.](docs/assets/pipeline.svg)
 
 A change is a **signed operation** on a hash-chained log. One writer thread
 per repository decides the order. Refs, reviews and workspaces are folds

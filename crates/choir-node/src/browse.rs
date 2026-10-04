@@ -204,6 +204,18 @@ pub(crate) enum Page {
         rev: String,
         path: String,
     },
+    /// One picture's bytes at `rev`, for the `<img>` a README renders.
+    ///
+    /// Not a page: [`raw`] answers it, and [`render`] never should. It is
+    /// a variant here all the same, because being one is what puts it
+    /// behind the grant check and the single-repository narrowing every
+    /// other address under `/r/` passes through, without a second copy
+    /// of either.
+    Raw {
+        repo: String,
+        rev: String,
+        path: String,
+    },
     /// Recent history reachable from `rev`.
     Commits { repo: String, rev: String },
     /// One commit and its diff.
@@ -240,6 +252,7 @@ impl Page {
             Page::Index { .. } | Page::Owed => None,
             Page::Tree { repo, .. }
             | Page::Blob { repo, .. }
+            | Page::Raw { repo, .. }
             | Page::Commits { repo, .. }
             | Page::Commit { repo, .. }
             | Page::Contribute { repo }
@@ -343,6 +356,19 @@ pub(crate) fn route(url: &str) -> Option<Page> {
             }
             safe_path(&path)?;
             Some(Page::Blob { repo, rev, path })
+        }
+        "raw" => {
+            let rev = safe_rev(&rev_or_oid)?;
+            if path.is_empty() {
+                return None;
+            }
+            safe_path(&path)?;
+            // Only a picture has a raw address. Refused here, with every
+            // other shape that must not be constructed, so that no
+            // responder downstream is ever asked to serve a repository's
+            // HTML or script from this node's origin.
+            crate::readme::image_type(&path)?;
+            Some(Page::Raw { repo, rev, path })
         }
         "commits" if path.is_empty() => Some(Page::Commits {
             repo,
@@ -849,6 +875,12 @@ pub(crate) fn render(
             tree(&bare(root, repo), repo, rev, path, platform, chrome, origin)
         }
         Page::Blob { repo, rev, path } => blob(&bare(root, repo), repo, rev, path, chrome, origin),
+        // Bytes, not a page: the caller answers this with [`raw`] before
+        // it renders anything. Reaching here means a caller forgot to,
+        // and a refusal is the honest page for an address that has none.
+        Page::Raw { repo, rev, .. } => {
+            missing(repo, rev, "that address is a file, not a page", chrome)
+        }
         Page::Commits { repo, rev } => commits(&bare(root, repo), repo, rev, chrome, origin),
         Page::Commit { repo, oid } => commit(&bare(root, repo), repo, oid, chrome, origin),
         Page::Contribute { repo } => contribute(root, repo, chrome, origin, self_service),
@@ -2647,6 +2679,70 @@ fn tree(
         )),
         html: close(h, chrome.signed_in),
     }
+}
+
+/// The most a picture served by [`raw`] may weigh: 4 MiB.
+///
+/// Eight times [`MAX_BLOB_BYTES`], because the two guard different
+/// things. That one bounds a page this node has to escape and colour
+/// line by line; this one bounds bytes handed to a browser untouched,
+/// and a screenshot at a laptop's native resolution is commonly past a
+/// megabyte. It is still a ceiling: the file is read whole into memory
+/// for each request that is not a revalidation.
+const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A picture the repository carries, as a browser asked for it.
+pub(crate) struct Raw {
+    /// The type the bytes are served as, from the path's extension.
+    pub(crate) content_type: &'static str,
+    /// The `ETag`: the commit and the path, as a page's is.
+    pub(crate) etag: String,
+    /// The file, or `None` when the reader already holds it.
+    pub(crate) bytes: Option<Vec<u8>>,
+}
+
+/// Reads one picture at `rev`, or `None` when there is none to serve:
+/// no such repository, revision or file, a path that is not a picture,
+/// or one past [`MAX_IMAGE_BYTES`].
+///
+/// `held` is the tag the reader sent, if any. A match is answered before
+/// the file is read, so a README revisited costs one `git` call per
+/// picture rather than three.
+///
+/// The caller has already checked the grant, as it has for a page.
+pub(crate) fn raw(
+    root: &Path,
+    repo: &str,
+    rev: &str,
+    path: &str,
+    held: Option<&str>,
+) -> Option<Raw> {
+    let content_type = crate::readme::image_type(path)?;
+    let dir = bare(root, repo);
+    let oid = resolve(&dir, rev).ok()?;
+    let etag = tag(&oid, &format!("raw:{path}"));
+    if held == Some(etag.as_str()) {
+        return Some(Raw {
+            content_type,
+            etag,
+            bytes: None,
+        });
+    }
+    let spec = format!("{oid}:{path}");
+    let size: u64 = git_text(&dir, &["cat-file", "-s", &spec])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if size > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let bytes = git(&dir, &["cat-file", "blob", &spec]).ok()?;
+    Some(Raw {
+        content_type,
+        etag,
+        bytes: Some(bytes),
+    })
 }
 
 /// One file.
@@ -5908,6 +6004,25 @@ mod tests {
                 path: "src/lib.rs".into()
             })
         );
+        assert_eq!(
+            route("/r/o/p/raw/main/docs/arch.svg"),
+            Some(Page::Raw {
+                repo: "o/p".into(),
+                rev: "main".into(),
+                path: "docs/arch.svg".into()
+            })
+        );
+        // The raw route has pictures and nothing else: a repository's
+        // HTML or script is never an address on this origin.
+        for url in [
+            "/r/o/p/raw/main/index.html",
+            "/r/o/p/raw/main/src/app.js",
+            "/r/o/p/raw/main/README.md",
+            "/r/o/p/raw/main",
+            "/r/o/p/raw/main/../x.png",
+        ] {
+            assert_eq!(route(url), None, "{url} was given a raw address");
+        }
         assert_eq!(
             route("/r/o/p/commits/main"),
             Some(Page::Commits {

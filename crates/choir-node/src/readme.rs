@@ -14,10 +14,15 @@
 //!    and `data:` are not links, they are code; a link carrying one keeps
 //!    its text and loses its anchor.
 //!
-//! Images become links for a third reason, which is not security: the
-//! CSP forbids loading them, so an `<img>` would render as a broken icon
-//! on every README that has a badge or a screenshot. A link says what is
-//! there and can be followed.
+//! Images are the third rule, and it has two halves. **A picture the
+//! repository itself carries is shown**: a relative
+//! `![alt](docs/arch.svg)` naming one of the types in [`image_type`]
+//! becomes an `<img>` at the raw route, which serves that file's bytes
+//! under the grant the blob page needs. **Every other image is a link
+//! carrying its alt text**, because the page's `img-src 'self'` would
+//! refuse to load it and refuses on purpose: fetching a badge tells its
+//! host who is reading this repository and when, which is what D28 and
+//! D59 removed. A link says what is there and can be followed.
 //!
 //! A fourth rule arrived with the route table: **a relative link is
 //! resolved against the repository, not against the page**. `[guide](
@@ -60,11 +65,12 @@ pub(crate) struct Base<'a> {
 /// (which is a path on this node and so already resolves), and a bare
 /// fragment or query, which addresses the page the reader is on.
 ///
-/// Everything else becomes a `blob` URL. A relative link naming a
+/// Everything else becomes a URL under `verb`: `blob` for a link, `raw`
+/// for a picture. A relative link naming a
 /// *directory* still 404s — telling the two apart needs a `git` call per
 /// link, and the answer would be a lookup per README rather than per
 /// page — but a 404 on one link is what this replaces node-wide.
-fn resolve(dest: &str, base: Base<'_>) -> Option<String> {
+fn resolve(dest: &str, base: Base<'_>, verb: &str) -> Option<String> {
     if dest.is_empty() || dest.starts_with('/') || dest.starts_with(['#', '?']) {
         return None;
     }
@@ -102,11 +108,46 @@ fn resolve(dest: &str, base: Base<'_>) -> Option<String> {
     }
     let joined = segments.join("/");
     Some(format!(
-        "/r/{}/blob/{}/{}{tail}",
+        "/r/{}/{verb}/{}/{}{tail}",
         base.repo,
         crate::browse::url_path(base.rev),
         crate::browse::url_path(&joined)
     ))
+}
+
+/// The type a picture's bytes are served as, by extension, or `None` for
+/// a file this node will not show as one.
+///
+/// One list, read twice: by the renderer, to decide whether an image is
+/// an `<img>` or a link, and by the raw route, to decide whether a path
+/// has bytes to serve at all. Two lists would be an `<img>` pointing at
+/// an address that answers `404`.
+///
+/// Every entry is an image type and none may ever be a script type. The
+/// route answers on this node's own origin, which `script-src 'self'`
+/// trusts (D81), and `nosniff` is what holds a browser to the type named
+/// here.
+pub(crate) fn image_type(path: &str) -> Option<&'static str> {
+    let (_, extension) = path.rsplit_once('.')?;
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+/// Rule 3's test: the raw address of an image this page may show, or
+/// `None` for one to link instead.
+///
+/// Only a relative path resolves, so a picture on another host, a `data:`
+/// URL and a path rooted at this node's `/` are all `None` here.
+fn picture(dest: &str, base: Base<'_>) -> Option<String> {
+    let path = dest.split(['#', '?']).next().unwrap_or(dest);
+    image_type(path)?;
+    resolve(dest, base, "raw")
 }
 
 /// The filenames looked for at a repository root, in order of preference.
@@ -125,8 +166,12 @@ pub(crate) fn render(markdown: &str, base: Base<'_>) -> String {
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
 
+    // Whether each image still open is being shown as one. A stack, since
+    // alt text may itself hold an image, and kept here because the `End`
+    // event does not say which kind of `Start` it closes.
+    let mut shown: Vec<bool> = Vec::new();
     let mut events: Vec<Event<'_>> = Parser::new_ext(markdown, options)
-        .filter_map(|event| sanitize(event, base))
+        .filter_map(|event| sanitize(event, base, &mut shown))
         .collect();
     name_headings(&mut events);
     let mut html = String::with_capacity(markdown.len());
@@ -188,7 +233,7 @@ fn slug(text: &str) -> String {
 }
 
 /// One event, as it is allowed to appear on the page — or `None`.
-fn sanitize<'a>(event: Event<'a>, base: Base<'_>) -> Option<Event<'a>> {
+fn sanitize<'a>(event: Event<'a>, base: Base<'_>, shown: &mut Vec<bool>) -> Option<Event<'a>> {
     /// The destination this link is served with: refused, resolved
     /// against the repository, or exactly as written.
     fn destination<'a>(dest: CowStr<'a>, base: Base<'_>) -> CowStr<'a> {
@@ -198,7 +243,7 @@ fn sanitize<'a>(event: Event<'a>, base: Base<'_>) -> Option<Event<'a>> {
             // an element that was never opened.
             return CowStr::Borrowed("");
         }
-        match resolve(&dest, base) {
+        match resolve(&dest, base, "blob") {
             Some(resolved) => CowStr::Boxed(resolved.into_boxed_str()),
             None => dest,
         }
@@ -219,20 +264,37 @@ fn sanitize<'a>(event: Event<'a>, base: Base<'_>) -> Option<Event<'a>> {
             title,
             id,
         })),
-        // Rule 3. The alt text is the events between here and `TagEnd`,
-        // so re-tagging the pair turns it into the link's text.
+        // Rule 3. A picture the repository carries stays an image, at the
+        // address that serves its bytes. Any other is re-tagged: the alt
+        // text is the events between here and `TagEnd`, so the pair
+        // becomes a link and the alt text is what it says.
         Event::Start(Tag::Image {
+            link_type,
             dest_url,
             title,
             id,
-            ..
-        }) => Some(Event::Start(Tag::Link {
-            link_type: LinkType::Inline,
-            dest_url: destination(dest_url, base),
-            title,
-            id,
+        }) => {
+            let picture = picture(&dest_url, base);
+            shown.push(picture.is_some());
+            Some(Event::Start(match picture {
+                Some(src) => Tag::Image {
+                    link_type,
+                    dest_url: CowStr::Boxed(src.into_boxed_str()),
+                    title,
+                    id,
+                },
+                None => Tag::Link {
+                    link_type: LinkType::Inline,
+                    dest_url: destination(dest_url, base),
+                    title,
+                    id,
+                },
+            }))
+        }
+        Event::End(TagEnd::Image) => Some(Event::End(match shown.pop() {
+            Some(true) => TagEnd::Image,
+            _ => TagEnd::Link,
         })),
-        Event::End(TagEnd::Image) => Some(Event::End(TagEnd::Link)),
         other => Some(other),
     }
 }
@@ -334,23 +396,97 @@ mod tests {
         );
     }
 
-    /// An image cannot load under this page's CSP, so it is rendered as
-    /// something a reader can act on instead of a broken icon.
+    /// A picture the repository carries is shown, from the address that
+    /// serves its bytes, and from a README below the root as well.
     #[test]
-    fn an_image_becomes_a_link_carrying_its_alt_text() {
+    fn an_image_the_repository_carries_is_shown() {
         let html = render("![the architecture diagram](docs/arch.png)\n", ROOT);
         assert!(
-            !html.contains("<img"),
-            "an image tag reached the page: {html}"
+            html.contains(
+                "<img src=\"/r/agents/demo/raw/main/docs/arch.png\" \
+                 alt=\"the architecture diagram\""
+            ),
+            "the image was not rendered from the raw route: {html}"
         );
+
+        let base = Base {
+            repo: "agents/demo",
+            rev: "main",
+            dir: "src/net",
+        };
+        let html = render("![flow](../flow.SVG)\n", base);
         assert!(
-            html.contains("href=\"/r/agents/demo/blob/main/docs/arch.png\""),
-            "the image is not reachable at all: {html}"
+            html.contains("<img src=\"/r/agents/demo/raw/main/src/flow.SVG\" alt=\"flow\""),
+            "a picture beside a nested README did not resolve: {html}"
         );
+    }
+
+    /// Every other image is something a reader can act on instead of a
+    /// broken icon: a link, carrying the alt text. Another host, because
+    /// loading it would tell that host who is reading; a path rooted at
+    /// this node, because that is an address rather than a file in the
+    /// repository; and a file that is not a picture.
+    #[test]
+    fn an_image_from_anywhere_else_is_a_link_carrying_its_alt_text() {
+        for (source, href) in [
+            (
+                "![build status](https://example.invalid/badge.svg)",
+                "https://example.invalid/badge.svg",
+            ),
+            ("![a chart](/status.png)", "/status.png"),
+            (
+                "![the notes](docs/notes.pdf)",
+                "/r/agents/demo/blob/main/docs/notes.pdf",
+            ),
+        ] {
+            let html = render(&format!("{source}\n"), ROOT);
+            assert!(
+                !html.contains("<img"),
+                "an image tag reached the page: {html}"
+            );
+            assert!(
+                html.contains(&format!("href=\"{href}\"")),
+                "the image is not reachable at all: {html}"
+            );
+        }
+        let html = render("![build status](https://example.invalid/badge.svg)\n", ROOT);
         assert!(
-            html.contains("the architecture diagram"),
+            html.contains(">build status</a>"),
             "the alt text was dropped: {html}"
         );
+    }
+
+    /// A linked picture keeps both: the tag that closes the image must
+    /// close an image, and the link around it must still close a link.
+    #[test]
+    fn a_shown_image_and_a_linked_one_close_the_tags_they_opened() {
+        let html = render(
+            "[![logo](logo.png)](https://example.invalid/) and ![badge](https://example.invalid/b.svg)\n",
+            ROOT,
+        );
+        assert!(
+            html.contains(
+                "<a href=\"https://example.invalid/\">\
+                 <img src=\"/r/agents/demo/raw/main/logo.png\" alt=\"logo\" /></a>"
+            ),
+            "a linked picture lost its shape: {html}"
+        );
+        assert!(
+            html.contains("<a href=\"https://example.invalid/b.svg\">badge</a>"),
+            "a refused picture did not become a link: {html}"
+        );
+    }
+
+    /// The list is by extension, whatever its case, and a name with no
+    /// extension or with a directory after its dot is not on it.
+    #[test]
+    fn only_a_picture_has_an_image_type() {
+        assert_eq!(image_type("docs/hero.svg"), Some("image/svg+xml"));
+        assert_eq!(image_type("shot.PNG"), Some("image/png"));
+        assert_eq!(image_type("photo.jpeg"), Some("image/jpeg"));
+        for path in ["README.md", "LICENSE", "site.png/index.html", "run.js"] {
+            assert_eq!(image_type(path), None, "{path} was called a picture");
+        }
     }
 
     /// A README below the root resolves against its own directory, which

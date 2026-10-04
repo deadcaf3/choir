@@ -2954,6 +2954,24 @@ const BROWSER_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src
 /// a page with no use for it.
 const UNSCRIPTED_PAGE_CSP: &[u8] = b"default-src 'none'; img-src 'self' data:; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
+/// The policy a repository's own picture is served under.
+///
+/// Not [`BROWSER_CSP`], because these bytes are a different kind of
+/// document: a file somebody pushed, served as itself. An `<img>` runs
+/// nothing whatever the file holds, so the policy is for the other way
+/// to reach this address, which is typing it. An SVG opened directly is
+/// a document, and a document may carry script. `sandbox` and
+/// `default-src 'none'` are what make it one that runs none and fetches
+/// nothing, on the origin a reader is signed in to.
+///
+/// `style-src 'unsafe-inline'` is the one thing admitted, and it is
+/// needed: an SVG's colours are commonly a `<style>` block inside it,
+/// and under `'self'` every figure that has one would draw in black.
+/// A style block in a sandboxed document that can load nothing has
+/// nowhere to send what it can see.
+const RAW_CSP: &[u8] =
+    b"default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'none'";
+
 /// Serves [`ui::UI_CSS`], addressed by a digest of its own bytes.
 ///
 /// `immutable`, and that is only honest because the URL carries the
@@ -5644,6 +5662,12 @@ fn handle_browse(
         }
     }
 
+    // A picture is answered here, after the grant and before anything
+    // is rendered: it is the one address under `/r/` that is not a page.
+    if let browse::Page::Raw { repo, rev, path } = page {
+        return respond_raw(request, root, repo, rev, path);
+    }
+
     // The origin the reader actually reached this node on, so a page
     // that prints a command can print one they can paste. Scheme comes
     // from the connection rather than the request: a client cannot talk
@@ -5724,6 +5748,55 @@ fn handle_browse(
         );
     }
     served(request, response, status, bytes)
+}
+
+/// Serves one picture a repository carries, for the `<img>` its README
+/// renders (D30).
+///
+/// The grant was checked by [`handle_browse`], which is the only caller.
+/// The type comes from the path's extension and from nowhere else, and
+/// [`served`] adds `nosniff`, so a browser takes these bytes as the
+/// picture they were asked for as or as nothing.
+///
+/// Every refusal is the same line, whichever of the reasons in
+/// [`browse::raw`] it was: the reader is an `<img>`, which shows the alt
+/// text either way.
+fn respond_raw(
+    request: tiny_http::Request,
+    root: &Path,
+    repo: &str,
+    rev: &str,
+    path: &str,
+) -> std::io::Result<(u16, u64)> {
+    let held = header(&request, "If-None-Match");
+    let Some(raw) = browse::raw(root, repo, rev, path, held.as_deref()) else {
+        return respond_plain(request, 404, "no such image\n", b"no-store");
+    };
+    let Some(bytes) = raw.bytes else {
+        return served(request, not_modified(&raw.etag, RAW_CSP), 304, 0);
+    };
+    let len = bytes.len() as u64;
+    let response = tiny_http::Response::from_data(bytes)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], raw.content_type.as_bytes())
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"private, no-cache"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Security-Policy"[..], RAW_CSP)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Referrer-Policy"[..], REFERRER_POLICY)
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"ETag"[..], raw.etag.as_bytes()).expect("etag header"),
+        );
+    served(request, response, 200, len)
 }
 
 #[derive(Debug)]

@@ -85,6 +85,7 @@ const TABLE: &[Row] = &[
     ("/r/{}/{}/tree/{}",      "/r/agents/one/tree/main",           401, 200, 200),
     ("/r/{}/{}/tree/{}/{..}", "/r/agents/one/tree/main/src",       401, 200, 200),
     ("/r/{}/{}/blob/{}/{..}", "/r/agents/one/blob/main/README.md", 401, 200, 200),
+    ("/r/{}/{}/raw/{}/{..}",  "/r/agents/one/raw/main/mark.svg",   401, 200, 200),
     ("/r/{}/{}/commits/{}",   "/r/agents/one/commits/main",        401, 200, 200),
     ("/r/{}/{}/commit/{}",    "/r/agents/one/commit/{oid}",        401, 200, 200),
     ("/r/{}/{}/search/{}",    "/r/agents/one/search/main?q=hi",    401, 200, 200),
@@ -154,6 +155,11 @@ const UNLINKED: &[(&str, &str)] = &[
         "/r/{}/{}/blob/{}/{..}",
         "reached from a directory listing, which the crawl enters through \
          `/r/{}/{}/tree/{}`; asserted separately by `browse.rs`",
+    ),
+    (
+        "/r/{}/{}/raw/{}/{..}",
+        "a picture a README shows, which is an `<img src>` and not an \
+         `href`; `browse.rs` fetches one",
     ),
     (
         "/r/{}/{}/search/{}",
@@ -346,6 +352,11 @@ fn served(tag: &str) -> Served {
     std::fs::create_dir_all(clone.join("src")).expect("src");
     std::fs::write(clone.join("README.md"), "# hello\n\nthe fixture readme.\n").expect("readme");
     std::fs::write(clone.join("src/lib.rs"), "fn main() {}\n").expect("source");
+    std::fs::write(
+        clone.join("mark.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n",
+    )
+    .expect("picture");
     git(&clone, &["add", "."]);
     git(&clone, &["commit", "-q", "-m", "seed"]);
     assert!(
