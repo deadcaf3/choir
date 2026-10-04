@@ -551,9 +551,22 @@ fn the_operator_mints_an_invite_from_the_page() {
 #[test]
 fn the_queue_has_a_ceiling() {
     let s = served("ceiling");
-    for n in 0..choir_node::accounts::MAX_PENDING_REQUESTS {
-        s.ask(&format!("asker {n}"), "");
-    }
+    // Filled side by side, not in a row. Every ask is a proof of work in
+    // an unoptimised build, and sixty-four of them in sequence was 43 s
+    // on one core: longer than the rest of this harness needs with eight,
+    // so this one test set the harness's wall time. The count is what the
+    // ceiling is about, and the count is the same.
+    let askers = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    std::thread::scope(|scope| {
+        for first in 0..askers {
+            let s = &s;
+            scope.spawn(move || {
+                for n in (first..choir_node::accounts::MAX_PENDING_REQUESTS).step_by(askers) {
+                    s.ask(&format!("asker {n}"), "");
+                }
+            });
+        }
+    });
     let (_, issued) =
         crate::support::curl(&["-X", "POST", &format!("{}/api/access/challenge", s.base)]);
     let challenge = issued["challenge"].as_str().expect("a challenge");

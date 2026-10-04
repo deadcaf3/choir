@@ -3,3 +3,12 @@
 # set the flag, so every build in this workspace adds it here.
 [env]
 LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_BATCH_ATOMIC_WRITE"
+# The suites drive real `git` against loopback nodes, and git's system
+# config on macOS names the `osxkeychain` credential helper. Every clone
+# or push that carried a credential then stored it in the developer's
+# login keychain: 0.35 to 0.65 s each, measured, five of them in one
+# round-trip test, and an entry per loopback port left behind. Two
+# modules already set this on their own `git`; here it reaches every
+# process cargo starts, including the node's own children. It skips the
+# system file only, so a helper named in a test's own HOME still runs.
+GIT_CONFIG_NOSYSTEM = "1"

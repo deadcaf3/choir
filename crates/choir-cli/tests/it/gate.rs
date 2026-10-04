@@ -519,6 +519,86 @@ fn a_guard_crates_key_follows_the_sources_it_scans() {
     std::fs::remove_dir_all(scratch).ok();
 }
 
+/// The node's suite is the longest thing either edit-loop lane runs, and
+/// both lanes run the same command for it. A green from one is therefore
+/// a verdict the other must not pay for again. The touched lane used to
+/// record nothing for choir-node, so `./gate fast` straight after a green
+/// `./gate touched` re-ran the whole harness on an identical tree, and a
+/// touched run after a green fast one did the same.
+///
+/// Both directions, in a throwaway worktree, because the touched lane
+/// selects from the diff of the tree it runs in.
+#[test]
+fn a_touched_green_and_a_fast_green_share_the_nodes_verdict() {
+    let scratch = scratch_dir();
+    let tree = scratch.join("worktree");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(args)
+            .output()
+            .expect("git")
+    };
+    let added = git(&[
+        "worktree",
+        "add",
+        "--detach",
+        tree.to_str().expect("worktree path"),
+        "HEAD",
+    ]);
+    assert!(
+        added.status.success(),
+        "could not make a worktree to mutate: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    std::fs::copy(gate(), tree.join("gate")).expect("the gate under test, not HEAD's");
+
+    let run_tree = |lane: &str| {
+        std::process::Command::new("sh")
+            .arg(tree.join("gate"))
+            .arg(lane)
+            .env("CHOIR_GATE_TEST_MODE", "1")
+            .env("CHOIR_GATE_TEST_CACHE", "1")
+            .env("TMPDIR", &scratch)
+            .output()
+            .expect("run the worktree's gate")
+    };
+    // Each edit is a new tree, so nothing the previous half minted can
+    // answer for the next one.
+    let edit = || {
+        let probe = tree.join("crates/choir-node/src/browse.rs");
+        let mut body = std::fs::read_to_string(&probe).expect("read a node source");
+        body.push_str("\n// shared verdict probe\n");
+        std::fs::write(&probe, body).expect("change a node source");
+    };
+
+    edit();
+    assert!(run_tree("touched").status.success(), "a green touched run");
+    let fast = cached_stages(&run_tree("fast"));
+    assert!(
+        fast.iter().any(|s| s == "node"),
+        "the fast lane re-ran the node suite a touched run had just \
+         proved on the same tree: {fast:?}"
+    );
+
+    edit();
+    assert!(run_tree("fast").status.success(), "a green fast run");
+    let touched = cached_stages(&run_tree("touched"));
+    assert!(
+        touched.iter().any(|s| s == "touched"),
+        "the touched lane re-ran what a fast run had just proved on the \
+         same tree: {touched:?}"
+    );
+
+    git(&[
+        "worktree",
+        "remove",
+        "--force",
+        tree.to_str().expect("worktree path"),
+    ]);
+    std::fs::remove_dir_all(scratch).ok();
+}
+
 /// The cache is opt-in twice over: off in test mode unless asked for,
 /// and off entirely under `CHOIR_GATE_NO_CACHE`. The second is the
 /// escape hatch a person reaches for when they suspect it, so it has to

@@ -88,15 +88,15 @@ if [ "${CHOIR_GATE_TEST_MODE:-}" != 1 ] && [ -z "${CHOIR_GATE_NICED:-}" ] \
 fi
 
 CORES=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
-# Only the lanes that actually overlap invocations. The touched lane runs
-# one thing at a time and should have the whole machine for the few
-# seconds it needs it.
-if [ "$LANE" = full ] || [ "$LANE" = fast ]; then
-  if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
-    CARGO_BUILD_JOBS=$((CORES / 3))
-    [ "$CARGO_BUILD_JOBS" -lt 1 ] && CARGO_BUILD_JOBS=1
-    export CARGO_BUILD_JOBS
-  fi
+# Only the phase that actually overlaps invocations, so this is computed
+# here and exported where phase 2 starts. It used to be exported here,
+# which also throttled phase 1: one serial build with the lock to itself,
+# compiling on a third of the cores while every later stage waited for
+# it. The touched lane runs one thing at a time and never sets it.
+OVERLAP_JOBS=
+if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+  OVERLAP_JOBS=$((CORES / 3))
+  [ "$OVERLAP_JOBS" -lt 1 ] && OVERLAP_JOBS=1
 fi
 
 # ------------------------------------------------------------- capacity
@@ -124,6 +124,39 @@ fi
 # first a phantom "job died without writing a status" at collection.
 LOG=${TMPDIR:-/tmp}/choir-gate-$(pwd | cksum | tr ' ' -)
 mkdir -p "$LOG"
+
+# ------------------------------------------------------------------ git
+# On macOS `/usr/bin/git` is not git. It is a stub that asks xcrun where
+# git lives and then execs it, on every call: 13.9 ms against 5.4 ms for
+# the binary it finds, on a quiet machine. The node harness alone starts
+# git 6,961 times. Run side by side under the same load, that harness
+# took 216 s through the stub with the keychain helper answering, and
+# 120 s with both out of the way (`.cargo/config.toml` is the other
+# half), the same 379 tests passing in each.
+#
+# Ask once and put the answer first in PATH. Only git: the directory it
+# lives in also holds a `make`, an `ld` and a `python3`, and prepending
+# that would quietly change which of those every child here resolves. So
+# this is a directory of three links instead. git finds its helpers, its
+# templates and its system config relative to the path it was started
+# by, and the two beside it are what make that path lead somewhere.
+#
+# It only takes effect if git, started through the links, still finds
+# its own helpers. Anywhere that is not true, and anywhere `git` is
+# already a real binary, nothing changes.
+if [ "$(command -v git)" = /usr/bin/git ] && _git=$(xcrun -f git 2>/dev/null); then
+  case $_git in
+    */usr/bin/git)
+      mkdir -p "$LOG/git/bin"
+      ln -sfn "$_git" "$LOG/git/bin/git"
+      ln -sfn "${_git%/bin/git}/libexec" "$LOG/git/libexec"
+      ln -sfn "${_git%/bin/git}/share" "$LOG/git/share"
+      if [ -x "$("$LOG/git/bin/git" --exec-path 2>/dev/null)/git-remote-http" ]; then
+        PATH=$LOG/git/bin:$PATH
+        export PATH
+      fi ;;
+  esac
+fi
 
 # ---------------------------------------------------------------- style
 # Colour only when a person is watching. CI captures this output to a
@@ -334,8 +367,38 @@ ws_count() {
   fi
 }
 
-t_touched() { cargo test $PKGS --no-fail-fast; }
+# choir-node gets the fast lane's target set, not everything it owns.
+# `cargo test -p choir-node` also ran the measurement binaries and
+# hooks_isolation, in a debug build with nothing quiet about it: 75 s of
+# the 190 s this lane spent on the crate, measured, on tests whose
+# ceilings mean nothing in that profile (SLOW and ISOLATED say why). The
+# lane already promised no release measurements; this is it keeping the
+# promise, and it makes the command the same one the fast lane's node
+# stage runs, which is what lets the two share a verdict below.
+# shellcheck disable=SC2086
+t_touched() {
+  _tr=0 _rest=
+  for _p in $(printf '%s\n' $PKGS | grep -v '^-p$'); do
+    [ "$_p" = choir-node ] || _rest="$_rest -p $_p"
+  done
+  if [ -n "$_rest" ]; then cargo test $_rest --no-fail-fast || _tr=1; fi
+  case " $PKGS " in *" choir-node "*) t_node_fast || _tr=1 ;; esac
+  return $_tr
+}
 c_touched() { cargo clippy $PKGS --all-targets -- -D warnings; }
+
+# The marker a touched green shares with the fast lane for one crate's
+# tests, or nothing. choir-node's is the fast lane's node stage: same
+# command, same tree, so whichever lane ran it first has said everything
+# the other would. The sequencer has none; its suite is timing-gated and
+# never cached, in any lane.
+touched_marker() {
+  case $1 in
+    choir-node) echo node-fast ;;
+    choir-sequencer) ;;
+    *) echo test ;;
+  esac
+}
 
 # ------------------------------------------------- verdict cache (D-gate)
 # A green verdict is cached against the hash of exactly the inputs that
@@ -754,7 +817,9 @@ if [ "$USE_CACHE" = 1 ] && [ -n "$PKGS" ]; then
   _kept=
   # shellcheck disable=SC2086
   for _c in $(printf '%s\n' $PKGS | grep -v '^-p$'); do
-    if cached test "$_c" && cached clippy "$_c"; then :; else _kept="$_kept -p $_c"; fi
+    _m=$(touched_marker "$_c")
+    if [ -n "$_m" ] && cached "$_m" "$_c" && cached clippy "$_c"; then :
+    else _kept="$_kept -p $_c"; fi
   done
   if [ -z "$_kept" ]; then TOUCHED_CACHED=1; else PKGS=$_kept; fi
 fi
@@ -774,13 +839,14 @@ else
   end $_tc ""
 
   # Feed the cache: a touched green is the same per-crate verdict the
-  # full lane's stages record, except for choir-node and the sequencer,
-  # whose gate stages run different target sets.
+  # other lanes' stages record. Clippy's is the same command for every
+  # crate; the test verdict goes under whichever marker names the
+  # command that actually ran.
   if [ "$_tt" -eq 0 ] && [ "$_tc" -eq 0 ]; then
     # shellcheck disable=SC2086
     for _c in $(printf '%s\n' $PKGS | grep -v '^-p$'); do
-      case $_c in choir-node | choir-sequencer) continue ;; esac
-      mark test "$_c"
+      _m=$(touched_marker "$_c")
+      [ -n "$_m" ] && mark "$_m" "$_c"
       mark clippy "$_c"
     done
   fi
@@ -809,6 +875,10 @@ fi
 # queue: runners first, compilers last. If the build stage failed, run
 # the suites anyway (`--no-fail-fast` for invocations) — cargo repeats
 # the same failure cheaply and the report names every broken stage.
+if [ -n "$OVERLAP_JOBS" ]; then
+  CARGO_BUILD_JOBS=$OVERLAP_JOBS
+  export CARGO_BUILD_JOBS
+fi
 NODE_PID=
 if [ "$USE_CACHE" = 1 ] && cached "node-$LANE" choir-node; then
   printf '  %s\342\234\223%s %-10s %scached%s\n' "$G" "$Z" node "$D" "$Z"
