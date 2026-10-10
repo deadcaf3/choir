@@ -231,6 +231,38 @@ fn a_refused_background_request_carries_no_credential_challenge() {
     );
 }
 
+/// Nor is the icon a browser fetches by itself. A page that declares no
+/// icon still has one asked for, and the challenge that request met
+/// opened the browser's password box over published source.
+#[test]
+fn a_browsers_own_icon_request_carries_no_credential_challenge() {
+    // Nothing is published here, which is the node with the most reason
+    // to challenge and the one that proves the route never reaches the
+    // wall.
+    let s = served("icon", "alice\t*\twrite\n");
+
+    for path in [
+        "/favicon.ico",
+        "/apple-touch-icon.png",
+        "/apple-touch-icon-precomposed.png",
+    ] {
+        let probe = std::process::Command::new("curl")
+            .args(["-s", "-D", "-", "-o", "/dev/null"])
+            .arg(format!("{}{path}", s.base))
+            .output()
+            .expect("curl runs");
+        let probe = String::from_utf8_lossy(&probe.stdout).to_ascii_lowercase();
+        assert!(
+            probe.contains("404"),
+            "{path} is not a thing this node holds: {probe}"
+        );
+        assert!(
+            !probe.contains("www-authenticate"),
+            "{path} handed a reader the browser's own password box: {probe}"
+        );
+    }
+}
+
 /// Publishing a repository publishes the repository, not the node.
 #[test]
 fn the_op_log_and_the_node_scope_stay_behind_the_wall() {

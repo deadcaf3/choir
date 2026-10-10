@@ -1682,6 +1682,15 @@ impl Node {
                 // protect, and a sitemap behind a wall is a sitemap
                 // nothing reads.
                 let sitemap_route = method == "GET" && public_path == ui::SITEMAP_PATH;
+                // A browser asks for these by itself, on every page that
+                // declares no icon. Behind the wall the answer was a
+                // `401` carrying `WWW-Authenticate`, and the browser's
+                // own credential box opened over a page the reader was
+                // allowed to read and had asked nothing else of. There
+                // is no icon to serve, so the answer is the `404` a
+                // signed-in reader already got; what changes is that
+                // nobody is challenged for it.
+                let icon_route = matches!(method, "GET" | "HEAD") && is_icon_probe(&public_path);
                 // D79. The shelf answers whatever the reader holds, for
                 // the same reason the robots policy does: an install
                 // command behind a `401` installs nothing, and the
@@ -1727,6 +1736,7 @@ impl Node {
                     || asking_route
                     || robots_route
                     || sitemap_route
+                    || icon_route
                     || downloads_route
                     || matches!((method, public_path.as_str()), ("GET" | "POST", "/join"))
                     || (method == "GET" && public_path == ui::CARD_PATH)
@@ -1785,6 +1795,8 @@ impl Node {
                         respond_robots(request, acl.as_deref(), downloads.is_some(), scheme)
                     } else if sitemap_route {
                         respond_sitemap(request, acl.as_deref(), downloads.is_some(), scheme)
+                    } else if icon_route {
+                        respond_plain(request, 404, "no such icon\n", b"no-store")
                     } else if downloads_route {
                         let shelf = downloads.as_deref().expect("the route needs a shelf");
                         respond_download(request, &public_path, shelf, scheme, site_repo.as_deref())
@@ -3256,6 +3268,13 @@ fn is_browser_route(url: &str) -> bool {
         || path == "/reviews"
         || path == "/r"
         || path.starts_with("/r/")
+}
+
+/// Whether this path is one a browser requests by itself, for a page
+/// that declares no icon: `/favicon.ico` everywhere, and the
+/// `/apple-touch-icon*.png` family from Safari.
+fn is_icon_probe(path: &str) -> bool {
+    path == "/favicon.ico" || (path.starts_with("/apple-touch-icon") && path.ends_with(".png"))
 }
 
 /// Whether an unauthenticated request may be evaluated as
